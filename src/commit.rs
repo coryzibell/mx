@@ -4,14 +4,41 @@
 //! - Title: Hash of diff, encoded with random dictionary
 //! - Body: Message compressed and encoded with random dictionary
 //! - Footer: Compression algorithm hint
+//!
+//! Dejavu detection: When both title and body randomly get the same
+//! dictionary, we add "whoa." to the footer.
 
 use anyhow::{bail, Context, Result};
 use rand::prelude::IndexedRandom;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const HASH_ALGOS: &[&str] = &["md5", "sha256", "sha512", "blake3", "xxh64", "xxh3"];
-const COMPRESS_ALGOS: &[&str] = &["gzip", "zstd", "brotli", "lz4"];
+/// Get available compression algorithms from base-d config
+fn get_compress_algos(base_d: &str) -> Result<Vec<String>> {
+    let output = Command::new(base_d)
+        .args(["config", "--compression"])
+        .output()
+        .context("Failed to run base-d config")?;
+
+    if !output.status.success() {
+        bail!(
+            "base-d config failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let algos: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    if algos.is_empty() {
+        bail!("No compression algorithms returned by base-d config");
+    }
+
+    Ok(algos)
+}
 
 /// Get the staged diff from git
 pub fn get_staged_diff() -> Result<String> {
@@ -55,13 +82,13 @@ pub fn stage_all() -> Result<()> {
 
 /// Find base-d binary
 fn find_base_d() -> Result<String> {
-    // Check common locations
+    // Check common locations - prefer cargo bin first for dev builds
     let candidates = [
-        "base-d",
         &format!(
             "{}/.cargo/bin/base-d",
             std::env::var("HOME").unwrap_or_default()
         ),
+        "base-d",
         &format!(
             "{}/.local/bin/base-d",
             std::env::var("HOME").unwrap_or_default()
@@ -101,13 +128,49 @@ fn find_base_d() -> Result<String> {
     bail!("base-d not found. Install with: cargo install base-d")
 }
 
-/// Encode text using base-d with hash and random dictionary, returns (encoded, dict_name)
-pub fn encode_hash(text: &str) -> Result<(String, String)> {
+/// Detect which dictionary was used to encode text
+fn detect_dictionary(encoded: &str) -> Result<String> {
     let base_d = find_base_d()?;
-    let algo = HASH_ALGOS.choose(&mut rand::rng()).unwrap();
 
     let mut child = Command::new(&base_d)
-        .args(["--hash", algo, "--dejavu"])
+        .arg("--detect")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn base-d")?;
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(encoded.as_bytes())
+        .context("Failed to write to base-d stdin")?;
+
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for base-d")?;
+
+    // --detect prints "Detected: <name> (confidence: XX%)" to stderr
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let dict = stderr
+        .lines()
+        .find(|l| l.starts_with("Detected:"))
+        .and_then(|l| l.strip_prefix("Detected:"))
+        .and_then(|s| s.split('(').next())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    Ok(dict)
+}
+
+/// Encode text using base-d with hash and random dictionary
+/// base-d randomizes both hash algorithm and dictionary when no args specified
+pub fn encode_hash(text: &str) -> Result<String> {
+    let base_d = find_base_d()?;
+
+    let mut child = Command::new(&base_d)
+        .args(["--hash", "--dejavu"]) // base-d picks random algo and dictionary
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -125,29 +188,21 @@ pub fn encode_hash(text: &str) -> Result<(String, String)> {
         .wait_with_output()
         .context("Failed to wait for base-d")?;
 
-    // dejavu prints "Using dictionary: <name>" to stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let dict = stderr
-        .lines()
-        .find(|l| l.contains("Using dictionary:"))
-        .and_then(|l| l.split(':').nth(1))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("base-d hash failed: {}", stderr);
     }
 
-    Ok((
-        String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        dict,
-    ))
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Compress and encode text using base-d, returns (encoded, compress_algo, dict_name)
-pub fn encode_compress(text: &str) -> Result<(String, String, String)> {
+/// Compress and encode text using base-d, returns (encoded, compress_algo)
+pub fn encode_compress(text: &str) -> Result<(String, String)> {
     let base_d = find_base_d()?;
-    let algo = COMPRESS_ALGOS.choose(&mut rand::rng()).unwrap();
+    let algos = get_compress_algos(&base_d)?;
+    let algo = algos
+        .choose(&mut rand::rng())
+        .context("No compression algorithms available")?;
 
     let mut child = Command::new(&base_d)
         .args(["--compress", algo, "--dejavu"])
@@ -168,21 +223,13 @@ pub fn encode_compress(text: &str) -> Result<(String, String, String)> {
         .wait_with_output()
         .context("Failed to wait for base-d")?;
 
-    // dejavu prints "Using dictionary: <name>" to stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let dict = stderr
-        .lines()
-        .find(|l| l.contains("Using dictionary:"))
-        .and_then(|l| l.split(':').nth(1))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("base-d compress failed: {}", stderr);
     }
 
     let encoded = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((encoded, algo.to_string(), dict))
+    Ok((encoded, algo.to_string()))
 }
 
 /// Create a git commit with the given message
@@ -204,8 +251,31 @@ pub fn git_commit(title: &str, body: &str, footer: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pull with rebase to sync with remote (CI often pushes version bumps)
+fn git_pull_rebase() -> Result<()> {
+    let output = Command::new("git")
+        .args(["pull", "--rebase"])
+        .output()
+        .context("Failed to run git pull --rebase")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "no tracking branch" errors - just means nothing to pull
+        if !stderr.contains("There is no tracking information")
+            && !stderr.contains("no tracking information")
+        {
+            bail!("git pull --rebase failed: {}", stderr);
+        }
+    }
+
+    Ok(())
+}
+
 /// Push to origin
 pub fn git_push() -> Result<()> {
+    // Always pull --rebase first to handle CI version bumps
+    git_pull_rebase()?;
+
     let output = Command::new("git")
         .arg("push")
         .output()
@@ -268,13 +338,17 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     let diff = get_staged_diff()?;
 
     // Generate title (hash of diff) - random dictionary
-    let (title, title_dict) = encode_hash(&diff)?;
+    let title = encode_hash(&diff)?;
 
     // Generate body (compressed message) - random dictionary
-    let (body, algo, body_dict) = encode_compress(message)?;
+    let (body, algo) = encode_compress(message)?;
+
+    // Detect dictionaries by running --detect on the encoded output
+    let title_dict = detect_dictionary(&title)?;
+    let body_dict = detect_dictionary(&body)?;
 
     // Dejavu detection - did the universe give us the same dictionary twice?
-    let dejavu = !title_dict.is_empty() && title_dict == body_dict;
+    let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
     // Footer with compression algo, and decode hint only on dejavu
     let footer = if dejavu {
