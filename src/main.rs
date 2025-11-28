@@ -52,6 +52,29 @@ enum Commands {
         #[arg(short, long)]
         body: String,
     },
+
+    /// Pull request operations
+    Pr {
+        #[command(subcommand)]
+        command: PrCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum PrCommands {
+    /// Merge a pull request with encoded commit message
+    Merge {
+        /// PR number
+        number: u32,
+
+        /// Use rebase merge
+        #[arg(long)]
+        rebase: bool,
+
+        /// Use standard merge commit (instead of squash)
+        #[arg(long, name = "merge")]
+        merge_commit: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -208,6 +231,7 @@ fn main() -> Result<()> {
             println!("{}", message);
             Ok(())
         }
+        Commands::Pr { command } => handle_pr(command),
     }
 }
 
@@ -614,6 +638,19 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn handle_pr(cmd: PrCommands) -> Result<()> {
+    match cmd {
+        PrCommands::Merge {
+            number,
+            rebase,
+            merge_commit,
+        } => {
+            commit::pr_merge(number, rebase, merge_commit)?;
+            Ok(())
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]

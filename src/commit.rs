@@ -403,3 +403,63 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
 
     Ok(())
 }
+
+/// Merge a pull request with encoded commit message
+pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
+    // Get PR info from gh
+    let pr_info = Command::new("gh")
+        .args(["pr", "view", &number.to_string(), "--json", "title,body"])
+        .output()
+        .context("Failed to run gh pr view")?;
+
+    if !pr_info.status.success() {
+        bail!(
+            "gh pr view failed: {}",
+            String::from_utf8_lossy(&pr_info.stderr)
+        );
+    }
+
+    // Parse JSON response
+    let json: serde_json::Value = serde_json::from_slice(&pr_info.stdout)
+        .context("Failed to parse PR info")?;
+
+    let pr_title = json["title"].as_str().unwrap_or("PR");
+    let pr_body = json["body"].as_str().unwrap_or("");
+
+    // Generate encoded commit message
+    let encoded = encode_commit_message(pr_title, pr_body)?;
+
+    // Determine merge method
+    let method = if rebase {
+        "rebase"
+    } else if merge_commit {
+        "merge"
+    } else {
+        "squash"
+    };
+
+    // Merge with gh
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "merge",
+            &number.to_string(),
+            &format!("--{}", method),
+            "--body",
+            &encoded,
+        ])
+        .output()
+        .context("Failed to run gh pr merge")?;
+
+    if !output.status.success() {
+        bail!(
+            "gh pr merge failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    println!("Merged PR #{} ({})", number, method);
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+
+    Ok(())
+}
