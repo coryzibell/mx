@@ -322,6 +322,33 @@ fn get_current_branch() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Generate an encoded commit message from title and body
+/// Returns the full message ready to use (title\n\nbody\n\nfooter)
+pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String> {
+    // Generate title (hash of title text) - random dictionary
+    let title = encode_hash(title_text)?;
+
+    // Generate body (compressed body text) - random dictionary
+    let (body, algo) = encode_compress(body_text)?;
+
+    // Detect dictionaries by running --detect on the encoded output
+    let title_dict = detect_dictionary(&title)?;
+    let body_dict = detect_dictionary(&body)?;
+
+    // Dejavu detection - did the universe give us the same dictionary twice?
+    let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
+
+    // Footer with compression algo, and decode hint only on dejavu
+    let footer = if dejavu {
+        format!("[{}]\nwhoa. base-d --detect --decompress {}", algo, algo)
+    } else {
+        format!("[{}]", algo)
+    };
+
+    // Build full commit message
+    Ok(format!("{}\n\n{}\n\n{}", title, body, footer))
+}
+
 /// Perform the full upload commit
 pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<()> {
     // Stage if requested

@@ -41,6 +41,17 @@ enum Commands {
         #[arg(short, long)]
         push: bool,
     },
+
+    /// Generate encoded commit message (for MCP/API use)
+    EncodeCommit {
+        /// Title text (will be hashed and encoded)
+        #[arg(short, long)]
+        title: String,
+
+        /// Body text (will be compressed and encoded)
+        #[arg(short, long)]
+        body: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -190,6 +201,11 @@ fn main() -> Result<()> {
         Commands::Zion { command } => handle_zion(command),
         Commands::Commit { message, all, push } => {
             commit::upload_commit(&message, all, push)?;
+            Ok(())
+        }
+        Commands::EncodeCommit { title, body } => {
+            let message = commit::encode_commit_message(&title, &body)?;
+            println!("{}", message);
             Ok(())
         }
     }
