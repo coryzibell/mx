@@ -204,8 +204,30 @@ pub fn git_commit(title: &str, body: &str, footer: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pull with rebase to sync with remote (CI often pushes version bumps)
+fn git_pull_rebase() -> Result<()> {
+    let output = Command::new("git")
+        .args(["pull", "--rebase"])
+        .output()
+        .context("Failed to run git pull --rebase")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Ignore "no tracking branch" errors - just means nothing to pull
+        if !stderr.contains("There is no tracking information")
+            && !stderr.contains("no tracking information") {
+            bail!("git pull --rebase failed: {}", stderr);
+        }
+    }
+
+    Ok(())
+}
+
 /// Push to origin
 pub fn git_push() -> Result<()> {
+    // Always pull --rebase first to handle CI version bumps
+    git_pull_rebase()?;
+
     let output = Command::new("git")
         .arg("push")
         .output()
