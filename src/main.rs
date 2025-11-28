@@ -161,6 +161,13 @@ enum AgentsCommands {
         /// Agent ID
         id: String,
     },
+
+    /// Seed agents from markdown files with YAML frontmatter
+    Seed {
+        /// Path to agents directory (defaults to ~/.matrix/agents/)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -463,9 +470,107 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 std::process::exit(1);
             }
         },
+
+        AgentsCommands::Seed { path } => {
+            use anyhow::Context;
+            use std::fs;
+            use std::path::PathBuf;
+
+            // Determine agents directory
+            let agents_dir = if let Some(p) = path {
+                PathBuf::from(p)
+            } else {
+                // Default: ~/.matrix/agents/
+                let home = dirs::home_dir().context("Could not determine home directory")?;
+                home.join(".matrix").join("agents")
+            };
+
+            if !agents_dir.exists() {
+                eprintln!("Agents directory does not exist: {:?}", agents_dir);
+                std::process::exit(1);
+            }
+
+            // Scan for .md files
+            let entries = fs::read_dir(&agents_dir)
+                .with_context(|| format!("Failed to read directory: {:?}", agents_dir))?;
+
+            let mut seeded = Vec::new();
+            let now = chrono::Utc::now().to_rfc3339();
+
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+
+                // Skip if not a markdown file
+                if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                    continue;
+                }
+
+                // Skip files starting with _
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('_') {
+                        continue;
+                    }
+                }
+
+                // Read file
+                let content = fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read file: {:?}", path))?;
+
+                // Parse frontmatter
+                if let Some((frontmatter, _body)) = parse_frontmatter(&content) {
+                    if let Ok(agent_data) = serde_yaml::from_str::<AgentFrontmatter>(&frontmatter) {
+                        let agent = db::Agent {
+                            id: agent_data.name.clone(),
+                            description: Some(agent_data.description.clone()),
+                            domain: agent_data.domain,
+                            created_at: Some(now.clone()),
+                            updated_at: Some(now.clone()),
+                        };
+
+                        db.upsert_agent(&agent)?;
+                        seeded.push(agent_data.name);
+                    }
+                }
+            }
+
+            if seeded.is_empty() {
+                println!("No agents seeded from {:?}", agents_dir);
+            } else {
+                println!("Seeded {} agents:", seeded.len());
+                for name in &seeded {
+                    println!("  {}", name);
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct AgentFrontmatter {
+    name: String,
+    description: String,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+fn parse_frontmatter(content: &str) -> Option<(String, String)> {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Check if starts with ---
+    if lines.first()? != &"---" {
+        return None;
+    }
+
+    // Find closing ---
+    let end_idx = lines.iter().skip(1).position(|&line| line == "---")?;
+
+    let frontmatter = lines[1..=end_idx].join("\n");
+    let body = lines[end_idx + 2..].join("\n");
+
+    Some((frontmatter, body))
 }
 
 fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
