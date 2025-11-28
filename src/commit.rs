@@ -4,14 +4,41 @@
 //! - Title: Hash of diff, encoded with random dictionary
 //! - Body: Message compressed and encoded with random dictionary
 //! - Footer: Compression algorithm hint
+//!
+//! Dejavu detection: When both title and body randomly get the same
+//! dictionary, we add "whoa." to the footer.
 
 use anyhow::{bail, Context, Result};
 use rand::prelude::IndexedRandom;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const HASH_ALGOS: &[&str] = &["md5", "sha256", "sha512", "blake3", "xxh64", "xxh3"];
-const COMPRESS_ALGOS: &[&str] = &["gzip", "zstd", "brotli", "lz4"];
+/// Get available compression algorithms from base-d config
+fn get_compress_algos(base_d: &str) -> Result<Vec<String>> {
+    let output = Command::new(base_d)
+        .args(["config", "--compression"])
+        .output()
+        .context("Failed to run base-d config")?;
+
+    if !output.status.success() {
+        bail!(
+            "base-d config failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let algos: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    if algos.is_empty() {
+        bail!("No compression algorithms returned by base-d config");
+    }
+
+    Ok(algos)
+}
 
 /// Get the staged diff from git
 pub fn get_staged_diff() -> Result<String> {
@@ -55,13 +82,13 @@ pub fn stage_all() -> Result<()> {
 
 /// Find base-d binary
 fn find_base_d() -> Result<String> {
-    // Check common locations
+    // Check common locations - prefer cargo bin first for dev builds
     let candidates = [
-        "base-d",
         &format!(
             "{}/.cargo/bin/base-d",
             std::env::var("HOME").unwrap_or_default()
         ),
+        "base-d",
         &format!(
             "{}/.local/bin/base-d",
             std::env::var("HOME").unwrap_or_default()
@@ -138,12 +165,12 @@ fn detect_dictionary(encoded: &str) -> Result<String> {
 }
 
 /// Encode text using base-d with hash and random dictionary
+/// base-d randomizes both hash algorithm and dictionary when no args specified
 pub fn encode_hash(text: &str) -> Result<String> {
     let base_d = find_base_d()?;
-    let algo = HASH_ALGOS.choose(&mut rand::rng()).unwrap();
 
     let mut child = Command::new(&base_d)
-        .args(["--hash", algo, "--dejavu"])
+        .args(["--hash", "--dejavu"]) // base-d picks random algo and dictionary
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -172,7 +199,10 @@ pub fn encode_hash(text: &str) -> Result<String> {
 /// Compress and encode text using base-d, returns (encoded, compress_algo)
 pub fn encode_compress(text: &str) -> Result<(String, String)> {
     let base_d = find_base_d()?;
-    let algo = COMPRESS_ALGOS.choose(&mut rand::rng()).unwrap();
+    let algos = get_compress_algos(&base_d)?;
+    let algo = algos
+        .choose(&mut rand::rng())
+        .context("No compression algorithms available")?;
 
     let mut child = Command::new(&base_d)
         .args(["--compress", algo, "--dejavu"])
