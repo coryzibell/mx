@@ -1,3 +1,4 @@
+mod commit;
 mod db;
 mod index;
 mod knowledge;
@@ -23,6 +24,20 @@ enum Commands {
     Zion {
         #[command(subcommand)]
         command: ZionCommands,
+    },
+
+    /// Encoded commit (upload pattern)
+    Commit {
+        /// Commit message (human-readable, will be encoded)
+        message: String,
+
+        /// Stage all changes before committing
+        #[arg(short = 'a', long)]
+        all: bool,
+
+        /// Push after committing
+        #[arg(short, long)]
+        push: bool,
     },
 }
 
@@ -83,6 +98,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Zion { command } => handle_zion(command),
+        Commands::Commit { message, all, push } => {
+            commit::upload_commit(&message, all, push)?;
+            Ok(())
+        }
     }
 }
 

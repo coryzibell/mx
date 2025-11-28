@@ -39,6 +39,9 @@ pulldown-cmark = "0.12"
 # Paths
 dirs = "5"
 
+# Random
+rand = "0.9"
+
 [[bin]]
 name = "mx"
 path = "src/main.rs"
