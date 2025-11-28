@@ -22,7 +22,7 @@ impl Default for IndexConfig {
 
         Self {
             zion_root: matrix.join("zion"),
-            db_path: matrix.join("db").join("knowledge.db"),
+            db_path: matrix.join("zion").join("knowledge.db"),
             jsonl_path: matrix.join("zion").join("index.jsonl"),
             excluded_dirs: vec!["future".to_string()],
         }
