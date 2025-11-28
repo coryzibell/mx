@@ -92,8 +92,7 @@ fn is_excluded(entry: &walkdir::DirEntry, excluded: &[String]) -> bool {
 
 /// Export database to JSONL
 pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
-    let file = File::create(path)
-        .with_context(|| format!("Failed to create {:?}", path))?;
+    let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
     let mut writer = BufWriter::new(file);
 
     // Export all categories
@@ -110,8 +109,7 @@ pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
 
 /// Import JSONL into database
 pub fn import_jsonl(db: &Database, path: &Path) -> Result<usize> {
-    let file = File::open(path)
-        .with_context(|| format!("Failed to open {:?}", path))?;
+    let file = File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
     let reader = BufReader::new(file);
 
     let mut count = 0;

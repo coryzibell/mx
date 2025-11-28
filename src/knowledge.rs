@@ -69,8 +69,8 @@ impl KnowledgeEntry {
 
     /// Parse a markdown file into a knowledge entry
     pub fn from_markdown(path: &Path, zion_root: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {:?}", path))?;
+        let content =
+            fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
 
         let (frontmatter, body) = parse_frontmatter(&content)?;
 
@@ -100,9 +100,9 @@ impl KnowledgeEntry {
 
         // Generate ID if not provided
         let path_str = relative.to_string_lossy().to_string();
-        let id = frontmatter.id.unwrap_or_else(|| {
-            Self::generate_id(&path_str, &title)
-        });
+        let id = frontmatter
+            .id
+            .unwrap_or_else(|| Self::generate_id(&path_str, &title));
 
         let now = chrono::Utc::now().to_rfc3339();
 
@@ -133,16 +133,14 @@ fn parse_frontmatter(content: &str) -> Result<(Frontmatter, String)> {
     }
 
     let rest = &content[3..];
-    let end = rest.find("\n---")
-        .or_else(|| rest.find("\r\n---"));
+    let end = rest.find("\n---").or_else(|| rest.find("\r\n---"));
 
     match end {
         Some(pos) => {
             let yaml = &rest[..pos];
             let body = rest[pos + 4..].trim_start_matches(['\n', '\r']).to_string();
 
-            let frontmatter: Frontmatter = serde_yaml::from_str(yaml)
-                .unwrap_or_default();
+            let frontmatter: Frontmatter = serde_yaml::from_str(yaml).unwrap_or_default();
 
             Ok((frontmatter, body))
         }
@@ -185,9 +183,12 @@ fn extract_summary(content: &str) -> Option<String> {
         }
 
         // Skip code blocks, lists, blockquotes for summary
-        if trimmed.starts_with("```") || trimmed.starts_with('-') ||
-           trimmed.starts_with('*') || trimmed.starts_with('>') ||
-           trimmed.starts_with('|') {
+        if trimmed.starts_with("```")
+            || trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with('|')
+        {
             continue;
         }
 

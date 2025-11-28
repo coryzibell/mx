@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::db::Database;
-use crate::index::{rebuild_index, IndexConfig};
+use crate::index::{import_jsonl, rebuild_index, IndexConfig};
 
 #[derive(Parser)]
 #[command(name = "mx")]
@@ -64,6 +64,18 @@ enum ZionCommands {
 
     /// Show index statistics
     Stats,
+
+    /// Delete an entry from the index
+    Delete {
+        /// Entry ID to delete
+        id: String,
+    },
+
+    /// Import entries from JSONL file
+    Import {
+        /// Path to JSONL file (defaults to zion/index.jsonl)
+        path: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -91,14 +103,12 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if entries.is_empty() {
+                println!("No results for '{}'", query);
             } else {
-                if entries.is_empty() {
-                    println!("No results for '{}'", query);
-                } else {
-                    println!("Found {} results:\n", entries.len());
-                    for entry in entries {
-                        print_entry_summary(&entry);
-                    }
+                println!("Found {} results:\n", entries.len());
+                for entry in entries {
+                    print_entry_summary(&entry);
                 }
             }
         }
@@ -119,14 +129,12 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if entries.is_empty() {
+                println!("No entries found");
             } else {
-                if entries.is_empty() {
-                    println!("No entries found");
-                } else {
-                    println!("Found {} entries:\n", entries.len());
-                    for entry in entries {
-                        print_entry_summary(&entry);
-                    }
+                println!("Found {} entries:\n", entries.len());
+                for entry in entries {
+                    print_entry_summary(&entry);
                 }
             }
         }
@@ -160,6 +168,27 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 let count = db.list_by_category(cat)?.len();
                 println!("  {:12} {}", cat, count);
             }
+        }
+
+        ZionCommands::Delete { id } => {
+            let db = Database::open(&config.db_path)?;
+
+            if db.delete(&id)? {
+                println!("Deleted entry '{}'", id);
+            } else {
+                eprintln!("Entry '{}' not found", id);
+                std::process::exit(1);
+            }
+        }
+
+        ZionCommands::Import { path } => {
+            let db = Database::open(&config.db_path)?;
+            let import_path = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| config.jsonl_path.clone());
+
+            let count = import_jsonl(&db, &import_path)?;
+            println!("Imported {} entries from {:?}", count, import_path);
         }
     }
 

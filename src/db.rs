@@ -20,6 +20,7 @@ impl Database {
         Ok(db)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let db = Self { conn };
@@ -29,7 +30,8 @@ impl Database {
 
     fn init_schema(&self) -> Result<()> {
         // Check schema version
-        let version: i32 = self.conn
+        let version: i32 = self
+            .conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM pragma_user_version",
                 [],
@@ -39,7 +41,8 @@ impl Database {
 
         if version < SCHEMA_VERSION {
             self.conn.execute_batch(include_str!("schema.sql"))?;
-            self.conn.execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
+            self.conn
+                .execute(&format!("PRAGMA user_version = {}", SCHEMA_VERSION), [])?;
         }
 
         Ok(())
@@ -83,7 +86,8 @@ impl Database {
         )?;
 
         // Update tags table
-        self.conn.execute("DELETE FROM tags WHERE entry_id = ?1", params![entry.id])?;
+        self.conn
+            .execute("DELETE FROM tags WHERE entry_id = ?1", params![entry.id])?;
         for tag in &entry.tags {
             self.conn.execute(
                 "INSERT INTO tags (entry_id, tag) VALUES (?1, ?2)",
@@ -200,16 +204,110 @@ impl Database {
     }
 
     pub fn delete(&self, id: &str) -> Result<bool> {
-        let rows = self.conn.execute("DELETE FROM knowledge WHERE id = ?1", params![id])?;
+        let rows = self
+            .conn
+            .execute("DELETE FROM knowledge WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
 
     pub fn count(&self) -> Result<usize> {
-        let count: usize = self.conn.query_row(
-            "SELECT COUNT(*) FROM knowledge",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM knowledge", [], |row| row.get(0))?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entry(id: &str, category: &str, title: &str) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: id.to_string(),
+            category: category.to_string(),
+            title: title.to_string(),
+            body: None,
+            summary: None,
+            applicability: None,
+            source_project: None,
+            source_agent: None,
+            file_path: None,
+            tags: vec![],
+            created_at: None,
+            updated_at: None,
+            content_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_crud_operations() {
+        let db = Database::open_in_memory().unwrap();
+
+        // Insert
+        let entry = make_entry("kn-test1", "pattern", "Test Pattern");
+        db.upsert_knowledge(&entry).unwrap();
+        assert_eq!(db.count().unwrap(), 1);
+
+        // Get
+        let fetched = db.get("kn-test1").unwrap().unwrap();
+        assert_eq!(fetched.title, "Test Pattern");
+
+        // Update (upsert)
+        let updated = make_entry("kn-test1", "pattern", "Updated Pattern");
+        db.upsert_knowledge(&updated).unwrap();
+        assert_eq!(db.count().unwrap(), 1);
+        let fetched = db.get("kn-test1").unwrap().unwrap();
+        assert_eq!(fetched.title, "Updated Pattern");
+
+        // Delete
+        assert!(db.delete("kn-test1").unwrap());
+        assert_eq!(db.count().unwrap(), 0);
+        assert!(db.get("kn-test1").unwrap().is_none());
+
+        // Delete non-existent
+        assert!(!db.delete("kn-nonexistent").unwrap());
+    }
+
+    #[test]
+    fn test_search() {
+        let db = Database::open_in_memory().unwrap();
+
+        db.upsert_knowledge(&make_entry("kn-1", "pattern", "Unicode Parsing"))
+            .unwrap();
+        db.upsert_knowledge(&make_entry("kn-2", "technique", "Error Handling"))
+            .unwrap();
+        db.upsert_knowledge(&make_entry("kn-3", "pattern", "Unicode Encoding"))
+            .unwrap();
+
+        let results = db.search("unicode").unwrap();
+        assert_eq!(results.len(), 2);
+
+        let results = db.search("error").unwrap();
+        assert_eq!(results.len(), 1);
+
+        let results = db.search("nonexistent").unwrap();
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_list_by_category() {
+        let db = Database::open_in_memory().unwrap();
+
+        db.upsert_knowledge(&make_entry("kn-1", "pattern", "Pattern 1"))
+            .unwrap();
+        db.upsert_knowledge(&make_entry("kn-2", "pattern", "Pattern 2"))
+            .unwrap();
+        db.upsert_knowledge(&make_entry("kn-3", "technique", "Technique 1"))
+            .unwrap();
+
+        let patterns = db.list_by_category("pattern").unwrap();
+        assert_eq!(patterns.len(), 2);
+
+        let techniques = db.list_by_category("technique").unwrap();
+        assert_eq!(techniques.len(), 1);
+
+        let insights = db.list_by_category("insight").unwrap();
+        assert_eq!(insights.len(), 0);
     }
 }
