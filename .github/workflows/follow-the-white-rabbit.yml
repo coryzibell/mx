@@ -140,8 +140,8 @@ jobs:
 
       - name: Create Release
         env:
-          # Use GITHUB_PAT so release event triggers knock-knock workflow
-          GITHUB_TOKEN: ${{ secrets.GITHUB_PAT }}
+          # Use GH_PAT so release event triggers knock-knock workflow
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           VERSION="${GITHUB_REF_NAME}"
 
