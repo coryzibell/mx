@@ -87,12 +87,11 @@ fn is_excluded(entry: &walkdir::DirEntry, excluded: &[String]) -> bool {
         .unwrap_or(false)
 }
 
-/// Export database to markdown
-pub fn export_markdown(db: &Database, path: &Path) -> Result<()> {
-    let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
-    let mut writer = BufWriter::new(file);
-
-    writeln!(writer, "# Zion Knowledge Export\n")?;
+/// Export database to markdown directory structure
+pub fn export_markdown(db: &Database, dir_path: &Path) -> Result<()> {
+    // Create base directory
+    fs::create_dir_all(dir_path)
+        .with_context(|| format!("Failed to create directory {:?}", dir_path))?;
 
     // Export all categories
     for category in &["pattern", "technique", "insight", "ritual", "project"] {
@@ -101,32 +100,107 @@ pub fn export_markdown(db: &Database, path: &Path) -> Result<()> {
             continue;
         }
 
-        writeln!(writer, "## {}\n", capitalize(category))?;
+        // Create category subdirectory
+        let category_dir = dir_path.join(category);
+        fs::create_dir_all(&category_dir)
+            .with_context(|| format!("Failed to create category dir {:?}", category_dir))?;
 
         for entry in entries {
-            writeln!(writer, "### {}", entry.title)?;
-            writeln!(writer, "**Category:** {}", entry.category)?;
+            // Generate filename from title
+            let filename = slugify(&entry.title);
+            let file_path = category_dir.join(format!("{}.md", filename));
+
+            // Handle filename collisions
+            let final_path = get_unique_path(&file_path)?;
+
+            // Write entry to individual file
+            let file = File::create(&final_path)
+                .with_context(|| format!("Failed to create {:?}", final_path))?;
+            let mut writer = BufWriter::new(file);
+
+            // Write frontmatter
+            writeln!(writer, "---")?;
+            writeln!(writer, "id: {}", entry.id)?;
+            writeln!(writer, "title: {}", entry.title)?;
+            writeln!(writer, "category: {}", entry.category)?;
 
             if !entry.tags.is_empty() {
-                writeln!(writer, "**Tags:** {}", entry.tags.join(", "))?;
+                writeln!(writer, "tags: [{}]", entry.tags.join(", "))?;
             }
 
             if let Some(created) = &entry.created_at {
-                writeln!(writer, "**Created:** {}", created)?;
+                writeln!(writer, "created: {}", created)?;
             }
 
-            writeln!(writer)?;
+            if let Some(updated) = &entry.updated_at {
+                writeln!(writer, "updated: {}", updated)?;
+            }
 
+            if let Some(source_project) = &entry.source_project {
+                writeln!(writer, "source_project: {}", source_project)?;
+            }
+
+            if let Some(source_agent) = &entry.source_agent {
+                writeln!(writer, "source_agent: {}", source_agent)?;
+            }
+
+            writeln!(writer, "---\n")?;
+
+            // Write body
             if let Some(body) = &entry.body {
                 writeln!(writer, "{}", body)?;
             }
 
-            writeln!(writer, "\n---\n")?;
+            writer.flush()?;
         }
     }
 
-    writer.flush()?;
     Ok(())
+}
+
+/// Slugify a string for use as a filename
+fn slugify(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | '0'..='9' => c,
+            ' ' | '-' | '_' => '-',
+            _ => '_',
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Get unique path by appending -1, -2, etc. if file exists
+fn get_unique_path(path: &Path) -> Result<std::path::PathBuf> {
+    if !path.exists() {
+        return Ok(path.to_path_buf());
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("Invalid file stem")?;
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let parent = path.parent().context("No parent directory")?;
+
+    for i in 1..1000 {
+        let new_name = if ext.is_empty() {
+            format!("{}-{}", stem, i)
+        } else {
+            format!("{}-{}.{}", stem, i, ext)
+        };
+
+        let new_path = parent.join(new_name);
+        if !new_path.exists() {
+            return Ok(new_path);
+        }
+    }
+
+    anyhow::bail!("Could not find unique filename for {:?}", path)
 }
 
 /// Export database to JSONL
@@ -171,14 +245,6 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
 
     writer.flush()?;
     Ok(())
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 /// Import JSONL into database

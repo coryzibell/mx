@@ -144,7 +144,7 @@ enum ZionCommands {
         #[arg(short, long, default_value = "md")]
         format: String,
 
-        /// Output file (defaults to stdout)
+        /// Output directory for md format (defaults to ./zion-export), or file for jsonl/csv (defaults to stdout)
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -419,14 +419,15 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
 
             match format.as_str() {
                 "md" | "markdown" => {
-                    if let Some(ref path) = output {
-                        export_markdown(&db, &std::path::PathBuf::from(path))?;
-                        println!("Exported to {}", path);
-                    } else {
-                        export_markdown(&db, &std::path::PathBuf::from("/dev/stdout"))?;
-                    }
+                    // Markdown exports to directory
+                    let output_dir = output.as_deref().unwrap_or("./zion-export");
+
+                    let dir_path = std::path::PathBuf::from(output_dir);
+                    export_markdown(&db, &dir_path)?;
+                    println!("Exported to directory: {}", output_dir);
                 }
                 "jsonl" => {
+                    // JSONL exports to file or stdout
                     if let Some(ref path) = output {
                         export_jsonl(&db, &std::path::PathBuf::from(path))?;
                         println!("Exported to {}", path);
@@ -435,6 +436,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                     }
                 }
                 "csv" => {
+                    // CSV exports to file or stdout
                     if let Some(ref path) = output {
                         export_csv(&db, &std::path::PathBuf::from(path))?;
                         println!("Exported to {}", path);
