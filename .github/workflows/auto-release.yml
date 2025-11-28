@@ -61,13 +61,36 @@ jobs:
           echo "skip_bump=false" >> $GITHUB_OUTPUT
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
+      - name: Install base-d
+        if: steps.bump.outputs.skip_bump != 'true'
+        run: cargo install base-d
+
       - name: Commit and push version bump
         if: steps.bump.outputs.skip_bump != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml
-          git commit -m "Bump version to $(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+
+          VERSION="v${{ steps.bump.outputs.new_version }}"
+          MESSAGE="Bump version to ${{ steps.bump.outputs.new_version }}"
+
+          # Encode title (hash of version)
+          TITLE=$(echo -n "$VERSION" | base-d --hash sha256 --dejavu)
+
+          # Pick random compression algo
+          ALGOS=("gzip" "zstd" "brotli" "lz4")
+          ALGO=${ALGOS[$RANDOM % ${#ALGOS[@]}]}
+
+          # Encode body (compressed message)
+          BODY=$(echo -n "$MESSAGE" | base-d --compress "$ALGO" --dejavu)
+
+          # Commit with encoded message
+          git commit -m "$TITLE
+
+          $BODY
+
+          [$ALGO]"
           git push origin main
 
   format-check:
