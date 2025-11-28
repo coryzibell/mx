@@ -1,6 +1,6 @@
-# The Matrix has you.
-# Tests, format checks, clippy - the simulation runs its checks.
-name: The Matrix Has You
+# the matrix has you.
+# tests, format checks, clippy - the simulation runs its checks.
+name: the matrix has you.
 
 on:
   workflow_call:

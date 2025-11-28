@@ -1,6 +1,6 @@
-# Knock knock, Neo.
-# Publish to crates.io - opening the door.
-name: Knock Knock
+# knock, knock, neo.
+# publish to crates.io - opening the door.
+name: knock, knock.
 
 on:
   release:

@@ -1,6 +1,6 @@
-# Wake up, Neo.
-# The orchestrator - decides what happens on PRs and main pushes.
-name: Wake Up
+# wake up, neo.
+# the orchestrator - decides what happens on PRs and main pushes.
+name: wake up.
 
 on:
   push:

@@ -1,6 +1,6 @@
-# Follow the white rabbit.
-# Build binaries for release - following through to the end.
-name: Follow The White Rabbit
+# follow the white rabbit.
+# build binaries for release - following through to the end.
+name: follow the white rabbit.
 
 on:
   push:
