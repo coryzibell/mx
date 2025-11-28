@@ -12,7 +12,13 @@ CREATE TABLE IF NOT EXISTS knowledge (
     tags TEXT,                     -- JSON array
     created_at TEXT,
     updated_at TEXT,
-    content_hash TEXT              -- For change detection
+    content_hash TEXT,             -- For change detection
+
+    -- Provenance metadata
+    source_type TEXT,              -- manual, ram, cache, agent_session
+    entry_type TEXT,               -- primary, summary, synthesis
+    session_id TEXT,               -- Link to originating session (if from RAM)
+    ephemeral INTEGER DEFAULT 0    -- 1 = session-based, may be pruned
 );
 
 -- Tags index for fast tag queries

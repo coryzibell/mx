@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::knowledge::KnowledgeEntry;
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 pub struct Database {
     conn: Connection,
@@ -53,8 +53,9 @@ impl Database {
             r#"
             INSERT INTO knowledge (id, category, title, body, summary, applicability,
                                    source_project, source_agent, file_path, tags,
-                                   created_at, updated_at, content_hash)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                                   created_at, updated_at, content_hash,
+                                   source_type, entry_type, session_id, ephemeral)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
             ON CONFLICT(id) DO UPDATE SET
                 category = excluded.category,
                 title = excluded.title,
@@ -66,7 +67,11 @@ impl Database {
                 file_path = excluded.file_path,
                 tags = excluded.tags,
                 updated_at = excluded.updated_at,
-                content_hash = excluded.content_hash
+                content_hash = excluded.content_hash,
+                source_type = excluded.source_type,
+                entry_type = excluded.entry_type,
+                session_id = excluded.session_id,
+                ephemeral = excluded.ephemeral
             "#,
             params![
                 entry.id,
@@ -82,6 +87,10 @@ impl Database {
                 entry.created_at,
                 entry.updated_at,
                 entry.content_hash,
+                entry.source_type,
+                entry.entry_type,
+                entry.session_id,
+                entry.ephemeral,
             ],
         )?;
 
@@ -104,7 +113,8 @@ impl Database {
             r#"
             SELECT id, category, title, body, summary, applicability,
                    source_project, source_agent, file_path, tags,
-                   created_at, updated_at, content_hash
+                   created_at, updated_at, content_hash,
+                   source_type, entry_type, session_id, ephemeral
             FROM knowledge
             WHERE title LIKE ?1 OR body LIKE ?1 OR summary LIKE ?1
             ORDER BY updated_at DESC
@@ -127,6 +137,10 @@ impl Database {
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
                     content_hash: row.get(12)?,
+                    source_type: row.get(13)?,
+                    entry_type: row.get(14)?,
+                    session_id: row.get(15)?,
+                    ephemeral: row.get::<_, i32>(16)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -139,7 +153,8 @@ impl Database {
             r#"
             SELECT id, category, title, body, summary, applicability,
                    source_project, source_agent, file_path, tags,
-                   created_at, updated_at, content_hash
+                   created_at, updated_at, content_hash,
+                   source_type, entry_type, session_id, ephemeral
             FROM knowledge
             WHERE category = ?1
             ORDER BY title ASC
@@ -162,6 +177,10 @@ impl Database {
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
                     content_hash: row.get(12)?,
+                    source_type: row.get(13)?,
+                    entry_type: row.get(14)?,
+                    session_id: row.get(15)?,
+                    ephemeral: row.get::<_, i32>(16)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -174,7 +193,8 @@ impl Database {
             r#"
             SELECT id, category, title, body, summary, applicability,
                    source_project, source_agent, file_path, tags,
-                   created_at, updated_at, content_hash
+                   created_at, updated_at, content_hash,
+                   source_type, entry_type, session_id, ephemeral
             FROM knowledge
             WHERE id = ?1
             "#,
@@ -196,6 +216,10 @@ impl Database {
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
                     content_hash: row.get(12)?,
+                    source_type: row.get(13)?,
+                    entry_type: row.get(14)?,
+                    session_id: row.get(15)?,
+                    ephemeral: row.get::<_, i32>(16)? != 0,
                 })
             })
             .ok();
@@ -237,6 +261,10 @@ mod tests {
             created_at: None,
             updated_at: None,
             content_hash: None,
+            source_type: None,
+            entry_type: None,
+            session_id: None,
+            ephemeral: false,
         }
     }
 

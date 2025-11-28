@@ -29,6 +29,20 @@ pub struct KnowledgeEntry {
     pub updated_at: Option<String>,
     #[serde(default)]
     pub content_hash: Option<String>,
+
+    // Provenance metadata - tracks where knowledge came from
+    /// Source type: manual, ram, cache, agent_session
+    #[serde(default)]
+    pub source_type: Option<String>,
+    /// Entry type: primary (original), summary, synthesis
+    #[serde(default)]
+    pub entry_type: Option<String>,
+    /// Session ID if absorbed from RAM
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Ephemeral hint - session-based knowledge that may be pruned
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// Frontmatter parsed from markdown
@@ -120,6 +134,11 @@ impl KnowledgeEntry {
             created_at: frontmatter.created.or_else(|| Some(now.clone())),
             updated_at: Some(now),
             content_hash: Some(Self::compute_hash(&content)),
+            // Markdown files are manual, primary knowledge
+            source_type: Some("manual".to_string()),
+            entry_type: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
         })
     }
 }
