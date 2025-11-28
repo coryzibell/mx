@@ -122,6 +122,45 @@ enum ZionCommands {
         #[arg(short, long)]
         domain: Option<String>,
     },
+
+    /// Apply database schema migrations
+    Migrate {
+        /// Show migration status (list tables)
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Manage agents registry
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentsCommands {
+    /// List all agents
+    List,
+
+    /// Add a new agent
+    Add {
+        /// Agent ID (e.g., smith, neo, trinity)
+        id: String,
+
+        /// Agent description
+        #[arg(short, long)]
+        description: String,
+
+        /// Agent domain/responsibility
+        #[arg(short = 'D', long)]
+        domain: String,
+    },
+
+    /// Show agent details
+    Show {
+        /// Agent ID
+        id: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -329,6 +368,101 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 println!("  Tags: {}", entry.tags.join(", "));
             }
         }
+
+        ZionCommands::Migrate { status } => {
+            let db = Database::open(&config.db_path)?;
+
+            if status {
+                // Show current tables
+                let tables: Vec<String> = db.list_tables()?;
+                println!("Database tables:");
+                for table in tables {
+                    println!("  {}", table);
+                }
+            } else {
+                // Apply migrations (schema is applied in Database::open via init_schema)
+                println!("Applying migrations to {:?}...", config.db_path);
+                println!("Schema applied successfully");
+
+                // Show what exists now
+                let tables = db.list_tables()?;
+                println!("\nCurrent tables:");
+                for table in tables {
+                    println!("  {}", table);
+                }
+            }
+        }
+
+        ZionCommands::Agents { command } => handle_agents(command, &config)?,
+    }
+
+    Ok(())
+}
+
+fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        AgentsCommands::List => {
+            let agents = db.list_agents()?;
+            if agents.is_empty() {
+                println!("No agents registered");
+            } else {
+                println!("Registered agents:\n");
+                for agent in agents {
+                    println!(
+                        "  {} - {}",
+                        agent.id,
+                        agent.description.as_deref().unwrap_or("")
+                    );
+                    if let Some(domain) = &agent.domain {
+                        println!("    Domain: {}", domain);
+                    }
+                }
+            }
+        }
+
+        AgentsCommands::Add {
+            id,
+            description,
+            domain,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let agent = db::Agent {
+                id: id.clone(),
+                description: Some(description.clone()),
+                domain: Some(domain.clone()),
+                created_at: Some(now.clone()),
+                updated_at: Some(now),
+            };
+
+            db.upsert_agent(&agent)?;
+            println!("Added agent: {}", id);
+            println!("  Description: {}", description);
+            println!("  Domain: {}", domain);
+        }
+
+        AgentsCommands::Show { id } => match db.get_agent(&id)? {
+            Some(agent) => {
+                println!("Agent: {}", agent.id);
+                if let Some(desc) = &agent.description {
+                    println!("Description: {}", desc);
+                }
+                if let Some(domain) = &agent.domain {
+                    println!("Domain: {}", domain);
+                }
+                if let Some(created) = &agent.created_at {
+                    println!("Created: {}", created);
+                }
+                if let Some(updated) = &agent.updated_at {
+                    println!("Updated: {}", updated);
+                }
+            }
+            None => {
+                eprintln!("Agent '{}' not found", id);
+                std::process::exit(1);
+            }
+        },
     }
 
     Ok(())

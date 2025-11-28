@@ -6,6 +6,15 @@ use crate::knowledge::KnowledgeEntry;
 
 const SCHEMA_VERSION: i32 = 2;
 
+#[derive(Debug, Clone)]
+pub struct Agent {
+    pub id: String,
+    pub description: Option<String>,
+    pub domain: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
 pub struct Database {
     conn: Connection,
 }
@@ -239,6 +248,79 @@ impl Database {
             .conn
             .query_row("SELECT COUNT(*) FROM knowledge", [], |row| row.get(0))?;
         Ok(count)
+    }
+
+    pub fn list_tables(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
+
+        let tables = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(tables)
+    }
+
+    pub fn upsert_agent(&self, agent: &Agent) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO agents (id, description, domain, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET
+                description = excluded.description,
+                domain = excluded.domain,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                agent.id,
+                agent.description,
+                agent.domain,
+                agent.created_at,
+                agent.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description, domain, created_at, updated_at FROM agents WHERE id = ?1",
+        )?;
+
+        let agent = stmt
+            .query_row(params![id], |row| {
+                Ok(Agent {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    domain: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })
+            .ok();
+
+        Ok(agent)
+    }
+
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description, domain, created_at, updated_at FROM agents ORDER BY id",
+        )?;
+
+        let agents = stmt
+            .query_map([], |row| {
+                Ok(Agent {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    domain: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(agents)
     }
 }
 

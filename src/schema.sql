@@ -44,7 +44,17 @@ CREATE TABLE IF NOT EXISTS deletions (
     deleted_at TEXT NOT NULL
 );
 
+-- Agents registry
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,           -- agent name (neo, smith, trinity, etc.)
+    description TEXT,              -- what this agent does
+    domain TEXT,                   -- primary responsibility area
+    created_at TEXT,
+    updated_at TEXT
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_knowledge_category ON knowledge(category);
 CREATE INDEX IF NOT EXISTS idx_knowledge_updated ON knowledge(updated_at);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+CREATE INDEX IF NOT EXISTS idx_agents_domain ON agents(domain);
