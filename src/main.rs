@@ -7,7 +7,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::db::Database;
-use crate::index::{import_jsonl, rebuild_index, IndexConfig};
+use crate::index::{
+    export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index, IndexConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "mx")]
@@ -135,6 +137,17 @@ enum ZionCommands {
         #[command(subcommand)]
         command: AgentsCommands,
     },
+
+    /// Export knowledge database
+    Export {
+        /// Output format (md, jsonl, csv)
+        #[arg(short, long, default_value = "md")]
+        format: String,
+
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -190,7 +203,6 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             println!("Rebuilding Zion index...");
             let stats = rebuild_index(&config)?;
             println!("{}", stats);
-            println!("Index written to {:?}", config.jsonl_path);
         }
 
         ZionCommands::Search { query, json } => {
@@ -401,6 +413,44 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         }
 
         ZionCommands::Agents { command } => handle_agents(command, &config)?,
+
+        ZionCommands::Export { format, output } => {
+            let db = Database::open(&config.db_path)?;
+
+            match format.as_str() {
+                "md" | "markdown" => {
+                    if let Some(ref path) = output {
+                        export_markdown(&db, &std::path::PathBuf::from(path))?;
+                        println!("Exported to {}", path);
+                    } else {
+                        export_markdown(&db, &std::path::PathBuf::from("/dev/stdout"))?;
+                    }
+                }
+                "jsonl" => {
+                    if let Some(ref path) = output {
+                        export_jsonl(&db, &std::path::PathBuf::from(path))?;
+                        println!("Exported to {}", path);
+                    } else {
+                        export_jsonl(&db, &std::path::PathBuf::from("/dev/stdout"))?;
+                    }
+                }
+                "csv" => {
+                    if let Some(ref path) = output {
+                        export_csv(&db, &std::path::PathBuf::from(path))?;
+                        println!("Exported to {}", path);
+                    } else {
+                        export_csv(&db, &std::path::PathBuf::from("/dev/stdout"))?;
+                    }
+                }
+                _ => {
+                    eprintln!(
+                        "Error: Invalid format '{}'. Valid formats: md, jsonl, csv",
+                        format
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())

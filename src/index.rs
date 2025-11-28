@@ -71,9 +71,6 @@ pub fn rebuild_index(config: &IndexConfig) -> Result<IndexStats> {
 
     stats.total = db.count()?;
 
-    // Export to JSONL
-    export_jsonl(&db, &config.jsonl_path)?;
-
     Ok(stats)
 }
 
@@ -88,6 +85,48 @@ fn is_excluded(entry: &walkdir::DirEntry, excluded: &[String]) -> bool {
         .to_str()
         .map(|s| excluded.contains(&s.to_string()))
         .unwrap_or(false)
+}
+
+/// Export database to markdown
+pub fn export_markdown(db: &Database, path: &Path) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
+    let mut writer = BufWriter::new(file);
+
+    writeln!(writer, "# Zion Knowledge Export\n")?;
+
+    // Export all categories
+    for category in &["pattern", "technique", "insight", "ritual", "project"] {
+        let entries = db.list_by_category(category)?;
+        if entries.is_empty() {
+            continue;
+        }
+
+        writeln!(writer, "## {}\n", capitalize(category))?;
+
+        for entry in entries {
+            writeln!(writer, "### {}", entry.title)?;
+            writeln!(writer, "**Category:** {}", entry.category)?;
+
+            if !entry.tags.is_empty() {
+                writeln!(writer, "**Tags:** {}", entry.tags.join(", "))?;
+            }
+
+            if let Some(created) = &entry.created_at {
+                writeln!(writer, "**Created:** {}", created)?;
+            }
+
+            writeln!(writer)?;
+
+            if let Some(body) = &entry.body {
+                writeln!(writer, "{}", body)?;
+            }
+
+            writeln!(writer, "\n---\n")?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
 }
 
 /// Export database to JSONL
@@ -105,6 +144,41 @@ pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
 
     writer.flush()?;
     Ok(())
+}
+
+/// Export database to CSV (metadata only, no body)
+pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
+    let mut writer = BufWriter::new(file);
+
+    // CSV header
+    writeln!(writer, "id,category,title,tags,created_at,updated_at")?;
+
+    // Export all categories
+    for category in &["pattern", "technique", "insight", "ritual", "project"] {
+        for entry in db.list_by_category(category)? {
+            let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
+            let created = entry.created_at.as_deref().unwrap_or("");
+            let updated = entry.updated_at.as_deref().unwrap_or("");
+
+            writeln!(
+                writer,
+                "{},{},\"{}\",\"{}\",{},{}",
+                entry.id, entry.category, entry.title, tags, created, updated
+            )?;
+        }
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+    }
 }
 
 /// Import JSONL into database
