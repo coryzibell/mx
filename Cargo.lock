@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "mx"
-version = "0.1.6"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "blake3",

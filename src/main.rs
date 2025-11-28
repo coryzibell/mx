@@ -91,6 +91,37 @@ enum ZionCommands {
         /// Path to JSONL file (defaults to zion/index.jsonl)
         path: Option<String>,
     },
+
+    /// Add a new entry directly to the database
+    Add {
+        /// Category (pattern, technique, insight, ritual, artifact, chronicle, project, future)
+        #[arg(short, long)]
+        category: String,
+
+        /// Entry title
+        #[arg(short, long)]
+        title: String,
+
+        /// Content inline
+        #[arg(short = 'c', long, conflicts_with = "file")]
+        content: Option<String>,
+
+        /// Content from file
+        #[arg(short, long, conflicts_with = "content")]
+        file: Option<String>,
+
+        /// Comma-separated tags
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Associated project name
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Domain/subdomain path
+        #[arg(short, long)]
+        domain: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -208,6 +239,95 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
 
             let count = import_jsonl(&db, &import_path)?;
             println!("Imported {} entries from {:?}", count, import_path);
+        }
+
+        ZionCommands::Add {
+            category,
+            title,
+            content,
+            file,
+            tags,
+            project,
+            domain,
+        } => {
+            use anyhow::Context;
+            use std::fs;
+
+            // Validate category
+            let valid_categories = [
+                "pattern",
+                "technique",
+                "insight",
+                "ritual",
+                "artifact",
+                "chronicle",
+                "project",
+                "future",
+            ];
+
+            if !valid_categories.contains(&category.as_str()) {
+                eprintln!("Error: Invalid category '{}'", category);
+                eprintln!("Valid categories: {}", valid_categories.join(", "));
+                std::process::exit(1);
+            }
+
+            // Get content from either --content or --file
+            let body = if let Some(text) = content {
+                text
+            } else if let Some(file_path) = file {
+                fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?
+            } else {
+                eprintln!("Error: Either --content or --file must be provided");
+                std::process::exit(1);
+            };
+
+            // Parse tags
+            let tag_list: Vec<String> = tags
+                .map(|t| {
+                    t.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Generate ID
+            let path_hint = domain.unwrap_or_else(|| category.clone());
+            let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &title);
+
+            // Create entry
+            let now = chrono::Utc::now().to_rfc3339();
+            let entry = knowledge::KnowledgeEntry {
+                id: id.clone(),
+                category: category.clone(),
+                title: title.clone(),
+                body: Some(body),
+                summary: None,
+                applicability: None,
+                source_project: project,
+                source_agent: None,
+                file_path: None,
+                tags: tag_list,
+                created_at: Some(now.clone()),
+                updated_at: Some(now),
+                content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&title)),
+                source_type: Some("manual".to_string()),
+                entry_type: Some("primary".to_string()),
+                session_id: None,
+                ephemeral: false,
+            };
+
+            // Insert into database
+            let db = Database::open(&config.db_path)?;
+            db.upsert_knowledge(&entry)?;
+
+            println!("Added entry: {}", id);
+            println!("  Category: {}", category);
+            println!("  Title: {}", title);
+            if !entry.tags.is_empty() {
+                println!("  Tags: {}", entry.tags.join(", "));
+            }
         }
     }
 
