@@ -1,4 +1,6 @@
-name: Release
+# Follow the white rabbit.
+# Build binaries for release - following through to the end.
+name: Follow The White Rabbit
 
 on:
   push:
@@ -9,23 +11,22 @@ permissions:
   contents: write
 
 jobs:
-  get-binary-name:
+  get-name:
     name: Get Binary Name
     runs-on: ubuntu-latest
     outputs:
       name: ${{ steps.get.outputs.name }}
     steps:
       - uses: actions/checkout@v4
-      - name: Extract binary name from Cargo.toml
+      - name: Extract from Cargo.toml
         id: get
         run: |
           NAME=$(grep '^name = ' Cargo.toml | head -1 | cut -d'"' -f2)
           echo "name=$NAME" >> $GITHUB_OUTPUT
-          echo "Binary name: $NAME"
 
   build:
     name: Build ${{ matrix.target }}
-    needs: get-binary-name
+    needs: get-name
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -59,13 +60,12 @@ jobs:
             suffix: ""
 
     env:
-      BINARY_NAME: ${{ needs.get-binary-name.outputs.name }}
+      BINARY_NAME: ${{ needs.get-name.outputs.name }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
@@ -85,7 +85,6 @@ jobs:
         id: asset
         shell: bash
         run: |
-          # Parse target: arch-vendor-os[-env]
           TARGET="${{ matrix.target }}"
           case "$TARGET" in
             x86_64-unknown-linux-gnu)     ASSET="${BINARY_NAME}-linux-x86_64" ;;
@@ -100,47 +99,41 @@ jobs:
           esac
           echo "asset_name=$ASSET" >> $GITHUB_OUTPUT
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.asset.outputs.asset_name }}
-          path: target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.suffix }}
-
-      - name: Package binary (Unix)
+      - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
           tar -czf ${{ steps.asset.outputs.asset_name }}.tar.gz ${{ env.BINARY_NAME }}${{ matrix.suffix }}
           mv ${{ steps.asset.outputs.asset_name }}.tar.gz ../../..
 
-      - name: Package binary (Windows)
+      - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive -Path target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.suffix }} -DestinationPath ${{ steps.asset.outputs.asset_name }}.zip
 
-      - name: Upload packaged artifact (Unix)
+      - name: Upload artifact (Unix)
         if: runner.os != 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.asset.outputs.asset_name }}-packaged
+          name: ${{ steps.asset.outputs.asset_name }}
           path: ${{ steps.asset.outputs.asset_name }}.tar.gz
 
-      - name: Upload packaged artifact (Windows)
+      - name: Upload artifact (Windows)
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.asset.outputs.asset_name }}-packaged
+          name: ${{ steps.asset.outputs.asset_name }}
           path: ${{ steps.asset.outputs.asset_name }}.zip
 
   release:
     name: Create Release
-    needs: [get-binary-name, build]
+    needs: [get-name, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -151,24 +144,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
 
-          # Check if release already exists
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "Release $VERSION already exists, skipping"
+            echo "Release $VERSION exists"
             exit 0
           fi
 
-          # Create release
           gh release create "$VERSION" \
             --title "Release $VERSION" \
             --generate-notes
 
-          # Upload all packaged binaries
-          for dir in artifacts/*-packaged/; do
-            if [ -d "$dir" ]; then
-              for file in "$dir"*.tar.gz "$dir"*.zip; do
-                if [ -f "$file" ]; then
-                  gh release upload "$VERSION" "$file"
-                fi
-              done
-            fi
+          for file in artifacts/*/*.tar.gz artifacts/*/*.zip; do
+            [ -f "$file" ] && gh release upload "$VERSION" "$file"
           done
