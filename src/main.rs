@@ -2,6 +2,7 @@ mod commit;
 mod db;
 mod index;
 mod knowledge;
+mod sync;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -58,6 +59,12 @@ enum Commands {
         #[command(subcommand)]
         command: PrCommands,
     },
+
+    /// GitHub sync operations
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -74,6 +81,57 @@ enum PrCommands {
         /// Use standard merge commit (instead of squash)
         #[arg(long, name = "merge")]
         merge_commit: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SyncCommands {
+    /// Pull issues/discussions from GitHub to local YAML
+    Pull {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Output directory (defaults to ~/.matrix/cache/sync/<repo>)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Dry run - show what would be pulled
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Push local changes to GitHub
+    Push {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Input directory (defaults to ~/.matrix/cache/sync/<repo>)
+        #[arg(short, long)]
+        input: Option<String>,
+
+        /// Dry run - show what would be pushed
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Sync identity labels to repository
+    Labels {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Dry run - show what would be synced
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Sync issues bidirectionally
+    Issues {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Dry run - show what would be synced
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -232,6 +290,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Pr { command } => handle_pr(command),
+        Commands::Sync { command } => sync::handle_sync(command),
     }
 }
 
