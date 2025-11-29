@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.15"
+version = "0.1.16"
 edition = "2021"
 description = "Matrix CLI - Knowledge indexing and task management"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
