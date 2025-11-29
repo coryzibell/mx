@@ -175,17 +175,8 @@ CREATE TABLE IF NOT EXISTS sessions_v3 (
     FOREIGN KEY (project_id) REFERENCES projects(id)
 );
 
--- Migrate existing sessions (if any)
-INSERT INTO sessions_v3 (id, session_type_id, project_id, started_at, ended_at, metadata)
-SELECT
-    id,
-    COALESCE(session_type, 'manual'),
-    NULL,  -- No project link in v2
-    started_at,
-    ended_at,
-    metadata
-FROM sessions
-WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions');
+-- Migrate existing sessions (only if sessions table exists in v2 - which it doesn't, so skip)
+-- V2 schema did not have sessions table, so no migration needed
 
 -- Step 4: Create new knowledge table with all FKs
 CREATE TABLE IF NOT EXISTS knowledge_v3 (
@@ -268,15 +259,8 @@ CREATE TABLE IF NOT EXISTS relationships_v3 (
     FOREIGN KEY (rel_type_id) REFERENCES relationship_types(id)
 );
 
--- Migrate existing relationships
-INSERT INTO relationships_v3 (from_id, to_id, rel_type_id, created_at)
-SELECT
-    from_id,
-    to_id,
-    COALESCE(rel_type, 'related'),
-    COALESCE(created_at, datetime('now'))
-FROM relationships
-WHERE EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='relationships');
+-- Migrate existing relationships (only if relationships table exists in v2)
+-- V2 schema did not have relationships table, so no migration needed
 
 -- Step 8: Swap tables
 DROP TABLE IF EXISTS knowledge;

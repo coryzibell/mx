@@ -274,9 +274,33 @@ enum ZionCommands {
         #[arg(long)]
         tags: Option<String>,
 
-        /// Associated project name
+        /// Applicability contexts (comma-separated)
+        #[arg(short = 'a', long)]
+        applicability: Option<String>,
+
+        /// Source project ID
         #[arg(short, long)]
         project: Option<String>,
+
+        /// Source agent ID
+        #[arg(long)]
+        source_agent: Option<String>,
+
+        /// Source type (manual, ram, cache, agent_session)
+        #[arg(long, default_value = "manual")]
+        source_type: String,
+
+        /// Entry type (primary, summary, synthesis)
+        #[arg(long, default_value = "primary")]
+        entry_type: String,
+
+        /// Session ID
+        #[arg(long)]
+        session_id: Option<String>,
+
+        /// Mark as ephemeral
+        #[arg(long)]
+        ephemeral: bool,
 
         /// Domain/subdomain path
         #[arg(short, long)]
@@ -305,6 +329,24 @@ enum ZionCommands {
         /// Output directory for md format (defaults to ./zion-export), or file for jsonl/csv (defaults to stdout)
         #[arg(short, long)]
         output: Option<String>,
+    },
+
+    /// Manage projects
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommands,
+    },
+
+    /// Manage applicability types
+    Applicability {
+        #[command(subcommand)]
+        command: ApplicabilityCommands,
+    },
+
+    /// Manage sessions
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommands,
     },
 }
 
@@ -417,6 +459,61 @@ enum AgentsCommands {
 }
 
 #[derive(Subcommand)]
+enum ProjectsCommands {
+    /// List all projects
+    List,
+    /// Add a new project
+    Add {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        repo_url: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ApplicabilityCommands {
+    /// List all applicability types
+    List,
+    /// Add a new applicability type
+    Add {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionsCommands {
+    /// List sessions
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Create a new session
+    Create {
+        #[arg(long)]
+        session_type: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Close a session
+    Close {
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum WikiCommands {
     /// Sync markdown files to GitHub wiki
     Sync {
@@ -492,10 +589,11 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             let entries = if let Some(cat) = &category {
                 db.list_by_category(cat)?
             } else {
-                // List all categories
+                // List all categories from database
                 let mut all = Vec::new();
-                for cat in &["pattern", "technique", "insight", "ritual", "project"] {
-                    all.extend(db.list_by_category(cat)?);
+                let categories = db.list_categories()?;
+                for cat in categories {
+                    all.extend(db.list_by_category(&cat.id)?);
                 }
                 all
             };
@@ -537,9 +635,10 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             println!("Total entries: {}", db.count()?);
             println!();
 
-            for cat in &["pattern", "technique", "insight", "ritual", "project"] {
-                let count = db.list_by_category(cat)?.len();
-                println!("  {:12} {}", cat, count);
+            let categories = db.list_categories()?;
+            for cat in categories {
+                let count = db.list_by_category(&cat.id)?.len();
+                println!("  {:12} {}", cat.id, count);
             }
         }
 
@@ -570,27 +669,26 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             content,
             file,
             tags,
+            applicability,
             project,
+            source_agent,
+            source_type,
+            entry_type,
+            session_id,
+            ephemeral,
             domain,
         } => {
             use anyhow::Context;
             use std::fs;
 
-            // Validate category
-            let valid_categories = [
-                "pattern",
-                "technique",
-                "insight",
-                "ritual",
-                "artifact",
-                "chronicle",
-                "project",
-                "future",
-            ];
+            let db = Database::open(&config.db_path)?;
 
-            if !valid_categories.contains(&category.as_str()) {
+            // Validate category against database
+            if db.get_category(&category)?.is_none() {
+                let categories = db.list_categories()?;
+                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
                 eprintln!("Error: Invalid category '{}'", category);
-                eprintln!("Valid categories: {}", valid_categories.join(", "));
+                eprintln!("Valid categories: {}", valid_ids.join(", "));
                 std::process::exit(1);
             }
 
@@ -615,6 +713,16 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 })
                 .unwrap_or_default();
 
+            // Parse applicability CSV
+            let applicability_list: Vec<String> = applicability
+                .map(|a| {
+                    a.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             // Generate ID
             let path_hint = domain.unwrap_or_else(|| category.clone());
             let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &title);
@@ -627,29 +735,36 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 title: title.clone(),
                 body: Some(body),
                 summary: None,
-                applicability: vec![],
+                applicability: applicability_list.clone(),
                 source_project_id: project,
-                source_agent_id: None,
+                source_agent_id: source_agent,
                 file_path: None,
                 tags: tag_list,
                 created_at: Some(now.clone()),
                 updated_at: Some(now),
                 content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&title)),
-                source_type_id: Some("manual".to_string()),
-                entry_type_id: Some("primary".to_string()),
-                session_id: None,
-                ephemeral: false,
+                source_type_id: Some(source_type),
+                entry_type_id: Some(entry_type),
+                session_id,
+                ephemeral,
             };
 
             // Insert into database
-            let db = Database::open(&config.db_path)?;
             db.upsert_knowledge(&entry)?;
+
+            // Set applicability if provided
+            if !applicability_list.is_empty() {
+                db.set_applicability_for_entry(&entry.id, &applicability_list)?;
+            }
 
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
             println!("  Title: {}", title);
             if !entry.tags.is_empty() {
                 println!("  Tags: {}", entry.tags.join(", "));
+            }
+            if !applicability_list.is_empty() {
+                println!("  Applicability: {}", applicability_list.join(", "));
             }
         }
 
@@ -678,6 +793,12 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         }
 
         ZionCommands::Agents { command } => handle_agents(command, &config)?,
+
+        ZionCommands::Projects { command } => handle_projects(command, &config)?,
+
+        ZionCommands::Applicability { command } => handle_applicability(command, &config)?,
+
+        ZionCommands::Sessions { command } => handle_sessions(command, &config)?,
 
         ZionCommands::Export { format, output } => {
             let db = Database::open(&config.db_path)?;
@@ -858,6 +979,161 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 for name in &seeded {
                     println!("  {}", name);
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_projects(cmd: ProjectsCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        ProjectsCommands::List => {
+            let projects = db.list_projects(false)?;
+            if projects.is_empty() {
+                println!("No projects registered");
+            } else {
+                println!("Registered projects:\n");
+                for project in projects {
+                    println!("  {} - {}", project.id, project.name);
+                    if let Some(path) = &project.path {
+                        println!("    Path: {}", path);
+                    }
+                    if let Some(url) = &project.repo_url {
+                        println!("    Repo: {}", url);
+                    }
+                    if let Some(desc) = &project.description {
+                        println!("    Description: {}", desc);
+                    }
+                    println!();
+                }
+            }
+        }
+
+        ProjectsCommands::Add {
+            id,
+            name,
+            path,
+            repo_url,
+            description,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let project = db::Project {
+                id: id.clone(),
+                name: name.clone(),
+                path,
+                repo_url,
+                description,
+                active: true,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+
+            db.upsert_project(&project)?;
+            println!("Added project: {}", id);
+            println!("  Name: {}", name);
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_applicability(cmd: ApplicabilityCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        ApplicabilityCommands::List => {
+            let types = db.list_applicability_types()?;
+            if types.is_empty() {
+                println!("No applicability types registered");
+            } else {
+                println!("Registered applicability types:\n");
+                for atype in types {
+                    println!("  {} - {}", atype.id, atype.description);
+                    if let Some(scope) = &atype.scope {
+                        println!("    Scope: {}", scope);
+                    }
+                    println!();
+                }
+            }
+        }
+
+        ApplicabilityCommands::Add {
+            id,
+            description,
+            scope,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let atype = db::ApplicabilityType {
+                id: id.clone(),
+                description: description.clone(),
+                scope,
+                created_at: now,
+            };
+
+            db.upsert_applicability_type(&atype)?;
+            println!("Added applicability type: {}", id);
+            println!("  Description: {}", description);
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        SessionsCommands::List { project } => {
+            let sessions = db.list_sessions(project.as_deref())?;
+            if sessions.is_empty() {
+                println!("No sessions found");
+            } else {
+                println!("Sessions:\n");
+                for session in sessions {
+                    println!("  ID: {}", session.id);
+                    println!("    Type: {}", session.session_type_id);
+                    if let Some(proj) = &session.project_id {
+                        println!("    Project: {}", proj);
+                    }
+                    println!("    Started: {}", session.started_at);
+                    if let Some(ended) = &session.ended_at {
+                        println!("    Ended: {}", ended);
+                    }
+                    println!();
+                }
+            }
+        }
+
+        SessionsCommands::Create {
+            session_type,
+            project,
+        } => {
+            let now = chrono::Utc::now().to_rfc3339();
+            let id = format!("sess-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+            let session = db::Session {
+                id: id.clone(),
+                session_type_id: session_type,
+                project_id: project,
+                started_at: now,
+                ended_at: None,
+                metadata: None,
+            };
+
+            db.upsert_session(&session)?;
+            println!("Created session: {}", id);
+        }
+
+        SessionsCommands::Close { id } => {
+            if let Some(mut session) = db.get_session(&id)? {
+                session.ended_at = Some(chrono::Utc::now().to_rfc3339());
+                db.upsert_session(&session)?;
+                println!("Closed session: {}", id);
+            } else {
+                eprintln!("Session '{}' not found", id);
+                std::process::exit(1);
             }
         }
     }
