@@ -356,7 +356,10 @@ pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String
             hash_algo, title_dict, compress_algo, body_dict
         )
     } else {
-        format!("[{}:{}|{}:{}]", hash_algo, title_dict, compress_algo, body_dict)
+        format!(
+            "[{}:{}|{}:{}]",
+            hash_algo, title_dict, compress_algo, body_dict
+        )
     };
 
     // Build full commit message
@@ -398,7 +401,10 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
             hash_algo, title_dict, compress_algo, body_dict
         )
     } else {
-        format!("[{}:{}|{}:{}]", hash_algo, title_dict, compress_algo, body_dict)
+        format!(
+            "[{}:{}|{}:{}]",
+            hash_algo, title_dict, compress_algo, body_dict
+        )
     };
 
     println!("Title:  {}", title);

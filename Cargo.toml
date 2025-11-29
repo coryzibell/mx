@@ -54,7 +54,10 @@ lazy_static = "1"
 # Temporary directories
 tempfile = "3"
 
-[dev-dependencies]
+[dev-dependencies.cargo-husky]
+version = "1"
+default-features = false
+features = ["user-hooks"]
 
 [[bin]]
 name = "mx"

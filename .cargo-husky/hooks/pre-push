@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo '+git pull'
+git pull
+
+echo '+cargo fmt -- --check'
+cargo fmt -- --check
+
+echo '+cargo clippy --all-targets --all-features -- -D warnings'
+cargo clippy --all-targets --all-features -- -D warnings
