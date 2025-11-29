@@ -42,6 +42,20 @@ dirs = "5"
 # Random
 rand = "0.9"
 
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+urlencoding = "2"
+regex = "1.12.2"
+
+# JWT for GitHub App auth
+jsonwebtoken = "9"
+lazy_static = "1"
+
+# Temporary directories
+tempfile = "3"
+
+[dev-dependencies]
+
 [[bin]]
 name = "mx"
 path = "src/main.rs"

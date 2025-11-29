@@ -1,7 +1,11 @@
 mod commit;
+mod convert;
 mod db;
+mod doctor;
+mod github;
 mod index;
 mod knowledge;
+mod session;
 mod sync;
 
 use anyhow::Result;
@@ -64,6 +68,68 @@ enum Commands {
     Sync {
         #[command(subcommand)]
         command: SyncCommands,
+    },
+
+    /// GitHub operations
+    Github {
+        #[command(subcommand)]
+        command: GithubCommands,
+    },
+
+    /// Wiki operations
+    Wiki {
+        #[command(subcommand)]
+        command: WikiCommands,
+    },
+
+    /// Session export operations
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+
+    /// Conversion utilities
+    Convert {
+        #[command(subcommand)]
+        command: ConvertCommands,
+    },
+
+    /// Environment health check
+    Doctor,
+}
+
+#[derive(Subcommand)]
+enum ConvertCommands {
+    /// Convert markdown to YAML for GitHub sync
+    Md2yaml {
+        /// Input file or directory
+        input: String,
+
+        /// Output directory (defaults to current directory)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Dry run - show what would be created
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Convert YAML to markdown for human reading
+    Yaml2md {
+        /// Input file or directory
+        input: String,
+
+        /// Output directory (defaults to current directory)
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Repository in owner/repo format (for GitHub URLs)
+        #[arg(short, long)]
+        repo: Option<String>,
+
+        /// Dry run - show what would be created
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -243,6 +309,81 @@ enum ZionCommands {
 }
 
 #[derive(Subcommand)]
+enum GithubCommands {
+    /// Clean up GitHub issues and discussions
+    Cleanup {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Issue numbers to close (comma-separated)
+        #[arg(long)]
+        issues: Option<String>,
+
+        /// Discussion numbers to delete (comma-separated)
+        #[arg(long)]
+        discussions: Option<String>,
+
+        /// Dry run - show what would be done
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Post comments to issues or discussions
+    Comment {
+        #[command(subcommand)]
+        command: CommentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommentCommands {
+    /// Post comment to an issue
+    Issue {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Issue number
+        number: u64,
+
+        /// Comment message
+        message: String,
+
+        /// Identity signature (e.g., "smith", "neo")
+        #[arg(long)]
+        identity: Option<String>,
+    },
+
+    /// Post comment to a discussion
+    Discussion {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Discussion number
+        number: u64,
+
+        /// Comment message
+        message: String,
+
+        /// Identity signature (e.g., "smith", "neo")
+        #[arg(long)]
+        identity: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// Export session to markdown
+    Export {
+        /// Path to session JSONL file (defaults to most recent non-agent session)
+        path: Option<String>,
+
+        /// Output file (defaults to stdout)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentsCommands {
     /// List all agents
     List,
@@ -275,6 +416,26 @@ enum AgentsCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum WikiCommands {
+    /// Sync markdown files to GitHub wiki
+    Sync {
+        /// Repository (owner/repo format)
+        repo: String,
+
+        /// Source file or directory
+        source: String,
+
+        /// Custom page name (single file only)
+        #[arg(long)]
+        page_name: Option<String>,
+
+        /// Dry run - show what would be synced
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -291,6 +452,11 @@ fn main() -> Result<()> {
         }
         Commands::Pr { command } => handle_pr(command),
         Commands::Sync { command } => sync::handle_sync(command),
+        Commands::Github { command } => handle_github(command),
+        Commands::Wiki { command } => handle_wiki(command),
+        Commands::Session { command } => handle_session(command),
+        Commands::Convert { command } => handle_convert(command),
+        Commands::Doctor => doctor::run_checks(),
     }
 }
 
@@ -707,6 +873,122 @@ fn handle_pr(cmd: PrCommands) -> Result<()> {
             merge_commit,
         } => {
             commit::pr_merge(number, rebase, merge_commit)?;
+            Ok(())
+        }
+    }
+}
+
+fn handle_github(cmd: GithubCommands) -> Result<()> {
+    match cmd {
+        GithubCommands::Cleanup {
+            repo,
+            issues,
+            discussions,
+            dry_run,
+        } => {
+            github::cleanup(&repo, issues, discussions, dry_run)?;
+            Ok(())
+        }
+        GithubCommands::Comment { command } => {
+            handle_comment(command)?;
+            Ok(())
+        }
+    }
+}
+
+fn handle_comment(cmd: CommentCommands) -> Result<()> {
+    match cmd {
+        CommentCommands::Issue {
+            repo,
+            number,
+            message,
+            identity,
+        } => {
+            let url = github::post_issue_comment(&repo, number, &message, identity.as_deref())?;
+            println!("Comment posted: {}", url);
+        }
+        CommentCommands::Discussion {
+            repo,
+            number,
+            message,
+            identity,
+        } => {
+            let url = github::post_discussion_comment(&repo, number, &message, identity.as_deref())?;
+            println!("Comment posted: {}", url);
+        }
+    }
+    Ok(())
+}
+
+fn handle_session(cmd: SessionCommands) -> Result<()> {
+    match cmd {
+        SessionCommands::Export { path, output } => {
+            session::export_session(path, output)?;
+            Ok(())
+        }
+    }
+}
+
+fn handle_convert(cmd: ConvertCommands) -> Result<()> {
+    use std::path::PathBuf;
+
+    match cmd {
+        ConvertCommands::Md2yaml {
+            input,
+            output,
+            dry_run,
+        } => {
+            let input_path = PathBuf::from(&input);
+            let output_dir = output
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+            if input_path.is_file() {
+                convert::convert_file(&input_path, &output_dir, dry_run)?;
+            } else if input_path.is_dir() {
+                convert::convert_directory(&input_path, &output_dir, dry_run)?;
+            } else {
+                eprintln!("Error: Input path does not exist: {:?}", input_path);
+                std::process::exit(1);
+            }
+
+            Ok(())
+        }
+
+        ConvertCommands::Yaml2md {
+            input,
+            output,
+            repo,
+            dry_run,
+        } => {
+            let input_path = PathBuf::from(&input);
+            let output_dir = output
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().unwrap());
+
+            if input_path.is_file() {
+                convert::yaml_to_markdown_file(&input_path, &output_dir, repo.as_deref(), dry_run)?;
+            } else if input_path.is_dir() {
+                convert::yaml_to_markdown_directory(&input_path, &output_dir, repo.as_deref(), dry_run)?;
+            } else {
+                eprintln!("Error: Input path does not exist: {:?}", input_path);
+                std::process::exit(1);
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn handle_wiki(cmd: WikiCommands) -> Result<()> {
+    match cmd {
+        WikiCommands::Sync {
+            repo,
+            source,
+            page_name,
+            dry_run,
+        } => {
+            sync::wiki::sync(&repo, &source, page_name.as_deref(), dry_run)?;
             Ok(())
         }
     }
