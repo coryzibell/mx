@@ -282,9 +282,9 @@ enum ZionCommands {
         #[arg(short, long)]
         project: Option<String>,
 
-        /// Source agent ID
-        #[arg(long)]
-        source_agent: Option<String>,
+        /// Source agent ID (required - who captured this knowledge?)
+        #[arg(long, required = true)]
+        source_agent: String,
 
         /// Source type (manual, ram, cache, agent_session)
         #[arg(long, default_value = "manual")]
@@ -737,7 +737,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 summary: None,
                 applicability: applicability_list.clone(),
                 source_project_id: project,
-                source_agent_id: source_agent,
+                source_agent_id: Some(source_agent),
                 file_path: None,
                 tags: tag_list,
                 created_at: Some(now.clone()),
