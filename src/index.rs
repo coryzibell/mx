@@ -93,15 +93,16 @@ pub fn export_markdown(db: &Database, dir_path: &Path) -> Result<()> {
     fs::create_dir_all(dir_path)
         .with_context(|| format!("Failed to create directory {:?}", dir_path))?;
 
-    // Export all categories
-    for category in &["pattern", "technique", "insight", "ritual", "project"] {
-        let entries = db.list_by_category(category)?;
+    // Export all categories dynamically
+    let categories = db.list_categories()?;
+    for category in categories {
+        let entries = db.list_by_category(&category.id)?;
         if entries.is_empty() {
             continue;
         }
 
         // Create category subdirectory
-        let category_dir = dir_path.join(category);
+        let category_dir = dir_path.join(&category.id);
         fs::create_dir_all(&category_dir)
             .with_context(|| format!("Failed to create category dir {:?}", category_dir))?;
 
@@ -219,9 +220,10 @@ pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
     let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
     let mut writer = BufWriter::new(file);
 
-    // Export all categories
-    for category in &["pattern", "technique", "insight", "ritual", "project"] {
-        for entry in db.list_by_category(category)? {
+    // Export all categories dynamically
+    let categories = db.list_categories()?;
+    for category in categories {
+        for entry in db.list_by_category(&category.id)? {
             let json = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", json)?;
         }
@@ -236,20 +238,23 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
     let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
     let mut writer = BufWriter::new(file);
 
-    // CSV header
-    writeln!(writer, "id,category,title,tags,created_at,updated_at")?;
+    // CSV header (v3 schema field names)
+    writeln!(writer, "id,category_id,title,tags,applicability,source_project_id,created_at,updated_at")?;
 
-    // Export all categories
-    for category in &["pattern", "technique", "insight", "ritual", "project"] {
-        for entry in db.list_by_category(category)? {
+    // Export all categories dynamically
+    let categories = db.list_categories()?;
+    for category in categories {
+        for entry in db.list_by_category(&category.id)? {
             let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
+            let applicability = entry.applicability.join(";");
+            let source_project = entry.source_project_id.as_deref().unwrap_or("");
             let created = entry.created_at.as_deref().unwrap_or("");
             let updated = entry.updated_at.as_deref().unwrap_or("");
 
             writeln!(
                 writer,
-                "{},{},\"{}\",\"{}\",{},{}",
-                entry.id, entry.category_id, entry.title, tags, created, updated
+                "{},{},\"{}\",\"{}\",\"{}\",{},{},{}",
+                entry.id, entry.category_id, entry.title, tags, applicability, source_project, created, updated
             )?;
         }
     }
