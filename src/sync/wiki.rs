@@ -129,8 +129,7 @@ fn should_skip_file(filename: &str) -> bool {
 /// Convert wiki page name to display name (remove .md, replace hyphens with spaces, title case)
 fn display_page_name(page_name: &str) -> String {
     let name = page_name.trim_end_matches(".md");
-    name.replace('-', "-")
-        .split('-')
+    name.split('-')
         .map(|word| {
             let mut chars = word.chars();
             match chars.next() {
@@ -183,11 +182,7 @@ pub fn sync(repo: &str, source: &str, page_name: Option<&str>, dry_run: bool) ->
 
     // Configure git user
     if !dry_run {
-        configure_git_user(
-            wiki_dir,
-            "Matrix CLI",
-            "noreply@github.com",
-        )?;
+        configure_git_user(wiki_dir, "Matrix CLI", "noreply@github.com")?;
     }
 
     // Copy files
@@ -213,9 +208,7 @@ pub fn sync(repo: &str, source: &str, page_name: Option<&str>, dry_run: bool) ->
         println!("    {} → {}", source_path.display(), display_name);
     } else {
         // Directory - copy all .md files
-        for entry in fs::read_dir(&source_path)
-            .context("Failed to read source directory")?
-        {
+        for entry in fs::read_dir(&source_path).context("Failed to read source directory")? {
             let entry = entry?;
             let path = entry.path();
 
@@ -269,7 +262,10 @@ pub fn sync(repo: &str, source: &str, page_name: Option<&str>, dry_run: bool) ->
     }
 
     // Output wiki URL
-    println!("\nWiki synced: https://github.com/{}/{}/wiki", owner, repo_name);
+    println!(
+        "\nWiki synced: https://github.com/{}/{}/wiki",
+        owner, repo_name
+    );
     for page in &synced_pages {
         let page_url_name = page.trim_end_matches(".md");
         println!("  - {}", page_url_name);

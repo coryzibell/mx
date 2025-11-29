@@ -72,7 +72,7 @@ pub fn generate_jwt(app_id: &str, private_key: &str) -> Result<String> {
         .as_secs();
 
     let claims = Claims {
-        iat: now - 60, // 60 seconds ago for clock skew
+        iat: now - 60,  // 60 seconds ago for clock skew
         exp: now + 600, // 10 minutes from now
         iss: app_id.to_string(),
     };
@@ -81,8 +81,7 @@ pub fn generate_jwt(app_id: &str, private_key: &str) -> Result<String> {
     let encoding_key = EncodingKey::from_rsa_pem(private_key.as_bytes())
         .context("Failed to parse RSA private key")?;
 
-    encode(&header, &claims, &encoding_key)
-        .context("Failed to encode JWT")
+    encode(&header, &claims, &encoding_key).context("Failed to encode JWT")
 }
 
 /// Get an installation access token (caches and refreshes automatically)
@@ -114,8 +113,8 @@ pub fn get_installation_token() -> Result<String> {
     }
 
     // Cache miss or expired - generate new token
-    let app_id = env::var("DOTMATRIX_APP_ID")
-        .context("DOTMATRIX_APP_ID environment variable not set")?;
+    let app_id =
+        env::var("DOTMATRIX_APP_ID").context("DOTMATRIX_APP_ID environment variable not set")?;
     let installation_id = env::var("DOTMATRIX_INSTALLATION_ID")
         .context("DOTMATRIX_INSTALLATION_ID environment variable not set")?;
     let private_key = env::var("DOTMATRIX_PRIVATE_KEY")
@@ -142,11 +141,7 @@ pub fn get_installation_token() -> Result<String> {
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().unwrap_or_default();
-        anyhow::bail!(
-            "GitHub API returned error {}: {}",
-            status,
-            body
-        );
+        anyhow::bail!("GitHub API returned error {}: {}", status, body);
     }
 
     let token_response: InstallationToken = response

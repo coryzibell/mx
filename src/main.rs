@@ -26,6 +26,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Zion knowledge management
     Zion {
@@ -1189,7 +1190,8 @@ fn handle_comment(cmd: CommentCommands) -> Result<()> {
             message,
             identity,
         } => {
-            let url = github::post_discussion_comment(&repo, number, &message, identity.as_deref())?;
+            let url =
+                github::post_discussion_comment(&repo, number, &message, identity.as_deref())?;
             println!("Comment posted: {}", url);
         }
     }
@@ -1245,7 +1247,12 @@ fn handle_convert(cmd: ConvertCommands) -> Result<()> {
             if input_path.is_file() {
                 convert::yaml_to_markdown_file(&input_path, &output_dir, repo.as_deref(), dry_run)?;
             } else if input_path.is_dir() {
-                convert::yaml_to_markdown_directory(&input_path, &output_dir, repo.as_deref(), dry_run)?;
+                convert::yaml_to_markdown_directory(
+                    &input_path,
+                    &output_dir,
+                    repo.as_deref(),
+                    dry_run,
+                )?;
             } else {
                 eprintln!("Error: Input path does not exist: {:?}", input_path);
                 std::process::exit(1);

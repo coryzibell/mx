@@ -73,14 +73,17 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                     let local_body = yaml.body();
 
                     // For simplicity, just update title/body if different from last_synced
-                    let needs_update = yaml.last_synced().map_or(true, |base| {
-                        local_title != base.title || local_body != base.body
-                    });
+                    let needs_update = yaml
+                        .last_synced()
+                        .is_none_or(|base| local_title != base.title || local_body != base.body);
 
                     if needs_update {
                         if dry_run {
-                            println!("  D#{} {} → would update",
-                                yaml.metadata.github_discussion_number.unwrap_or(0), title);
+                            println!(
+                                "  D#{} {} → would update",
+                                yaml.metadata.github_discussion_number.unwrap_or(0),
+                                title
+                            );
                         } else {
                             graphql_client.update_discussion(
                                 discussion_id,
@@ -94,18 +97,24 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                                 local_title,
                                 local_body,
                                 yaml.labels().to_vec(),
-                                &chrono::Utc::now().to_rfc3339(),
+                                chrono::Utc::now().to_rfc3339(),
                                 None,
                             ));
                             store.write(&path, &updated_yaml)?;
 
-                            println!("  D#{} {} → updated",
-                                yaml.metadata.github_discussion_number.unwrap_or(0), title);
+                            println!(
+                                "  D#{} {} → updated",
+                                yaml.metadata.github_discussion_number.unwrap_or(0),
+                                title
+                            );
                         }
                         discussions_updated += 1;
                     } else {
-                        println!("  D#{} {} → unchanged",
-                            yaml.metadata.github_discussion_number.unwrap_or(0), title);
+                        println!(
+                            "  D#{} {} → unchanged",
+                            yaml.metadata.github_discussion_number.unwrap_or(0),
+                            title
+                        );
                         discussions_unchanged += 1;
                     }
                 } else {
@@ -123,7 +132,10 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                     let category_id = categories.as_ref().unwrap().get(category_slug);
 
                     if category_id.is_none() {
-                        println!("  {} → skipped (category '{}' not found)", title, category_slug);
+                        println!(
+                            "  {} → skipped (category '{}' not found)",
+                            title, category_slug
+                        );
                         discussions_unchanged += 1;
                         continue;
                     }
@@ -131,7 +143,10 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                     let body = yaml.body();
 
                     if dry_run {
-                        println!("  {} → would create discussion in '{}'", title, category_slug);
+                        println!(
+                            "  {} → would create discussion in '{}'",
+                            title, category_slug
+                        );
                     } else {
                         let discussion = graphql_client.create_discussion(
                             repo_id.as_ref().unwrap(),
@@ -144,7 +159,8 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                         let mut updated_yaml = yaml.clone();
                         updated_yaml.metadata.github_discussion_id = Some(discussion.id.clone());
                         updated_yaml.metadata.github_discussion_number = Some(discussion.number);
-                        updated_yaml.metadata.github_updated_at = Some(discussion.updated_at.clone());
+                        updated_yaml.metadata.github_updated_at =
+                            Some(discussion.updated_at.clone());
                         updated_yaml.metadata.last_synced = Some(LastSynced::new(
                             title,
                             body,
@@ -166,7 +182,10 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                             std::fs::remove_file(&path).ok();
                         }
 
-                        println!("  {} → created D#{} ({})", title, discussion.number, new_filename);
+                        println!(
+                            "  {} → created D#{} ({})",
+                            title, discussion.number, new_filename
+                        );
                     }
                     discussions_created += 1;
                 }
@@ -188,22 +207,22 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                     let remote_assignees = remote_issue.assignee_logins();
 
                     let base = yaml.last_synced();
-                    let (base_title, base_body, base_labels, base_assignees) =
-                        if let Some(b) = base {
-                            (
-                                b.title.as_str(),
-                                b.body.as_str(),
-                                b.labels.as_slice(),
-                                b.assignees.as_deref().unwrap_or(&[]),
-                            )
-                        } else {
-                            (
-                                remote_title.as_str(),
-                                remote_body,
-                                remote_labels.as_slice(),
-                                remote_assignees.as_slice(),
-                            )
-                        };
+                    let (base_title, base_body, base_labels, base_assignees) = if let Some(b) = base
+                    {
+                        (
+                            b.title.as_str(),
+                            b.body.as_str(),
+                            b.labels.as_slice(),
+                            b.assignees.as_deref().unwrap_or(&[]),
+                        )
+                    } else {
+                        (
+                            remote_title.as_str(),
+                            remote_body,
+                            remote_labels.as_slice(),
+                            remote_assignees.as_slice(),
+                        )
+                    };
 
                     let (merged, _has_conflicts) = merge_fields(
                         local_title,
@@ -244,7 +263,7 @@ pub fn run(repo: &str, input: Option<String>, dry_run: bool) -> Result<()> {
                                 &merged.title,
                                 &merged.body,
                                 merged.labels.clone(),
-                                &chrono::Utc::now().to_rfc3339(),
+                                chrono::Utc::now().to_rfc3339(),
                                 Some(merged.assignees.clone()),
                             ));
                             store.write(&path, &updated_yaml)?;

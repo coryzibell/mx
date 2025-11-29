@@ -55,7 +55,7 @@ pub fn get_github_token() -> Result<String> {
         .with_context(|| format!("Failed to parse {}", config_path.display()))?;
 
     // Search through all projects for a GitHub token
-    for (_project_path, project_config) in &config.projects {
+    for project_config in config.projects.values() {
         if let Some(github_server) = project_config.mcp_servers.get("github") {
             if let Some(token) = github_server.env.get("GITHUB_PERSONAL_ACCESS_TOKEN") {
                 if !token.is_empty() {
@@ -90,6 +90,10 @@ mod tests {
         let token = get_github_token().expect("Should find token");
         assert!(!token.is_empty());
         // Tokens typically start with ghp_ or gho_
-        assert!(token.starts_with("ghp_") || token.starts_with("gho_") || token.starts_with("github_pat_"));
+        assert!(
+            token.starts_with("ghp_")
+                || token.starts_with("gho_")
+                || token.starts_with("github_pat_")
+        );
     }
 }

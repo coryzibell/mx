@@ -6,11 +6,11 @@
 //! - Labels: Sync identity labels
 //! - Issues: Bidirectional sync
 
-pub mod github;
-pub mod yaml;
-pub mod merge;
 pub mod commands;
+pub mod github;
+pub mod merge;
 pub mod wiki;
+pub mod yaml;
 
 use anyhow::Result;
 use std::path::PathBuf;

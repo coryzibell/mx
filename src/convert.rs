@@ -19,9 +19,10 @@ pub fn parse_markdown(content: &str) -> Result<SyncYaml> {
         .map(|line| line.trim_start_matches("# ").trim())
         .unwrap_or("Untitled");
 
-    // Extract Type and Labels using regex
+    // Extract Type and Labels using regex - compile once
     let type_re = Regex::new(r#"\*\*Type:\*\*\s*`([^`]+)`"#)?;
     let labels_re = Regex::new(r#"\*\*Labels:\*\*\s*(.+)"#)?;
+    let label_re = Regex::new(r"`([^`]+)`")?;
 
     let mut item_type = "issue".to_string();
     let mut labels = Vec::new();
@@ -34,7 +35,6 @@ pub fn parse_markdown(content: &str) -> Result<SyncYaml> {
         if let Some(caps) = labels_re.captures(line) {
             // Parse labels: `label1`, `label2`
             let label_text = &caps[1];
-            let label_re = Regex::new(r"`([^`]+)`")?;
             for cap in label_re.captures_iter(label_text) {
                 labels.push(cap[1].to_string());
             }
@@ -86,8 +86,8 @@ fn find_body_start(lines: &[&str]) -> usize {
 
 /// Convert markdown file to YAML
 pub fn convert_file(input: &Path, output_dir: &Path, dry_run: bool) -> Result<PathBuf> {
-    let content = fs::read_to_string(input)
-        .with_context(|| format!("Failed to read file: {:?}", input))?;
+    let content =
+        fs::read_to_string(input).with_context(|| format!("Failed to read file: {:?}", input))?;
 
     let yaml_data = parse_markdown(&content)?;
     let title = yaml_data.metadata.title.as_ref().unwrap();
@@ -149,8 +149,8 @@ pub fn yaml_to_markdown_file(
     repo: Option<&str>,
     dry_run: bool,
 ) -> Result<PathBuf> {
-    let content = fs::read_to_string(input)
-        .with_context(|| format!("Failed to read file: {:?}", input))?;
+    let content =
+        fs::read_to_string(input).with_context(|| format!("Failed to read file: {:?}", input))?;
 
     let yaml_data: SyncYaml = serde_yaml::from_str(&content)
         .with_context(|| format!("Failed to parse YAML: {:?}", input))?;

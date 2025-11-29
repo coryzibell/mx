@@ -74,14 +74,14 @@ impl SyncYaml {
     pub fn labels(&self) -> &[String] {
         self.labels
             .as_deref()
-            .unwrap_or_else(|| self.metadata.labels.as_slice())
+            .unwrap_or(self.metadata.labels.as_slice())
     }
 
     /// Get assignees, preferring root level
     pub fn assignees(&self) -> &[String] {
         self.assignees
             .as_deref()
-            .unwrap_or_else(|| self.metadata.assignees.as_slice())
+            .unwrap_or(self.metadata.assignees.as_slice())
     }
 
     /// Get discussion category

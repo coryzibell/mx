@@ -40,12 +40,10 @@ impl Check {
             } else {
                 ("✗", "\x1b[31m", "\x1b[0m") // Red X
             }
+        } else if self.passed {
+            ("✓", "", "")
         } else {
-            if self.passed {
-                ("✓", "", "")
-            } else {
-                ("✗", "", "")
-            }
+            ("✗", "", "")
         };
 
         let mut result = format!("{}{}{} {}", color_code, mark, reset, self.name);
@@ -64,26 +62,15 @@ pub fn run_checks() -> Result<()> {
 
     println!("Matrix Environment Check\n");
 
-    let mut checks = Vec::new();
-
-    // Check required files and directories
-    checks.push(check_file_exists(
-        "~/.matrix/CLAUDE.md",
-        &home_path(".matrix/CLAUDE.md"),
-    ));
-
-    checks.push(check_file_exists(
-        "~/.matrix/artifacts/etc/identity-colors.yaml",
-        &home_path(".matrix/artifacts/etc/identity-colors.yaml"),
-    ));
-
-    checks.push(check_directory_exists(
-        "~/.matrix/ram/neo/",
-        &home_path(".matrix/ram/neo"),
-    ));
-
-    // Check GitHub token
-    checks.push(check_github_token());
+    let checks = vec![
+        check_file_exists("~/.matrix/CLAUDE.md", &home_path(".matrix/CLAUDE.md")),
+        check_file_exists(
+            "~/.matrix/artifacts/etc/identity-colors.yaml",
+            &home_path(".matrix/artifacts/etc/identity-colors.yaml"),
+        ),
+        check_directory_exists("~/.matrix/ram/neo/", &home_path(".matrix/ram/neo")),
+        check_github_token(),
+    ];
 
     // Print results
     for check in &checks {
@@ -98,13 +85,17 @@ pub fn run_checks() -> Result<()> {
         println!("All checks passed!");
         Ok(())
     } else {
-        println!("{} issue{} found", failed_count, if failed_count == 1 { "" } else { "s" });
+        println!(
+            "{} issue{} found",
+            failed_count,
+            if failed_count == 1 { "" } else { "s" }
+        );
         std::process::exit(1);
     }
 }
 
 /// Check if a file exists
-fn check_file_exists(display_name: &str, path: &PathBuf) -> Check {
+fn check_file_exists(display_name: &str, path: &std::path::Path) -> Check {
     if path.exists() && path.is_file() {
         Check::new(display_name, true)
     } else {
@@ -113,7 +104,7 @@ fn check_file_exists(display_name: &str, path: &PathBuf) -> Check {
 }
 
 /// Check if a directory exists
-fn check_directory_exists(display_name: &str, path: &PathBuf) -> Check {
+fn check_directory_exists(display_name: &str, path: &std::path::Path) -> Check {
     if path.exists() && path.is_dir() {
         Check::new(display_name, true)
     } else {

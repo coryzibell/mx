@@ -239,8 +239,12 @@ mod tests {
             ..Default::default()
         };
 
-        store.write(&temp_dir.path().join("1.yaml"), &yaml1).unwrap();
-        store.write(&temp_dir.path().join("2.yaml"), &yaml2).unwrap();
+        store
+            .write(&temp_dir.path().join("1.yaml"), &yaml1)
+            .unwrap();
+        store
+            .write(&temp_dir.path().join("2.yaml"), &yaml2)
+            .unwrap();
 
         let found = store.find_by_issue_number(2).unwrap();
         assert!(found.is_some());
@@ -263,7 +267,9 @@ mod tests {
             ..Default::default()
         };
 
-        store.write(&temp_dir.path().join("test.yaml"), &yaml).unwrap();
+        store
+            .write(&temp_dir.path().join("test.yaml"), &yaml)
+            .unwrap();
 
         let found = store.find_by_title("Specific Title").unwrap();
         assert!(found.is_some());

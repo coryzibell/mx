@@ -239,7 +239,10 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
     let mut writer = BufWriter::new(file);
 
     // CSV header (v3 schema field names)
-    writeln!(writer, "id,category_id,title,tags,applicability,source_project_id,created_at,updated_at")?;
+    writeln!(
+        writer,
+        "id,category_id,title,tags,applicability,source_project_id,created_at,updated_at"
+    )?;
 
     // Export all categories dynamically
     let categories = db.list_categories()?;
@@ -254,7 +257,14 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
             writeln!(
                 writer,
                 "{},{},\"{}\",\"{}\",\"{}\",{},{},{}",
-                entry.id, entry.category_id, entry.title, tags, applicability, source_project, created, updated
+                entry.id,
+                entry.category_id,
+                entry.title,
+                tags,
+                applicability,
+                source_project,
+                created,
+                updated
             )?;
         }
     }

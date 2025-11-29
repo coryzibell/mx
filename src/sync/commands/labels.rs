@@ -41,7 +41,10 @@ pub fn run(repo: &str, dry_run: bool) -> Result<()> {
     let colors_path = artifacts_dir().join("etc").join("identity-colors.yaml");
     let identity_colors = load_identity_colors(&colors_path)?;
 
-    println!("Loaded {} identity definitions", identity_colors.identities.len());
+    println!(
+        "Loaded {} identity definitions",
+        identity_colors.identities.len()
+    );
 
     // Get GitHub token and create client
     let token = get_github_token()?;
@@ -74,15 +77,23 @@ pub fn run(repo: &str, dry_run: bool) -> Result<()> {
 
             if needs_color_update || needs_desc_update {
                 if dry_run {
-                    println!("  [DRY RUN] Would update: {} (color: {} -> {})",
-                             label_name,
-                             existing.color,
-                             color);
+                    println!(
+                        "  [DRY RUN] Would update: {} (color: {} -> {})",
+                        label_name, existing.color, color
+                    );
                 } else {
                     let req = UpdateLabelRequest {
                         new_name: None,
-                        color: if needs_color_update { Some(color.to_string()) } else { None },
-                        description: if needs_desc_update { Some(def.rationale.clone()) } else { None },
+                        color: if needs_color_update {
+                            Some(color.to_string())
+                        } else {
+                            None
+                        },
+                        description: if needs_desc_update {
+                            Some(def.rationale.clone())
+                        } else {
+                            None
+                        },
                     };
                     client.update_label(&owner, &repo_name, &label_name, &req)?;
                     println!("  Updated: {}", label_name);
@@ -94,7 +105,10 @@ pub fn run(repo: &str, dry_run: bool) -> Result<()> {
         } else {
             // Label doesn't exist - create it
             if dry_run {
-                println!("  [DRY RUN] Would create: {} (color: {})", label_name, color);
+                println!(
+                    "  [DRY RUN] Would create: {} (color: {})",
+                    label_name, color
+                );
             } else {
                 let req = CreateLabelRequest {
                     name: label_name.clone(),

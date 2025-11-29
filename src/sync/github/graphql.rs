@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 const GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
@@ -31,8 +31,7 @@ impl GraphQLClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", token))
-                .context("Invalid token format")?,
+            HeaderValue::from_str(&format!("Bearer {}", token)).context("Invalid token format")?,
         );
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
@@ -40,7 +39,11 @@ impl GraphQLClient {
     }
 
     /// Execute a GraphQL query
-    fn query<T: for<'de> Deserialize<'de>>(&self, query: &str, variables: serde_json::Value) -> Result<T> {
+    fn query<T: for<'de> Deserialize<'de>>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T> {
         let body = json!({
             "query": query,
             "variables": variables
@@ -93,7 +96,11 @@ impl GraphQLClient {
     }
 
     /// List discussion categories for a repository
-    pub fn list_discussion_categories(&self, owner: &str, repo: &str) -> Result<Vec<DiscussionCategory>> {
+    pub fn list_discussion_categories(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<DiscussionCategory>> {
         let query = r#"
             query($owner: String!, $repo: String!) {
                 repository(owner: $owner, name: $repo) {
@@ -339,7 +346,11 @@ impl GraphQLClient {
     }
 
     /// Add a comment to a discussion
-    pub fn add_discussion_comment(&self, discussion_id: &str, body: &str) -> Result<DiscussionCommentCreated> {
+    pub fn add_discussion_comment(
+        &self,
+        discussion_id: &str,
+        body: &str,
+    ) -> Result<DiscussionCommentCreated> {
         let query = r#"
             mutation($discussionId: ID!, $body: String!) {
                 addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {

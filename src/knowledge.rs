@@ -56,14 +56,13 @@ where
     let value = Value::deserialize(deserializer)?;
     match value {
         Value::String(s) => Ok(vec![s]),
-        Value::Sequence(seq) => {
-            seq.into_iter()
-                .map(|v| match v {
-                    Value::String(s) => Ok(s),
-                    _ => Err(D::Error::custom("Expected string in applicability array")),
-                })
-                .collect()
-        }
+        Value::Sequence(seq) => seq
+            .into_iter()
+            .map(|v| match v {
+                Value::String(s) => Ok(s),
+                _ => Err(D::Error::custom("Expected string in applicability array")),
+            })
+            .collect(),
         _ => Ok(vec![]),
     }
 }

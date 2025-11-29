@@ -420,8 +420,8 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     }
 
     // Parse JSON response
-    let json: serde_json::Value = serde_json::from_slice(&pr_info.stdout)
-        .context("Failed to parse PR info")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&pr_info.stdout).context("Failed to parse PR info")?;
 
     let pr_title = json["title"].as_str().unwrap_or("PR");
     let pr_body = json["body"].as_str().unwrap_or("");

@@ -100,7 +100,10 @@ pub fn export_session(path: Option<String>, output: Option<String>) -> Result<()
     // Generate markdown
     let mut markdown = String::new();
     markdown.push_str("# Session Export\n");
-    markdown.push_str(&format!("*Exported: {}*\n", Utc::now().format("%Y-%m-%dT%H:%M:%SZ")));
+    markdown.push_str(&format!(
+        "*Exported: {}*\n",
+        Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+    ));
     markdown.push_str(&format!("*Source: {}*\n\n", session_path.display()));
 
     // Tool usage summary

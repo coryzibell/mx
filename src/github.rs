@@ -196,8 +196,7 @@ pub fn post_issue_comment(
     let (owner, repo_name) = (parts[0], parts[1]);
 
     // Get GitHub App token
-    let token = get_installation_token()
-        .context("Failed to get GitHub App installation token")?;
+    let token = get_installation_token().context("Failed to get GitHub App installation token")?;
 
     // Create REST client
     let client = RestClient::new(token)?;
@@ -226,8 +225,7 @@ pub fn post_discussion_comment(
     let (owner, repo_name) = (parts[0], parts[1]);
 
     // Get GitHub App token
-    let token = get_installation_token()
-        .context("Failed to get GitHub App installation token")?;
+    let token = get_installation_token().context("Failed to get GitHub App installation token")?;
 
     // Create GraphQL client
     let graphql_client = GraphQLClient::new(&token)?;
@@ -236,7 +234,8 @@ pub fn post_discussion_comment(
     let body = format_comment_body(message, identity);
 
     // Get discussion ID from number
-    let discussion_id = graphql_client.get_discussion_id(owner, repo_name, number)
+    let discussion_id = graphql_client
+        .get_discussion_id(owner, repo_name, number)
         .with_context(|| format!("Failed to get discussion ID for D#{}", number))?;
 
     // Post comment
@@ -266,7 +265,8 @@ fn create_issue_comment(
         body: body.to_string(),
     };
 
-    client.post_json(&url, &req)
+    client
+        .post_json(&url, &req)
         .with_context(|| format!("Failed to create comment on issue #{}", number))
 }
 

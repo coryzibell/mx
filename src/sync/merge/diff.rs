@@ -18,11 +18,7 @@ pub enum FieldChange<T> {
     BothSame(T),
 
     /// Conflict - both changed to different values
-    Conflict {
-        local: T,
-        remote: T,
-        base: T,
-    },
+    Conflict { local: T, remote: T, base: T },
 }
 
 impl<T: Clone + PartialEq> FieldChange<T> {
@@ -78,18 +74,18 @@ pub struct DiffResult {
 impl DiffResult {
     /// Check if there are any changes
     pub fn has_changes(&self) -> bool {
-        self.title.as_ref().map_or(false, |c| c.has_changes())
-            || self.body.as_ref().map_or(false, |c| c.has_changes())
-            || self.labels.as_ref().map_or(false, |c| c.has_changes())
-            || self.assignees.as_ref().map_or(false, |c| c.has_changes())
+        self.title.as_ref().is_some_and(|c| c.has_changes())
+            || self.body.as_ref().is_some_and(|c| c.has_changes())
+            || self.labels.as_ref().is_some_and(|c| c.has_changes())
+            || self.assignees.as_ref().is_some_and(|c| c.has_changes())
     }
 
     /// Check if there are any conflicts
     pub fn has_conflicts(&self) -> bool {
-        self.title.as_ref().map_or(false, |c| c.is_conflict())
-            || self.body.as_ref().map_or(false, |c| c.is_conflict())
-            || self.labels.as_ref().map_or(false, |c| c.is_conflict())
-            || self.assignees.as_ref().map_or(false, |c| c.is_conflict())
+        self.title.as_ref().is_some_and(|c| c.is_conflict())
+            || self.body.as_ref().is_some_and(|c| c.is_conflict())
+            || self.labels.as_ref().is_some_and(|c| c.is_conflict())
+            || self.assignees.as_ref().is_some_and(|c| c.is_conflict())
     }
 
     /// Get a summary of changes for display
@@ -132,6 +128,7 @@ fn change_type_str<T>(change: &FieldChange<T>) -> &'static str {
 }
 
 /// Compute diff between local YAML, remote GitHub, and base (last_synced) states
+#[allow(clippy::too_many_arguments)]
 pub fn compute_diff(
     local_title: &str,
     local_body: &str,
@@ -176,8 +173,11 @@ mod tests {
 
     #[test]
     fn test_unchanged() {
-        let change: FieldChange<String> =
-            FieldChange::compute(&"same".to_string(), &"same".to_string(), &"same".to_string());
+        let change: FieldChange<String> = FieldChange::compute(
+            &"same".to_string(),
+            &"same".to_string(),
+            &"same".to_string(),
+        );
         assert_eq!(change, FieldChange::Unchanged);
         assert!(!change.has_changes());
         assert!(!change.is_conflict());
@@ -233,7 +233,12 @@ mod tests {
         assert!(change.has_changes());
         assert_eq!(change.resolved_value(), None);
 
-        if let FieldChange::Conflict { local, remote, base } = change {
+        if let FieldChange::Conflict {
+            local,
+            remote,
+            base,
+        } = change
+        {
             assert_eq!(local, "local change");
             assert_eq!(remote, "remote change");
             assert_eq!(base, "original");

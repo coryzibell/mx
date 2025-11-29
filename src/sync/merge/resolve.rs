@@ -58,6 +58,7 @@ pub fn resolve_conflict<T: Clone>(change: &FieldChange<T>, strategy: Resolution)
 /// - Title/body require explicit resolution if conflicted
 ///
 /// Returns: (merged_state, has_unresolved_conflicts)
+#[allow(clippy::too_many_arguments)]
 pub fn merge_fields(
     local_title: &str,
     local_body: &str,
@@ -104,8 +105,13 @@ pub fn merge_fields(
     );
 
     // Resolve body
-    let (merged_body, body_conflict) =
-        resolve_string_field(&body_change, local_body, remote_body, base_body, prefer_local);
+    let (merged_body, body_conflict) = resolve_string_field(
+        &body_change,
+        local_body,
+        remote_body,
+        base_body,
+        prefer_local,
+    );
 
     // Resolve assignees (same logic as labels - use union)
     let merged_assignees = match &assignees_change {

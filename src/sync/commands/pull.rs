@@ -65,7 +65,7 @@ pub fn run(repo: &str, output: Option<String>, dry_run: bool) -> Result<()> {
             let remote_assignees = issue.assignee_logins();
 
             let base = yaml.last_synced();
-            let local_changed = base.map_or(false, |b| {
+            let local_changed = base.is_some_and(|b| {
                 yaml.title() != b.title
                     || yaml.body() != b.body
                     || yaml.labels() != b.labels.as_slice()
@@ -203,7 +203,7 @@ pub fn run(repo: &str, output: Option<String>, dry_run: bool) -> Result<()> {
             let remote_labels = discussion.label_names();
 
             let base = yaml.last_synced();
-            let local_changed = base.map_or(false, |b| {
+            let local_changed = base.is_some_and(|b| {
                 yaml.title() != b.title
                     || yaml.body() != b.body
                     || yaml.labels() != b.labels.as_slice()
@@ -227,7 +227,11 @@ pub fn run(repo: &str, output: Option<String>, dry_run: bool) -> Result<()> {
                     .iter()
                     .map(|c| Comment {
                         id: c.id.clone(),
-                        author: c.author.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
+                        author: c
+                            .author
+                            .as_ref()
+                            .map(|a| a.login.clone())
+                            .unwrap_or_default(),
                         created_at: c.created_at.clone(),
                         body: c.body.clone().unwrap_or_default(),
                     })
@@ -288,7 +292,11 @@ pub fn run(repo: &str, output: Option<String>, dry_run: bool) -> Result<()> {
                     .iter()
                     .map(|c| Comment {
                         id: c.id.clone(),
-                        author: c.author.as_ref().map(|a| a.login.clone()).unwrap_or_default(),
+                        author: c
+                            .author
+                            .as_ref()
+                            .map(|a| a.login.clone())
+                            .unwrap_or_default(),
                         created_at: c.created_at.clone(),
                         body: c.body.clone().unwrap_or_default(),
                     })

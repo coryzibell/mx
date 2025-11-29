@@ -31,8 +31,7 @@ impl RestClient {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", token))
-                .context("Invalid token format")?,
+            HeaderValue::from_str(&format!("Bearer {}", token)).context("Invalid token format")?,
         );
         headers.insert(
             ACCEPT,
@@ -224,7 +223,12 @@ impl RestClient {
     }
 
     /// List comments on an issue
-    pub fn list_issue_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<Comment>> {
+    pub fn list_issue_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Vec<Comment>> {
         let mut all_comments = Vec::new();
         let mut page = 1;
 
@@ -262,7 +266,11 @@ impl RestClient {
     }
 
     /// Generic POST request with JSON body
-    pub fn post_json<T: Serialize, R: for<'de> Deserialize<'de>>(&self, url: &str, body: &T) -> Result<R> {
+    pub fn post_json<T: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> Result<R> {
         self.client
             .post(url)
             .json(body)

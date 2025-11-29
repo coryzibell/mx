@@ -5,6 +5,8 @@ use std::path::Path;
 use crate::knowledge::KnowledgeEntry;
 use serde::{Deserialize, Serialize};
 
+// Schema version - kept for future migrations
+#[allow(dead_code)]
 const SCHEMA_VERSION: i32 = 3;
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,8 @@ pub struct ApplicabilityType {
     pub created_at: String,
 }
 
+// Type definitions - used by database queries
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceType {
     pub id: String,
@@ -50,6 +54,7 @@ pub struct SourceType {
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntryType {
     pub id: String,
@@ -57,6 +62,7 @@ pub struct EntryType {
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationshipType {
     pub id: String,
@@ -65,6 +71,7 @@ pub struct RelationshipType {
     pub created_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionType {
     pub id: String,
