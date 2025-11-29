@@ -10,6 +10,11 @@ use crate::sync::yaml::schema::{slugify, SyncYaml};
 
 /// Parse markdown file to YAML structure
 pub fn parse_markdown(content: &str) -> Result<SyncYaml> {
+    // Check for YAML frontmatter
+    if content.starts_with("---\n") || content.starts_with("---\r\n") {
+        return parse_markdown_with_frontmatter(content);
+    }
+
     let lines: Vec<&str> = content.lines().collect();
 
     // Extract title (first # heading)
@@ -58,6 +63,62 @@ pub fn parse_markdown(content: &str) -> Result<SyncYaml> {
     Ok(yaml)
 }
 
+/// Parse markdown with YAML frontmatter
+fn parse_markdown_with_frontmatter(content: &str) -> Result<SyncYaml> {
+    // Find end of frontmatter
+    let rest = &content[4..]; // Skip opening "---\n"
+    let end_pos = rest
+        .find("\n---")
+        .with_context(|| "Invalid frontmatter: missing closing ---")?;
+
+    let frontmatter = &rest[..end_pos];
+    let body_start = end_pos + 5; // Skip "\n---\n"
+    let body = if body_start < rest.len() {
+        rest[body_start..].trim().to_string()
+    } else {
+        String::new()
+    };
+
+    // Parse frontmatter as YAML
+    let fm: serde_yaml::Value =
+        serde_yaml::from_str(frontmatter).with_context(|| "Failed to parse frontmatter")?;
+
+    let title = fm
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Untitled")
+        .to_string();
+
+    let item_type = fm
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("issue")
+        .to_string();
+
+    let labels: Vec<String> = fm
+        .get("labels")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut yaml = SyncYaml::default();
+    yaml.metadata.title = Some(title);
+    yaml.metadata.r#type = Some(item_type);
+    yaml.metadata.labels = labels;
+    yaml.body_markdown = body;
+
+    // Also grab priority if present
+    if let Some(priority) = fm.get("priority").and_then(|v| v.as_str()) {
+        yaml.metadata.labels.push(format!("priority:{}", priority));
+    }
+
+    Ok(yaml)
+}
+
 /// Find where body content starts (after title and metadata)
 fn find_body_start(lines: &[&str]) -> usize {
     let mut idx = 0;
@@ -90,15 +151,23 @@ pub fn convert_file(input: &Path, output_dir: &Path, dry_run: bool) -> Result<Pa
         fs::read_to_string(input).with_context(|| format!("Failed to read file: {:?}", input))?;
 
     let yaml_data = parse_markdown(&content)?;
-    let title = yaml_data.metadata.title.as_ref().unwrap();
-    let slug = slugify(title, 50);
-    let filename = format!("new-{}.yaml", slug);
+
+    // Preserve input filename, just change extension
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unnamed");
+    let filename = format!("{}.yaml", stem);
     let output_path = output_dir.join(&filename);
 
     if dry_run {
         println!("Would create: {:?}", output_path);
-        println!("  Title: {}", title);
-        println!("  Type: {}", yaml_data.metadata.r#type.as_ref().unwrap());
+        if let Some(title) = &yaml_data.metadata.title {
+            println!("  Title: {}", title);
+        }
+        if let Some(item_type) = &yaml_data.metadata.r#type {
+            println!("  Type: {}", item_type);
+        }
         if !yaml_data.metadata.labels.is_empty() {
             println!("  Labels: {}", yaml_data.metadata.labels.join(", "));
         }
@@ -221,48 +290,47 @@ pub fn yaml_to_markdown_directory(
     Ok(())
 }
 
-/// Generate markdown content from YAML
+/// Generate markdown content from YAML (with frontmatter for clean roundtrips)
 fn generate_markdown(yaml: &SyncYaml, repo: &str) -> Result<String> {
     let mut md = String::new();
 
-    // Title
-    md.push_str(&format!("# {}\n\n", yaml.title()));
+    // YAML frontmatter
+    md.push_str("---\n");
+    md.push_str(&format!(
+        "title: \"{}\"\n",
+        yaml.title().replace('"', "\\\"")
+    ));
 
-    // Metadata section
     if let Some(item_type) = yaml.r#type.as_deref().or(yaml.metadata.r#type.as_deref()) {
-        md.push_str(&format!("**Type:** {}\n", item_type));
+        md.push_str(&format!("type: {}\n", item_type));
     }
 
     let labels = yaml.labels();
     if !labels.is_empty() {
-        md.push_str(&format!("**Labels:** {}\n", labels.join(", ")));
-    }
-
-    if let Some(state) = &yaml.metadata.state {
-        md.push_str(&format!("**State:** {}\n", state));
-    }
-
-    // GitHub URL
-    if let Some(number) = yaml.github_issue_number() {
-        md.push_str(&format!(
-            "**GitHub:** [#{}](https://github.com/{}/issues/{})\n",
-            number, repo, number
-        ));
-    } else if let Some(disc_num) = yaml.metadata.github_discussion_number {
-        md.push_str(&format!(
-            "**GitHub:** [Discussion #{}](https://github.com/{}/discussions/{})\n",
-            disc_num, repo, disc_num
-        ));
-    }
-
-    // Last updated
-    if let Some(updated_at) = &yaml.metadata.github_updated_at {
-        if let Ok(formatted) = format_date(updated_at) {
-            md.push_str(&format!("**Updated:** {}\n", formatted));
+        md.push_str("labels:\n");
+        for label in labels {
+            md.push_str(&format!("  - {}\n", label));
         }
     }
 
-    md.push_str("\n---\n\n");
+    if let Some(state) = &yaml.metadata.state {
+        md.push_str(&format!("state: {}\n", state));
+    }
+
+    // GitHub metadata
+    if let Some(number) = yaml.github_issue_number() {
+        md.push_str(&format!("github_issue: {}\n", number));
+        md.push_str(&format!("github_repo: {}\n", repo));
+    } else if let Some(disc_num) = yaml.metadata.github_discussion_number {
+        md.push_str(&format!("github_discussion: {}\n", disc_num));
+        md.push_str(&format!("github_repo: {}\n", repo));
+    }
+
+    if let Some(updated_at) = &yaml.metadata.github_updated_at {
+        md.push_str(&format!("updated_at: {}\n", updated_at));
+    }
+
+    md.push_str("---\n\n");
 
     // Body
     let body = yaml.body();
@@ -387,5 +455,38 @@ Description of the problem...
 
         let start = find_body_start(&lines);
         assert_eq!(lines[start], "## Body");
+    }
+
+    #[test]
+    fn test_parse_markdown_with_frontmatter() {
+        let content = r#"---
+title: "chore(deps): update zero-code dependencies"
+type: issue
+labels:
+  - dependencies
+  - identity:smith
+priority: P2
+---
+
+## Context
+
+Some context here...
+
+## Problem
+
+Description of the problem...
+"#;
+
+        let yaml = parse_markdown(content).unwrap();
+        assert_eq!(
+            yaml.metadata.title.as_deref(),
+            Some("chore(deps): update zero-code dependencies")
+        );
+        assert_eq!(yaml.metadata.r#type.as_deref(), Some("issue"));
+        assert!(yaml.metadata.labels.contains(&"dependencies".to_string()));
+        assert!(yaml.metadata.labels.contains(&"identity:smith".to_string()));
+        assert!(yaml.metadata.labels.contains(&"priority:P2".to_string()));
+        assert!(yaml.body_markdown.contains("## Context"));
+        assert!(yaml.body_markdown.contains("## Problem"));
     }
 }
