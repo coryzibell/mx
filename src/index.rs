@@ -122,10 +122,21 @@ pub fn export_markdown(db: &Database, dir_path: &Path) -> Result<()> {
             writeln!(writer, "---")?;
             writeln!(writer, "id: {}", entry.id)?;
             writeln!(writer, "title: {}", entry.title)?;
-            writeln!(writer, "category: {}", entry.category)?;
+            writeln!(writer, "category: {}", entry.category_id)?;
 
             if !entry.tags.is_empty() {
                 writeln!(writer, "tags: [{}]", entry.tags.join(", "))?;
+            }
+
+            if !entry.applicability.is_empty() {
+                if entry.applicability.len() == 1 {
+                    writeln!(writer, "applicability: {}", entry.applicability[0])?;
+                } else {
+                    writeln!(writer, "applicability:")?;
+                    for app in &entry.applicability {
+                        writeln!(writer, "  - {}", app)?;
+                    }
+                }
             }
 
             if let Some(created) = &entry.created_at {
@@ -136,11 +147,11 @@ pub fn export_markdown(db: &Database, dir_path: &Path) -> Result<()> {
                 writeln!(writer, "updated: {}", updated)?;
             }
 
-            if let Some(source_project) = &entry.source_project {
+            if let Some(source_project) = &entry.source_project_id {
                 writeln!(writer, "source_project: {}", source_project)?;
             }
 
-            if let Some(source_agent) = &entry.source_agent {
+            if let Some(source_agent) = &entry.source_agent_id {
                 writeln!(writer, "source_agent: {}", source_agent)?;
             }
 
@@ -238,7 +249,7 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
             writeln!(
                 writer,
                 "{},{},\"{}\",\"{}\",{},{}",
-                entry.id, entry.category, entry.title, tags, created, updated
+                entry.id, entry.category_id, entry.title, tags, created, updated
             )?;
         }
     }

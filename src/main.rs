@@ -623,20 +623,20 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             let now = chrono::Utc::now().to_rfc3339();
             let entry = knowledge::KnowledgeEntry {
                 id: id.clone(),
-                category: category.clone(),
+                category_id: category.clone(),
                 title: title.clone(),
                 body: Some(body),
                 summary: None,
-                applicability: None,
-                source_project: project,
-                source_agent: None,
+                applicability: vec![],
+                source_project_id: project,
+                source_agent_id: None,
                 file_path: None,
                 tags: tag_list,
                 created_at: Some(now.clone()),
                 updated_at: Some(now),
                 content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&title)),
-                source_type: Some("manual".to_string()),
-                entry_type: Some("primary".to_string()),
+                source_type_id: Some("manual".to_string()),
+                entry_type_id: Some("primary".to_string()),
                 session_id: None,
                 ephemeral: false,
             };
@@ -1020,7 +1020,7 @@ fn parse_frontmatter(content: &str) -> Option<(String, String)> {
 }
 
 fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
-    println!("  {} [{}]", entry.id, entry.category);
+    println!("  {} [{}]", entry.id, entry.category_id);
     println!("  {}", entry.title);
     if let Some(summary) = &entry.summary {
         let short = if summary.len() > 80 {
@@ -1038,7 +1038,7 @@ fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
 
 fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     println!("ID:       {}", entry.id);
-    println!("Category: {}", entry.category);
+    println!("Category: {}", entry.category_id);
     println!("Title:    {}", entry.title);
     if let Some(path) = &entry.file_path {
         println!("File:     {}", path);

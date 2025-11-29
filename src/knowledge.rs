@@ -7,18 +7,18 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeEntry {
     pub id: String,
-    pub category: String,
+    pub category_id: String,
     pub title: String,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
     #[serde(default)]
-    pub applicability: Option<String>,
+    pub applicability: Vec<String>,
     #[serde(default)]
-    pub source_project: Option<String>,
+    pub source_project_id: Option<String>,
     #[serde(default)]
-    pub source_agent: Option<String>,
+    pub source_agent_id: Option<String>,
     #[serde(default)]
     pub file_path: Option<String>,
     #[serde(default)]
@@ -33,16 +33,39 @@ pub struct KnowledgeEntry {
     // Provenance metadata - tracks where knowledge came from
     /// Source type: manual, ram, cache, agent_session
     #[serde(default)]
-    pub source_type: Option<String>,
+    pub source_type_id: Option<String>,
     /// Entry type: primary (original), summary, synthesis
     #[serde(default)]
-    pub entry_type: Option<String>,
+    pub entry_type_id: Option<String>,
     /// Session ID if absorbed from RAM
     #[serde(default)]
     pub session_id: Option<String>,
     /// Ephemeral hint - session-based knowledge that may be pruned
     #[serde(default)]
     pub ephemeral: bool,
+}
+
+/// Custom deserializer for applicability - accepts string or array
+fn deserialize_applicability<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_yaml::Value;
+
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Sequence(seq) => {
+            seq.into_iter()
+                .map(|v| match v {
+                    Value::String(s) => Ok(s),
+                    _ => Err(D::Error::custom("Expected string in applicability array")),
+                })
+                .collect()
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 /// Frontmatter parsed from markdown
@@ -56,8 +79,8 @@ pub struct Frontmatter {
     pub category: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
-    #[serde(default)]
-    pub applicability: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_applicability")]
+    pub applicability: Vec<String>,
     #[serde(default)]
     pub source_project: Option<String>,
     #[serde(default)]
@@ -90,7 +113,7 @@ impl KnowledgeEntry {
 
         // Derive category from path if not in frontmatter
         let relative = path.strip_prefix(zion_root).unwrap_or(path);
-        let category = frontmatter.category.clone().unwrap_or_else(|| {
+        let category_id = frontmatter.category.clone().unwrap_or_else(|| {
             relative
                 .components()
                 .next()
@@ -122,21 +145,21 @@ impl KnowledgeEntry {
 
         Ok(Self {
             id,
-            category,
+            category_id,
             title,
             body: Some(body),
             summary,
             applicability: frontmatter.applicability,
-            source_project: frontmatter.source_project,
-            source_agent: frontmatter.source_agent,
+            source_project_id: frontmatter.source_project,
+            source_agent_id: frontmatter.source_agent,
             file_path: Some(path_str),
             tags: frontmatter.tags,
             created_at: frontmatter.created.or_else(|| Some(now.clone())),
             updated_at: Some(now),
             content_hash: Some(Self::compute_hash(&content)),
             // Markdown files are manual, primary knowledge
-            source_type: Some("manual".to_string()),
-            entry_type: Some("primary".to_string()),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
             session_id: None,
             ephemeral: false,
         })
@@ -235,6 +258,7 @@ mod tests {
 id: test-123
 title: Test Entry
 tags: [rust, testing]
+applicability: [cross-platform, rust]
 ---
 
 # Content Here
@@ -245,7 +269,35 @@ This is the body."#;
         assert_eq!(fm.id, Some("test-123".to_string()));
         assert_eq!(fm.title, Some("Test Entry".to_string()));
         assert_eq!(fm.tags, vec!["rust", "testing"]);
+        assert_eq!(fm.applicability, vec!["cross-platform", "rust"]);
         assert!(body.contains("# Content Here"));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_applicability_string() {
+        let content = r#"---
+title: Test
+applicability: rust
+---
+Body"#;
+
+        let (fm, _) = parse_frontmatter(content).unwrap();
+        assert_eq!(fm.applicability, vec!["rust"]);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_applicability_array() {
+        let content = r#"---
+title: Test
+applicability:
+  - rust
+  - async
+  - cli
+---
+Body"#;
+
+        let (fm, _) = parse_frontmatter(content).unwrap();
+        assert_eq!(fm.applicability, vec!["rust", "async", "cli"]);
     }
 
     #[test]

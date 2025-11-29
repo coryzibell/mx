@@ -160,18 +160,18 @@ impl Database {
             "#,
             params![
                 entry.id,
-                entry.category,
+                entry.category_id,
                 entry.title,
                 entry.body,
                 entry.summary,
-                entry.source_project,
-                entry.source_agent,
+                entry.source_project_id,
+                entry.source_agent_id,
                 entry.file_path,
                 entry.created_at,
                 entry.updated_at,
                 entry.content_hash,
-                entry.source_type,
-                entry.entry_type,
+                entry.source_type_id,
+                entry.entry_type_id,
                 entry.session_id,
                 entry.ephemeral,
             ],
@@ -179,6 +179,9 @@ impl Database {
 
         // Update tags junction table
         self.set_tags_for_entry(&entry.id, &entry.tags)?;
+
+        // Update applicability junction table
+        self.set_applicability_for_entry(&entry.id, &entry.applicability)?;
 
         Ok(())
     }
@@ -202,29 +205,30 @@ impl Database {
                 let id: String = row.get(0)?;
                 Ok(KnowledgeEntry {
                     id: id.clone(),
-                    category: row.get(1)?,
+                    category_id: row.get(1)?,
                     title: row.get(2)?,
                     body: row.get(3)?,
                     summary: row.get(4)?,
-                    applicability: None,
-                    source_project: row.get(5)?,
-                    source_agent: row.get(6)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
                     file_path: row.get(7)?,
                     tags: vec![],
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     content_hash: row.get(10)?,
-                    source_type: row.get(11)?,
-                    entry_type: row.get(12)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Load tags for each entry
+        // Load tags and applicability for each entry
         for entry in &mut entries {
             entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
         }
 
         Ok(entries)
@@ -247,29 +251,30 @@ impl Database {
             .query_map(params![category], |row| {
                 Ok(KnowledgeEntry {
                     id: row.get(0)?,
-                    category: row.get(1)?,
+                    category_id: row.get(1)?,
                     title: row.get(2)?,
                     body: row.get(3)?,
                     summary: row.get(4)?,
-                    applicability: None,
-                    source_project: row.get(5)?,
-                    source_agent: row.get(6)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
                     file_path: row.get(7)?,
                     tags: vec![],
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     content_hash: row.get(10)?,
-                    source_type: row.get(11)?,
-                    entry_type: row.get(12)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Load tags for each entry
+        // Load tags and applicability for each entry
         for entry in &mut entries {
             entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
         }
 
         Ok(entries)
@@ -291,20 +296,20 @@ impl Database {
             .query_row(params![id], |row| {
                 Ok(KnowledgeEntry {
                     id: row.get(0)?,
-                    category: row.get(1)?,
+                    category_id: row.get(1)?,
                     title: row.get(2)?,
                     body: row.get(3)?,
                     summary: row.get(4)?,
-                    applicability: None,
-                    source_project: row.get(5)?,
-                    source_agent: row.get(6)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
                     file_path: row.get(7)?,
                     tags: vec![],
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
                     content_hash: row.get(10)?,
-                    source_type: row.get(11)?,
-                    entry_type: row.get(12)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                 })
@@ -313,6 +318,7 @@ impl Database {
 
         if let Some(ref mut e) = entry {
             e.tags = self.get_tags_for_entry(&e.id)?;
+            e.applicability = self.get_applicability_for_entry(&e.id)?;
         }
 
         Ok(entry)
@@ -836,20 +842,20 @@ mod tests {
     fn make_entry(id: &str, category: &str, title: &str) -> KnowledgeEntry {
         KnowledgeEntry {
             id: id.to_string(),
-            category: category.to_string(),
+            category_id: category.to_string(),
             title: title.to_string(),
             body: None,
             summary: None,
-            applicability: None,
-            source_project: None,
-            source_agent: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
             file_path: None,
             tags: vec![],
             created_at: None,
             updated_at: None,
             content_hash: None,
-            source_type: None,
-            entry_type: None,
+            source_type_id: None,
+            entry_type_id: None,
             session_id: None,
             ephemeral: false,
         }
