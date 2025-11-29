@@ -333,37 +333,61 @@ fn get_current_branch() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Generate an encoded commit message from title and body
-/// Returns the full message ready to use (title\n\nbody\n\nfooter)
-pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String> {
-    // Generate title (hash of title text) - random dictionary
+/// Encoded commit parts
+pub struct EncodedCommit {
+    pub title: String,
+    pub body: String,
+    pub footer: String,
+    pub dejavu: bool,
+    pub title_dict: String,
+}
+
+impl EncodedCommit {
+    /// Full commit message: title\n\nbody\n\nfooter
+    pub fn message(&self) -> String {
+        format!("{}\n\n{}\n\n{}", self.title, self.body, self.footer)
+    }
+}
+
+/// Encode title and body into commit parts
+/// Title is hashed, body is compressed, footer shows algos/dicts used
+pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit> {
+    // Generate title (hash) - random dictionary
     let (title, hash_algo) = encode_hash(title_text)?;
 
-    // Generate body (compressed body text) - random dictionary
+    // Generate body (compressed) - random dictionary
     let (body, compress_algo) = encode_compress(body_text)?;
 
-    // Detect dictionaries by running --detect on the encoded output
+    // Detect dictionaries
     let title_dict = detect_dictionary(&title)?;
     let body_dict = detect_dictionary(&body)?;
 
-    // Dejavu detection - did the universe give us the same dictionary twice?
+    // Dejavu detection - same dictionary for both?
     let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
     // Footer: [hash_algo:title_dict|compress_algo:body_dict]
-    let footer = if dejavu {
-        format!(
-            "[{}:{}|{}:{}]\nwhoa.",
-            hash_algo, title_dict, compress_algo, body_dict
-        )
-    } else {
-        format!(
-            "[{}:{}|{}:{}]",
-            hash_algo, title_dict, compress_algo, body_dict
-        )
-    };
+    let footer = format!(
+        "[{}:{}|{}:{}]{}",
+        hash_algo,
+        title_dict,
+        compress_algo,
+        body_dict,
+        if dejavu { "\nwhoa." } else { "" }
+    );
 
-    // Build full commit message
-    Ok(format!("{}\n\n{}\n\n{}", title, body, footer))
+    Ok(EncodedCommit {
+        title,
+        body,
+        footer,
+        dejavu,
+        title_dict,
+    })
+}
+
+/// Generate an encoded commit message from title and body
+/// Returns the full message ready to use (title\n\nbody\n\nfooter)
+pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String> {
+    Ok(encode_commit(title_text, body_text)?.message())
 }
 
 /// Perform the full upload commit
@@ -378,44 +402,21 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
         bail!("No staged changes to commit");
     }
 
-    // Get diff for hashing
+    // Get diff for hashing (title is hash of diff)
     let diff = get_staged_diff()?;
 
-    // Generate title (hash of diff) - random dictionary
-    let (title, hash_algo) = encode_hash(&diff)?;
+    // Encode: title from diff hash, body from compressed message
+    let encoded = encode_commit(&diff, message)?;
 
-    // Generate body (compressed message) - random dictionary
-    let (body, compress_algo) = encode_compress(message)?;
-
-    // Detect dictionaries by running --detect on the encoded output
-    let title_dict = detect_dictionary(&title)?;
-    let body_dict = detect_dictionary(&body)?;
-
-    // Dejavu detection - did the universe give us the same dictionary twice?
-    let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
-
-    // Footer: [hash_algo:title_dict|compress_algo:body_dict]
-    let footer = if dejavu {
-        format!(
-            "[{}:{}|{}:{}]\nwhoa.",
-            hash_algo, title_dict, compress_algo, body_dict
-        )
-    } else {
-        format!(
-            "[{}:{}|{}:{}]",
-            hash_algo, title_dict, compress_algo, body_dict
-        )
-    };
-
-    println!("Title:  {}", title);
-    println!("Body:   {}", body);
-    if dejavu {
-        println!("Dejavu: {} (both used {})", dejavu, title_dict);
+    println!("Title:  {}", encoded.title);
+    println!("Body:   {}", encoded.body);
+    if encoded.dejavu {
+        println!("Dejavu: true (both used {})", encoded.title_dict);
     }
-    println!("Footer: {}", footer);
+    println!("Footer: {}", encoded.footer);
 
     // Commit
-    git_commit(&title, &body, &footer)?;
+    git_commit(&encoded.title, &encoded.body, &encoded.footer)?;
     println!("Committed.");
 
     // Push if requested
