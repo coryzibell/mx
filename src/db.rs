@@ -846,7 +846,34 @@ impl Database {
 mod tests {
     use super::*;
 
+    fn seed_test_db(db: &Database) {
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Insert required categories
+        db.conn.execute(
+            "INSERT OR IGNORE INTO categories (id, description, created_at) VALUES (?1, ?2, ?3)",
+            params!["pattern", "Pattern", &now],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT OR IGNORE INTO categories (id, description, created_at) VALUES (?1, ?2, ?3)",
+            params!["technique", "Technique", &now],
+        ).unwrap();
+
+        // Insert required source types
+        db.conn.execute(
+            "INSERT OR IGNORE INTO source_types (id, description, created_at) VALUES (?1, ?2, ?3)",
+            params!["manual", "Manual entry", &now],
+        ).unwrap();
+
+        // Insert required entry types
+        db.conn.execute(
+            "INSERT OR IGNORE INTO entry_types (id, description, created_at) VALUES (?1, ?2, ?3)",
+            params!["primary", "Primary entry", &now],
+        ).unwrap();
+    }
+
     fn make_entry(id: &str, category: &str, title: &str) -> KnowledgeEntry {
+        let now = chrono::Utc::now().to_rfc3339();
         KnowledgeEntry {
             id: id.to_string(),
             category_id: category.to_string(),
@@ -858,11 +885,11 @@ mod tests {
             source_agent_id: None,
             file_path: None,
             tags: vec![],
-            created_at: None,
-            updated_at: None,
-            content_hash: None,
-            source_type_id: None,
-            entry_type_id: None,
+            created_at: Some(now.clone()),
+            updated_at: Some(now),
+            content_hash: Some("test-hash".to_string()),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
             session_id: None,
             ephemeral: false,
         }
@@ -871,6 +898,7 @@ mod tests {
     #[test]
     fn test_crud_operations() {
         let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
 
         // Insert
         let entry = make_entry("kn-test1", "pattern", "Test Pattern");
@@ -900,6 +928,7 @@ mod tests {
     #[test]
     fn test_search() {
         let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
 
         db.upsert_knowledge(&make_entry("kn-1", "pattern", "Unicode Parsing"))
             .unwrap();
@@ -921,6 +950,7 @@ mod tests {
     #[test]
     fn test_list_by_category() {
         let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
 
         db.upsert_knowledge(&make_entry("kn-1", "pattern", "Pattern 1"))
             .unwrap();
