@@ -166,7 +166,8 @@ fn detect_dictionary(encoded: &str) -> Result<String> {
 
 /// Encode text using base-d with hash and random dictionary
 /// base-d randomizes both hash algorithm and dictionary when no args specified
-pub fn encode_hash(text: &str) -> Result<String> {
+/// Returns (encoded_text, hash_algorithm)
+pub fn encode_hash(text: &str) -> Result<(String, String)> {
     let base_d = find_base_d()?;
 
     let mut child = Command::new(&base_d)
@@ -193,7 +194,17 @@ pub fn encode_hash(text: &str) -> Result<String> {
         bail!("base-d hash failed: {}", stderr);
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    // Parse hash algorithm from stderr: "Note: Using randomly selected hash 'md5'"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let hash_algo = stderr
+        .lines()
+        .find(|l| l.contains("Using randomly selected hash"))
+        .and_then(|l| l.split('\'').nth(1))
+        .unwrap_or("unknown")
+        .to_string();
+
+    let encoded = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((encoded, hash_algo))
 }
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo)
@@ -326,10 +337,10 @@ fn get_current_branch() -> Result<String> {
 /// Returns the full message ready to use (title\n\nbody\n\nfooter)
 pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String> {
     // Generate title (hash of title text) - random dictionary
-    let title = encode_hash(title_text)?;
+    let (title, hash_algo) = encode_hash(title_text)?;
 
     // Generate body (compressed body text) - random dictionary
-    let (body, algo) = encode_compress(body_text)?;
+    let (body, compress_algo) = encode_compress(body_text)?;
 
     // Detect dictionaries by running --detect on the encoded output
     let title_dict = detect_dictionary(&title)?;
@@ -338,11 +349,14 @@ pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String
     // Dejavu detection - did the universe give us the same dictionary twice?
     let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
-    // Footer with compression algo, and decode hint only on dejavu
+    // Footer: [hash_algo:title_dict|compress_algo:body_dict]
     let footer = if dejavu {
-        format!("[{}]\nwhoa. base-d --detect --decompress {}", algo, algo)
+        format!(
+            "[{}:{}|{}:{}]\nwhoa.",
+            hash_algo, title_dict, compress_algo, body_dict
+        )
     } else {
-        format!("[{}]", algo)
+        format!("[{}:{}|{}:{}]", hash_algo, title_dict, compress_algo, body_dict)
     };
 
     // Build full commit message
@@ -365,10 +379,10 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     let diff = get_staged_diff()?;
 
     // Generate title (hash of diff) - random dictionary
-    let title = encode_hash(&diff)?;
+    let (title, hash_algo) = encode_hash(&diff)?;
 
     // Generate body (compressed message) - random dictionary
-    let (body, algo) = encode_compress(message)?;
+    let (body, compress_algo) = encode_compress(message)?;
 
     // Detect dictionaries by running --detect on the encoded output
     let title_dict = detect_dictionary(&title)?;
@@ -377,11 +391,14 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     // Dejavu detection - did the universe give us the same dictionary twice?
     let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
-    // Footer with compression algo, and decode hint only on dejavu
+    // Footer: [hash_algo:title_dict|compress_algo:body_dict]
     let footer = if dejavu {
-        format!("[{}]\nwhoa. base-d --detect --decompress {}", algo, algo)
+        format!(
+            "[{}:{}|{}:{}]\nwhoa.",
+            hash_algo, title_dict, compress_algo, body_dict
+        )
     } else {
-        format!("[{}]", algo)
+        format!("[{}:{}|{}:{}]", hash_algo, title_dict, compress_algo, body_dict)
     };
 
     println!("Title:  {}", title);
