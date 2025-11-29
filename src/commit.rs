@@ -80,60 +80,60 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
-/// Find base-d binary
-fn find_base_d() -> Result<String> {
-    // Check common locations - prefer cargo bin first for dev builds
-    let candidates = [
-        &format!(
-            "{}/.cargo/bin/base-d",
-            std::env::var("HOME").unwrap_or_default()
-        ),
-        "base-d",
-        &format!(
-            "{}/.local/bin/base-d",
-            std::env::var("HOME").unwrap_or_default()
-        ),
-    ];
+/// Find base-d binary (cached)
+fn find_base_d() -> Result<&'static str> {
+    use std::sync::OnceLock;
+    static BASE_D: OnceLock<Option<String>> = OnceLock::new();
 
-    for candidate in candidates {
-        if Command::new("which")
-            .arg(candidate)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            return Ok(candidate.to_string());
-        }
+    let cached = BASE_D.get_or_init(|| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates = [
+            format!("{}/.cargo/bin/base-d", home),
+            "base-d".to_string(),
+            format!("{}/.local/bin/base-d", home),
+        ];
 
-        // Also check if it exists directly
-        if std::path::Path::new(candidate).exists() {
-            return Ok(candidate.to_string());
-        }
-    }
+        for candidate in &candidates {
+            if Command::new("which")
+                .arg(candidate)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(candidate.clone());
+            }
 
-    // Try to find via mise
-    let mise_path = format!(
-        "{}/.local/share/mise/installs/cargo-base-d",
-        std::env::var("HOME").unwrap_or_default()
-    );
-    if let Ok(entries) = std::fs::read_dir(&mise_path) {
-        for entry in entries.flatten() {
-            let bin_path = entry.path().join("bin/base-d");
-            if bin_path.exists() {
-                return Ok(bin_path.to_string_lossy().to_string());
+            if std::path::Path::new(candidate).exists() {
+                return Some(candidate.clone());
             }
         }
-    }
 
-    bail!("base-d not found. Install with: cargo install base-d")
+        // Try mise
+        let mise_path = format!("{}/.local/share/mise/installs/cargo-base-d", home);
+        if let Ok(entries) = std::fs::read_dir(&mise_path) {
+            for entry in entries.flatten() {
+                let bin_path = entry.path().join("bin/base-d");
+                if bin_path.exists() {
+                    return Some(bin_path.to_string_lossy().to_string());
+                }
+            }
+        }
+
+        None
+    });
+
+    cached
+        .as_ref()
+        .map(|s| s.as_str())
+        .ok_or_else(|| anyhow::anyhow!("base-d not found. Install with: cargo install base-d"))
 }
 
-/// Detect which dictionary was used to encode text
-fn detect_dictionary(encoded: &str) -> Result<String> {
+/// Run base-d with args and stdin input, return output
+fn run_base_d(args: &[&str], input: &str) -> Result<std::process::Output> {
     let base_d = find_base_d()?;
 
-    let mut child = Command::new(&base_d)
-        .arg("--detect")
+    let mut child = Command::new(base_d)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -144,12 +144,17 @@ fn detect_dictionary(encoded: &str) -> Result<String> {
         .stdin
         .take()
         .unwrap()
-        .write_all(encoded.as_bytes())
+        .write_all(input.as_bytes())
         .context("Failed to write to base-d stdin")?;
 
-    let output = child
+    child
         .wait_with_output()
-        .context("Failed to wait for base-d")?;
+        .context("Failed to wait for base-d")
+}
+
+/// Detect which dictionary was used to encode text
+fn detect_dictionary(encoded: &str) -> Result<String> {
+    let output = run_base_d(&["--detect"], encoded)?;
 
     // --detect prints "Detected: <name> (confidence: XX%)" to stderr
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -165,33 +170,15 @@ fn detect_dictionary(encoded: &str) -> Result<String> {
 }
 
 /// Encode text using base-d with hash and random dictionary
-/// base-d randomizes both hash algorithm and dictionary when no args specified
 /// Returns (encoded_text, hash_algorithm)
 pub fn encode_hash(text: &str) -> Result<(String, String)> {
-    let base_d = find_base_d()?;
-
-    let mut child = Command::new(&base_d)
-        .args(["--hash", "--dejavu"]) // base-d picks random algo and dictionary
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn base-d")?;
-
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(text.as_bytes())
-        .context("Failed to write to base-d stdin")?;
-
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for base-d")?;
+    let output = run_base_d(&["--hash", "--dejavu"], text)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("base-d hash failed: {}", stderr);
+        bail!(
+            "base-d hash failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // Parse hash algorithm from stderr: "Note: Using randomly selected hash 'md5'"
@@ -209,34 +196,18 @@ pub fn encode_hash(text: &str) -> Result<(String, String)> {
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo)
 pub fn encode_compress(text: &str) -> Result<(String, String)> {
-    let base_d = find_base_d()?;
-    let algos = get_compress_algos(&base_d)?;
+    let algos = get_compress_algos(find_base_d()?)?;
     let algo = algos
         .choose(&mut rand::rng())
         .context("No compression algorithms available")?;
 
-    let mut child = Command::new(&base_d)
-        .args(["--compress", algo, "--dejavu"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn base-d")?;
-
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(text.as_bytes())
-        .context("Failed to write to base-d stdin")?;
-
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for base-d")?;
+    let output = run_base_d(&["--compress", algo, "--dejavu"], text)?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("base-d compress failed: {}", stderr);
+        bail!(
+            "base-d compress failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let encoded = String::from_utf8_lossy(&output.stdout).trim().to_string();
