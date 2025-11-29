@@ -282,7 +282,7 @@ enum ZionCommands {
         #[arg(short, long)]
         project: Option<String>,
 
-        /// Source agent ID (required - who captured this knowledge?)
+        /// Source agent ID (required - where did this knowledge originate?)
         #[arg(long, required = true)]
         source_agent: String,
 
