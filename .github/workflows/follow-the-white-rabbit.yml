@@ -46,6 +46,10 @@ jobs:
             target: aarch64-unknown-linux-musl
             suffix: ""
             cross: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            suffix: ""
+            cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: ".exe"
@@ -91,6 +95,7 @@ jobs:
             aarch64-unknown-linux-gnu)    ASSET="${BINARY_NAME}-linux-aarch64" ;;
             x86_64-unknown-linux-musl)    ASSET="${BINARY_NAME}-linux-x86_64-musl" ;;
             aarch64-unknown-linux-musl)   ASSET="${BINARY_NAME}-linux-aarch64-musl" ;;
+            x86_64-unknown-freebsd)       ASSET="${BINARY_NAME}-freebsd-x86_64" ;;
             x86_64-pc-windows-msvc)       ASSET="${BINARY_NAME}-windows-x86_64" ;;
             aarch64-pc-windows-msvc)      ASSET="${BINARY_NAME}-windows-aarch64" ;;
             x86_64-apple-darwin)          ASSET="${BINARY_NAME}-macos-x86_64" ;;
