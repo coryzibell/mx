@@ -40,7 +40,7 @@ dirs = "5"
 rand = "0.9"
 
 # base-d library
-base-d = { git = "https://github.com/coryzibell/base-d" }
+base-d = "2"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
