@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 
 use crate::db::Database;
 use crate::index::{
-    export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index, IndexConfig,
+    IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
 };
 
 #[derive(Parser)]
@@ -948,10 +948,10 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 }
 
                 // Skip files starting with _
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('_') {
-                        continue;
-                    }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && name.starts_with('_')
+                {
+                    continue;
                 }
 
                 // Read file
@@ -959,19 +959,19 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                     .with_context(|| format!("Failed to read file: {:?}", path))?;
 
                 // Parse frontmatter
-                if let Some((frontmatter, _body)) = parse_frontmatter(&content) {
-                    if let Ok(agent_data) = serde_yaml::from_str::<AgentFrontmatter>(&frontmatter) {
-                        let agent = db::Agent {
-                            id: agent_data.name.clone(),
-                            description: Some(agent_data.description.clone()),
-                            domain: agent_data.domain,
-                            created_at: Some(now.clone()),
-                            updated_at: Some(now.clone()),
-                        };
+                if let Some((frontmatter, _body)) = parse_frontmatter(&content)
+                    && let Ok(agent_data) = serde_yaml::from_str::<AgentFrontmatter>(&frontmatter)
+                {
+                    let agent = db::Agent {
+                        id: agent_data.name.clone(),
+                        description: Some(agent_data.description.clone()),
+                        domain: agent_data.domain,
+                        created_at: Some(now.clone()),
+                        updated_at: Some(now.clone()),
+                    };
 
-                        db.upsert_agent(&agent)?;
-                        seeded.push(agent_data.name);
-                    }
+                    db.upsert_agent(&agent)?;
+                    seeded.push(agent_data.name);
                 }
             }
 

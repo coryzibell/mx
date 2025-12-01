@@ -6,7 +6,7 @@ use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::sync::yaml::schema::{slugify, SyncYaml};
+use crate::sync::yaml::schema::{SyncYaml, slugify};
 
 /// Parse markdown file to YAML structure
 pub fn parse_markdown(content: &str) -> Result<SyncYaml> {

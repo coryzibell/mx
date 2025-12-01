@@ -6,7 +6,7 @@
 //! - DOTMATRIX_PRIVATE_KEY: Full PEM private key content
 
 use anyhow::{Context, Result};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -80,9 +80,8 @@ pub fn generate_jwt(app_id: &str, private_key: &str) -> Result<String> {
     let header = Header::new(Algorithm::RS256);
 
     // Parse PEM to DER for jsonwebtoken v10
-    let pem = pem::parse(private_key.as_bytes())
-        .context("Failed to parse PEM format")?;
-    let encoding_key = EncodingKey::from_rsa_der(&pem.contents());
+    let pem = pem::parse(private_key.as_bytes()).context("Failed to parse PEM format")?;
+    let encoding_key = EncodingKey::from_rsa_der(pem.contents());
 
     encode(&header, &claims, &encoding_key).context("Failed to encode JWT")
 }

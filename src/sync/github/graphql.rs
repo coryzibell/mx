@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -66,11 +66,11 @@ impl GraphQLClient {
         let result: GraphQLResponse<T> = serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse GraphQL response: {}", text))?;
 
-        if let Some(errors) = result.errors {
-            if !errors.is_empty() {
-                let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
-                anyhow::bail!("GraphQL errors: {}", messages.join(", "));
-            }
+        if let Some(errors) = result.errors
+            && !errors.is_empty()
+        {
+            let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+            anyhow::bail!("GraphQL errors: {}", messages.join(", "));
         }
 
         result.data.context("No data in GraphQL response")

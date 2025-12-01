@@ -167,17 +167,17 @@ fn find_most_recent_session() -> Result<PathBuf> {
             }
 
             // Skip agent sessions
-            if let Some(name) = file_path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("agent-") {
-                    continue;
-                }
+            if let Some(name) = file_path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("agent-")
+            {
+                continue;
             }
 
             // Get modification time
-            if let Ok(metadata) = file_entry.metadata() {
-                if let Ok(modified) = metadata.modified() {
-                    sessions.push((file_path, modified));
-                }
+            if let Ok(metadata) = file_entry.metadata()
+                && let Ok(modified) = metadata.modified()
+            {
+                sessions.push((file_path, modified));
             }
         }
     }

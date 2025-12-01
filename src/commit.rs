@@ -8,7 +8,7 @@
 //! Dejavu detection: When both title and body randomly get the same
 //! dictionary, we add "whoa." to the footer.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base_d::prelude::*;
 use std::process::Command;
 
