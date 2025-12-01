@@ -5,6 +5,9 @@ on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: write
+
 jobs:
   release:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@main
