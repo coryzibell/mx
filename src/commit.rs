@@ -421,8 +421,11 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     let pr_title = json["title"].as_str().unwrap_or("PR");
     let pr_body = json["body"].as_str().unwrap_or("");
 
-    // Generate encoded commit message
-    let encoded = encode_commit_message(pr_title, pr_body)?;
+    // Combine PR title and body into full content for encoding
+    let full_body = format!("{}\n\n{}", pr_title, pr_body);
+
+    // Encode: title from PR title hash, body from compressed full content
+    let encoded = encode_commit(pr_title, &full_body)?;
 
     // Determine merge method
     let method = if rebase {
@@ -433,15 +436,18 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
         "squash"
     };
 
-    // Merge with gh
+    // Merge with gh - pass encoded title and body+footer separately
+    let body_with_footer = format!("{}\n\n{}", encoded.body, encoded.footer);
     let output = Command::new("gh")
         .args([
             "pr",
             "merge",
             &number.to_string(),
             &format!("--{}", method),
+            "--subject",
+            &encoded.title,
             "--body",
-            &encoded,
+            &body_with_footer,
         ])
         .output()
         .context("Failed to run gh pr merge")?;
