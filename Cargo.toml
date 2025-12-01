@@ -23,9 +23,6 @@ serde_yaml = "0.9"
 walkdir = "2"
 notify = "6"
 
-# Hashing for IDs
-blake3 = "1"
-
 # Error handling
 anyhow = "1"
 thiserror = "2"

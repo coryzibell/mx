@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base_d::{encode, hash, DictionaryRegistry, HashAlgorithm};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -92,15 +93,21 @@ impl KnowledgeEntry {
     /// Generate a hash-based ID from path and title
     pub fn generate_id(path: &str, title: &str) -> String {
         let input = format!("{}:{}", path, title);
-        let hash = blake3::hash(input.as_bytes());
-        let hex = hash.to_hex();
+        let hex = Self::blake3_hex(input.as_bytes());
         format!("kn-{}", &hex[..8])
     }
 
     /// Compute content hash for change detection
     pub fn compute_hash(content: &str) -> String {
-        let hash = blake3::hash(content.as_bytes());
-        hash.to_hex().to_string()
+        Self::blake3_hex(content.as_bytes())
+    }
+
+    /// Hash data with blake3 and encode as lowercase hex
+    fn blake3_hex(data: &[u8]) -> String {
+        let hash_bytes = hash(data, HashAlgorithm::Blake3);
+        let registry = DictionaryRegistry::load_default().expect("base-d dictionaries");
+        let dict = registry.dictionary("base16").expect("base16 dictionary");
+        encode(&hash_bytes, &dict).to_lowercase()
     }
 
     /// Parse a markdown file into a knowledge entry
