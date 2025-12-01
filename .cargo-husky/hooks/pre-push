@@ -1,9 +1,6 @@
 #!/bin/sh
 set -e
 
-echo '+git pull'
-git pull
-
 echo '+cargo fmt -- --check'
 cargo fmt -- --check
 

@@ -10,7 +10,7 @@ mod knowledge;
 mod session;
 mod sync;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::db::Database;
@@ -39,7 +39,8 @@ enum Commands {
     /// Encoded commit (upload pattern)
     Commit {
         /// Commit message (human-readable, will be encoded)
-        message: String,
+        #[arg(required_unless_present_any = ["title", "encode_only"])]
+        message: Option<String>,
 
         /// Stage all changes before committing
         #[arg(short = 'a', long)]
@@ -48,9 +49,22 @@ enum Commands {
         /// Push after committing
         #[arg(short, long)]
         push: bool,
+
+        /// Only generate and print encoded message (don't commit)
+        #[arg(long, conflicts_with_all = ["all", "push"])]
+        encode_only: bool,
+
+        /// Title text for PR-style encoding (requires --encode-only)
+        #[arg(short, long, requires = "encode_only", requires = "body")]
+        title: Option<String>,
+
+        /// Body text for PR-style encoding (requires --encode-only)
+        #[arg(short, long, requires = "encode_only", requires = "title")]
+        body: Option<String>,
     },
 
-    /// Generate encoded commit message (for MCP/API use)
+    /// Generate encoded commit message (DEPRECATED - use 'mx commit --encode-only')
+    #[command(hide = true)]
     EncodeCommit {
         /// Title text (will be hashed and encoded)
         #[arg(short, long)]
@@ -541,11 +555,36 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Zion { command } => handle_zion(command),
-        Commands::Commit { message, all, push } => {
-            commit::upload_commit(&message, all, push)?;
+        Commands::Commit {
+            message,
+            all,
+            push,
+            encode_only,
+            title,
+            body,
+        } => {
+            if encode_only {
+                // PR-style encoding: encode title and body, print to stdout
+                if let (Some(t), Some(b)) = (title, body) {
+                    let encoded_message = commit::encode_commit_message(&t, &b)?;
+                    println!("{}", encoded_message);
+                } else {
+                    // This shouldn't happen due to clap validation, but handle gracefully
+                    bail!("--encode-only requires both --title and --body");
+                }
+            } else {
+                // Normal commit workflow
+                let msg =
+                    message.ok_or_else(|| anyhow::anyhow!("message is required for commit"))?;
+                commit::upload_commit(&msg, all, push)?;
+            }
             Ok(())
         }
         Commands::EncodeCommit { title, body } => {
+            // Deprecated - print warning to stderr, then execute
+            eprintln!(
+                "Warning: 'mx encode-commit' is deprecated. Use 'mx commit --encode-only' instead."
+            );
             let message = commit::encode_commit_message(&title, &body)?;
             println!("{}", message);
             Ok(())
