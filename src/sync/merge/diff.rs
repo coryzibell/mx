@@ -92,25 +92,25 @@ impl DiffResult {
     pub fn summary(&self) -> Vec<String> {
         let mut changes = Vec::new();
 
-        if let Some(ref c) = self.title {
-            if c.has_changes() {
-                changes.push(format!("title: {}", change_type_str(c)));
-            }
+        if let Some(ref c) = self.title
+            && c.has_changes()
+        {
+            changes.push(format!("title: {}", change_type_str(c)));
         }
-        if let Some(ref c) = self.body {
-            if c.has_changes() {
-                changes.push(format!("body: {}", change_type_str(c)));
-            }
+        if let Some(ref c) = self.body
+            && c.has_changes()
+        {
+            changes.push(format!("body: {}", change_type_str(c)));
         }
-        if let Some(ref c) = self.labels {
-            if c.has_changes() {
-                changes.push(format!("labels: {}", change_type_str(c)));
-            }
+        if let Some(ref c) = self.labels
+            && c.has_changes()
+        {
+            changes.push(format!("labels: {}", change_type_str(c)));
         }
-        if let Some(ref c) = self.assignees {
-            if c.has_changes() {
-                changes.push(format!("assignees: {}", change_type_str(c)));
-            }
+        if let Some(ref c) = self.assignees
+            && c.has_changes()
+        {
+            changes.push(format!("assignees: {}", change_type_str(c)));
         }
 
         changes

@@ -7,7 +7,7 @@ use crate::sync::default_sync_dir;
 use crate::sync::github::auth::get_github_token;
 use crate::sync::github::graphql::GraphQLClient;
 use crate::sync::github::rest::RestClient;
-use crate::sync::yaml::schema::{yaml_filename, Comment, LastSynced, Metadata, SyncYaml};
+use crate::sync::yaml::schema::{Comment, LastSynced, Metadata, SyncYaml, yaml_filename};
 use crate::sync::yaml::store::YamlStore;
 
 /// Run the pull command

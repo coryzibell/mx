@@ -44,10 +44,10 @@ impl YamlStore {
             let entry = entry?;
             let path = entry.path();
 
-            if let Some(ext) = path.extension() {
-                if ext == "yaml" || ext == "yml" {
-                    files.push(path);
-                }
+            if let Some(ext) = path.extension()
+                && (ext == "yaml" || ext == "yml")
+            {
+                files.push(path);
             }
         }
 
@@ -99,10 +99,10 @@ impl YamlStore {
     /// Find a YAML file by GitHub issue number
     pub fn find_by_issue_number(&self, number: u64) -> Result<Option<(PathBuf, SyncYaml)>> {
         for path in self.list_files()? {
-            if let Ok(yaml) = self.read(&path) {
-                if yaml.metadata.github_issue_number == Some(number) {
-                    return Ok(Some((path, yaml)));
-                }
+            if let Ok(yaml) = self.read(&path)
+                && yaml.metadata.github_issue_number == Some(number)
+            {
+                return Ok(Some((path, yaml)));
             }
         }
         Ok(None)
@@ -111,10 +111,10 @@ impl YamlStore {
     /// Find a YAML file by GitHub discussion ID
     pub fn find_by_discussion_id(&self, id: &str) -> Result<Option<(PathBuf, SyncYaml)>> {
         for path in self.list_files()? {
-            if let Ok(yaml) = self.read(&path) {
-                if yaml.metadata.github_discussion_id.as_deref() == Some(id) {
-                    return Ok(Some((path, yaml)));
-                }
+            if let Ok(yaml) = self.read(&path)
+                && yaml.metadata.github_discussion_id.as_deref() == Some(id)
+            {
+                return Ok(Some((path, yaml)));
             }
         }
         Ok(None)
@@ -123,10 +123,10 @@ impl YamlStore {
     /// Find a YAML file by title (exact match)
     pub fn find_by_title(&self, title: &str) -> Result<Option<(PathBuf, SyncYaml)>> {
         for path in self.list_files()? {
-            if let Ok(yaml) = self.read(&path) {
-                if yaml.title() == title {
-                    return Ok(Some((path, yaml)));
-                }
+            if let Ok(yaml) = self.read(&path)
+                && yaml.title() == title
+            {
+                return Ok(Some((path, yaml)));
             }
         }
         Ok(None)

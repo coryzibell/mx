@@ -12,7 +12,7 @@ use crate::sync::github::auth::get_github_token;
 use crate::sync::github::graphql::GraphQLClient;
 use crate::sync::github::rest::{CreateIssueRequest, RestClient, UpdateIssueRequest};
 use crate::sync::merge::resolve::merge_fields;
-use crate::sync::yaml::schema::{yaml_filename, ItemType, LastSynced};
+use crate::sync::yaml::schema::{ItemType, LastSynced, yaml_filename};
 use crate::sync::yaml::store::YamlStore;
 
 /// Run the push command

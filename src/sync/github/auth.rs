@@ -56,12 +56,11 @@ pub fn get_github_token() -> Result<String> {
 
     // Search through all projects for a GitHub token
     for project_config in config.projects.values() {
-        if let Some(github_server) = project_config.mcp_servers.get("github") {
-            if let Some(token) = github_server.env.get("GITHUB_PERSONAL_ACCESS_TOKEN") {
-                if !token.is_empty() {
-                    return Ok(token.clone());
-                }
-            }
+        if let Some(github_server) = project_config.mcp_servers.get("github")
+            && let Some(token) = github_server.env.get("GITHUB_PERSONAL_ACCESS_TOKEN")
+            && !token.is_empty()
+        {
+            return Ok(token.clone());
         }
     }
 

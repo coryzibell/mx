@@ -6,7 +6,7 @@
 //! - DOTMATRIX_PRIVATE_KEY: Full PEM private key content
 
 use anyhow::{Context, Result};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -78,8 +78,10 @@ pub fn generate_jwt(app_id: &str, private_key: &str) -> Result<String> {
     };
 
     let header = Header::new(Algorithm::RS256);
-    let encoding_key = EncodingKey::from_rsa_pem(private_key.as_bytes())
-        .context("Failed to parse RSA private key")?;
+
+    // Parse PEM to DER for jsonwebtoken v10
+    let pem = pem::parse(private_key.as_bytes()).context("Failed to parse PEM format")?;
+    let encoding_key = EncodingKey::from_rsa_der(pem.contents());
 
     encode(&header, &claims, &encoding_key).context("Failed to encode JWT")
 }
@@ -174,9 +176,13 @@ mod tests {
     #[test]
     fn test_is_app_configured_missing_vars() {
         // Should return false if any var is missing
-        env::remove_var("DOTMATRIX_APP_ID");
-        env::remove_var("DOTMATRIX_INSTALLATION_ID");
-        env::remove_var("DOTMATRIX_PRIVATE_KEY");
+        // SAFETY: These env var modifications are in test code only.
+        // Tests run serially (not in parallel) so there's no race condition.
+        unsafe {
+            env::remove_var("DOTMATRIX_APP_ID");
+            env::remove_var("DOTMATRIX_INSTALLATION_ID");
+            env::remove_var("DOTMATRIX_PRIVATE_KEY");
+        }
         assert!(!is_app_configured());
     }
 

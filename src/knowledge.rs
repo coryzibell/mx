@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use base_d::{encode, hash, DictionaryRegistry, HashAlgorithm};
+use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
