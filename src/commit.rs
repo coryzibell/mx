@@ -9,36 +9,8 @@
 //! dictionary, we add "whoa." to the footer.
 
 use anyhow::{bail, Context, Result};
-use rand::prelude::IndexedRandom;
-use std::io::Write;
-use std::process::{Command, Stdio};
-
-/// Get available compression algorithms from base-d config
-fn get_compress_algos(base_d: &str) -> Result<Vec<String>> {
-    let output = Command::new(base_d)
-        .args(["config", "--compression"])
-        .output()
-        .context("Failed to run base-d config")?;
-
-    if !output.status.success() {
-        bail!(
-            "base-d config failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let algos: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-
-    if algos.is_empty() {
-        bail!("No compression algorithms returned by base-d config");
-    }
-
-    Ok(algos)
-}
+use base_d::prelude::*;
+use std::process::Command;
 
 /// Get the staged diff from git
 pub fn get_staged_diff() -> Result<String> {
@@ -80,138 +52,34 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
-/// Find base-d binary (cached)
-fn find_base_d() -> Result<&'static str> {
-    use std::sync::OnceLock;
-    static BASE_D: OnceLock<Option<String>> = OnceLock::new();
-
-    let cached = BASE_D.get_or_init(|| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let candidates = [
-            format!("{}/.cargo/bin/base-d", home),
-            "base-d".to_string(),
-            format!("{}/.local/bin/base-d", home),
-        ];
-
-        for candidate in &candidates {
-            if Command::new("which")
-                .arg(candidate)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-            {
-                return Some(candidate.clone());
-            }
-
-            if std::path::Path::new(candidate).exists() {
-                return Some(candidate.clone());
-            }
-        }
-
-        // Try mise
-        let mise_path = format!("{}/.local/share/mise/installs/cargo-base-d", home);
-        if let Ok(entries) = std::fs::read_dir(&mise_path) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin/base-d");
-                if bin_path.exists() {
-                    return Some(bin_path.to_string_lossy().to_string());
-                }
-            }
-        }
-
-        None
-    });
-
-    cached
-        .as_ref()
-        .map(|s| s.as_str())
-        .ok_or_else(|| anyhow::anyhow!("base-d not found. Install with: cargo install base-d"))
-}
-
-/// Run base-d with args and stdin input, return output
-fn run_base_d(args: &[&str], input: &str) -> Result<std::process::Output> {
-    let base_d = find_base_d()?;
-
-    let mut child = Command::new(base_d)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn base-d")?;
-
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .context("Failed to write to base-d stdin")?;
-
-    child
-        .wait_with_output()
-        .context("Failed to wait for base-d")
-}
-
 /// Detect which dictionary was used to encode text
 fn detect_dictionary(encoded: &str) -> Result<String> {
-    let output = run_base_d(&["--detect"], encoded)?;
+    let matches = base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // --detect prints "Detected: <name> (confidence: XX%)" to stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let dict = stderr
-        .lines()
-        .find(|l| l.starts_with("Detected:"))
-        .and_then(|l| l.strip_prefix("Detected:"))
-        .and_then(|s| s.split('(').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-
-    Ok(dict)
+    Ok(matches.first().map(|m| m.name.clone()).unwrap_or_default())
 }
 
 /// Encode text using base-d with hash and random dictionary
 /// Returns (encoded_text, hash_algorithm)
 pub fn encode_hash(text: &str) -> Result<(String, String)> {
-    let output = run_base_d(&["--hash", "--dejavu"], text)?;
+    let registry = DictionaryRegistry::load_default()
+        .map_err(|e| anyhow::anyhow!("Failed to load dictionaries: {}", e))?;
 
-    if !output.status.success() {
-        bail!(
-            "base-d hash failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let result = hash_encode(text.as_bytes(), &registry)
+        .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
 
-    // Parse hash algorithm from stderr: "Note: Using randomly selected hash 'md5'"
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let hash_algo = stderr
-        .lines()
-        .find(|l| l.contains("Using randomly selected hash"))
-        .and_then(|l| l.split('\'').nth(1))
-        .unwrap_or("unknown")
-        .to_string();
-
-    let encoded = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((encoded, hash_algo))
+    Ok((result.encoded, result.hash_algo.as_str().to_string()))
 }
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo)
 pub fn encode_compress(text: &str) -> Result<(String, String)> {
-    let algos = get_compress_algos(find_base_d()?)?;
-    let algo = algos
-        .choose(&mut rand::rng())
-        .context("No compression algorithms available")?;
+    let registry = DictionaryRegistry::load_default()
+        .map_err(|e| anyhow::anyhow!("Failed to load dictionaries: {}", e))?;
 
-    let output = run_base_d(&["--compress", algo, "--dejavu"], text)?;
+    let result = compress_encode(text.as_bytes(), &registry)
+        .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
 
-    if !output.status.success() {
-        bail!(
-            "base-d compress failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let encoded = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((encoded, algo.to_string()))
+    Ok((result.encoded, result.compress_algo.as_str().to_string()))
 }
 
 /// Create a git commit with the given message
