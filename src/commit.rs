@@ -399,8 +399,28 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     Ok(())
 }
 
+/// Get PR diff via gh
+fn get_pr_diff(number: u32) -> Result<String> {
+    let output = Command::new("gh")
+        .args(["pr", "diff", &number.to_string()])
+        .output()
+        .context("Failed to run gh pr diff")?;
+
+    if !output.status.success() {
+        bail!(
+            "gh pr diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 /// Merge a pull request with encoded commit message
 pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
+    // Get PR diff for title hash
+    let diff = get_pr_diff(number)?;
+
     // Get PR info from gh
     let pr_info = Command::new("gh")
         .args(["pr", "view", &number.to_string(), "--json", "title,body"])
@@ -421,11 +441,11 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     let pr_title = json["title"].as_str().unwrap_or("PR");
     let pr_body = json["body"].as_str().unwrap_or("");
 
-    // Combine PR title and body into full content for encoding
-    let full_body = format!("{}\n\n{}", pr_title, pr_body);
+    // Combine PR title and body into full message for body encoding
+    let full_message = format!("{}\n\n{}", pr_title, pr_body);
 
-    // Encode: title from PR title hash, body from compressed full content
-    let encoded = encode_commit(pr_title, &full_body)?;
+    // Encode: title from diff hash, body from compressed full message
+    let encoded = encode_commit(&diff, &full_message)?;
 
     // Determine merge method
     let method = if rebase {
