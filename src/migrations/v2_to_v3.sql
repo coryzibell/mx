@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS session_types (
 
 -- Step 2: Seed lookup tables with known values
 INSERT OR IGNORE INTO categories (id, description, created_at) VALUES
+    ('archive', 'Verbatim source documents - never summarized', datetime('now')),
     ('pattern', 'Recurring structural solutions', datetime('now')),
     ('technique', 'Specific procedural approaches', datetime('now')),
     ('insight', 'Key realizations and understanding', datetime('now')),
