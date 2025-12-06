@@ -371,6 +371,30 @@ enum ZionCommands {
         #[command(subcommand)]
         command: CategoriesCommands,
     },
+
+    /// Manage source types
+    SourceTypes {
+        #[command(subcommand)]
+        command: SourceTypesCommands,
+    },
+
+    /// Manage entry types
+    EntryTypes {
+        #[command(subcommand)]
+        command: EntryTypesCommands,
+    },
+
+    /// Manage session types
+    SessionTypes {
+        #[command(subcommand)]
+        command: SessionTypesCommands,
+    },
+
+    /// Manage relationship types
+    RelationshipTypes {
+        #[command(subcommand)]
+        command: RelationshipTypesCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -539,6 +563,46 @@ enum SessionsCommands {
 #[derive(Subcommand)]
 enum CategoriesCommands {
     /// List all categories
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SourceTypesCommands {
+    /// List all source types
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntryTypesCommands {
+    /// List all entry types
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionTypesCommands {
+    /// List all session types
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelationshipTypesCommands {
+    /// List all relationship types
     List {
         /// Output as JSON
         #[arg(long)]
@@ -859,6 +923,14 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         ZionCommands::Sessions { command } => handle_sessions(command, &config)?,
 
         ZionCommands::Categories { command } => handle_categories(command, &config)?,
+
+        ZionCommands::SourceTypes { command } => handle_source_types(command, &config)?,
+
+        ZionCommands::EntryTypes { command } => handle_entry_types(command, &config)?,
+
+        ZionCommands::SessionTypes { command } => handle_session_types(command, &config)?,
+
+        ZionCommands::RelationshipTypes { command } => handle_relationship_types(command, &config)?,
 
         ZionCommands::Export { format, output } => {
             let db = Database::open(&config.db_path)?;
@@ -1215,6 +1287,99 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
                 println!("Registered categories:\n");
                 for category in categories {
                     println!("  {} - {}", category.id, category.description);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_source_types(cmd: SourceTypesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        SourceTypesCommands::List { json } => {
+            let types = db.list_source_types()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&types)?);
+            } else if types.is_empty() {
+                println!("No source types registered");
+            } else {
+                println!("Registered source types:\n");
+                for stype in types {
+                    println!("  {} - {}", stype.id, stype.description);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_entry_types(cmd: EntryTypesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        EntryTypesCommands::List { json } => {
+            let types = db.list_entry_types()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&types)?);
+            } else if types.is_empty() {
+                println!("No entry types registered");
+            } else {
+                println!("Registered entry types:\n");
+                for etype in types {
+                    println!("  {} - {}", etype.id, etype.description);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_session_types(cmd: SessionTypesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        SessionTypesCommands::List { json } => {
+            let types = db.list_session_types()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&types)?);
+            } else if types.is_empty() {
+                println!("No session types registered");
+            } else {
+                println!("Registered session types:\n");
+                for stype in types {
+                    println!("  {} - {}", stype.id, stype.description);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_relationship_types(cmd: RelationshipTypesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        RelationshipTypesCommands::List { json } => {
+            let types = db.list_relationship_types()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&types)?);
+            } else if types.is_empty() {
+                println!("No relationship types registered");
+            } else {
+                println!("Registered relationship types:\n");
+                for rtype in types {
+                    let directional = if rtype.directional {
+                        "(directional)"
+                    } else {
+                        "(bidirectional)"
+                    };
+                    println!("  {} - {} {}", rtype.id, rtype.description, directional);
                 }
             }
         }
