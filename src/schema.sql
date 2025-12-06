@@ -139,14 +139,15 @@ CREATE TABLE IF NOT EXISTS tags (
 
 -- Relationships between knowledge entries (with FK to relationship_types)
 CREATE TABLE IF NOT EXISTS relationships (
-    from_id TEXT NOT NULL,
-    to_id TEXT NOT NULL,
-    rel_type_id TEXT NOT NULL,         -- FK to relationship_types
+    id TEXT PRIMARY KEY,
+    from_entry_id TEXT NOT NULL,
+    to_entry_id TEXT NOT NULL,
+    relationship_type TEXT NOT NULL,   -- FK to relationship_types
     created_at TEXT NOT NULL,
-    PRIMARY KEY (from_id, to_id, rel_type_id),
-    FOREIGN KEY (from_id) REFERENCES knowledge(id) ON DELETE CASCADE,
-    FOREIGN KEY (to_id) REFERENCES knowledge(id) ON DELETE CASCADE,
-    FOREIGN KEY (rel_type_id) REFERENCES relationship_types(id)
+    FOREIGN KEY (from_entry_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_entry_id) REFERENCES knowledge(id) ON DELETE CASCADE,
+    FOREIGN KEY (relationship_type) REFERENCES relationship_types(id),
+    UNIQUE (from_entry_id, to_entry_id, relationship_type)
 );
 
 -- Project applicability (many-to-many: projects <-> applicability_types)
@@ -204,6 +205,8 @@ CREATE INDEX IF NOT EXISTS idx_project_tags_tag ON project_tags(tag);
 CREATE INDEX IF NOT EXISTS idx_agents_domain ON agents(domain);
 CREATE INDEX IF NOT EXISTS idx_sessions_type ON sessions(session_type_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
-CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(rel_type_id);
+CREATE INDEX IF NOT EXISTS idx_relationships_type ON relationships(relationship_type);
+CREATE INDEX IF NOT EXISTS idx_relationships_from ON relationships(from_entry_id);
+CREATE INDEX IF NOT EXISTS idx_relationships_to ON relationships(to_entry_id);
 CREATE INDEX IF NOT EXISTS idx_applicability_scope ON applicability_types(scope);
 CREATE INDEX IF NOT EXISTS idx_projects_active ON projects(active);

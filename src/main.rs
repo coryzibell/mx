@@ -425,6 +425,12 @@ enum ZionCommands {
         #[command(subcommand)]
         command: RelationshipTypesCommands,
     },
+
+    /// Manage relationships between knowledge entries
+    Relationships {
+        #[command(subcommand)]
+        command: RelationshipsCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -637,6 +643,40 @@ enum RelationshipTypesCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelationshipsCommands {
+    /// List all relationships for an entry
+    List {
+        /// Entry ID
+        id: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add a relationship between two entries
+    Add {
+        /// Source entry ID
+        #[arg(long)]
+        from: String,
+
+        /// Target entry ID
+        #[arg(long)]
+        to: String,
+
+        /// Relationship type (related, supersedes, extends, implements, contradicts)
+        #[arg(long)]
+        r#type: String,
+    },
+
+    /// Delete a relationship
+    Delete {
+        /// Relationship ID
+        id: String,
     },
 }
 
@@ -1066,6 +1106,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         ZionCommands::SessionTypes { command } => handle_session_types(command, &config)?,
 
         ZionCommands::RelationshipTypes { command } => handle_relationship_types(command, &config)?,
+
+        ZionCommands::Relationships { command } => handle_relationships(command, &config)?,
 
         ZionCommands::Export { format, output } => {
             let db = Database::open(&config.db_path)?;
@@ -1516,6 +1558,51 @@ fn handle_relationship_types(cmd: RelationshipTypesCommands, config: &IndexConfi
                     };
                     println!("  {} - {} {}", rtype.id, rtype.description, directional);
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_relationships(cmd: RelationshipsCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        RelationshipsCommands::List { id, json } => {
+            let relationships = db.list_relationships_for_entry(&id)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&relationships)?);
+            } else if relationships.is_empty() {
+                println!("No relationships found for '{}'", id);
+            } else {
+                println!("Relationships for '{}':\n", id);
+                for rel in relationships {
+                    let direction = if rel.from_entry_id == id {
+                        format!("-> {} ({})", rel.to_entry_id, rel.relationship_type)
+                    } else {
+                        format!("<- {} ({})", rel.from_entry_id, rel.relationship_type)
+                    };
+                    println!("  {} {}", rel.id, direction);
+                }
+            }
+        }
+
+        RelationshipsCommands::Add { from, to, r#type } => {
+            let id = db.add_relationship(&from, &to, &r#type)?;
+            println!("Added relationship: {}", id);
+            println!("  From: {}", from);
+            println!("  To: {}", to);
+            println!("  Type: {}", r#type);
+        }
+
+        RelationshipsCommands::Delete { id } => {
+            if db.delete_relationship(&id)? {
+                println!("Deleted relationship: {}", id);
+            } else {
+                eprintln!("Relationship '{}' not found", id);
+                std::process::exit(1);
             }
         }
     }

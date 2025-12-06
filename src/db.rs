@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 // Schema version - kept for future migrations
 #[allow(dead_code)]
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -71,6 +71,15 @@ pub struct RelationshipType {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Relationship {
+    pub id: String,
+    pub from_entry_id: String,
+    pub to_entry_id: String,
+    pub relationship_type: String,
+    pub created_at: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionType {
@@ -120,9 +129,9 @@ impl Database {
 
         match version {
             0..=1 => {
-                // Fresh install - apply full v3 schema
+                // Fresh install - apply full v4 schema
                 self.conn.execute_batch(include_str!("schema.sql"))?;
-                self.conn.execute("PRAGMA user_version = 3", [])?;
+                self.conn.execute("PRAGMA user_version = 4", [])?;
             }
             2 => {
                 // Migrate from v2 to v3
@@ -130,8 +139,19 @@ impl Database {
                 self.conn
                     .execute_batch(include_str!("migrations/v2_to_v3.sql"))?;
                 eprintln!("Migration complete.");
+                // Fall through to v3->v4 migration
+                self.conn
+                    .execute_batch(include_str!("migrations/v3_to_v4.sql"))?;
+                eprintln!("Migrated to v4.");
             }
             3 => {
+                // Migrate from v3 to v4
+                eprintln!("Migrating Zion schema from v3 to v4...");
+                self.conn
+                    .execute_batch(include_str!("migrations/v3_to_v4.sql"))?;
+                eprintln!("Migration complete.");
+            }
+            4 => {
                 // Current version
             }
             _ => {
@@ -839,6 +859,74 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    // Relationships
+    pub fn list_relationships_for_entry(&self, entry_id: &str) -> Result<Vec<Relationship>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, from_entry_id, to_entry_id, relationship_type, created_at
+            FROM relationships
+            WHERE from_entry_id = ?1 OR to_entry_id = ?1
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let relationships = stmt
+            .query_map(params![entry_id], |row| {
+                Ok(Relationship {
+                    id: row.get(0)?,
+                    from_entry_id: row.get(1)?,
+                    to_entry_id: row.get(2)?,
+                    relationship_type: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(relationships)
+    }
+
+    pub fn add_relationship(&self, from_id: &str, to_id: &str, rel_type: &str) -> Result<String> {
+        // Validate relationship type exists
+        let valid_types = self.list_relationship_types()?;
+        if !valid_types.iter().any(|t| t.id == rel_type) {
+            anyhow::bail!("Invalid relationship type: {}", rel_type);
+        }
+
+        // Validate both entries exist
+        if self.get(from_id)?.is_none() {
+            anyhow::bail!("Source entry not found: {}", from_id);
+        }
+        if self.get(to_id)?.is_none() {
+            anyhow::bail!("Target entry not found: {}", to_id);
+        }
+
+        // Generate ID
+        let id = format!(
+            "rel-{}-{}-{}",
+            &from_id[3..8],
+            &to_id[3..8],
+            &rel_type[..3.min(rel_type.len())]
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            r#"
+            INSERT INTO relationships (id, from_entry_id, to_entry_id, relationship_type, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![id, from_id, to_id, rel_type, now],
+        )?;
+
+        Ok(id)
+    }
+
+    pub fn delete_relationship(&self, id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .execute("DELETE FROM relationships WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
     }
 }
 
