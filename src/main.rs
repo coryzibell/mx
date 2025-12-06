@@ -324,6 +324,36 @@ enum ZionCommands {
         domain: Option<String>,
     },
 
+    /// Update an existing entry in the database
+    Update {
+        /// Entry ID to update
+        id: String,
+
+        /// Update title
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Update content inline
+        #[arg(short = 'c', long, conflicts_with = "file")]
+        content: Option<String>,
+
+        /// Update content from file
+        #[arg(short, long, conflicts_with = "content")]
+        file: Option<String>,
+
+        /// Update category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Update tags (comma-separated, replaces all)
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Update applicability (comma-separated, replaces all)
+        #[arg(short = 'a', long)]
+        applicability: Option<String>,
+    },
+
     /// Apply database schema migrations
     Migrate {
         /// Show migration status (list tables)
@@ -887,6 +917,111 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
             if !applicability_list.is_empty() {
                 println!("  Applicability: {}", applicability_list.join(", "));
+            }
+        }
+
+        ZionCommands::Update {
+            id,
+            title,
+            content,
+            file,
+            category,
+            tags,
+            applicability,
+        } => {
+            use anyhow::Context;
+            use std::fs;
+
+            let db = Database::open(&config.db_path)?;
+
+            // Fetch existing entry
+            let mut entry = db
+                .get(&id)?
+                .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+            let mut changes = Vec::new();
+
+            // Update title if provided
+            if let Some(new_title) = title {
+                changes.push(format!("title: {} -> {}", entry.title, new_title));
+                entry.title = new_title;
+            }
+
+            // Track if body was changed for hash update
+            let mut body_changed = false;
+
+            // Update content if provided
+            if let Some(text) = content {
+                changes.push("content: updated (inline)".to_string());
+                entry.body = Some(text);
+                body_changed = true;
+            } else if let Some(file_path) = file {
+                let text = fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?;
+                changes.push(format!("content: updated from {}", file_path));
+                entry.body = Some(text);
+                body_changed = true;
+            }
+
+            // Update category if provided
+            if let Some(new_category) = category {
+                // Validate category
+                if db.get_category(&new_category)?.is_none() {
+                    let categories = db.list_categories()?;
+                    let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+                    eprintln!("Error: Invalid category '{}'", new_category);
+                    eprintln!("Valid categories: {}", valid_ids.join(", "));
+                    std::process::exit(1);
+                }
+                changes.push(format!(
+                    "category: {} -> {}",
+                    entry.category_id, new_category
+                ));
+                entry.category_id = new_category;
+            }
+
+            // Update timestamp
+            entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+            // Update content hash if body was changed
+            if body_changed && entry.body.is_some() {
+                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(
+                    entry.body.as_ref().unwrap(),
+                ));
+            }
+
+            // Upsert entry
+            db.upsert_knowledge(&entry)?;
+
+            // Update tags if provided
+            if let Some(tags_str) = tags {
+                let tag_list: Vec<String> = tags_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                changes.push(format!("tags: {}", tag_list.join(", ")));
+                db.set_tags_for_entry(&entry.id, &tag_list)?;
+            }
+
+            // Update applicability if provided
+            if let Some(applicability_str) = applicability {
+                let applicability_list: Vec<String> = applicability_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                changes.push(format!("applicability: {}", applicability_list.join(", ")));
+                db.set_applicability_for_entry(&entry.id, &applicability_list)?;
+            }
+
+            println!("Updated entry: {}", id);
+            if changes.is_empty() {
+                println!("  No changes specified");
+            } else {
+                for change in changes {
+                    println!("  {}", change);
+                }
             }
         }
 
