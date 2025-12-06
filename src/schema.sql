@@ -47,6 +47,14 @@ CREATE TABLE IF NOT EXISTS entry_types (
     created_at TEXT NOT NULL
 );
 
+-- Content types (text, code, config, data, binary)
+CREATE TABLE IF NOT EXISTS content_types (
+    id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    file_extensions TEXT,              -- comma-separated list of typical extensions
+    created_at TEXT NOT NULL
+);
+
 -- Relationship types (related, supersedes, extends, etc.)
 CREATE TABLE IF NOT EXISTS relationship_types (
     id TEXT PRIMARY KEY,               -- related, supersedes, extends, implements
@@ -107,6 +115,7 @@ CREATE TABLE IF NOT EXISTS knowledge (
     entry_type_id TEXT NOT NULL,       -- FK to entry_types
     session_id TEXT,                   -- FK to sessions (nullable)
     ephemeral INTEGER DEFAULT 0,       -- Boolean: may be pruned
+    content_type_id TEXT DEFAULT 'text', -- FK to content_types
 
     FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (source_project_id) REFERENCES projects(id),
@@ -189,6 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_source_type ON knowledge(source_type_id
 CREATE INDEX IF NOT EXISTS idx_knowledge_entry_type ON knowledge(entry_type_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_session ON knowledge(session_id);
 CREATE INDEX IF NOT EXISTS idx_knowledge_updated ON knowledge(updated_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_content_type ON knowledge(content_type_id);
 
 -- Knowledge junction table indexes
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);

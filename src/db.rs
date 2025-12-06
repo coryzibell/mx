@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 // Schema version - kept for future migrations
 #[allow(dead_code)]
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct Agent {
@@ -59,6 +59,15 @@ pub struct SourceType {
 pub struct EntryType {
     pub id: String,
     pub description: String,
+    pub created_at: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentType {
+    pub id: String,
+    pub description: String,
+    pub file_extensions: Option<String>,
     pub created_at: String,
 }
 
@@ -129,9 +138,18 @@ impl Database {
 
         match version {
             0..=1 => {
-                // Fresh install - apply full v4 schema
+                // Fresh install - apply full v5 schema
                 self.conn.execute_batch(include_str!("schema.sql"))?;
-                self.conn.execute("PRAGMA user_version = 4", [])?;
+                // Seed content types
+                self.conn.execute_batch(r#"
+                    INSERT OR IGNORE INTO content_types (id, description, file_extensions, created_at) VALUES
+                        ('text', 'Plain text or markdown documents', 'md,txt,text', datetime('now')),
+                        ('code', 'Source code or scripts', 'py,rs,js,ts,sh,bash,rb,go,java,c,cpp,h', datetime('now')),
+                        ('config', 'Configuration files', 'json,yaml,yml,toml,xml,ini,env', datetime('now')),
+                        ('data', 'Data files or test fixtures', 'json,csv,sql,fiche,schema', datetime('now')),
+                        ('binary', 'Binary or encoded content', 'bin,dat,b64', datetime('now'));
+                "#)?;
+                self.conn.execute("PRAGMA user_version = 5", [])?;
             }
             2 => {
                 // Migrate from v2 to v3
@@ -150,8 +168,20 @@ impl Database {
                 self.conn
                     .execute_batch(include_str!("migrations/v3_to_v4.sql"))?;
                 eprintln!("Migration complete.");
+                // Fall through to v4->v5 migration
+                eprintln!("Migrating Zion schema from v4 to v5...");
+                self.conn
+                    .execute_batch(include_str!("migrations/v4_to_v5.sql"))?;
+                eprintln!("Migrated to v5.");
             }
             4 => {
+                // Migrate from v4 to v5
+                eprintln!("Migrating Zion schema from v4 to v5...");
+                self.conn
+                    .execute_batch(include_str!("migrations/v4_to_v5.sql"))?;
+                eprintln!("Migration complete.");
+            }
+            5 => {
                 // Current version
             }
             _ => {
@@ -168,8 +198,8 @@ impl Database {
             INSERT INTO knowledge (id, category_id, title, body, summary,
                                    source_project_id, source_agent_id, file_path,
                                    created_at, updated_at, content_hash,
-                                   source_type_id, entry_type_id, session_id, ephemeral)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             ON CONFLICT(id) DO UPDATE SET
                 category_id = excluded.category_id,
                 title = excluded.title,
@@ -183,7 +213,8 @@ impl Database {
                 source_type_id = excluded.source_type_id,
                 entry_type_id = excluded.entry_type_id,
                 session_id = excluded.session_id,
-                ephemeral = excluded.ephemeral
+                ephemeral = excluded.ephemeral,
+                content_type_id = excluded.content_type_id
             "#,
             params![
                 entry.id,
@@ -201,6 +232,7 @@ impl Database {
                 entry.entry_type_id,
                 entry.session_id,
                 entry.ephemeral,
+                entry.content_type_id,
             ],
         )?;
 
@@ -220,7 +252,7 @@ impl Database {
             SELECT id, category_id, title, body, summary,
                    source_project_id, source_agent_id, file_path,
                    created_at, updated_at, content_hash,
-                   source_type_id, entry_type_id, session_id, ephemeral
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
             FROM knowledge
             WHERE title LIKE ?1 OR body LIKE ?1 OR summary LIKE ?1
             ORDER BY updated_at DESC
@@ -248,6 +280,7 @@ impl Database {
                     entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -267,7 +300,7 @@ impl Database {
             SELECT id, category_id, title, body, summary,
                    source_project_id, source_agent_id, file_path,
                    created_at, updated_at, content_hash,
-                   source_type_id, entry_type_id, session_id, ephemeral
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
             FROM knowledge
             WHERE category_id = ?1
             ORDER BY title ASC
@@ -294,6 +327,7 @@ impl Database {
                     entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -313,7 +347,7 @@ impl Database {
             SELECT id, category_id, title, body, summary,
                    source_project_id, source_agent_id, file_path,
                    created_at, updated_at, content_hash,
-                   source_type_id, entry_type_id, session_id, ephemeral
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
             FROM knowledge
             WHERE id = ?1
             "#,
@@ -339,6 +373,7 @@ impl Database {
                     entry_type_id: row.get(12)?,
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
                 })
             })
             .ok();
@@ -618,6 +653,26 @@ impl Database {
                     id: row.get(0)?,
                     description: row.get(1)?,
                     created_at: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(types)
+    }
+
+    // Content Types
+    pub fn list_content_types(&self) -> Result<Vec<ContentType>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, description, file_extensions, created_at FROM content_types ORDER BY id",
+        )?;
+
+        let types = stmt
+            .query_map([], |row| {
+                Ok(ContentType {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    file_extensions: row.get(2)?,
+                    created_at: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -980,6 +1035,7 @@ mod tests {
             entry_type_id: Some("primary".to_string()),
             session_id: None,
             ephemeral: false,
+            content_type_id: Some("text".to_string()),
         }
     }
 

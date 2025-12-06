@@ -322,6 +322,10 @@ enum ZionCommands {
         /// Domain/subdomain path
         #[arg(short, long)]
         domain: Option<String>,
+
+        /// Content type (text, code, config, data, binary)
+        #[arg(long, default_value = "text")]
+        content_type: String,
     },
 
     /// Update an existing entry in the database
@@ -352,6 +356,10 @@ enum ZionCommands {
         /// Update applicability (comma-separated, replaces all)
         #[arg(short = 'a', long)]
         applicability: Option<String>,
+
+        /// Update content type
+        #[arg(long)]
+        content_type: Option<String>,
     },
 
     /// Apply database schema migrations
@@ -430,6 +438,12 @@ enum ZionCommands {
     Relationships {
         #[command(subcommand)]
         command: RelationshipsCommands,
+    },
+
+    /// Manage content types
+    ContentTypes {
+        #[command(subcommand)]
+        command: ContentTypesCommands,
     },
 }
 
@@ -681,6 +695,16 @@ enum RelationshipsCommands {
 }
 
 #[derive(Subcommand)]
+enum ContentTypesCommands {
+    /// List all content types
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum WikiCommands {
     /// Sync markdown files to GitHub wiki
     Sync {
@@ -869,6 +893,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             session_id,
             ephemeral,
             domain,
+            content_type,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -939,6 +964,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 entry_type_id: Some(entry_type),
                 session_id,
                 ephemeral,
+                content_type_id: Some(content_type),
             };
 
             // Insert into database
@@ -968,6 +994,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             category,
             tags,
             applicability,
+            content_type,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1055,6 +1082,18 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 db.set_applicability_for_entry(&entry.id, &applicability_list)?;
             }
 
+            // Update content type if provided
+            if let Some(new_content_type) = content_type {
+                changes.push(format!(
+                    "content_type: {} -> {}",
+                    entry.content_type_id.as_deref().unwrap_or("none"),
+                    new_content_type
+                ));
+                entry.content_type_id = Some(new_content_type);
+                // Re-upsert to update content_type_id
+                db.upsert_knowledge(&entry)?;
+            }
+
             println!("Updated entry: {}", id);
             if changes.is_empty() {
                 println!("  No changes specified");
@@ -1108,6 +1147,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         ZionCommands::RelationshipTypes { command } => handle_relationship_types(command, &config)?,
 
         ZionCommands::Relationships { command } => handle_relationships(command, &config)?,
+
+        ZionCommands::ContentTypes { command } => handle_content_types(command, &config)?,
 
         ZionCommands::Export { format, output } => {
             let db = Database::open(&config.db_path)?;
@@ -1603,6 +1644,31 @@ fn handle_relationships(cmd: RelationshipsCommands, config: &IndexConfig) -> Res
             } else {
                 eprintln!("Relationship '{}' not found", id);
                 std::process::exit(1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_content_types(cmd: ContentTypesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        ContentTypesCommands::List { json } => {
+            let types = db.list_content_types()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&types)?);
+            } else if types.is_empty() {
+                println!("No content types registered");
+            } else {
+                println!("Registered content types:\n");
+                for ctype in types {
+                    println!("  {} - {}", ctype.id, ctype.description);
+                    if let Some(exts) = &ctype.file_extensions {
+                        println!("    Extensions: {}", exts);
+                    }
+                }
             }
         }
     }

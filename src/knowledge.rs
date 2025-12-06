@@ -44,6 +44,9 @@ pub struct KnowledgeEntry {
     /// Ephemeral hint - session-based knowledge that may be pruned
     #[serde(default)]
     pub ephemeral: bool,
+    /// Content type: text, code, config, data, binary
+    #[serde(default)]
+    pub content_type_id: Option<String>,
 }
 
 /// Custom deserializer for applicability - accepts string or array
@@ -168,6 +171,7 @@ impl KnowledgeEntry {
             entry_type_id: Some("primary".to_string()),
             session_id: None,
             ephemeral: false,
+            content_type_id: Some("text".to_string()),
         })
     }
 }
