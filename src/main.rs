@@ -235,7 +235,7 @@ enum ZionCommands {
 
     /// List entries by category
     List {
-        /// Category to list (pattern, technique, insight, ritual, project)
+        /// Category to list (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future)
         #[arg(short, long)]
         category: Option<String>,
 
@@ -271,7 +271,7 @@ enum ZionCommands {
 
     /// Add a new entry directly to the database
     Add {
-        /// Category (pattern, technique, insight, ritual, artifact, chronicle, project, future)
+        /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future)
         #[arg(short, long)]
         category: String,
 
