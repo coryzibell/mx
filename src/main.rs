@@ -365,6 +365,12 @@ enum ZionCommands {
         #[command(subcommand)]
         command: SessionsCommands,
     },
+
+    /// Manage categories
+    Categories {
+        #[command(subcommand)]
+        command: CategoriesCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -527,6 +533,16 @@ enum SessionsCommands {
     Close {
         #[arg(long)]
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CategoriesCommands {
+    /// List all categories
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -841,6 +857,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
         ZionCommands::Applicability { command } => handle_applicability(command, &config)?,
 
         ZionCommands::Sessions { command } => handle_sessions(command, &config)?,
+
+        ZionCommands::Categories { command } => handle_categories(command, &config)?,
 
         ZionCommands::Export { format, output } => {
             let db = Database::open(&config.db_path)?;
@@ -1176,6 +1194,28 @@ fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
             } else {
                 eprintln!("Session '{}' not found", id);
                 std::process::exit(1);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()> {
+    let db = Database::open(&config.db_path)?;
+
+    match cmd {
+        CategoriesCommands::List { json } => {
+            let categories = db.list_categories()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&categories)?);
+            } else if categories.is_empty() {
+                println!("No categories registered");
+            } else {
+                println!("Registered categories:\n");
+                for category in categories {
+                    println!("  {} - {}", category.id, category.description);
+                }
             }
         }
     }
