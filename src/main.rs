@@ -8,6 +8,7 @@ mod github;
 mod index;
 mod knowledge;
 mod session;
+mod surreal_db;
 mod sync;
 
 use anyhow::{Result, bail};
