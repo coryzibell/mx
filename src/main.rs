@@ -10,7 +10,7 @@ mod knowledge;
 mod session;
 mod sync;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 use crate::db::Database;
@@ -113,6 +113,21 @@ enum Commands {
 
     /// Environment health check
     Doctor,
+
+    /// Decoded git log (decodes encoded commit messages)
+    Log {
+        /// Number of commits to show
+        #[arg(short = 'n', long, default_value = "10")]
+        count: usize,
+
+        /// Show full commit details
+        #[arg(long)]
+        full: bool,
+
+        /// Pass through additional git log arguments
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -770,6 +785,7 @@ fn main() -> Result<()> {
         Commands::Session { command } => handle_session(command),
         Commands::Convert { command } => handle_convert(command),
         Commands::Doctor => doctor::run_checks(),
+        Commands::Log { count, full, args } => handle_log(count, full, args),
     }
 }
 
@@ -1808,6 +1824,151 @@ fn handle_wiki(cmd: WikiCommands) -> Result<()> {
             sync::wiki::sync(&repo, &source, page_name.as_deref(), dry_run)?;
             Ok(())
         }
+    }
+}
+
+/// Handle mx log - decoded git log
+fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> Result<()> {
+    use std::process::Command;
+
+    // Build git log command
+    let format = if full {
+        // Full format: hash, author, date, subject, body
+        "%H%n%an <%ae>%n%ad%n%s%n%b%n---END---"
+    } else {
+        // Compact format: short hash, subject, body (for decoding)
+        "%h%n%s%n%b%n---END---"
+    };
+
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "log",
+        &format!("-{}", count),
+        &format!("--format={}", format),
+    ]);
+
+    // Add any extra arguments
+    for arg in &extra_args {
+        cmd.arg(arg);
+    }
+
+    let output = cmd.output().context("Failed to run git log")?;
+
+    if !output.status.success() {
+        bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let log_output = String::from_utf8_lossy(&output.stdout);
+
+    // Parse and decode each commit
+    for commit_block in log_output.split("---END---") {
+        let commit_block = commit_block.trim();
+        if commit_block.is_empty() {
+            continue;
+        }
+
+        let lines: Vec<&str> = commit_block.lines().collect();
+
+        if full {
+            // Full format: hash, author, date, subject, body...
+            if lines.len() >= 4 {
+                let hash = lines[0];
+                let author = lines[1];
+                let date = lines[2];
+                let subject = lines[3];
+                let body: String = lines[4..].join("\n");
+
+                println!("\x1b[33mcommit {}\x1b[0m", hash);
+                println!("Author: {}", author);
+                println!("Date:   {}", date);
+                println!();
+
+                // Try to decode the subject (title)
+                println!("    {}", subject);
+
+                // Try to decode the body
+                if !body.trim().is_empty() {
+                    let decoded = try_decode_commit_body(&body);
+                    println!();
+                    for line in decoded.lines() {
+                        println!("    {}", line);
+                    }
+                }
+                println!();
+            }
+        } else {
+            // Compact format: short hash, subject, body...
+            if lines.len() >= 2 {
+                let hash = lines[0];
+                let subject = lines[1];
+                let body: String = lines[2..].join("\n");
+
+                // Try to decode the body
+                let decoded = try_decode_commit_body(&body);
+                let display = if decoded != body.trim() {
+                    decoded
+                } else {
+                    // Not encoded, show original subject
+                    subject.to_string()
+                };
+
+                // Truncate for display
+                let display_truncated = if display.len() > 72 {
+                    format!("{}...", &display[..69])
+                } else {
+                    display
+                };
+
+                println!("\x1b[33m{}\x1b[0m {}", hash, display_truncated);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Try to decode an encoded commit body, return original if decoding fails
+fn try_decode_commit_body(body: &str) -> String {
+    let body = body.trim();
+    if body.is_empty() {
+        return body.to_string();
+    }
+
+    // Look for footer pattern [algo:dict|algo:dict]
+    let lines: Vec<&str> = body.lines().collect();
+
+    // Find the footer (last line starting with '[' and containing '|')
+    let footer_line = lines
+        .iter()
+        .rev()
+        .find(|l| l.trim().starts_with('[') && l.contains('|'));
+
+    let footer = match footer_line {
+        Some(f) => *f,
+        None => return body.to_string(), // No footer, not encoded
+    };
+
+    // Find the encoded body (everything before footer, excluding "whoa.")
+    let body_lines: Vec<&str> = lines
+        .iter()
+        .take_while(|l| !l.trim().starts_with('['))
+        .filter(|l| l.trim() != "whoa.")
+        .copied()
+        .collect();
+
+    if body_lines.is_empty() {
+        return body.to_string();
+    }
+
+    let encoded_body = body_lines.join("\n");
+
+    // Try to decode
+    match commit::decode_body(&encoded_body, footer) {
+        Ok(decoded) => decoded,
+        Err(_) => body.to_string(), // Decoding failed, return original
     }
 }
 

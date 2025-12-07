@@ -35,7 +35,7 @@ dirs = "6"
 # Random
 rand = "0.9"
 
-# base-d library
+# base-d library (includes compression support)
 base-d = "3"
 
 # HTTP client
