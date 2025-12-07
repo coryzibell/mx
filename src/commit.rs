@@ -82,6 +82,70 @@ pub fn encode_compress(text: &str) -> Result<(String, String)> {
     Ok((result.encoded, result.compress_algo.as_str().to_string()))
 }
 
+/// Decode and decompress text that was encoded with encode_compress
+/// Footer format: [hash_algo:dict|compress_algo:dict]
+pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
+    use base_d::{CompressionAlgorithm, decode, decompress};
+
+    let encoded = encoded.trim();
+
+    // Parse footer to get compression algorithm
+    let compress_algo = parse_compress_algo(footer);
+
+    // Auto-detect dictionary and decode
+    let matches = base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if matches.is_empty() {
+        bail!("Could not detect dictionary for encoded text");
+    }
+
+    // DictionaryMatch includes the dictionary itself
+    let dict = &matches[0].dictionary;
+
+    // Decode
+    let decoded_bytes =
+        decode(encoded, dict).map_err(|e| anyhow::anyhow!("Decode failed: {}", e))?;
+
+    // Decompress if we have a compression algorithm
+    let final_bytes = if let Some(algo) = compress_algo {
+        let compression_algo = match algo.to_lowercase().as_str() {
+            "lzma" => CompressionAlgorithm::Lzma,
+            "zstd" => CompressionAlgorithm::Zstd,
+            "brotli" => CompressionAlgorithm::Brotli,
+            "gzip" | "gz" => CompressionAlgorithm::Gzip,
+            "lz4" => CompressionAlgorithm::Lz4,
+            "snappy" => CompressionAlgorithm::Snappy,
+            _ => return String::from_utf8(decoded_bytes).context("Not valid UTF-8"),
+        };
+        decompress(&decoded_bytes, compression_algo)
+            .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?
+    } else {
+        decoded_bytes
+    };
+
+    String::from_utf8(final_bytes).context("Decoded content is not valid UTF-8")
+}
+
+/// Parse compression algorithm from footer
+/// Footer format: [hash_algo:dict|compress_algo:dict]
+fn parse_compress_algo(footer: &str) -> Option<String> {
+    // Look for pattern like [sha384:base62|lzma:uuencode]
+    let footer = footer.trim();
+    if !footer.starts_with('[') || !footer.contains('|') {
+        return None;
+    }
+
+    // Extract the part after |
+    let pipe_pos = footer.find('|')?;
+    let after_pipe = &footer[pipe_pos + 1..];
+
+    // Get the compression algo (before the colon)
+    let colon_pos = after_pipe.find(':')?;
+    let algo = &after_pipe[..colon_pos];
+
+    Some(algo.to_string())
+}
+
 /// Create a git commit with the given message
 pub fn git_commit(title: &str, body: &str, footer: &str) -> Result<()> {
     let message = format!("{}\n\n{}\n\n{}", title, body, footer);
