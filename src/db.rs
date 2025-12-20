@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 
 use crate::knowledge::KnowledgeEntry;
+use crate::store::KnowledgeStore;
 use serde::{Deserialize, Serialize};
 
 // Schema version - kept for future migrations
@@ -982,6 +983,156 @@ impl Database {
             .conn
             .execute("DELETE FROM relationships WHERE id = ?1", params![id])?;
         Ok(rows > 0)
+    }
+}
+
+// ============================================================================
+// KNOWLEDGESTORE TRAIT IMPLEMENTATION
+// ============================================================================
+
+impl KnowledgeStore for Database {
+    fn upsert_knowledge(&self, entry: &KnowledgeEntry) -> Result<()> {
+        self.upsert_knowledge(entry)
+    }
+
+    fn get(&self, id: &str) -> Result<Option<KnowledgeEntry>> {
+        self.get(id)
+    }
+
+    fn delete(&self, id: &str) -> Result<bool> {
+        self.delete(id)
+    }
+
+    fn search(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
+        self.search(query)
+    }
+
+    fn list_by_category(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {
+        self.list_by_category(category)
+    }
+
+    fn count(&self) -> Result<usize> {
+        self.count()
+    }
+
+    fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+        self.get_tags_for_entry(entry_id)
+    }
+
+    fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
+        self.set_tags_for_entry(entry_id, tags)
+    }
+
+    fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+        self.get_applicability_for_entry(entry_id)
+    }
+
+    fn set_applicability_for_entry(&self, entry_id: &str, ids: &[String]) -> Result<()> {
+        self.set_applicability_for_entry(entry_id, ids)
+    }
+
+    fn list_applicability_types(&self) -> Result<Vec<ApplicabilityType>> {
+        self.list_applicability_types()
+    }
+
+    fn upsert_applicability_type(&self, atype: &ApplicabilityType) -> Result<()> {
+        self.upsert_applicability_type(atype)
+    }
+
+    fn list_categories(&self) -> Result<Vec<Category>> {
+        self.list_categories()
+    }
+
+    fn get_category(&self, id: &str) -> Result<Option<Category>> {
+        self.get_category(id)
+    }
+
+    fn list_projects(&self, active_only: bool) -> Result<Vec<Project>> {
+        self.list_projects(active_only)
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<Project>> {
+        self.get_project(id)
+    }
+
+    fn upsert_project(&self, project: &Project) -> Result<()> {
+        self.upsert_project(project)
+    }
+
+    fn get_tags_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+        self.get_tags_for_project(project_id)
+    }
+
+    fn set_tags_for_project(&self, project_id: &str, tags: &[String]) -> Result<()> {
+        self.set_tags_for_project(project_id, tags)
+    }
+
+    fn get_applicability_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+        self.get_applicability_for_project(project_id)
+    }
+
+    fn set_applicability_for_project(&self, project_id: &str, ids: &[String]) -> Result<()> {
+        self.set_applicability_for_project(project_id, ids)
+    }
+
+    fn list_agents(&self) -> Result<Vec<Agent>> {
+        self.list_agents()
+    }
+
+    fn get_agent(&self, id: &str) -> Result<Option<Agent>> {
+        self.get_agent(id)
+    }
+
+    fn upsert_agent(&self, agent: &Agent) -> Result<()> {
+        self.upsert_agent(agent)
+    }
+
+    fn list_relationships_for_entry(&self, entry_id: &str) -> Result<Vec<Relationship>> {
+        self.list_relationships_for_entry(entry_id)
+    }
+
+    fn add_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<String> {
+        self.add_relationship(from, to, rel_type)
+    }
+
+    fn delete_relationship(&self, id: &str) -> Result<bool> {
+        self.delete_relationship(id)
+    }
+
+    fn list_tables(&self) -> Result<Vec<String>> {
+        self.list_tables()
+    }
+
+    fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<Session>> {
+        self.list_sessions(project_id)
+    }
+
+    fn get_session(&self, id: &str) -> Result<Option<Session>> {
+        self.get_session(id)
+    }
+
+    fn upsert_session(&self, session: &Session) -> Result<()> {
+        self.upsert_session(session)
+    }
+
+    fn list_source_types(&self) -> Result<Vec<SourceType>> {
+        self.list_source_types()
+    }
+
+    fn list_entry_types(&self) -> Result<Vec<EntryType>> {
+        self.list_entry_types()
+    }
+
+    fn list_content_types(&self) -> Result<Vec<ContentType>> {
+        self.list_content_types()
+    }
+
+    fn list_session_types(&self) -> Result<Vec<SessionType>> {
+        self.list_session_types()
+    }
+
+    fn list_relationship_types(&self) -> Result<Vec<RelationshipType>> {
+        self.list_relationship_types()
     }
 }
 

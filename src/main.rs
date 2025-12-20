@@ -8,12 +8,13 @@ mod github;
 mod index;
 mod knowledge;
 mod session;
+mod store;
+mod surreal_db;
 mod sync;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-use crate::db::Database;
 use crate::index::{
     IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
 };
@@ -30,10 +31,10 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Zion knowledge management
-    Zion {
+    /// Memory knowledge management
+    Memory {
         #[command(subcommand)]
-        command: ZionCommands,
+        command: MemoryCommands,
     },
 
     /// Encoded commit (upload pattern)
@@ -234,7 +235,7 @@ pub enum SyncCommands {
 }
 
 #[derive(Subcommand)]
-enum ZionCommands {
+enum MemoryCommands {
     /// Rebuild the knowledge index
     Rebuild,
 
@@ -280,7 +281,7 @@ enum ZionCommands {
 
     /// Import entries from JSONL file
     Import {
-        /// Path to JSONL file (defaults to zion/index.jsonl)
+        /// Path to JSONL file (defaults to memory/index.jsonl)
         path: Option<String>,
     },
 
@@ -382,6 +383,14 @@ enum ZionCommands {
         /// Show migration status (list tables)
         #[arg(long)]
         status: bool,
+
+        /// Source database path (SQLite)
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Target database type
+        #[arg(long)]
+        to: Option<String>,
     },
 
     /// Manage agents registry
@@ -396,7 +405,7 @@ enum ZionCommands {
         #[arg(short, long, default_value = "md")]
         format: String,
 
-        /// Output directory for md format (defaults to ./zion-export), or file for jsonl/csv (defaults to stdout)
+        /// Output directory for md format (defaults to ./memory-export), or file for jsonl/csv (defaults to stdout)
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -743,7 +752,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Zion { command } => handle_zion(command),
+        Commands::Memory { command } => handle_memory(command),
         Commands::Commit {
             message,
             all,
@@ -789,18 +798,18 @@ fn main() -> Result<()> {
     }
 }
 
-fn handle_zion(cmd: ZionCommands) -> Result<()> {
+fn handle_memory(cmd: MemoryCommands) -> Result<()> {
     let config = IndexConfig::default();
 
     match cmd {
-        ZionCommands::Rebuild => {
-            println!("Rebuilding Zion index...");
+        MemoryCommands::Rebuild => {
+            println!("Rebuilding Memory index...");
             let stats = rebuild_index(&config)?;
             println!("{}", stats);
         }
 
-        ZionCommands::Search { query, json } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Search { query, json } => {
+            let db = store::create_store(&config.db_path)?;
             let entries = db.search(&query)?;
 
             if json {
@@ -815,8 +824,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::List { category, json } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::List { category, json } => {
+            let db = store::create_store(&config.db_path)?;
 
             let entries = if let Some(cat) = &category {
                 db.list_by_category(cat)?
@@ -842,8 +851,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Show { id, json } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Show { id, json } => {
+            let db = store::create_store(&config.db_path)?;
 
             match db.get(&id)? {
                 Some(entry) => {
@@ -860,10 +869,10 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Stats => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Stats => {
+            let db = store::create_store(&config.db_path)?;
 
-            println!("Zion Index Statistics\n");
+            println!("Memory Index Statistics\n");
             println!("Total entries: {}", db.count()?);
             println!();
 
@@ -874,8 +883,8 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Delete { id } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Delete { id } => {
+            let db = store::create_store(&config.db_path)?;
 
             if db.delete(&id)? {
                 println!("Deleted entry '{}'", id);
@@ -885,17 +894,17 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Import { path } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Import { path } => {
+            let db = store::create_store(&config.db_path)?;
             let import_path = path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| config.jsonl_path.clone());
 
-            let count = import_jsonl(&db, &import_path)?;
+            let count = import_jsonl(db.as_ref(), &import_path)?;
             println!("Imported {} entries from {:?}", count, import_path);
         }
 
-        ZionCommands::Add {
+        MemoryCommands::Add {
             category,
             title,
             content,
@@ -914,7 +923,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             use anyhow::Context;
             use std::fs;
 
-            let db = Database::open(&config.db_path)?;
+            let db = store::create_store(&config.db_path)?;
 
             // Validate category against database
             if db.get_category(&category)?.is_none() {
@@ -1002,7 +1011,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Update {
+        MemoryCommands::Update {
             id,
             title,
             content,
@@ -1015,7 +1024,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             use anyhow::Context;
             use std::fs;
 
-            let db = Database::open(&config.db_path)?;
+            let db = store::create_store(&config.db_path)?;
 
             // Fetch existing entry
             let mut entry = db
@@ -1120,11 +1129,19 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Migrate { status } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Migrate { status, from, to } => {
+            // Handle migration from SQLite to SurrealDB
+            if let (Some(source_path), Some(target_type)) = (from, to) {
+                if target_type != "surrealdb" {
+                    eprintln!("Error: Only 'surrealdb' is supported as --to value");
+                    std::process::exit(1);
+                }
 
-            if status {
+                // Perform migration
+                perform_migration(&source_path, &config)?;
+            } else if status {
                 // Show current tables
+                let db = store::create_store(&config.db_path)?;
                 let tables: Vec<String> = db.list_tables()?;
                 println!("Database tables:");
                 for table in tables {
@@ -1132,6 +1149,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
                 }
             } else {
                 // Apply migrations (schema is applied in Database::open via init_schema)
+                let db = store::create_store(&config.db_path)?;
                 println!("Applying migrations to {:?}...", config.db_path);
                 println!("Schema applied successfully");
 
@@ -1144,56 +1162,58 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
             }
         }
 
-        ZionCommands::Agents { command } => handle_agents(command, &config)?,
+        MemoryCommands::Agents { command } => handle_agents(command, &config)?,
 
-        ZionCommands::Projects { command } => handle_projects(command, &config)?,
+        MemoryCommands::Projects { command } => handle_projects(command, &config)?,
 
-        ZionCommands::Applicability { command } => handle_applicability(command, &config)?,
+        MemoryCommands::Applicability { command } => handle_applicability(command, &config)?,
 
-        ZionCommands::Sessions { command } => handle_sessions(command, &config)?,
+        MemoryCommands::Sessions { command } => handle_sessions(command, &config)?,
 
-        ZionCommands::Categories { command } => handle_categories(command, &config)?,
+        MemoryCommands::Categories { command } => handle_categories(command, &config)?,
 
-        ZionCommands::SourceTypes { command } => handle_source_types(command, &config)?,
+        MemoryCommands::SourceTypes { command } => handle_source_types(command, &config)?,
 
-        ZionCommands::EntryTypes { command } => handle_entry_types(command, &config)?,
+        MemoryCommands::EntryTypes { command } => handle_entry_types(command, &config)?,
 
-        ZionCommands::SessionTypes { command } => handle_session_types(command, &config)?,
+        MemoryCommands::SessionTypes { command } => handle_session_types(command, &config)?,
 
-        ZionCommands::RelationshipTypes { command } => handle_relationship_types(command, &config)?,
+        MemoryCommands::RelationshipTypes { command } => {
+            handle_relationship_types(command, &config)?
+        }
 
-        ZionCommands::Relationships { command } => handle_relationships(command, &config)?,
+        MemoryCommands::Relationships { command } => handle_relationships(command, &config)?,
 
-        ZionCommands::ContentTypes { command } => handle_content_types(command, &config)?,
+        MemoryCommands::ContentTypes { command } => handle_content_types(command, &config)?,
 
-        ZionCommands::Export { format, output } => {
-            let db = Database::open(&config.db_path)?;
+        MemoryCommands::Export { format, output } => {
+            let db = store::create_store(&config.db_path)?;
 
             match format.as_str() {
                 "md" | "markdown" => {
                     // Markdown exports to directory
-                    let output_dir = output.as_deref().unwrap_or("./zion-export");
+                    let output_dir = output.as_deref().unwrap_or("./memory-export");
 
                     let dir_path = std::path::PathBuf::from(output_dir);
-                    export_markdown(&db, &dir_path)?;
+                    export_markdown(db.as_ref(), &dir_path)?;
                     println!("Exported to directory: {}", output_dir);
                 }
                 "jsonl" => {
                     // JSONL exports to file or stdout
                     if let Some(ref path) = output {
-                        export_jsonl(&db, &std::path::PathBuf::from(path))?;
+                        export_jsonl(db.as_ref(), &std::path::PathBuf::from(path))?;
                         println!("Exported to {}", path);
                     } else {
-                        export_jsonl(&db, &std::path::PathBuf::from("/dev/stdout"))?;
+                        export_jsonl(db.as_ref(), &std::path::PathBuf::from("/dev/stdout"))?;
                     }
                 }
                 "csv" => {
                     // CSV exports to file or stdout
                     if let Some(ref path) = output {
-                        export_csv(&db, &std::path::PathBuf::from(path))?;
+                        export_csv(db.as_ref(), &std::path::PathBuf::from(path))?;
                         println!("Exported to {}", path);
                     } else {
-                        export_csv(&db, &std::path::PathBuf::from("/dev/stdout"))?;
+                        export_csv(db.as_ref(), &std::path::PathBuf::from("/dev/stdout"))?;
                     }
                 }
                 _ => {
@@ -1211,7 +1231,7 @@ fn handle_zion(cmd: ZionCommands) -> Result<()> {
 }
 
 fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         AgentsCommands::List => {
@@ -1353,7 +1373,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
 }
 
 fn handle_projects(cmd: ProjectsCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         ProjectsCommands::List => {
@@ -1407,7 +1427,7 @@ fn handle_projects(cmd: ProjectsCommands, config: &IndexConfig) -> Result<()> {
 }
 
 fn handle_applicability(cmd: ApplicabilityCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         ApplicabilityCommands::List => {
@@ -1449,7 +1469,7 @@ fn handle_applicability(cmd: ApplicabilityCommands, config: &IndexConfig) -> Res
 }
 
 fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         SessionsCommands::List { project } => {
@@ -1508,7 +1528,7 @@ fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
 }
 
 fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         CategoriesCommands::List { json } => {
@@ -1530,7 +1550,7 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
 }
 
 fn handle_source_types(cmd: SourceTypesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         SourceTypesCommands::List { json } => {
@@ -1552,7 +1572,7 @@ fn handle_source_types(cmd: SourceTypesCommands, config: &IndexConfig) -> Result
 }
 
 fn handle_entry_types(cmd: EntryTypesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         EntryTypesCommands::List { json } => {
@@ -1574,7 +1594,7 @@ fn handle_entry_types(cmd: EntryTypesCommands, config: &IndexConfig) -> Result<(
 }
 
 fn handle_session_types(cmd: SessionTypesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         SessionTypesCommands::List { json } => {
@@ -1596,7 +1616,7 @@ fn handle_session_types(cmd: SessionTypesCommands, config: &IndexConfig) -> Resu
 }
 
 fn handle_relationship_types(cmd: RelationshipTypesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         RelationshipTypesCommands::List { json } => {
@@ -1623,7 +1643,7 @@ fn handle_relationship_types(cmd: RelationshipTypesCommands, config: &IndexConfi
 }
 
 fn handle_relationships(cmd: RelationshipsCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         RelationshipsCommands::List { id, json } => {
@@ -1668,7 +1688,7 @@ fn handle_relationships(cmd: RelationshipsCommands, config: &IndexConfig) -> Res
 }
 
 fn handle_content_types(cmd: ContentTypesCommands, config: &IndexConfig) -> Result<()> {
-    let db = Database::open(&config.db_path)?;
+    let db = store::create_store(&config.db_path)?;
 
     match cmd {
         ContentTypesCommands::List { json } => {
@@ -2034,4 +2054,169 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     if let Some(body) = &entry.body {
         println!("{}", body);
     }
+}
+
+/// Perform migration from SQLite to SurrealDB
+fn perform_migration(source_path: &str, config: &IndexConfig) -> Result<()> {
+    use crate::db::Database;
+    use crate::store::KnowledgeStore;
+    use crate::surreal_db::SurrealDatabase;
+    use std::path::PathBuf;
+
+    // Expand ~ in source path
+    let source_path_expanded = if source_path.starts_with('~') {
+        let home = dirs::home_dir().context("Could not determine home directory")?;
+        PathBuf::from(source_path.replacen('~', &home.to_string_lossy(), 1))
+    } else {
+        PathBuf::from(source_path)
+    };
+
+    println!(
+        "Migrating from {:?} to SurrealDB...\n",
+        source_path_expanded
+    );
+
+    // Open source SQLite database
+    let source_db = Database::open(&source_path_expanded).with_context(|| {
+        format!(
+            "Failed to open source database at {:?}",
+            source_path_expanded
+        )
+    })?;
+
+    // Open target SurrealDB
+    let target_path = config.db_path.with_extension("surreal");
+    let target_db: Box<dyn KnowledgeStore> = Box::new(
+        SurrealDatabase::open(&target_path)
+            .with_context(|| format!("Failed to open target database at {:?}", target_path))?,
+    );
+
+    println!("Lookup tables:");
+
+    // Migrate categories
+    let categories = source_db.list_categories()?;
+    println!("  categories: {}", categories.len());
+
+    // Migrate source types
+    let source_types = source_db.list_source_types()?;
+    println!("  source_types: {}", source_types.len());
+
+    // Migrate entry types
+    let entry_types = source_db.list_entry_types()?;
+    println!("  entry_types: {}", entry_types.len());
+
+    // Migrate content types
+    let content_types = source_db.list_content_types()?;
+    println!("  content_types: {}", content_types.len());
+
+    // Migrate session types
+    let session_types = source_db.list_session_types()?;
+    println!("  session_types: {}", session_types.len());
+
+    // Migrate relationship types
+    let relationship_types = source_db.list_relationship_types()?;
+    println!("  relationship_types: {}", relationship_types.len());
+
+    // Migrate applicability types
+    let applicability_types = source_db.list_applicability_types()?;
+    println!("  applicability_types: {}", applicability_types.len());
+    for atype in &applicability_types {
+        target_db.upsert_applicability_type(atype)?;
+    }
+
+    println!("\nEntities:");
+
+    // Migrate agents
+    let agents = source_db.list_agents()?;
+    println!("  agents: {}", agents.len());
+    for agent in &agents {
+        target_db.upsert_agent(agent)?;
+    }
+
+    // Migrate projects
+    let projects = source_db.list_projects(false)?;
+    println!("  projects: {}", projects.len());
+    for project in &projects {
+        target_db.upsert_project(project)?;
+    }
+
+    // Migrate knowledge entries
+    let mut all_knowledge = Vec::new();
+    let categories_for_knowledge = source_db.list_categories()?;
+    for category in &categories_for_knowledge {
+        let entries = source_db.list_by_category(&category.id)?;
+        all_knowledge.extend(entries);
+    }
+    println!("  knowledge: {}", all_knowledge.len());
+
+    // Count tags across all entries
+    let mut total_tags = 0;
+    for entry in &all_knowledge {
+        total_tags += entry.tags.len();
+        target_db.upsert_knowledge(entry)?;
+    }
+    println!("  tags: {}", total_tags);
+
+    // Migrate relationships
+    let mut all_relationships = Vec::new();
+    for entry in &all_knowledge {
+        let rels = source_db.list_relationships_for_entry(&entry.id)?;
+        for rel in rels {
+            // Avoid duplicates - only add if from_entry_id matches current entry
+            if rel.from_entry_id == entry.id {
+                all_relationships.push(rel);
+            }
+        }
+    }
+    println!("  relationships: {}", all_relationships.len());
+    for rel in &all_relationships {
+        target_db.add_relationship(&rel.from_entry_id, &rel.to_entry_id, &rel.relationship_type)?;
+    }
+
+    // Migrate sessions
+    let sessions = source_db.list_sessions(None)?;
+    println!("  sessions: {}", sessions.len());
+    for session in &sessions {
+        target_db.upsert_session(session)?;
+    }
+
+    println!("\nValidation:");
+
+    // Validate counts
+    let target_knowledge_count = target_db.count()?;
+    if target_knowledge_count == all_knowledge.len() {
+        println!("  ✓ Knowledge entries match: {}", target_knowledge_count);
+    } else {
+        println!(
+            "  ✗ Knowledge entries mismatch: source={}, target={}",
+            all_knowledge.len(),
+            target_knowledge_count
+        );
+    }
+
+    let target_agents = target_db.list_agents()?;
+    if target_agents.len() == agents.len() {
+        println!("  ✓ Agents match: {}", target_agents.len());
+    } else {
+        println!(
+            "  ✗ Agents mismatch: source={}, target={}",
+            agents.len(),
+            target_agents.len()
+        );
+    }
+
+    let target_projects = target_db.list_projects(false)?;
+    if target_projects.len() == projects.len() {
+        println!("  ✓ Projects match: {}", target_projects.len());
+    } else {
+        println!(
+            "  ✗ Projects mismatch: source={}, target={}",
+            projects.len(),
+            target_projects.len()
+        );
+    }
+
+    println!("\nMigration complete!");
+
+    Ok(())
 }
