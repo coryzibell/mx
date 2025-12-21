@@ -187,54 +187,54 @@ DEFINE FIELD deleted_at ON deletion TYPE datetime DEFAULT time::now();
 -- =============================================================================
 
 -- Categories
-CREATE category:pattern SET description = 'Reusable design patterns and solutions';
-CREATE category:technique SET description = 'Implementation techniques and approaches';
-CREATE category:insight SET description = 'Learnings and observations';
-CREATE category:gotcha SET description = 'Pitfalls and things to watch for';
-CREATE category:reference SET description = 'Reference material and documentation';
-CREATE category:decision SET description = 'Architectural and design decisions';
+UPSERT category:pattern SET description = 'Reusable design patterns and solutions';
+UPSERT category:technique SET description = 'Implementation techniques and approaches';
+UPSERT category:insight SET description = 'Learnings and observations';
+UPSERT category:gotcha SET description = 'Pitfalls and things to watch for';
+UPSERT category:reference SET description = 'Reference material and documentation';
+UPSERT category:decision SET description = 'Architectural and design decisions';
 
 -- Source types
-CREATE source_type:manual SET description = 'Manually entered by human';
-CREATE source_type:ram SET description = 'Promoted from agent RAM';
-CREATE source_type:cache SET description = 'Extracted from workflow cache';
-CREATE source_type:agent_session SET description = 'Created during agent session';
+UPSERT source_type:manual SET description = 'Manually entered by human';
+UPSERT source_type:ram SET description = 'Promoted from agent RAM';
+UPSERT source_type:cache SET description = 'Extracted from workflow cache';
+UPSERT source_type:agent_session SET description = 'Created during agent session';
 
 -- Entry types
-CREATE entry_type:primary SET description = 'Original knowledge entry';
-CREATE entry_type:summary SET description = 'Summarized from other content';
-CREATE entry_type:synthesis SET description = 'Combined from multiple sources';
+UPSERT entry_type:primary SET description = 'Original knowledge entry';
+UPSERT entry_type:summary SET description = 'Summarized from other content';
+UPSERT entry_type:synthesis SET description = 'Combined from multiple sources';
 
 -- Content types
-CREATE content_type:text SET description = 'Plain text or markdown', file_extensions = 'md,txt,text';
-CREATE content_type:code SET description = 'Source code or scripts', file_extensions = 'py,rs,js,ts,sh,bash,rb,go,java,c,cpp,h';
-CREATE content_type:config SET description = 'Configuration files', file_extensions = 'json,yaml,yml,toml,xml,ini,env';
-CREATE content_type:data SET description = 'Data files or fixtures', file_extensions = 'json,csv,sql,fiche,schema';
-CREATE content_type:binary SET description = 'Binary or encoded content', file_extensions = 'bin,dat,b64';
+UPSERT content_type:text SET description = 'Plain text or markdown', file_extensions = 'md,txt,text';
+UPSERT content_type:code SET description = 'Source code or scripts', file_extensions = 'py,rs,js,ts,sh,bash,rb,go,java,c,cpp,h';
+UPSERT content_type:config SET description = 'Configuration files', file_extensions = 'json,yaml,yml,toml,xml,ini,env';
+UPSERT content_type:data SET description = 'Data files or fixtures', file_extensions = 'json,csv,sql,fiche,schema';
+UPSERT content_type:binary SET description = 'Binary or encoded content', file_extensions = 'bin,dat,b64';
 
 -- Relationship types
-CREATE relationship_type:related SET description = 'General relationship', directional = false;
-CREATE relationship_type:supersedes SET description = 'Replaces older entry', directional = true;
-CREATE relationship_type:extends SET description = 'Builds upon', directional = true;
-CREATE relationship_type:implements SET description = 'Implements concept', directional = true;
-CREATE relationship_type:contradicts SET description = 'Conflicts with', directional = false;
-CREATE relationship_type:example_of SET description = 'Is an example of', directional = true;
+UPSERT relationship_type:related SET description = 'General relationship', directional = false;
+UPSERT relationship_type:supersedes SET description = 'Replaces older entry', directional = true;
+UPSERT relationship_type:extends SET description = 'Builds upon', directional = true;
+UPSERT relationship_type:implements SET description = 'Implements concept', directional = true;
+UPSERT relationship_type:contradicts SET description = 'Conflicts with', directional = false;
+UPSERT relationship_type:example_of SET description = 'Is an example of', directional = true;
 
 -- Session types
-CREATE session_type:claude_desktop SET description = 'Claude Desktop app session';
-CREATE session_type:claude_code SET description = 'Claude Code CLI session';
-CREATE session_type:agent_task SET description = 'Dispatched agent task';
-CREATE session_type:manual SET description = 'Manual CLI interaction';
+UPSERT session_type:claude_desktop SET description = 'Claude Desktop app session';
+UPSERT session_type:claude_code SET description = 'Claude Code CLI session';
+UPSERT session_type:agent_task SET description = 'Dispatched agent task';
+UPSERT session_type:manual SET description = 'Manual CLI interaction';
 
 -- Common applicability types
-CREATE applicability_type:cross_platform SET description = 'Works on all platforms', scope = 'platform';
-CREATE applicability_type:linux SET description = 'Linux-specific', scope = 'platform';
-CREATE applicability_type:macos SET description = 'macOS-specific', scope = 'platform';
-CREATE applicability_type:windows SET description = 'Windows-specific', scope = 'platform';
-CREATE applicability_type:rust SET description = 'Rust language', scope = 'language';
-CREATE applicability_type:python SET description = 'Python language', scope = 'language';
-CREATE applicability_type:typescript SET description = 'TypeScript/JavaScript', scope = 'language';
-CREATE applicability_type:shell SET description = 'Shell scripting', scope = 'language';
-CREATE applicability_type:async SET description = 'Async/concurrent patterns', scope = 'domain';
-CREATE applicability_type:cli SET description = 'Command-line tools', scope = 'domain';
-CREATE applicability_type:api SET description = 'API design', scope = 'domain';
+UPSERT applicability_type:cross_platform SET description = 'Works on all platforms', scope = 'platform';
+UPSERT applicability_type:linux SET description = 'Linux-specific', scope = 'platform';
+UPSERT applicability_type:macos SET description = 'macOS-specific', scope = 'platform';
+UPSERT applicability_type:windows SET description = 'Windows-specific', scope = 'platform';
+UPSERT applicability_type:rust SET description = 'Rust language', scope = 'language';
+UPSERT applicability_type:python SET description = 'Python language', scope = 'language';
+UPSERT applicability_type:typescript SET description = 'TypeScript/JavaScript', scope = 'language';
+UPSERT applicability_type:shell SET description = 'Shell scripting', scope = 'language';
+UPSERT applicability_type:async SET description = 'Async/concurrent patterns', scope = 'domain';
+UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'domain';
+UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
