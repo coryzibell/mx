@@ -7,6 +7,41 @@ use crate::db::{
 };
 use crate::knowledge::KnowledgeEntry;
 
+/// Agent context for privacy-aware queries
+#[derive(Debug, Clone)]
+pub struct AgentContext {
+    /// Current agent ID (None = anonymous/public-only access)
+    pub agent_id: Option<String>,
+    /// Whether to include private entries (requires matching agent_id)
+    pub include_private: bool,
+}
+
+impl AgentContext {
+    /// Public-only access (no private entries visible)
+    pub fn public_only() -> Self {
+        Self {
+            agent_id: None,
+            include_private: false,
+        }
+    }
+
+    /// Agent with full access to their private entries
+    pub fn for_agent(id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(id.into()),
+            include_private: true,
+        }
+    }
+
+    /// Agent but only viewing public entries
+    pub fn public_for_agent(id: impl Into<String>) -> Self {
+        Self {
+            agent_id: Some(id.into()),
+            include_private: false,
+        }
+    }
+}
+
 /// Abstract interface for knowledge storage backends (SQLite, SurrealDB, etc)
 pub trait KnowledgeStore {
     // =========================================================================
@@ -17,16 +52,16 @@ pub trait KnowledgeStore {
     fn upsert_knowledge(&self, entry: &KnowledgeEntry) -> Result<()>;
 
     /// Get a knowledge entry by ID
-    fn get(&self, id: &str) -> Result<Option<KnowledgeEntry>>;
+    fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
 
     /// Delete a knowledge entry
     fn delete(&self, id: &str) -> Result<bool>;
 
     /// Search knowledge entries
-    fn search(&self, query: &str) -> Result<Vec<KnowledgeEntry>>;
+    fn search(&self, query: &str, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
 
     /// List entries by category
-    fn list_by_category(&self, category: &str) -> Result<Vec<KnowledgeEntry>>;
+    fn list_by_category(&self, category: &str, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
 
     /// Count total entries
     fn count(&self) -> Result<usize>;
@@ -66,6 +101,12 @@ pub trait KnowledgeStore {
 
     /// Get category by ID
     fn get_category(&self, id: &str) -> Result<Option<Category>>;
+
+    /// Upsert category
+    fn upsert_category(&self, category: &Category) -> Result<()>;
+
+    /// Delete category (fails if entries use it)
+    fn delete_category(&self, id: &str) -> Result<bool>;
 
     // =========================================================================
     // PROJECT OPERATIONS

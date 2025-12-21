@@ -282,6 +282,8 @@ impl Database {
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                     content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -329,6 +331,8 @@ impl Database {
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                     content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -375,6 +379,8 @@ impl Database {
                     session_id: row.get(13)?,
                     ephemeral: row.get::<_, i32>(14)? != 0,
                     content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
                 })
             })
             .ok();
@@ -509,6 +515,41 @@ impl Database {
             .ok();
 
         Ok(category)
+    }
+
+    pub fn upsert_category(&self, category: &Category) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO categories (id, description, created_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(id) DO UPDATE SET
+                description = excluded.description
+            "#,
+            params![category.id, category.description, category.created_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_category(&self, id: &str) -> Result<bool> {
+        // Check if any knowledge entries use this category
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM knowledge WHERE category_id = ?1")?;
+        let count: i64 = stmt.query_row(params![id], |row| row.get(0))?;
+
+        if count > 0 {
+            anyhow::bail!(
+                "Cannot remove category '{}': {} entries still use it",
+                id,
+                count
+            );
+        }
+
+        // Delete the category
+        let rows = self
+            .conn
+            .execute("DELETE FROM categories WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
     }
 
     // Projects
@@ -995,7 +1036,8 @@ impl KnowledgeStore for Database {
         self.upsert_knowledge(entry)
     }
 
-    fn get(&self, id: &str) -> Result<Option<KnowledgeEntry>> {
+    fn get(&self, id: &str, _ctx: &crate::store::AgentContext) -> Result<Option<KnowledgeEntry>> {
+        // SQLite backend doesn't support privacy filtering yet - always return entry if it exists
         self.get(id)
     }
 
@@ -1003,11 +1045,21 @@ impl KnowledgeStore for Database {
         self.delete(id)
     }
 
-    fn search(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
+    fn search(
+        &self,
+        query: &str,
+        _ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend doesn't support privacy filtering yet - return all results
         self.search(query)
     }
 
-    fn list_by_category(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {
+    fn list_by_category(
+        &self,
+        category: &str,
+        _ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend doesn't support privacy filtering yet - return all results
         self.list_by_category(category)
     }
 
@@ -1045,6 +1097,14 @@ impl KnowledgeStore for Database {
 
     fn get_category(&self, id: &str) -> Result<Option<Category>> {
         self.get_category(id)
+    }
+
+    fn upsert_category(&self, category: &Category) -> Result<()> {
+        self.upsert_category(category)
+    }
+
+    fn delete_category(&self, id: &str) -> Result<bool> {
+        self.delete_category(id)
     }
 
     fn list_projects(&self, active_only: bool) -> Result<Vec<Project>> {
@@ -1187,6 +1247,8 @@ mod tests {
             session_id: None,
             ephemeral: false,
             content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
         }
     }
 

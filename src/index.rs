@@ -96,9 +96,11 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create directory {:?}", dir_path))?;
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        let entries = db.list_by_category(&category.id)?;
+        let entries = db.list_by_category(&category.id, &ctx)?;
         if entries.is_empty() {
             continue;
         }
@@ -223,9 +225,11 @@ pub fn export_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     let mut writer = BufWriter::new(file);
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id)? {
+        for entry in db.list_by_category(&category.id, &ctx)? {
             let json = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", json)?;
         }
@@ -247,9 +251,11 @@ pub fn export_csv(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     )?;
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id)? {
+        for entry in db.list_by_category(&category.id, &ctx)? {
             let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
             let applicability = entry.applicability.join(";");
             let source_project = entry.source_project_id.as_deref().unwrap_or("");

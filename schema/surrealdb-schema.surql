@@ -12,129 +12,134 @@
 -- =============================================================================
 
 -- Categories: pattern, technique, insight, etc.
-DEFINE TABLE category SCHEMAFULL;
-DEFINE FIELD description ON category TYPE string;
-DEFINE FIELD created_at ON category TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS category SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON category TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON category TYPE datetime DEFAULT time::now();
 
 -- Projects: dotmatrix, mx, base-d, etc.
-DEFINE TABLE project SCHEMAFULL;
-DEFINE FIELD name ON project TYPE string;
-DEFINE FIELD path ON project TYPE option<string>;
-DEFINE FIELD repo_url ON project TYPE option<string>;
-DEFINE FIELD description ON project TYPE option<string>;
-DEFINE FIELD active ON project TYPE bool DEFAULT true;
-DEFINE FIELD created_at ON project TYPE datetime DEFAULT time::now();
-DEFINE FIELD updated_at ON project TYPE datetime DEFAULT time::now();
-DEFINE INDEX project_active ON project FIELDS active;
+DEFINE TABLE IF NOT EXISTS project SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON project TYPE string;
+DEFINE FIELD IF NOT EXISTS path ON project TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS repo_url ON project TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS description ON project TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS active ON project TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS created_at ON project TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON project TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS project_active ON project FIELDS active;
 
 -- Agents: neo, smith, trinity, etc.
-DEFINE TABLE agent SCHEMAFULL;
-DEFINE FIELD description ON agent TYPE option<string>;
-DEFINE FIELD domain ON agent TYPE option<string>;
-DEFINE FIELD created_at ON agent TYPE datetime DEFAULT time::now();
-DEFINE FIELD updated_at ON agent TYPE datetime DEFAULT time::now();
-DEFINE INDEX agent_domain ON agent FIELDS domain;
+DEFINE TABLE IF NOT EXISTS agent SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON agent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS domain ON agent TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at ON agent TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON agent TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS agent_domain ON agent FIELDS domain;
 
 -- Applicability types: rust, python, cross-platform, linux-only
-DEFINE TABLE applicability_type SCHEMAFULL;
-DEFINE FIELD description ON applicability_type TYPE string;
-DEFINE FIELD scope ON applicability_type TYPE option<string>;  -- language, platform, tool, domain
-DEFINE FIELD created_at ON applicability_type TYPE datetime DEFAULT time::now();
-DEFINE INDEX applicability_scope ON applicability_type FIELDS scope;
+DEFINE TABLE IF NOT EXISTS applicability_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON applicability_type TYPE string;
+DEFINE FIELD IF NOT EXISTS scope ON applicability_type TYPE option<string>;  -- language, platform, tool, domain
+DEFINE FIELD IF NOT EXISTS created_at ON applicability_type TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS applicability_scope ON applicability_type FIELDS scope;
 
 -- Source types: manual, ram, cache, agent_session
-DEFINE TABLE source_type SCHEMAFULL;
-DEFINE FIELD description ON source_type TYPE string;
-DEFINE FIELD created_at ON source_type TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS source_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON source_type TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON source_type TYPE datetime DEFAULT time::now();
 
 -- Entry types: primary, summary, synthesis
-DEFINE TABLE entry_type SCHEMAFULL;
-DEFINE FIELD description ON entry_type TYPE string;
-DEFINE FIELD created_at ON entry_type TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS entry_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON entry_type TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON entry_type TYPE datetime DEFAULT time::now();
 
 -- Content types: text, code, config, data, binary
-DEFINE TABLE content_type SCHEMAFULL;
-DEFINE FIELD description ON content_type TYPE string;
-DEFINE FIELD file_extensions ON content_type TYPE option<string>;  -- comma-separated
-DEFINE FIELD created_at ON content_type TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS content_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON content_type TYPE string;
+DEFINE FIELD IF NOT EXISTS file_extensions ON content_type TYPE option<string>;  -- comma-separated
+DEFINE FIELD IF NOT EXISTS created_at ON content_type TYPE datetime DEFAULT time::now();
 
 -- Relationship types: related, supersedes, extends, implements
-DEFINE TABLE relationship_type SCHEMAFULL;
-DEFINE FIELD description ON relationship_type TYPE string;
-DEFINE FIELD directional ON relationship_type TYPE bool DEFAULT true;
-DEFINE FIELD created_at ON relationship_type TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS relationship_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON relationship_type TYPE string;
+DEFINE FIELD IF NOT EXISTS directional ON relationship_type TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS created_at ON relationship_type TYPE datetime DEFAULT time::now();
 
 -- Session types: claude_desktop, agent_task, manual
-DEFINE TABLE session_type SCHEMAFULL;
-DEFINE FIELD description ON session_type TYPE string;
-DEFINE FIELD created_at ON session_type TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS session_type SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS description ON session_type TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON session_type TYPE datetime DEFAULT time::now();
 
 -- Tags: freeform labels
-DEFINE TABLE tag SCHEMAFULL;
-DEFINE FIELD name ON tag TYPE string;
-DEFINE FIELD created_at ON tag TYPE datetime DEFAULT time::now();
-DEFINE INDEX tag_name ON tag FIELDS name UNIQUE;
+DEFINE TABLE IF NOT EXISTS tag SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON tag TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON tag TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS tag_name ON tag FIELDS name UNIQUE;
 
 -- =============================================================================
 -- CORE TABLES
 -- =============================================================================
 
 -- Sessions
-DEFINE TABLE session SCHEMAFULL;
-DEFINE FIELD session_type ON session TYPE record<session_type>;
-DEFINE FIELD project ON session TYPE option<record<project>>;
-DEFINE FIELD started_at ON session TYPE datetime DEFAULT time::now();
-DEFINE FIELD ended_at ON session TYPE option<datetime>;
-DEFINE FIELD metadata ON session TYPE option<object>;  -- flexible JSON
-DEFINE INDEX session_type_idx ON session FIELDS session_type;
-DEFINE INDEX session_project_idx ON session FIELDS project;
+DEFINE TABLE IF NOT EXISTS session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS session_type ON session TYPE record<session_type>;
+DEFINE FIELD IF NOT EXISTS project ON session TYPE option<record<project>>;
+DEFINE FIELD IF NOT EXISTS started_at ON session TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS ended_at ON session TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS metadata ON session TYPE option<object>;  -- flexible JSON
+DEFINE INDEX IF NOT EXISTS session_type_idx ON session FIELDS session_type;
+DEFINE INDEX IF NOT EXISTS session_project_idx ON session FIELDS project;
 
 -- Knowledge entries (main entity)
-DEFINE TABLE knowledge SCHEMAFULL;
-DEFINE FIELD title ON knowledge TYPE string;
-DEFINE FIELD body ON knowledge TYPE option<string>;
-DEFINE FIELD summary ON knowledge TYPE option<string>;
-DEFINE FIELD file_path ON knowledge TYPE option<string>;
-DEFINE FIELD content_hash ON knowledge TYPE string;
-DEFINE FIELD ephemeral ON knowledge TYPE bool DEFAULT false;
-DEFINE FIELD created_at ON knowledge TYPE datetime DEFAULT time::now();
-DEFINE FIELD updated_at ON knowledge TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS knowledge SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS title ON knowledge TYPE string;
+DEFINE FIELD IF NOT EXISTS body ON knowledge TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS summary ON knowledge TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS file_path ON knowledge TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS content_hash ON knowledge TYPE string;
+DEFINE FIELD IF NOT EXISTS ephemeral ON knowledge TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS owner ON knowledge TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS visibility ON knowledge TYPE string DEFAULT 'public'
+  ASSERT $value IN ['public', 'private'];
+DEFINE FIELD IF NOT EXISTS created_at ON knowledge TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS updated_at ON knowledge TYPE option<datetime>;
 
 -- Record links (replaces foreign keys)
-DEFINE FIELD category ON knowledge TYPE record<category>;
-DEFINE FIELD source_project ON knowledge TYPE option<record<project>>;
-DEFINE FIELD source_agent ON knowledge TYPE option<record<agent>>;
-DEFINE FIELD source_type ON knowledge TYPE record<source_type>;
-DEFINE FIELD entry_type ON knowledge TYPE record<entry_type>;
-DEFINE FIELD content_type ON knowledge TYPE record<content_type> DEFAULT content_type:text;
-DEFINE FIELD session ON knowledge TYPE option<record<session>>;
+DEFINE FIELD IF NOT EXISTS category ON knowledge TYPE record<category>;
+DEFINE FIELD IF NOT EXISTS source_project ON knowledge TYPE option<record<project>>;
+DEFINE FIELD IF NOT EXISTS source_agent ON knowledge TYPE option<record<agent>>;
+DEFINE FIELD IF NOT EXISTS source_type ON knowledge TYPE record<source_type>;
+DEFINE FIELD IF NOT EXISTS entry_type ON knowledge TYPE record<entry_type>;
+DEFINE FIELD IF NOT EXISTS content_type ON knowledge TYPE record<content_type> DEFAULT content_type:text;
+DEFINE FIELD IF NOT EXISTS session ON knowledge TYPE option<record<session>>;
 
 -- Indexes for common queries
-DEFINE INDEX knowledge_category ON knowledge FIELDS category;
-DEFINE INDEX knowledge_source_project ON knowledge FIELDS source_project;
-DEFINE INDEX knowledge_source_agent ON knowledge FIELDS source_agent;
-DEFINE INDEX knowledge_source_type ON knowledge FIELDS source_type;
-DEFINE INDEX knowledge_entry_type ON knowledge FIELDS entry_type;
-DEFINE INDEX knowledge_content_type ON knowledge FIELDS content_type;
-DEFINE INDEX knowledge_session ON knowledge FIELDS session;
-DEFINE INDEX knowledge_updated ON knowledge FIELDS updated_at;
-DEFINE INDEX knowledge_ephemeral ON knowledge FIELDS ephemeral;
+DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
+DEFINE INDEX IF NOT EXISTS knowledge_source_project ON knowledge FIELDS source_project;
+DEFINE INDEX IF NOT EXISTS knowledge_source_agent ON knowledge FIELDS source_agent;
+DEFINE INDEX IF NOT EXISTS knowledge_source_type ON knowledge FIELDS source_type;
+DEFINE INDEX IF NOT EXISTS knowledge_entry_type ON knowledge FIELDS entry_type;
+DEFINE INDEX IF NOT EXISTS knowledge_content_type ON knowledge FIELDS content_type;
+DEFINE INDEX IF NOT EXISTS knowledge_session ON knowledge FIELDS session;
+DEFINE INDEX IF NOT EXISTS knowledge_updated ON knowledge FIELDS updated_at;
+DEFINE INDEX IF NOT EXISTS knowledge_ephemeral ON knowledge FIELDS ephemeral;
+DEFINE INDEX IF NOT EXISTS knowledge_owner ON knowledge FIELDS owner;
+DEFINE INDEX IF NOT EXISTS knowledge_visibility ON knowledge FIELDS visibility;
 
 -- =============================================================================
 -- FULL-TEXT SEARCH
 -- =============================================================================
 
 -- Custom analyzer for knowledge search
-DEFINE ANALYZER memory_analyzer
+DEFINE ANALYZER IF NOT EXISTS memory_analyzer
     TOKENIZERS class
     FILTERS lowercase, snowball(english);
 
 -- Search indexes
-DEFINE INDEX knowledge_title_fts ON knowledge
+DEFINE INDEX IF NOT EXISTS knowledge_title_fts ON knowledge
     FIELDS title SEARCH ANALYZER memory_analyzer BM25;
-DEFINE INDEX knowledge_body_fts ON knowledge
+DEFINE INDEX IF NOT EXISTS knowledge_body_fts ON knowledge
     FIELDS body SEARCH ANALYZER memory_analyzer BM25;
-DEFINE INDEX knowledge_summary_fts ON knowledge
+DEFINE INDEX IF NOT EXISTS knowledge_summary_fts ON knowledge
     FIELDS summary SEARCH ANALYZER memory_analyzer BM25;
 
 -- =============================================================================
@@ -142,45 +147,45 @@ DEFINE INDEX knowledge_summary_fts ON knowledge
 -- =============================================================================
 
 -- Knowledge <-> Tag relationship
-DEFINE TABLE tagged_with SCHEMAFULL TYPE RELATION
+DEFINE TABLE IF NOT EXISTS tagged_with SCHEMAFULL TYPE RELATION
     FROM knowledge TO tag;
-DEFINE FIELD created_at ON tagged_with TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS created_at ON tagged_with TYPE datetime DEFAULT time::now();
 -- Prevent duplicate edges
-DEFINE INDEX tagged_with_unique ON tagged_with FIELDS in, out UNIQUE;
+DEFINE INDEX IF NOT EXISTS tagged_with_unique ON tagged_with FIELDS in, out UNIQUE;
 
 -- Knowledge <-> Applicability relationship
-DEFINE TABLE applies_to SCHEMAFULL TYPE RELATION
+DEFINE TABLE IF NOT EXISTS applies_to SCHEMAFULL TYPE RELATION
     FROM knowledge TO applicability_type;
-DEFINE FIELD created_at ON applies_to TYPE datetime DEFAULT time::now();
-DEFINE INDEX applies_to_unique ON applies_to FIELDS in, out UNIQUE;
+DEFINE FIELD IF NOT EXISTS created_at ON applies_to TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS applies_to_unique ON applies_to FIELDS in, out UNIQUE;
 
 -- Project <-> Applicability relationship
-DEFINE TABLE project_applies_to SCHEMAFULL TYPE RELATION
+DEFINE TABLE IF NOT EXISTS project_applies_to SCHEMAFULL TYPE RELATION
     FROM project TO applicability_type;
-DEFINE FIELD created_at ON project_applies_to TYPE datetime DEFAULT time::now();
-DEFINE INDEX project_applies_unique ON project_applies_to FIELDS in, out UNIQUE;
+DEFINE FIELD IF NOT EXISTS created_at ON project_applies_to TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS project_applies_unique ON project_applies_to FIELDS in, out UNIQUE;
 
 -- Project <-> Tag relationship
-DEFINE TABLE project_tagged_with SCHEMAFULL TYPE RELATION
+DEFINE TABLE IF NOT EXISTS project_tagged_with SCHEMAFULL TYPE RELATION
     FROM project TO tag;
-DEFINE FIELD created_at ON project_tagged_with TYPE datetime DEFAULT time::now();
-DEFINE INDEX project_tagged_unique ON project_tagged_with FIELDS in, out UNIQUE;
+DEFINE FIELD IF NOT EXISTS created_at ON project_tagged_with TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS project_tagged_unique ON project_tagged_with FIELDS in, out UNIQUE;
 
 -- Knowledge <-> Knowledge relationship (the graph!)
-DEFINE TABLE relates_to SCHEMAFULL TYPE RELATION
+DEFINE TABLE IF NOT EXISTS relates_to SCHEMAFULL TYPE RELATION
     FROM knowledge TO knowledge;
-DEFINE FIELD relationship_type ON relates_to TYPE record<relationship_type>;
-DEFINE FIELD created_at ON relates_to TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS relationship_type ON relates_to TYPE record<relationship_type>;
+DEFINE FIELD IF NOT EXISTS created_at ON relates_to TYPE datetime DEFAULT time::now();
 -- Unique constraint on the triple (from, to, type)
-DEFINE INDEX relates_to_unique ON relates_to FIELDS in, out, relationship_type UNIQUE;
+DEFINE INDEX IF NOT EXISTS relates_to_unique ON relates_to FIELDS in, out, relationship_type UNIQUE;
 
 -- =============================================================================
 -- METADATA TABLES
 -- =============================================================================
 
 -- Deletion tombstones (for sync scenarios)
-DEFINE TABLE deletion SCHEMAFULL;
-DEFINE FIELD deleted_at ON deletion TYPE datetime DEFAULT time::now();
+DEFINE TABLE IF NOT EXISTS deletion SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS deleted_at ON deletion TYPE datetime DEFAULT time::now();
 
 -- =============================================================================
 -- SEED DATA
@@ -193,6 +198,7 @@ UPSERT category:insight SET description = 'Learnings and observations';
 UPSERT category:gotcha SET description = 'Pitfalls and things to watch for';
 UPSERT category:reference SET description = 'Reference material and documentation';
 UPSERT category:decision SET description = 'Architectural and design decisions';
+UPSERT category:bloom SET description = 'Identity discoveries and personal growth - Q private';
 
 -- Source types
 UPSERT source_type:manual SET description = 'Manually entered by human';

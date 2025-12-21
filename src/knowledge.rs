@@ -47,6 +47,16 @@ pub struct KnowledgeEntry {
     /// Content type: text, code, config, data, binary
     #[serde(default)]
     pub content_type_id: Option<String>,
+    /// Owner of the entry (if private)
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Visibility: public or private
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+}
+
+fn default_visibility() -> String {
+    "public".to_string()
 }
 
 /// Custom deserializer for applicability - accepts string or array
@@ -172,6 +182,8 @@ impl KnowledgeEntry {
             session_id: None,
             ephemeral: false,
             content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
         })
     }
 }

@@ -247,6 +247,14 @@ enum MemoryCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Show only your private entries
+        #[arg(long)]
+        mine: bool,
+
+        /// Include private entries (requires matching owner)
+        #[arg(long)]
+        include_private: bool,
     },
 
     /// List entries by category
@@ -258,6 +266,14 @@ enum MemoryCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Show only your private entries
+        #[arg(long)]
+        mine: bool,
+
+        /// Include private entries (requires matching owner)
+        #[arg(long)]
+        include_private: bool,
     },
 
     /// Show a specific entry
@@ -288,7 +304,7 @@ enum MemoryCommands {
     /// Add a new entry directly to the database
     Add {
         /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future)
-        #[arg(short, long)]
+        #[arg(long)]
         category: String,
 
         /// Entry title
@@ -342,6 +358,14 @@ enum MemoryCommands {
         /// Content type (text, code, config, data, binary)
         #[arg(long, default_value = "text")]
         content_type: String,
+
+        /// Mark as private (only visible to owner)
+        #[arg(long)]
+        private: bool,
+
+        /// Explicit owner (defaults to source_agent if private)
+        #[arg(long)]
+        owner: Option<String>,
     },
 
     /// Update an existing entry in the database
@@ -642,6 +666,18 @@ enum CategoriesCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Add a new category
+    Add {
+        /// Category ID (lowercase, no spaces)
+        id: String,
+        /// Description of the category
+        description: String,
+    },
+    /// Remove a category (only if unused)
+    Remove {
+        /// Category ID to remove
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -798,6 +834,25 @@ fn main() -> Result<()> {
     }
 }
 
+/// Resolve agent context from environment and flags
+fn resolve_agent_context(mine: bool, include_private: bool) -> store::AgentContext {
+    match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => {
+            if mine {
+                // --mine: only show private entries owned by this agent
+                store::AgentContext::for_agent(agent)
+            } else if include_private {
+                // --include-private: show public + private entries owned by this agent
+                store::AgentContext::for_agent(agent)
+            } else {
+                // default: only show public entries
+                store::AgentContext::public_for_agent(agent)
+            }
+        }
+        _ => store::AgentContext::public_only(),
+    }
+}
+
 fn handle_memory(cmd: MemoryCommands) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -808,9 +863,17 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             println!("{}", stats);
         }
 
-        MemoryCommands::Search { query, json } => {
+        MemoryCommands::Search {
+            query,
+            json,
+            mine,
+            include_private,
+        } => {
             let db = store::create_store(&config.db_path)?;
-            let entries = db.search(&query)?;
+            let ctx = resolve_agent_context(mine, include_private);
+
+            // Privacy filtering happens at the database level now
+            let entries = db.search(&query, &ctx)?;
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -824,17 +887,24 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
         }
 
-        MemoryCommands::List { category, json } => {
+        MemoryCommands::List {
+            category,
+            json,
+            mine,
+            include_private,
+        } => {
             let db = store::create_store(&config.db_path)?;
+            let ctx = resolve_agent_context(mine, include_private);
 
+            // Privacy filtering happens at the database level now
             let entries = if let Some(cat) = &category {
-                db.list_by_category(cat)?
+                db.list_by_category(cat, &ctx)?
             } else {
                 // List all categories from database
                 let mut all = Vec::new();
                 let categories = db.list_categories()?;
                 for cat in categories {
-                    all.extend(db.list_by_category(&cat.id)?);
+                    all.extend(db.list_by_category(&cat.id, &ctx)?);
                 }
                 all
             };
@@ -854,7 +924,14 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
         MemoryCommands::Show { id, json } => {
             let db = store::create_store(&config.db_path)?;
 
-            match db.get(&id)? {
+            // For Show, we need to respect privacy but use current agent context
+            // If the user has MX_CURRENT_AGENT set, they can see their own private entries
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            match db.get(&id, &ctx)? {
                 Some(entry) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&entry)?);
@@ -876,9 +953,15 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             println!("Total entries: {}", db.count()?);
             println!();
 
+            // For stats, show counts for current agent's perspective
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
             let categories = db.list_categories()?;
             for cat in categories {
-                let count = db.list_by_category(&cat.id)?.len();
+                let count = db.list_by_category(&cat.id, &ctx)?.len();
                 println!("  {:12} {}", cat.id, count);
             }
         }
@@ -919,6 +1002,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             ephemeral,
             domain,
             content_type,
+            private,
+            owner,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -965,6 +1050,19 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 })
                 .unwrap_or_default();
 
+            // Determine visibility and owner
+            let visibility = if private {
+                "private".to_string()
+            } else {
+                "public".to_string()
+            };
+
+            let entry_owner = if private {
+                Some(owner.unwrap_or_else(|| source_agent.clone()))
+            } else {
+                None
+            };
+
             // Generate ID
             let path_hint = domain.unwrap_or_else(|| category.clone());
             let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &title);
@@ -990,6 +1088,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 session_id,
                 ephemeral,
                 content_type_id: Some(content_type),
+                owner: entry_owner.clone(),
+                visibility: visibility.clone(),
             };
 
             // Insert into database
@@ -1003,6 +1103,10 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
             println!("  Title: {}", title);
+            println!("  Visibility: {}", visibility);
+            if let Some(ref o) = entry_owner {
+                println!("  Owner: {}", o);
+            }
             if !entry.tags.is_empty() {
                 println!("  Tags: {}", entry.tags.join(", "));
             }
@@ -1026,9 +1130,15 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
             let db = store::create_store(&config.db_path)?;
 
+            // For Update, use current agent context to allow updating own private entries
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
             // Fetch existing entry
             let mut entry = db
-                .get(&id)?
+                .get(&id, &ctx)?
                 .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
 
             let mut changes = Vec::new();
@@ -1541,6 +1651,46 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
                 println!("Registered categories:\n");
                 for category in categories {
                     println!("  {} - {}", category.id, category.description);
+                }
+            }
+        }
+        CategoriesCommands::Add { id, description } => {
+            // Check if category already exists
+            if db.get_category(&id)?.is_some() {
+                eprintln!("Error: Category '{}' already exists", id);
+                std::process::exit(1);
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let category = db::Category {
+                id: id.clone(),
+                description: description.clone(),
+                created_at: now,
+            };
+
+            db.upsert_category(&category)?;
+            println!("Added category: {}", id);
+            println!("  Description: {}", description);
+        }
+        CategoriesCommands::Remove { id } => {
+            // Check if category exists
+            if db.get_category(&id)?.is_none() {
+                eprintln!("Error: Category '{}' not found", id);
+                std::process::exit(1);
+            }
+
+            // delete_category will check if entries use it and error if so
+            match db.delete_category(&id) {
+                Ok(true) => {
+                    println!("Deleted category: {}", id);
+                }
+                Ok(false) => {
+                    eprintln!("Error: Category '{}' not found", id);
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
                 }
             }
         }

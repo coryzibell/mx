@@ -107,9 +107,16 @@ impl SurrealDatabase {
             .context("Failed to set namespace and database")?;
 
         // Apply schema (idempotent)
-        db.query(SCHEMA)
+        let mut response = db
+            .query(SCHEMA)
             .await
             .context("Failed to apply database schema")?;
+
+        // Check for errors - schema application returns multiple results
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
+        }
 
         Ok(Self { db })
     }
@@ -150,6 +157,8 @@ impl SurrealDatabase {
             file_path = $file_path,
             content_hash = $content_hash,
             ephemeral = $ephemeral,
+            owner = $owner,
+            visibility = $visibility,
             category = type::thing('category', $category_id),
             source_type = type::thing('source_type', $source_type_id),
             entry_type = type::thing('entry_type', $entry_type_id),
@@ -187,6 +196,8 @@ impl SurrealDatabase {
                 entry.content_hash.clone().unwrap_or_default(),
             ))
             .bind(("ephemeral", entry.ephemeral))
+            .bind(("owner", entry.owner.clone()))
+            .bind(("visibility", entry.visibility.clone()))
             .bind(("category_id", entry.category_id.clone()))
             .bind((
                 "source_type_id",
@@ -321,27 +332,67 @@ impl SurrealDatabase {
     }
 
     /// Get a knowledge entry by ID
-    pub fn get_knowledge(&self, id: &str) -> Result<Option<KnowledgeEntry>> {
-        Self::runtime().block_on(self.get_knowledge_async(id))
+    pub fn get_knowledge(
+        &self,
+        id: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<KnowledgeEntry>> {
+        Self::runtime().block_on(self.get_knowledge_async(id, ctx))
     }
 
-    async fn get_knowledge_async(&self, id: &str) -> Result<Option<KnowledgeEntry>> {
+    async fn get_knowledge_async(
+        &self,
+        id: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<KnowledgeEntry>> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
-        let record_id = RecordId::new("knowledge", id_part);
 
-        // Fetch main record
-        let result: Option<Value> = self
-            .db
-            .select(record_id.to_record_id())
-            .await
-            .context("Failed to query knowledge record")?;
-
-        let Some(record) = result else {
-            return Ok(None);
+        // Build visibility filter based on context
+        // Use parameterized query for owner to prevent injection
+        let (visibility_clause, current_agent) = if ctx.include_private {
+            if let Some(ref agent) = ctx.agent_id {
+                (
+                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
+                    Some(agent.clone())
+                )
+            } else {
+                ("AND (visibility = 'public')".to_string(), None)
+            }
+        } else {
+            ("AND (visibility = 'public')".to_string(), None)
         };
 
-        let obj = record.into_json();
-        self.value_to_knowledge_entry(obj).await.map(Some)
+        let sql = format!(
+            "SELECT
+                meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
+                owner, visibility,
+                meta::id(category) AS category_id,
+                meta::id(source_type) AS source_type_id,
+                meta::id(entry_type) AS entry_type_id,
+                meta::id(content_type) AS content_type_id,
+                IF source_project THEN meta::id(source_project) ELSE null END AS source_project_id,
+                IF source_agent THEN meta::id(source_agent) ELSE null END AS source_agent_id,
+                IF session THEN meta::id(session) ELSE null END AS session_id,
+                <string>created_at AS created_at, <string>updated_at AS updated_at
+            FROM knowledge
+            WHERE meta::id(id) = $id {}",
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql).bind(("id", id_part.to_string()));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+        let mut response = query.await.context("Failed to query knowledge record")?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+
+        if results.is_empty() {
+            return Ok(None);
+        }
+
+        let obj = &results[0];
+        self.value_to_knowledge_entry(obj.clone()).await.map(Some)
     }
 
     /// Delete a knowledge entry (edges cascade automatically)
@@ -363,17 +414,40 @@ impl SurrealDatabase {
     }
 
     /// Search knowledge using BM25 full-text indexes
-    pub fn search_knowledge(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.search_knowledge_async(query))
+    pub fn search_knowledge(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.search_knowledge_async(query, ctx))
     }
 
-    async fn search_knowledge_async(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
+    async fn search_knowledge_async(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
         let query_owned = query.to_string();
-        let mut response = self
-            .db
-            .query(
-                "SELECT
+
+        // Build visibility filter based on context
+        // Use parameterized query for owner to prevent injection
+        let (visibility_clause, current_agent) = if ctx.include_private {
+            if let Some(ref agent) = ctx.agent_id {
+                (
+                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
+                    Some(agent.clone())
+                )
+            } else {
+                ("AND (visibility = 'public')".to_string(), None)
+            }
+        } else {
+            ("AND (visibility = 'public')".to_string(), None)
+        };
+
+        let sql = format!(
+            "SELECT
                 meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
+                owner, visibility,
                 meta::id(category) AS category_id,
                 meta::id(source_type) AS source_type_id,
                 meta::id(entry_type) AS entry_type_id,
@@ -383,9 +457,15 @@ impl SurrealDatabase {
                 IF session THEN meta::id(session) ELSE null END AS session_id,
                 <string>created_at AS created_at, <string>updated_at AS updated_at
             FROM knowledge
-            WHERE title @@ $query OR body @@ $query OR summary @@ $query",
-            )
-            .bind(("query", query_owned))
+            WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {}",
+            visibility_clause
+        );
+
+        let mut query_builder = self.db.query(&sql).bind(("query", query_owned));
+        if let Some(agent) = current_agent {
+            query_builder = query_builder.bind(("current_agent", agent));
+        }
+        let mut response = query_builder
             .await
             .context("Failed to execute search query")?;
 
@@ -488,6 +568,9 @@ impl SurrealDatabase {
             entry_type_id,
             content_type_id,
             session_id,
+            owner: serde_json::from_value(obj["owner"].clone()).ok(),
+            visibility: serde_json::from_value(obj["visibility"].clone())
+                .unwrap_or_else(|_| "public".to_string()),
         })
     }
 
@@ -924,6 +1007,84 @@ impl SurrealDatabase {
         }))
     }
 
+    /// Upsert a category
+    pub fn upsert_category(&self, category: &Category) -> Result<()> {
+        Self::runtime().block_on(self.upsert_category_async(category))
+    }
+
+    async fn upsert_category_async(&self, category: &Category) -> Result<()> {
+        // Always include datetime - use current time if not provided
+        let now = Utc::now().to_rfc3339();
+        let created_at = if category.created_at.is_empty() {
+            now
+        } else {
+            category.created_at.clone()
+        };
+
+        let mut response = self
+            .db
+            .query(
+                "UPSERT type::thing('category', $id) SET
+                description = $description,
+                created_at = <datetime>$created_at
+            ",
+            )
+            .bind(("id", category.id.clone()))
+            .bind(("description", category.description.clone()))
+            .bind(("created_at", normalize_datetime(&created_at)))
+            .await
+            .context("Failed to upsert category")?;
+
+        // Check for errors in the response
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("SurrealDB returned errors: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a category (only if no entries use it)
+    pub fn delete_category(&self, id: &str) -> Result<bool> {
+        Self::runtime().block_on(self.delete_category_async(id))
+    }
+
+    async fn delete_category_async(&self, id: &str) -> Result<bool> {
+        let category_thing = Thing::from(("category", id));
+
+        // Check if any knowledge entries use this category
+        let mut count_response = self
+            .db
+            .query("SELECT count() AS c FROM knowledge WHERE category = $category GROUP ALL")
+            .bind(("category", category_thing.clone()))
+            .await
+            .context("Failed to count knowledge entries for category")?;
+
+        let count_results: Vec<serde_json::Value> = count_response.take(0)?;
+        let count = count_results
+            .first()
+            .and_then(|v| v["c"].as_i64())
+            .unwrap_or(0);
+
+        if count > 0 {
+            return Err(anyhow::anyhow!(
+                "Cannot remove category '{}': {} entries still use it",
+                id,
+                count
+            ));
+        }
+
+        // Delete the category
+        let record_id = RecordId::new("category", id);
+        let result: Option<Value> = self
+            .db
+            .delete(record_id.to_record_id())
+            .await
+            .context("Failed to delete category")?;
+
+        Ok(result.is_some())
+    }
+
     /// Get project by ID
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
         Self::runtime().block_on(self.get_project_async(id))
@@ -1096,18 +1257,40 @@ impl SurrealDatabase {
     }
 
     /// List entries by category
-    pub fn list_by_category(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.list_by_category_async(category))
+    pub fn list_by_category(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.list_by_category_async(category, ctx))
     }
 
-    async fn list_by_category_async(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {
+    async fn list_by_category_async(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
         let category_thing = Thing::from(("category", category));
 
-        let mut response = self
-            .db
-            .query(
-                "SELECT
+        // Build visibility filter based on context
+        // Use parameterized query for owner to prevent injection
+        let (visibility_clause, current_agent) = if ctx.include_private {
+            if let Some(ref agent) = ctx.agent_id {
+                (
+                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
+                    Some(agent.clone())
+                )
+            } else {
+                ("AND (visibility = 'public')".to_string(), None)
+            }
+        } else {
+            ("AND (visibility = 'public')".to_string(), None)
+        };
+
+        let sql = format!(
+            "SELECT
                 meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
+                owner, visibility,
                 meta::id(category) AS category_id,
                 meta::id(source_type) AS source_type_id,
                 meta::id(entry_type) AS entry_type_id,
@@ -1117,10 +1300,16 @@ impl SurrealDatabase {
                 IF session THEN meta::id(session) ELSE null END AS session_id,
                 <string>created_at AS created_at, <string>updated_at AS updated_at
             FROM knowledge
-            WHERE category = $category
+            WHERE category = $category {}
             ORDER BY title",
-            )
-            .bind(("category", category_thing))
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql).bind(("category", category_thing));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+        let mut response = query
             .await
             .context("Failed to query knowledge by category")?;
 
@@ -1312,20 +1501,24 @@ impl KnowledgeStore for SurrealDatabase {
         Ok(())
     }
 
-    fn get(&self, id: &str) -> Result<Option<KnowledgeEntry>> {
-        self.get_knowledge(id)
+    fn get(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<Option<KnowledgeEntry>> {
+        self.get_knowledge(id, ctx)
     }
 
     fn delete(&self, id: &str) -> Result<bool> {
         self.delete_knowledge(id)
     }
 
-    fn search(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
-        self.search_knowledge(query)
+    fn search(&self, query: &str, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
+        self.search_knowledge(query, ctx)
     }
 
-    fn list_by_category(&self, category: &str) -> Result<Vec<KnowledgeEntry>> {
-        self.list_by_category(category)
+    fn list_by_category(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.list_by_category(category, ctx)
     }
 
     fn count(&self) -> Result<usize> {
@@ -1362,6 +1555,14 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn get_category(&self, id: &str) -> Result<Option<Category>> {
         self.get_category(id)
+    }
+
+    fn upsert_category(&self, category: &Category) -> Result<()> {
+        self.upsert_category(category)
+    }
+
+    fn delete_category(&self, id: &str) -> Result<bool> {
+        self.delete_category(id)
     }
 
     fn list_projects(&self, _active_only: bool) -> Result<Vec<Project>> {
