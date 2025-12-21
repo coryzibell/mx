@@ -27,6 +27,125 @@ pub struct Tag {
     pub created_at: Option<String>,
 }
 
+/// DTO for deserializing knowledge records from SurrealDB queries.
+///
+/// SurrealDB returns record links as `Thing` types, which don't deserialize
+/// to serde_json::Value properly. This DTO expects queries to use:
+///   - `meta::id(id) AS id` for the record ID
+///   - `meta::id(category) AS category_id` for record links
+///   - `<string>created_at AS created_at` for datetime conversion
+///
+/// This allows direct deserialization without manual JSON field extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurrealKnowledgeRecord {
+    /// Record ID (from `meta::id(id)`)
+    pub id: String,
+
+    /// Entry title
+    pub title: String,
+
+    /// Full body content
+    #[serde(default)]
+    pub body: Option<String>,
+
+    /// Brief summary
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Source file path (for markdown-sourced entries)
+    #[serde(default)]
+    pub file_path: Option<String>,
+
+    /// Content hash for change detection
+    #[serde(default)]
+    pub content_hash: Option<String>,
+
+    /// Whether this is ephemeral/session-scoped
+    #[serde(default)]
+    pub ephemeral: bool,
+
+    /// Owner ID for private entries
+    #[serde(default)]
+    pub owner: Option<String>,
+
+    /// Visibility: "public" or "private"
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+
+    // === Record links (converted to strings via meta::id()) ===
+    /// Category ID (from `meta::id(category)`)
+    pub category_id: String,
+
+    /// Source type ID (from `meta::id(source_type)`)
+    #[serde(default)]
+    pub source_type_id: Option<String>,
+
+    /// Entry type ID (from `meta::id(entry_type)`)
+    #[serde(default)]
+    pub entry_type_id: Option<String>,
+
+    /// Content type ID (from `meta::id(content_type)`)
+    #[serde(default)]
+    pub content_type_id: Option<String>,
+
+    /// Source project ID
+    #[serde(default)]
+    pub source_project_id: Option<String>,
+
+    /// Source agent ID
+    #[serde(default)]
+    pub source_agent_id: Option<String>,
+
+    /// Session ID
+    #[serde(default)]
+    pub session_id: Option<String>,
+
+    // === Timestamps (converted to strings via <string>cast) ===
+    /// Created timestamp (from `<string>created_at`)
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    /// Updated timestamp (from `<string>updated_at`)
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+fn default_visibility() -> String {
+    "public".to_string()
+}
+
+impl SurrealKnowledgeRecord {
+    /// Convert to domain KnowledgeEntry, fetching tags and applicability
+    pub fn into_knowledge_entry(
+        self,
+        tags: Vec<String>,
+        applicability: Vec<String>,
+    ) -> KnowledgeEntry {
+        KnowledgeEntry {
+            id: format!("kn-{}", self.id),
+            category_id: self.category_id,
+            title: self.title,
+            body: self.body,
+            summary: self.summary,
+            file_path: self.file_path,
+            content_hash: self.content_hash,
+            ephemeral: self.ephemeral,
+            owner: self.owner,
+            visibility: self.visibility,
+            source_type_id: self.source_type_id,
+            entry_type_id: self.entry_type_id,
+            content_type_id: self.content_type_id,
+            source_project_id: self.source_project_id,
+            source_agent_id: self.source_agent_id,
+            session_id: self.session_id,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            tags,
+            applicability,
+        }
+    }
+}
+
 /// SurrealDB Thing wrapper for typed record IDs
 #[derive(Debug, Clone)]
 pub(crate) struct RecordId(Thing);
@@ -385,14 +504,24 @@ impl SurrealDatabase {
         }
         let mut response = query.await.context("Failed to query knowledge record")?;
 
-        let results: Vec<serde_json::Value> = response.take(0)?;
+        // Direct deserialization to DTO - no manual JSON parsing!
+        let records: Vec<SurrealKnowledgeRecord> = response.take(0)?;
 
-        if results.is_empty() {
+        if records.is_empty() {
             return Ok(None);
         }
 
-        let obj = &results[0];
-        self.value_to_knowledge_entry(obj.clone()).await.map(Some)
+        let record = records.into_iter().next().unwrap();
+
+        // Fetch tags and applicability separately
+        let tags = self
+            .get_tags_for_entry_async(&format!("kn-{}", record.id))
+            .await?;
+        let applicability = self
+            .get_applicability_for_entry_async(&format!("kn-{}", record.id))
+            .await?;
+
+        Ok(Some(record.into_knowledge_entry(tags, applicability)))
     }
 
     /// Delete a knowledge entry (edges cascade automatically)
