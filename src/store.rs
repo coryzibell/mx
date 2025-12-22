@@ -55,7 +55,8 @@ pub struct WakeCascade {
 
 impl WakeCascade {
     pub fn all_ids(&self) -> Vec<String> {
-        self.core.iter()
+        self.core
+            .iter()
             .chain(self.recent.iter())
             .chain(self.bridges.iter())
             .map(|e| e.id.clone())

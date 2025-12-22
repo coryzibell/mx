@@ -1085,7 +1085,12 @@ impl KnowledgeStore for Database {
         self.count()
     }
 
-    fn wake_cascade(&self, _ctx: &crate::store::AgentContext, _limit: usize, _days: i64) -> Result<crate::store::WakeCascade> {
+    fn wake_cascade(
+        &self,
+        _ctx: &crate::store::AgentContext,
+        _limit: usize,
+        _days: i64,
+    ) -> Result<crate::store::WakeCascade> {
         // SQLite backend doesn't support wake cascade yet - return empty cascade
         Ok(crate::store::WakeCascade {
             core: vec![],

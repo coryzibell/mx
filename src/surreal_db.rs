@@ -789,7 +789,8 @@ impl SurrealDatabase {
         let bridges = if anchor_ids.is_empty() {
             Vec::new()
         } else {
-            self.query_bridge_blooms(ctx, bridge_limit, &anchor_ids).await?
+            self.query_bridge_blooms(ctx, bridge_limit, &anchor_ids)
+                .await?
         };
 
         Ok(crate::store::WakeCascade {
@@ -824,9 +825,7 @@ impl SurrealDatabase {
             query = query.bind(("current_agent", agent));
         }
 
-        let mut response = query
-            .await
-            .context("Failed to query core blooms")?;
+        let mut response = query.await.context("Failed to query core blooms")?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -861,16 +860,16 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self.db.query(&sql)
+        let mut query = self
+            .db
+            .query(&sql)
             .bind(("cutoff", cutoff_str))
             .bind(("limit", limit as i64));
         if let Some(agent) = current_agent {
             query = query.bind(("current_agent", agent));
         }
 
-        let mut response = query
-            .await
-            .context("Failed to query recent blooms")?;
+        let mut response = query.await.context("Failed to query recent blooms")?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -903,16 +902,16 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self.db.query(&sql)
+        let mut query = self
+            .db
+            .query(&sql)
             .bind(("anchor_ids", anchor_ids.to_vec()))
             .bind(("limit", limit as i64));
         if let Some(agent) = current_agent {
             query = query.bind(("current_agent", agent));
         }
 
-        let mut response = query
-            .await
-            .context("Failed to query bridge blooms")?;
+        let mut response = query.await.context("Failed to query bridge blooms")?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -951,7 +950,7 @@ impl SurrealDatabase {
                 "UPDATE knowledge SET
                 activation_count += 1,
                 last_activated = time::now()
-                WHERE id IN $ids"
+                WHERE id IN $ids",
             )
             .bind(("ids", things))
             .await
@@ -959,7 +958,10 @@ impl SurrealDatabase {
 
         let errors = response.take_errors();
         if !errors.is_empty() {
-            return Err(anyhow::anyhow!("Failed to update activations: {:?}", errors));
+            return Err(anyhow::anyhow!(
+                "Failed to update activations: {:?}",
+                errors
+            ));
         }
 
         Ok(())
@@ -1894,7 +1896,12 @@ impl KnowledgeStore for SurrealDatabase {
         self.count()
     }
 
-    fn wake_cascade(&self, ctx: &crate::store::AgentContext, limit: usize, days: i64) -> Result<crate::store::WakeCascade> {
+    fn wake_cascade(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+        days: i64,
+    ) -> Result<crate::store::WakeCascade> {
         self.wake_cascade(ctx, limit, days)
     }
 

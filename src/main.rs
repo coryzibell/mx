@@ -1224,13 +1224,22 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
             // Update resonance if provided
             if let Some(new_resonance) = resonance {
-                changes.push(format!("resonance: {} -> {}", entry.resonance, new_resonance));
+                changes.push(format!(
+                    "resonance: {} -> {}",
+                    entry.resonance, new_resonance
+                ));
                 entry.resonance = new_resonance;
             }
 
             // Update resonance type if provided
             if let Some(ref new_type) = resonance_type {
-                let valid_types = ["foundational", "transformative", "relational", "operational", "ephemeral"];
+                let valid_types = [
+                    "foundational",
+                    "transformative",
+                    "relational",
+                    "operational",
+                    "ephemeral",
+                ];
                 if !valid_types.contains(&new_type.as_str()) {
                     eprintln!("Error: Invalid resonance type '{}'", new_type);
                     eprintln!("Valid types: {}", valid_types.join(", "));
@@ -1408,7 +1417,12 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
         }
 
-        MemoryCommands::Wake { limit, days, json, no_activate } => {
+        MemoryCommands::Wake {
+            limit,
+            days,
+            json,
+            no_activate,
+        } => {
             let db = store::create_store(&config.db_path)?;
 
             // Get current agent context - required for wake
@@ -2276,43 +2290,36 @@ fn print_wake_cascade(cascade: &store::WakeCascade) {
     if !cascade.core.is_empty() {
         println!("\n=== CORE (Foundational) ===\n");
         for entry in &cascade.core {
-            println!("  {} [{}] {}",
-                entry.id,
-                entry.resonance,
-                entry.title
-            );
+            println!("  {} [{}] {}", entry.id, entry.resonance, entry.title);
         }
     }
 
     if !cascade.recent.is_empty() {
         println!("\n=== RECENT ===\n");
         for entry in &cascade.recent {
-            println!("  {} [{}] {}",
-                entry.id,
-                entry.resonance,
-                entry.title
-            );
+            println!("  {} [{}] {}", entry.id, entry.resonance, entry.title);
         }
     }
 
     if !cascade.bridges.is_empty() {
         println!("\n=== BRIDGES ===\n");
         for entry in &cascade.bridges {
-            println!("  {} [{}] {}",
-                entry.id,
-                entry.resonance,
-                entry.title
-            );
+            println!("  {} [{}] {}", entry.id, entry.resonance, entry.title);
         }
     }
 
     let total = cascade.core.len() + cascade.recent.len() + cascade.bridges.len();
-    println!("\nLoaded {} memories across {} layers.",
+    println!(
+        "\nLoaded {} memories across {} layers.",
         total,
-        [!cascade.core.is_empty(), !cascade.recent.is_empty(), !cascade.bridges.is_empty()]
-            .iter()
-            .filter(|&&x| x)
-            .count()
+        [
+            !cascade.core.is_empty(),
+            !cascade.recent.is_empty(),
+            !cascade.bridges.is_empty()
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count()
     );
 }
 
