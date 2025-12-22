@@ -53,10 +53,33 @@ pub struct KnowledgeEntry {
     /// Visibility: public or private
     #[serde(default = "default_visibility")]
     pub visibility: String,
+
+    // Resonance fields - for wake-up cascade
+    #[serde(default)]
+    pub resonance: i32, // 1-10 (with overflow for transcendent)
+
+    #[serde(default)]
+    pub resonance_type: Option<String>, // foundational, transformative, relational, operational, ephemeral
+
+    #[serde(default)]
+    pub last_activated: Option<String>, // RFC3339 timestamp
+
+    #[serde(default)]
+    pub activation_count: i32,
+
+    #[serde(default = "default_decay_rate")]
+    pub decay_rate: f64, // 0.0-1.0, some memories fade, some don't
+
+    #[serde(default)]
+    pub anchors: Vec<String>, // IDs of related blooms this connects to
 }
 
 fn default_visibility() -> String {
     "public".to_string()
+}
+
+fn default_decay_rate() -> f64 {
+    0.0
 }
 
 /// Custom deserializer for applicability - accepts string or array
@@ -184,6 +207,13 @@ impl KnowledgeEntry {
             content_type_id: Some("text".to_string()),
             owner: None,
             visibility: "public".to_string(),
+            // Resonance fields - initialized to defaults
+            resonance: 0,
+            resonance_type: None,
+            last_activated: None,
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
         })
     }
 }

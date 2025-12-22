@@ -112,6 +112,15 @@ DEFINE FIELD IF NOT EXISTS entry_type ON knowledge TYPE record<entry_type>;
 DEFINE FIELD IF NOT EXISTS content_type ON knowledge TYPE record<content_type> DEFAULT content_type:text;
 DEFINE FIELD IF NOT EXISTS session ON knowledge TYPE option<record<session>>;
 
+-- Resonance fields for wake-up cascade
+DEFINE FIELD IF NOT EXISTS resonance ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS resonance_type ON knowledge TYPE option<string>
+  ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral'];
+DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
+DEFINE FIELD IF NOT EXISTS anchors ON knowledge TYPE option<array<string>>;
+
 -- Indexes for common queries
 DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
 DEFINE INDEX IF NOT EXISTS knowledge_source_project ON knowledge FIELDS source_project;
@@ -124,6 +133,11 @@ DEFINE INDEX IF NOT EXISTS knowledge_updated ON knowledge FIELDS updated_at;
 DEFINE INDEX IF NOT EXISTS knowledge_ephemeral ON knowledge FIELDS ephemeral;
 DEFINE INDEX IF NOT EXISTS knowledge_owner ON knowledge FIELDS owner;
 DEFINE INDEX IF NOT EXISTS knowledge_visibility ON knowledge FIELDS visibility;
+
+-- Resonance indexes for wake-up queries
+DEFINE INDEX IF NOT EXISTS knowledge_resonance ON knowledge FIELDS resonance;
+DEFINE INDEX IF NOT EXISTS knowledge_resonance_type ON knowledge FIELDS resonance_type;
+DEFINE INDEX IF NOT EXISTS knowledge_last_activated ON knowledge FIELDS last_activated;
 
 -- =============================================================================
 -- FULL-TEXT SEARCH

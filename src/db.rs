@@ -284,6 +284,12 @@ impl Database {
                     content_type_id: row.get(15)?,
                     owner: None,
                     visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -333,6 +339,12 @@ impl Database {
                     content_type_id: row.get(15)?,
                     owner: None,
                     visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -381,6 +393,12 @@ impl Database {
                     content_type_id: row.get(15)?,
                     owner: None,
                     visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
                 })
             })
             .ok();
@@ -1067,6 +1085,20 @@ impl KnowledgeStore for Database {
         self.count()
     }
 
+    fn wake_cascade(&self, _ctx: &crate::store::AgentContext, _limit: usize, _days: i64) -> Result<crate::store::WakeCascade> {
+        // SQLite backend doesn't support wake cascade yet - return empty cascade
+        Ok(crate::store::WakeCascade {
+            core: vec![],
+            recent: vec![],
+            bridges: vec![],
+        })
+    }
+
+    fn update_activations(&self, _ids: &[String]) -> Result<()> {
+        // SQLite backend doesn't support activation tracking yet - no-op
+        Ok(())
+    }
+
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_tags_for_entry(entry_id)
     }
@@ -1249,6 +1281,12 @@ mod tests {
             content_type_id: Some("text".to_string()),
             owner: None,
             visibility: "public".to_string(),
+            resonance: 0,
+            resonance_type: None,
+            last_activated: None,
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
         }
     }
 

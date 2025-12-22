@@ -42,6 +42,27 @@ impl AgentContext {
     }
 }
 
+/// Result of a wake-up cascade query
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WakeCascade {
+    /// Layer 1: Foundational/transformative, resonance 8+
+    pub core: Vec<crate::knowledge::KnowledgeEntry>,
+    /// Layer 2: Last N days, sorted by resonance * recency
+    pub recent: Vec<crate::knowledge::KnowledgeEntry>,
+    /// Layer 3: Anchored to core/recent, resonance 5+
+    pub bridges: Vec<crate::knowledge::KnowledgeEntry>,
+}
+
+impl WakeCascade {
+    pub fn all_ids(&self) -> Vec<String> {
+        self.core.iter()
+            .chain(self.recent.iter())
+            .chain(self.bridges.iter())
+            .map(|e| e.id.clone())
+            .collect()
+    }
+}
+
 /// Abstract interface for knowledge storage backends (SQLite, SurrealDB, etc)
 pub trait KnowledgeStore {
     // =========================================================================
@@ -65,6 +86,12 @@ pub trait KnowledgeStore {
 
     /// Count total entries
     fn count(&self) -> Result<usize>;
+
+    /// Wake-up cascade query (three-layer resonance)
+    fn wake_cascade(&self, ctx: &AgentContext, limit: usize, days: i64) -> Result<WakeCascade>;
+
+    /// Update activation counts for loaded blooms
+    fn update_activations(&self, ids: &[String]) -> Result<()>;
 
     // =========================================================================
     // TAG OPERATIONS

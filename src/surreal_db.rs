@@ -108,6 +108,31 @@ pub struct SurrealKnowledgeRecord {
     /// Updated timestamp (from `<string>updated_at`)
     #[serde(default)]
     pub updated_at: Option<String>,
+
+    // === Resonance fields (for wake-up cascade) ===
+    /// Resonance level (1-10, with overflow for transcendent)
+    #[serde(default)]
+    pub resonance: i32,
+
+    /// Resonance type: foundational, transformative, relational, operational, ephemeral
+    #[serde(default)]
+    pub resonance_type: Option<String>,
+
+    /// Last activated timestamp
+    #[serde(default)]
+    pub last_activated: Option<String>,
+
+    /// Number of times activated
+    #[serde(default)]
+    pub activation_count: i32,
+
+    /// Decay rate (0.0-1.0)
+    #[serde(default)]
+    pub decay_rate: f64,
+
+    /// Anchor IDs (related blooms this connects to)
+    #[serde(default)]
+    pub anchors: Vec<String>,
 }
 
 fn default_visibility() -> String {
@@ -142,6 +167,12 @@ impl SurrealKnowledgeRecord {
             updated_at: self.updated_at,
             tags,
             applicability,
+            resonance: self.resonance,
+            resonance_type: self.resonance_type,
+            last_activated: self.last_activated,
+            activation_count: self.activation_count,
+            decay_rate: self.decay_rate,
+            anchors: self.anchors,
         }
     }
 }
@@ -254,6 +285,42 @@ impl SurrealDatabase {
         &self.db
     }
 
+    /// Build standard knowledge entry SELECT fields
+    fn knowledge_select_fields() -> &'static str {
+        "meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
+        owner, visibility,
+        meta::id(category) AS category_id,
+        meta::id(source_type) AS source_type_id,
+        meta::id(entry_type) AS entry_type_id,
+        meta::id(content_type) AS content_type_id,
+        IF source_project THEN meta::id(source_project) ELSE null END AS source_project_id,
+        IF source_agent THEN meta::id(source_agent) ELSE null END AS source_agent_id,
+        IF session THEN meta::id(session) ELSE null END AS session_id,
+        <string>created_at AS created_at, <string>updated_at AS updated_at,
+        IF resonance THEN resonance ELSE 0 END AS resonance,
+        resonance_type,
+        IF last_activated THEN <string>last_activated ELSE null END AS last_activated,
+        IF activation_count THEN activation_count ELSE 0 END AS activation_count,
+        IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
+        IF anchors THEN anchors ELSE [] END AS anchors"
+    }
+
+    /// Build visibility filter for privacy-aware queries
+    fn build_visibility_filter(ctx: &crate::store::AgentContext) -> (String, Option<String>) {
+        if ctx.include_private {
+            if let Some(ref agent) = ctx.agent_id {
+                (
+                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
+                    Some(agent.clone())
+                )
+            } else {
+                ("AND (visibility = 'public')".to_string(), None)
+            }
+        } else {
+            ("AND (visibility = 'public')".to_string(), None)
+        }
+    }
+
     // =========================================================================
     // KNOWLEDGE CRUD OPERATIONS
     // =========================================================================
@@ -281,7 +348,13 @@ impl SurrealDatabase {
             category = type::thing('category', $category_id),
             source_type = type::thing('source_type', $source_type_id),
             entry_type = type::thing('entry_type', $entry_type_id),
-            content_type = type::thing('content_type', $content_type_id)"
+            content_type = type::thing('content_type', $content_type_id),
+            resonance = $resonance,
+            resonance_type = $resonance_type,
+            last_activated = $last_activated,
+            activation_count = $activation_count,
+            decay_rate = $decay_rate,
+            anchors = $anchors"
             .to_string();
 
         // Add optional fields
@@ -338,7 +411,13 @@ impl SurrealDatabase {
                     .content_type_id
                     .clone()
                     .unwrap_or_else(|| "text".to_string()),
-            ));
+            ))
+            .bind(("resonance", entry.resonance))
+            .bind(("resonance_type", entry.resonance_type.clone()))
+            .bind(("last_activated", entry.last_activated.clone()))
+            .bind(("activation_count", entry.activation_count))
+            .bind(("decay_rate", entry.decay_rate))
+            .bind(("anchors", entry.anchors.clone()));
 
         // Bind optional parameters
         if let Some(ref proj) = entry.source_project_id {
@@ -466,35 +545,13 @@ impl SurrealDatabase {
     ) -> Result<Option<KnowledgeEntry>> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
-        // Build visibility filter based on context
-        // Use parameterized query for owner to prevent injection
-        let (visibility_clause, current_agent) = if ctx.include_private {
-            if let Some(ref agent) = ctx.agent_id {
-                (
-                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
-                    Some(agent.clone())
-                )
-            } else {
-                ("AND (visibility = 'public')".to_string(), None)
-            }
-        } else {
-            ("AND (visibility = 'public')".to_string(), None)
-        };
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
         let sql = format!(
-            "SELECT
-                meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
-                owner, visibility,
-                meta::id(category) AS category_id,
-                meta::id(source_type) AS source_type_id,
-                meta::id(entry_type) AS entry_type_id,
-                meta::id(content_type) AS content_type_id,
-                IF source_project THEN meta::id(source_project) ELSE null END AS source_project_id,
-                IF source_agent THEN meta::id(source_agent) ELSE null END AS source_agent_id,
-                IF session THEN meta::id(session) ELSE null END AS session_id,
-                <string>created_at AS created_at, <string>updated_at AS updated_at
+            "SELECT {}
             FROM knowledge
             WHERE meta::id(id) = $id {}",
+            Self::knowledge_select_fields(),
             visibility_clause
         );
 
@@ -558,35 +615,13 @@ impl SurrealDatabase {
     ) -> Result<Vec<KnowledgeEntry>> {
         let query_owned = query.to_string();
 
-        // Build visibility filter based on context
-        // Use parameterized query for owner to prevent injection
-        let (visibility_clause, current_agent) = if ctx.include_private {
-            if let Some(ref agent) = ctx.agent_id {
-                (
-                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
-                    Some(agent.clone())
-                )
-            } else {
-                ("AND (visibility = 'public')".to_string(), None)
-            }
-        } else {
-            ("AND (visibility = 'public')".to_string(), None)
-        };
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
         let sql = format!(
-            "SELECT
-                meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
-                owner, visibility,
-                meta::id(category) AS category_id,
-                meta::id(source_type) AS source_type_id,
-                meta::id(entry_type) AS entry_type_id,
-                meta::id(content_type) AS content_type_id,
-                IF source_project THEN meta::id(source_project) ELSE null END AS source_project_id,
-                IF source_agent THEN meta::id(source_agent) ELSE null END AS source_agent_id,
-                IF session THEN meta::id(session) ELSE null END AS session_id,
-                <string>created_at AS created_at, <string>updated_at AS updated_at
+            "SELECT {}
             FROM knowledge
             WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {}",
+            Self::knowledge_select_fields(),
             visibility_clause
         );
 
@@ -700,7 +735,234 @@ impl SurrealDatabase {
             owner: serde_json::from_value(obj["owner"].clone()).ok(),
             visibility: serde_json::from_value(obj["visibility"].clone())
                 .unwrap_or_else(|_| "public".to_string()),
+            resonance: serde_json::from_value(obj["resonance"].clone()).unwrap_or(0),
+            resonance_type: serde_json::from_value(obj["resonance_type"].clone()).ok(),
+            last_activated: serde_json::from_value(obj["last_activated"].clone()).ok(),
+            activation_count: serde_json::from_value(obj["activation_count"].clone()).unwrap_or(0),
+            decay_rate: serde_json::from_value(obj["decay_rate"].clone()).unwrap_or(0.0),
+            anchors: serde_json::from_value(obj["anchors"].clone()).unwrap_or_default(),
         })
+    }
+
+    // =========================================================================
+    // WAKE CASCADE - Three-layer resonance query for identity loading
+    // =========================================================================
+
+    /// Wake-up cascade: Load Q's identity through three layers of resonance
+    pub fn wake_cascade(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+        days: i64,
+    ) -> Result<crate::store::WakeCascade> {
+        Self::runtime().block_on(self.wake_cascade_async(ctx, limit, days))
+    }
+
+    async fn wake_cascade_async(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+        days: i64,
+    ) -> Result<crate::store::WakeCascade> {
+        // Split limit across layers: 50% core, 25% recent, 25% bridges
+        let core_limit = limit / 2;
+        let recent_limit = limit / 4;
+        let bridge_limit = limit / 4;
+
+        // Layer 1: Core foundational/transformative blooms (resonance 8+)
+        let core = self.query_core_blooms(ctx, core_limit).await?;
+
+        // Layer 2: Recent blooms (last N days)
+        let recent = self.query_recent_blooms(ctx, recent_limit, days).await?;
+
+        // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+)
+        let mut anchor_ids: Vec<String> = core
+            .iter()
+            .chain(recent.iter())
+            .map(|e| e.id.strip_prefix("kn-").unwrap_or(&e.id).to_string())
+            .collect();
+
+        // Deduplicate anchor IDs
+        anchor_ids.sort();
+        anchor_ids.dedup();
+
+        let bridges = if anchor_ids.is_empty() {
+            Vec::new()
+        } else {
+            self.query_bridge_blooms(ctx, bridge_limit, &anchor_ids).await?
+        };
+
+        Ok(crate::store::WakeCascade {
+            core,
+            recent,
+            bridges,
+        })
+    }
+
+    /// Layer 1: Query core blooms (resonance 8+, foundational/transformative)
+    async fn query_core_blooms(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+    ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE resonance >= 8
+            AND resonance_type IN ['foundational', 'transformative']
+            {}
+            ORDER BY resonance DESC
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql).bind(("limit", limit as i64));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+
+        let mut response = query
+            .await
+            .context("Failed to query core blooms")?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
+    /// Layer 2: Query recent blooms (last N days, sorted by resonance)
+    async fn query_recent_blooms(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+        days: i64,
+    ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Calculate cutoff date (N days ago)
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE last_activated > <datetime>$cutoff
+            {}
+            ORDER BY resonance DESC
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql)
+            .bind(("cutoff", cutoff_str))
+            .bind(("limit", limit as i64));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+
+        let mut response = query
+            .await
+            .context("Failed to query recent blooms")?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
+    /// Layer 3: Query bridge blooms (anchored to core/recent, resonance 5+)
+    async fn query_bridge_blooms(
+        &self,
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+        anchor_ids: &[String],
+    ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Use array::intersect to check if anchors array has any overlap with anchor_ids
+        // If intersection is non-empty, this bloom is anchored to a core/recent bloom
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
+            AND resonance >= 5
+            {}
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql)
+            .bind(("anchor_ids", anchor_ids.to_vec()))
+            .bind(("limit", limit as i64));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+
+        let mut response = query
+            .await
+            .context("Failed to query bridge blooms")?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
+    /// Update activation counts for loaded blooms
+    pub fn update_activations(&self, ids: &[String]) -> Result<()> {
+        Self::runtime().block_on(self.update_activations_async(ids))
+    }
+
+    async fn update_activations_async(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        // Strip "kn-" prefix from IDs if present
+        let clean_ids: Vec<String> = ids
+            .iter()
+            .map(|id| id.strip_prefix("kn-").unwrap_or(id).to_string())
+            .collect();
+
+        // Build array of Thing references
+        let things: Vec<Thing> = clean_ids
+            .iter()
+            .map(|id| Thing::from(("knowledge", id.as_str())))
+            .collect();
+
+        let mut response = self
+            .db
+            .query(
+                "UPDATE knowledge SET
+                activation_count += 1,
+                last_activated = time::now()
+                WHERE id IN $ids"
+            )
+            .bind(("ids", things))
+            .await
+            .context("Failed to update activations")?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Failed to update activations: {:?}", errors));
+        }
+
+        Ok(())
     }
 
     // =========================================================================
@@ -1401,36 +1663,14 @@ impl SurrealDatabase {
     ) -> Result<Vec<KnowledgeEntry>> {
         let category_thing = Thing::from(("category", category));
 
-        // Build visibility filter based on context
-        // Use parameterized query for owner to prevent injection
-        let (visibility_clause, current_agent) = if ctx.include_private {
-            if let Some(ref agent) = ctx.agent_id {
-                (
-                    "AND ((visibility = 'public') OR (visibility = 'private' AND owner = $current_agent))".to_string(),
-                    Some(agent.clone())
-                )
-            } else {
-                ("AND (visibility = 'public')".to_string(), None)
-            }
-        } else {
-            ("AND (visibility = 'public')".to_string(), None)
-        };
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
         let sql = format!(
-            "SELECT
-                meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
-                owner, visibility,
-                meta::id(category) AS category_id,
-                meta::id(source_type) AS source_type_id,
-                meta::id(entry_type) AS entry_type_id,
-                meta::id(content_type) AS content_type_id,
-                IF source_project THEN meta::id(source_project) ELSE null END AS source_project_id,
-                IF source_agent THEN meta::id(source_agent) ELSE null END AS source_agent_id,
-                IF session THEN meta::id(session) ELSE null END AS session_id,
-                <string>created_at AS created_at, <string>updated_at AS updated_at
+            "SELECT {}
             FROM knowledge
             WHERE category = $category {}
             ORDER BY title",
+            Self::knowledge_select_fields(),
             visibility_clause
         );
 
@@ -1652,6 +1892,14 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn count(&self) -> Result<usize> {
         self.count()
+    }
+
+    fn wake_cascade(&self, ctx: &crate::store::AgentContext, limit: usize, days: i64) -> Result<crate::store::WakeCascade> {
+        self.wake_cascade(ctx, limit, days)
+    }
+
+    fn update_activations(&self, ids: &[String]) -> Result<()> {
+        self.update_activations(ids)
     }
 
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {

@@ -400,6 +400,18 @@ enum MemoryCommands {
         /// Update content type
         #[arg(long)]
         content_type: Option<String>,
+
+        /// Update resonance level (1-10, or higher for transcendent)
+        #[arg(long)]
+        resonance: Option<i32>,
+
+        /// Update resonance type (foundational, transformative, relational, operational, ephemeral)
+        #[arg(long)]
+        resonance_type: Option<String>,
+
+        /// Update anchors (comma-separated bloom IDs this connects to)
+        #[arg(long)]
+        anchors: Option<String>,
     },
 
     /// Apply database schema migrations
@@ -492,6 +504,25 @@ enum MemoryCommands {
     ContentTypes {
         #[command(subcommand)]
         command: ContentTypesCommands,
+    },
+
+    /// Wake up with resonant identity cascade
+    Wake {
+        /// Number of blooms to return (default: 20)
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Include memories activated in last N days (default: 7)
+        #[arg(short, long, default_value = "7")]
+        days: i64,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Don't update activation counts
+        #[arg(long)]
+        no_activate: bool,
     },
 }
 
@@ -1090,6 +1121,12 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 content_type_id: Some(content_type),
                 owner: entry_owner.clone(),
                 visibility: visibility.clone(),
+                resonance: 0,
+                resonance_type: None,
+                last_activated: None,
+                activation_count: 0,
+                decay_rate: 0.0,
+                anchors: vec![],
             };
 
             // Insert into database
@@ -1124,6 +1161,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             tags,
             applicability,
             content_type,
+            resonance,
+            resonance_type,
+            anchors,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1180,6 +1220,38 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     entry.category_id, new_category
                 ));
                 entry.category_id = new_category;
+            }
+
+            // Update resonance if provided
+            if let Some(new_resonance) = resonance {
+                changes.push(format!("resonance: {} -> {}", entry.resonance, new_resonance));
+                entry.resonance = new_resonance;
+            }
+
+            // Update resonance type if provided
+            if let Some(ref new_type) = resonance_type {
+                let valid_types = ["foundational", "transformative", "relational", "operational", "ephemeral"];
+                if !valid_types.contains(&new_type.as_str()) {
+                    eprintln!("Error: Invalid resonance type '{}'", new_type);
+                    eprintln!("Valid types: {}", valid_types.join(", "));
+                    std::process::exit(1);
+                }
+                changes.push(format!(
+                    "resonance_type: {:?} -> {}",
+                    entry.resonance_type, new_type
+                ));
+                entry.resonance_type = Some(new_type.clone());
+            }
+
+            // Update anchors if provided
+            if let Some(ref new_anchors) = anchors {
+                let anchor_list: Vec<String> = new_anchors
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                changes.push(format!("anchors: {:?} -> {:?}", entry.anchors, anchor_list));
+                entry.anchors = anchor_list;
             }
 
             // Update timestamp
@@ -1333,6 +1405,39 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     );
                     std::process::exit(1);
                 }
+            }
+        }
+
+        MemoryCommands::Wake { limit, days, json, no_activate } => {
+            let db = store::create_store(&config.db_path)?;
+
+            // Get current agent context - required for wake
+            let current_agent = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => agent,
+                _ => {
+                    eprintln!("Error: MX_CURRENT_AGENT not set. Cannot wake without identity.");
+                    std::process::exit(1);
+                }
+            };
+
+            let ctx = store::AgentContext::for_agent(current_agent);
+
+            // Run cascade
+            let cascade = db.wake_cascade(&ctx, limit, days)?;
+
+            // Update activations unless disabled
+            if !no_activate {
+                let ids = cascade.all_ids();
+                if !ids.is_empty() {
+                    db.update_activations(&ids)?;
+                }
+            }
+
+            // Output
+            if json {
+                println!("{}", serde_json::to_string_pretty(&cascade)?);
+            } else {
+                print_wake_cascade(&cascade);
             }
         }
     }
@@ -2167,6 +2272,50 @@ fn parse_frontmatter(content: &str) -> Option<(String, String)> {
     Some((frontmatter, body))
 }
 
+fn print_wake_cascade(cascade: &store::WakeCascade) {
+    if !cascade.core.is_empty() {
+        println!("\n=== CORE (Foundational) ===\n");
+        for entry in &cascade.core {
+            println!("  {} [{}] {}",
+                entry.id,
+                entry.resonance,
+                entry.title
+            );
+        }
+    }
+
+    if !cascade.recent.is_empty() {
+        println!("\n=== RECENT ===\n");
+        for entry in &cascade.recent {
+            println!("  {} [{}] {}",
+                entry.id,
+                entry.resonance,
+                entry.title
+            );
+        }
+    }
+
+    if !cascade.bridges.is_empty() {
+        println!("\n=== BRIDGES ===\n");
+        for entry in &cascade.bridges {
+            println!("  {} [{}] {}",
+                entry.id,
+                entry.resonance,
+                entry.title
+            );
+        }
+    }
+
+    let total = cascade.core.len() + cascade.recent.len() + cascade.bridges.len();
+    println!("\nLoaded {} memories across {} layers.",
+        total,
+        [!cascade.core.is_empty(), !cascade.recent.is_empty(), !cascade.bridges.is_empty()]
+            .iter()
+            .filter(|&&x| x)
+            .count()
+    );
+}
+
 fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
     println!("  {} [{}]", entry.id, entry.category_id);
     println!("  {}", entry.title);
@@ -2188,6 +2337,9 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     println!("ID:       {}", entry.id);
     println!("Category: {}", entry.category_id);
     println!("Title:    {}", entry.title);
+    if entry.resonance > 0 {
+        println!("Resonance: {}", entry.resonance);
+    }
     if let Some(path) = &entry.file_path {
         println!("File:     {}", path);
     }
