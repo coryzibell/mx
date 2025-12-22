@@ -4,12 +4,12 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use walkdir::WalkDir;
 
-use crate::db::Database;
 use crate::knowledge::KnowledgeEntry;
+use crate::store::KnowledgeStore;
 
 /// Index configuration
 pub struct IndexConfig {
-    pub zion_root: std::path::PathBuf,
+    pub memory_root: std::path::PathBuf,
     pub db_path: std::path::PathBuf,
     pub jsonl_path: std::path::PathBuf,
     pub excluded_dirs: Vec<String>,
@@ -18,29 +18,31 @@ pub struct IndexConfig {
 impl Default for IndexConfig {
     fn default() -> Self {
         let home = dirs::home_dir().expect("No home directory");
-        let matrix = home.join(".matrix");
+        let base = std::env::var("MX_MEMORY_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| home.join(".crystal-tokyo"));
 
         Self {
-            zion_root: matrix.join("zion"),
-            db_path: matrix.join("zion").join("knowledge.db"),
-            jsonl_path: matrix.join("zion").join("index.jsonl"),
+            memory_root: base.join("memory"),
+            db_path: base.join("memory").join("knowledge.db"),
+            jsonl_path: base.join("memory").join("index.jsonl"),
             excluded_dirs: vec!["future".to_string()],
         }
     }
 }
 
-/// Rebuild the entire index from zion markdown files
+/// Rebuild the entire index from memory markdown files
 pub fn rebuild_index(config: &IndexConfig) -> Result<IndexStats> {
     // Ensure db directory exists
     if let Some(parent) = config.db_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let db = Database::open(&config.db_path)?;
+    let db = crate::store::create_store(&config.db_path)?;
     let mut stats = IndexStats::default();
 
-    // Walk zion directory
-    for entry in WalkDir::new(&config.zion_root)
+    // Walk memory directory
+    for entry in WalkDir::new(&config.memory_root)
         .into_iter()
         .filter_entry(|e| !is_excluded(e, &config.excluded_dirs))
     {
@@ -57,7 +59,7 @@ pub fn rebuild_index(config: &IndexConfig) -> Result<IndexStats> {
             continue;
         }
 
-        match KnowledgeEntry::from_markdown(path, &config.zion_root) {
+        match KnowledgeEntry::from_markdown(path, &config.memory_root) {
             Ok(entry) => {
                 db.upsert_knowledge(&entry)?;
                 stats.indexed += 1;
@@ -88,15 +90,17 @@ fn is_excluded(entry: &walkdir::DirEntry, excluded: &[String]) -> bool {
 }
 
 /// Export database to markdown directory structure
-pub fn export_markdown(db: &Database, dir_path: &Path) -> Result<()> {
+pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
     // Create base directory
     fs::create_dir_all(dir_path)
         .with_context(|| format!("Failed to create directory {:?}", dir_path))?;
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        let entries = db.list_by_category(&category.id)?;
+        let entries = db.list_by_category(&category.id, &ctx)?;
         if entries.is_empty() {
             continue;
         }
@@ -216,14 +220,16 @@ fn get_unique_path(path: &Path) -> Result<std::path::PathBuf> {
 }
 
 /// Export database to JSONL
-pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
+pub fn export_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
     let mut writer = BufWriter::new(file);
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id)? {
+        for entry in db.list_by_category(&category.id, &ctx)? {
             let json = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", json)?;
         }
@@ -234,7 +240,7 @@ pub fn export_jsonl(db: &Database, path: &Path) -> Result<()> {
 }
 
 /// Export database to CSV (metadata only, no body)
-pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
+pub fn export_csv(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     let file = File::create(path).with_context(|| format!("Failed to create {:?}", path))?;
     let mut writer = BufWriter::new(file);
 
@@ -245,9 +251,11 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
     )?;
 
     // Export all categories dynamically
+    // Use public_only context to export all non-private entries
+    let ctx = crate::store::AgentContext::public_only();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id)? {
+        for entry in db.list_by_category(&category.id, &ctx)? {
             let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
             let applicability = entry.applicability.join(";");
             let source_project = entry.source_project_id.as_deref().unwrap_or("");
@@ -274,7 +282,7 @@ pub fn export_csv(db: &Database, path: &Path) -> Result<()> {
 }
 
 /// Import JSONL into database
-pub fn import_jsonl(db: &Database, path: &Path) -> Result<usize> {
+pub fn import_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<usize> {
     let file = File::open(path).with_context(|| format!("Failed to open {:?}", path))?;
     let reader = BufReader::new(file);
 

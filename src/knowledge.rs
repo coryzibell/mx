@@ -47,6 +47,16 @@ pub struct KnowledgeEntry {
     /// Content type: text, code, config, data, binary
     #[serde(default)]
     pub content_type_id: Option<String>,
+    /// Owner of the entry (if private)
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Visibility: public or private
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+}
+
+fn default_visibility() -> String {
+    "public".to_string()
 }
 
 /// Custom deserializer for applicability - accepts string or array
@@ -114,14 +124,14 @@ impl KnowledgeEntry {
     }
 
     /// Parse a markdown file into a knowledge entry
-    pub fn from_markdown(path: &Path, zion_root: &Path) -> Result<Self> {
+    pub fn from_markdown(path: &Path, memory_root: &Path) -> Result<Self> {
         let content =
             fs::read_to_string(path).with_context(|| format!("Failed to read {:?}", path))?;
 
         let (frontmatter, body) = parse_frontmatter(&content)?;
 
         // Derive category from path if not in frontmatter
-        let relative = path.strip_prefix(zion_root).unwrap_or(path);
+        let relative = path.strip_prefix(memory_root).unwrap_or(path);
         let category_id = frontmatter.category.clone().unwrap_or_else(|| {
             relative
                 .components()
@@ -172,6 +182,8 @@ impl KnowledgeEntry {
             session_id: None,
             ephemeral: false,
             content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
         })
     }
 }
