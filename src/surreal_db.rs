@@ -307,7 +307,8 @@ impl SurrealDatabase {
         IF last_activated THEN <string>last_activated ELSE null END AS last_activated,
         IF activation_count THEN activation_count ELSE 0 END AS activation_count,
         IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
-        IF anchors THEN anchors ELSE [] END AS anchors"
+        IF anchors THEN anchors ELSE [] END AS anchors,
+        wake_phrase"
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -358,7 +359,8 @@ impl SurrealDatabase {
             resonance_type = $resonance_type,
             activation_count = $activation_count,
             decay_rate = $decay_rate,
-            anchors = $anchors"
+            anchors = $anchors,
+            wake_phrase = $wake_phrase"
             .to_string();
 
         // Add optional fields
@@ -423,7 +425,8 @@ impl SurrealDatabase {
             .bind(("resonance_type", entry.resonance_type.clone()))
             .bind(("activation_count", entry.activation_count))
             .bind(("decay_rate", entry.decay_rate))
-            .bind(("anchors", entry.anchors.clone()));
+            .bind(("anchors", entry.anchors.clone()))
+            .bind(("wake_phrase", entry.wake_phrase.clone()));
 
         // Bind optional parameters
         if let Some(ref proj) = entry.source_project_id {
