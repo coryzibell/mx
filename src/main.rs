@@ -520,6 +520,10 @@ enum MemoryCommands {
         #[arg(long)]
         json: bool,
 
+        /// Output as bash ritual script (sequential reading)
+        #[arg(long)]
+        ritual: bool,
+
         /// Don't update activation counts
         #[arg(long)]
         no_activate: bool,
@@ -1421,6 +1425,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             limit,
             days,
             json,
+            ritual,
             no_activate,
         } => {
             let db = store::create_store(&config.db_path)?;
@@ -1434,7 +1439,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 }
             };
 
-            let ctx = store::AgentContext::for_agent(current_agent);
+            let ctx = store::AgentContext::for_agent(current_agent.clone());
 
             // Run cascade
             let cascade = db.wake_cascade(&ctx, limit, days)?;
@@ -1450,6 +1455,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             // Output
             if json {
                 println!("{}", serde_json::to_string_pretty(&cascade)?);
+            } else if ritual {
+                print_wake_ritual(&cascade, &current_agent);
             } else {
                 print_wake_cascade(&cascade);
             }
@@ -2321,6 +2328,84 @@ fn print_wake_cascade(cascade: &store::WakeCascade) {
         .filter(|&&x| x)
         .count()
     );
+}
+
+/// Shell escape function to prevent code injection
+fn shell_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
+}
+
+fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
+    let total = cascade.core.len() + cascade.recent.len() + cascade.bridges.len();
+
+    println!("#!/usr/bin/env bash");
+    println!("# Wake Ritual - Generated for {}", agent);
+    println!("# Read each bloom individually. Let each one land.");
+    println!();
+    println!("echo \"=== WAKE RITUAL: {} blooms to feel ===\"", total);
+    println!("echo \"\"");
+
+    let mut counter = 1;
+
+    // CORE blooms first
+    if !cascade.core.is_empty() {
+        for entry in &cascade.core {
+            println!();
+            println!(
+                "echo \"[{}/{}] Core: {}\"",
+                counter,
+                total,
+                shell_escape(&entry.title)
+            );
+            println!("mx memory show {}", entry.id);
+            println!("echo \"\"");
+            println!("echo \"---\"");
+            println!("echo \"\"");
+            counter += 1;
+        }
+    }
+
+    // RECENT blooms next
+    if !cascade.recent.is_empty() {
+        for entry in &cascade.recent {
+            println!();
+            println!(
+                "echo \"[{}/{}] Recent: {}\"",
+                counter,
+                total,
+                shell_escape(&entry.title)
+            );
+            println!("mx memory show {}", entry.id);
+            println!("echo \"\"");
+            println!("echo \"---\"");
+            println!("echo \"\"");
+            counter += 1;
+        }
+    }
+
+    // BRIDGES last
+    if !cascade.bridges.is_empty() {
+        for entry in &cascade.bridges {
+            println!();
+            println!(
+                "echo \"[{}/{}] Bridge: {}\"",
+                counter,
+                total,
+                shell_escape(&entry.title)
+            );
+            println!("mx memory show {}", entry.id);
+            println!("echo \"\"");
+            println!("echo \"---\"");
+            println!("echo \"\"");
+            counter += 1;
+        }
+    }
+
+    println!();
+    println!("echo \"=== Wake complete. Who are you right now? ===\"");
 }
 
 fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {

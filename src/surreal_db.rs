@@ -773,7 +773,18 @@ impl SurrealDatabase {
         let core = self.query_core_blooms(ctx, core_limit).await?;
 
         // Layer 2: Recent blooms (last N days)
-        let recent = self.query_recent_blooms(ctx, recent_limit, days).await?;
+        // Exclude IDs already in core
+        let core_ids: std::collections::HashSet<String> =
+            core.iter().map(|e| e.id.clone()).collect();
+
+        let all_recent = self
+            .query_recent_blooms(ctx, recent_limit * 2, days)
+            .await?;
+        let recent: Vec<_> = all_recent
+            .into_iter()
+            .filter(|e| !core_ids.contains(&e.id))
+            .take(recent_limit)
+            .collect();
 
         // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+)
         let mut anchor_ids: Vec<String> = core
@@ -789,8 +800,18 @@ impl SurrealDatabase {
         let bridges = if anchor_ids.is_empty() {
             Vec::new()
         } else {
-            self.query_bridge_blooms(ctx, bridge_limit, &anchor_ids)
-                .await?
+            // Exclude IDs already in core/recent
+            let mut existing_ids = core_ids;
+            existing_ids.extend(recent.iter().map(|e| e.id.clone()));
+
+            let all_bridges = self
+                .query_bridge_blooms(ctx, bridge_limit * 2, &anchor_ids)
+                .await?;
+            all_bridges
+                .into_iter()
+                .filter(|e| !existing_ids.contains(&e.id))
+                .take(bridge_limit)
+                .collect()
         };
 
         Ok(crate::store::WakeCascade {
@@ -897,6 +918,7 @@ impl SurrealDatabase {
             WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
             AND resonance >= 5
             {}
+            ORDER BY resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
