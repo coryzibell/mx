@@ -133,6 +133,10 @@ pub struct SurrealKnowledgeRecord {
     /// Anchor IDs (related blooms this connects to)
     #[serde(default)]
     pub anchors: Vec<String>,
+
+    /// Wake phrase for memory ritual verification
+    #[serde(default)]
+    pub wake_phrase: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -173,6 +177,7 @@ impl SurrealKnowledgeRecord {
             activation_count: self.activation_count,
             decay_rate: self.decay_rate,
             anchors: self.anchors,
+            wake_phrase: self.wake_phrase,
         }
     }
 }
@@ -302,7 +307,8 @@ impl SurrealDatabase {
         IF last_activated THEN <string>last_activated ELSE null END AS last_activated,
         IF activation_count THEN activation_count ELSE 0 END AS activation_count,
         IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
-        IF anchors THEN anchors ELSE [] END AS anchors"
+        IF anchors THEN anchors ELSE [] END AS anchors,
+        wake_phrase"
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -353,7 +359,8 @@ impl SurrealDatabase {
             resonance_type = $resonance_type,
             activation_count = $activation_count,
             decay_rate = $decay_rate,
-            anchors = $anchors"
+            anchors = $anchors,
+            wake_phrase = $wake_phrase"
             .to_string();
 
         // Add optional fields
@@ -418,7 +425,8 @@ impl SurrealDatabase {
             .bind(("resonance_type", entry.resonance_type.clone()))
             .bind(("activation_count", entry.activation_count))
             .bind(("decay_rate", entry.decay_rate))
-            .bind(("anchors", entry.anchors.clone()));
+            .bind(("anchors", entry.anchors.clone()))
+            .bind(("wake_phrase", entry.wake_phrase.clone()));
 
         // Bind optional parameters
         if let Some(ref proj) = entry.source_project_id {
@@ -773,6 +781,7 @@ impl SurrealDatabase {
             activation_count: serde_json::from_value(obj["activation_count"].clone()).unwrap_or(0),
             decay_rate: serde_json::from_value(obj["decay_rate"].clone()).unwrap_or(0.0),
             anchors: serde_json::from_value(obj["anchors"].clone()).unwrap_or_default(),
+            wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
         })
     }
 

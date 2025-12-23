@@ -72,6 +72,9 @@ pub struct KnowledgeEntry {
 
     #[serde(default)]
     pub anchors: Vec<String>, // IDs of related blooms this connects to
+
+    #[serde(default)]
+    pub wake_phrase: Option<String>, // Verification phrase for memory rituals
 }
 
 fn default_visibility() -> String {
@@ -214,6 +217,7 @@ impl KnowledgeEntry {
             activation_count: 0,
             decay_rate: 0.0,
             anchors: vec![],
+            wake_phrase: None,
         })
     }
 }

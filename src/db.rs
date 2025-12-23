@@ -290,6 +290,7 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrase: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -345,6 +346,7 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrase: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -399,6 +401,7 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrase: None,
                 })
             })
             .ok();
@@ -1292,6 +1295,7 @@ mod tests {
             activation_count: 0,
             decay_rate: 0.0,
             anchors: vec![],
+            wake_phrase: None,
         }
     }
 
