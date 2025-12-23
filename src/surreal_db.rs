@@ -474,16 +474,21 @@ impl SurrealDatabase {
         }
 
         for tag_name in &entry.tags {
-            // Ensure tag exists
-            let tag_id = RecordId::new("tag", tag_name);
-            let _: Option<Value> = self
+            // Ensure tag exists - use query UPSERT to handle schema defaults
+            let mut tag_response = self
                 .db
-                .update(tag_id.to_record_id())
-                .content(serde_json::json!({
-                    "name": tag_name
-                }))
+                .query("UPSERT type::thing('tag', $tag_id) SET name = $tag_name")
+                .bind(("tag_id", tag_name.clone()))
+                .bind(("tag_name", tag_name.clone()))
                 .await
                 .context("Failed to create tag")?;
+
+            let tag_errors = tag_response.take_errors();
+            if !tag_errors.is_empty() {
+                return Err(anyhow::anyhow!("Failed to create tag: {:?}", tag_errors));
+            }
+
+            let tag_id = RecordId::new("tag", tag_name);
 
             // Create edge
             let mut tag_edge_response = self
@@ -504,6 +509,7 @@ impl SurrealDatabase {
         }
 
         // Manage applicability - delete old, create new
+        eprintln!("DEBUG: entry.applicability = {:?}", entry.applicability);
         let mut app_delete_response = self
             .db
             .query("DELETE applies_to WHERE in = $knowledge")
@@ -519,8 +525,26 @@ impl SurrealDatabase {
             ));
         }
 
+        eprintln!("DEBUG: About to loop through {} applicability types", entry.applicability.len());
         for app_type in &entry.applicability {
+            eprintln!("DEBUG: Processing applicability type: {}", app_type);
+            // Ensure applicability_type exists - use query UPSERT to handle schema defaults
+            let mut app_type_response = self
+                .db
+                .query("UPSERT type::thing('applicability_type', $app_type_id) SET description = $app_type_desc")
+                .bind(("app_type_id", app_type.clone()))
+                .bind(("app_type_desc", format!("Applicability: {}", app_type)))
+                .await
+                .context("Failed to create applicability_type")?;
+
+            let app_type_errors = app_type_response.take_errors();
+            if !app_type_errors.is_empty() {
+                return Err(anyhow::anyhow!("Failed to create applicability_type: {:?}", app_type_errors));
+            }
+
             let app_id = RecordId::new("applicability_type", app_type);
+
+            // Create edge
             let mut app_edge_response = self
                 .db
                 .query("RELATE $knowledge->applies_to->$app_type")
@@ -734,7 +758,7 @@ impl SurrealDatabase {
         let knowledge_thing = Thing::from(("knowledge", id_str));
         let mut tags_response = self
             .db
-            .query("SELECT VALUE ->tagged_with->tag.name FROM $knowledge")
+            .query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
             .bind(("knowledge", knowledge_thing.clone()))
             .await
             .context("Failed to query tags")?;
@@ -743,7 +767,7 @@ impl SurrealDatabase {
         // Fetch applicability
         let mut app_response = self
             .db
-            .query("SELECT VALUE ->applies_to->applicability_type.id FROM $knowledge")
+            .query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
             .bind(("knowledge", knowledge_thing))
             .await
             .context("Failed to query applicability")?;
@@ -1350,7 +1374,7 @@ impl SurrealDatabase {
 
         let mut tags_response = self
             .db
-            .query("SELECT VALUE ->tagged_with->tag.name FROM $knowledge")
+            .query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
             .bind(("knowledge", entry_thing))
             .await
             .context("Failed to query tags")?;
@@ -1374,19 +1398,22 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
+        eprintln!("DEBUG GET: Looking for applicability for entry_id={}, id_part={}", entry_id, id_part);
         let mut app_response = self
             .db
-            .query("SELECT VALUE ->applies_to->applicability_type.id FROM $knowledge")
+            .query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
             .bind(("knowledge", entry_thing))
             .await
             .context("Failed to query applicability")?;
 
         let applicability_raw: Vec<Thing> = app_response.take(0).unwrap_or_default();
+        eprintln!("DEBUG GET: Found {} applicability types: {:?}", applicability_raw.len(), applicability_raw);
         let applicability: Vec<String> = applicability_raw
             .into_iter()
             .map(|t| t.id.to_string())
             .collect();
 
+        eprintln!("DEBUG GET: Returning applicability: {:?}", applicability);
         Ok(applicability)
     }
 

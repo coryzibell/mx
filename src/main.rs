@@ -1200,13 +1200,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 wake_phrase,
             };
 
-            // Insert into database
+            // Insert into database (applicability already set in struct)
             db.upsert_knowledge(&entry)?;
-
-            // Set applicability if provided
-            if !applicability_list.is_empty() {
-                db.set_applicability_for_entry(&entry.id, &applicability_list)?;
-            }
 
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
@@ -1224,8 +1219,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             if !entry.tags.is_empty() {
                 println!("  Tags: {}", entry.tags.join(", "));
             }
-            if !applicability_list.is_empty() {
-                println!("  Applicability: {}", applicability_list.join(", "));
+            if !entry.applicability.is_empty() {
+                println!("  Applicability: {}", entry.applicability.join(", "));
             }
             if let Some(ref phrase) = entry.wake_phrase {
                 println!("  Wake Phrase: {}", phrase);
@@ -1363,10 +1358,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 ));
             }
 
-            // Upsert entry
-            db.upsert_knowledge(&entry)?;
-
-            // Update tags if provided
+            // Update tags if provided - set on entry BEFORE upsert
             if let Some(tags_str) = tags {
                 let tag_list: Vec<String> = tags_str
                     .split(',')
@@ -1374,8 +1366,11 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 changes.push(format!("tags: {}", tag_list.join(", ")));
-                db.set_tags_for_entry(&entry.id, &tag_list)?;
+                entry.tags = tag_list;
             }
+
+            // Upsert entry (now includes updated tags)
+            db.upsert_knowledge(&entry)?;
 
             // Update applicability if provided
             if let Some(applicability_str) = applicability {
@@ -1385,7 +1380,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 changes.push(format!("applicability: {}", applicability_list.join(", ")));
-                db.set_applicability_for_entry(&entry.id, &applicability_list)?;
+                entry.applicability = applicability_list;
+                db.upsert_knowledge(&entry)?;
             }
 
             // Update content type if provided
@@ -2570,6 +2566,9 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     }
     if !entry.tags.is_empty() {
         println!("Tags:     {}", entry.tags.join(", "));
+    }
+    if !entry.applicability.is_empty() {
+        println!("Applicability: {}", entry.applicability.join(", "));
     }
     if let Some(created) = &entry.created_at {
         println!("Created:  {}", created);
