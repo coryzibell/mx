@@ -4,6 +4,7 @@ mod commit;
 mod convert;
 mod db;
 mod doctor;
+mod engage;
 mod github;
 mod index;
 mod knowledge;
@@ -11,6 +12,8 @@ mod session;
 mod store;
 mod surreal_db;
 mod sync;
+mod wake_ritual;
+mod wake_token;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -543,6 +546,34 @@ enum MemoryCommands {
         /// Don't update activation counts
         #[arg(long)]
         no_activate: bool,
+
+        /// Interactive engage mode - verify wake phrases (requires TTY)
+        #[arg(short = 'e', long)]
+        engage: bool,
+
+        /// Prompt to set missing wake phrases during engage mode
+        #[arg(short = 's', long, requires = "engage")]
+        set_missing: bool,
+
+        /// Start token-based wake ritual (returns first bloom and session token)
+        #[arg(long, conflicts_with_all = &["engage", "json", "ritual"])]
+        begin: bool,
+
+        /// Bloom ID for --respond or --skip operations
+        #[arg(long)]
+        bloom_id: Option<String>,
+
+        /// Submit wake phrase response
+        #[arg(long, conflicts_with_all = &["engage", "json", "ritual", "begin", "skip"])]
+        respond: Option<String>,
+
+        /// Skip a bloom without wake phrase
+        #[arg(long, conflicts_with_all = &["engage", "json", "ritual", "begin", "respond"])]
+        skip: bool,
+
+        /// Session token for chained ritual (required with --respond or --skip)
+        #[arg(long)]
+        session: Option<String>,
     },
 }
 
@@ -1482,6 +1513,13 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             json,
             ritual,
             no_activate,
+            engage,
+            set_missing,
+            begin,
+            bloom_id,
+            respond,
+            skip,
+            session,
         } => {
             let db = store::create_store(&config.db_path)?;
 
@@ -1508,7 +1546,32 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
 
             // Output
-            if json {
+            if begin {
+                // Start token-based ritual
+                let output = wake_ritual::begin_ritual(&cascade)?;
+                println!("{}", output);
+            } else if let Some(phrase) = respond {
+                // Submit wake phrase response
+                let session_token =
+                    session.ok_or_else(|| anyhow::anyhow!("--session required with --respond"))?;
+                let id = bloom_id
+                    .ok_or_else(|| anyhow::anyhow!("--bloom-id required with --respond"))?;
+
+                let output = wake_ritual::respond_ritual(&cascade, &id, &phrase, &session_token)?;
+                println!("{}", output);
+            } else if skip {
+                // Skip a bloom
+                let session_token =
+                    session.ok_or_else(|| anyhow::anyhow!("--session required with --skip"))?;
+                let id =
+                    bloom_id.ok_or_else(|| anyhow::anyhow!("--bloom-id required with --skip"))?;
+
+                let output = wake_ritual::skip_ritual(&cascade, &id, &session_token)?;
+                println!("{}", output);
+            } else if engage {
+                // Interactive engage mode
+                engage::run_engage_ritual(&cascade, db.as_ref(), set_missing)?;
+            } else if json {
                 println!("{}", serde_json::to_string_pretty(&cascade)?);
             } else if ritual {
                 print_wake_ritual(&cascade, &current_agent);

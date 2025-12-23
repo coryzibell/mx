@@ -38,6 +38,14 @@ dirs = "6"
 # Random
 rand = "0.9"
 
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Cryptography for wake token signing
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
 # base-d library (includes compression support)
 base-d = "3"
 
@@ -53,6 +61,10 @@ lazy_static = "1"
 
 # Temporary directories
 tempfile = "3"
+
+# Terminal colors and TTY detection
+colored = "2"
+atty = "0.2"
 
 [dev-dependencies.cargo-husky]
 version = "1"
