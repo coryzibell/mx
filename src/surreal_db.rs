@@ -805,29 +805,29 @@ impl SurrealDatabase {
         limit: usize,
         days: i64,
     ) -> Result<crate::store::WakeCascade> {
-        // Split limit across layers: 50% core, 25% recent, 25% bridges
-        let core_limit = limit / 2;
-        let recent_limit = limit / 4;
-        let bridge_limit = limit / 4;
+        // Sequential filling: core first, then recent, then bridges
+        // This ensures we get the most important blooms first
 
         // Layer 1: Core foundational/transformative blooms (resonance 8+)
-        let core = self.query_core_blooms(ctx, core_limit).await?;
+        // Use full limit for core - we'll subtract what we get
+        let core = self.query_core_blooms(ctx, limit).await?;
+        let remaining = limit.saturating_sub(core.len());
 
         // Layer 2: Recent blooms (last N days)
-        // Exclude IDs already in core
+        // Exclude IDs already in core, use remaining quota
         let core_ids: std::collections::HashSet<String> =
             core.iter().map(|e| e.id.clone()).collect();
 
-        let all_recent = self
-            .query_recent_blooms(ctx, recent_limit * 2, days)
-            .await?;
+        let all_recent = self.query_recent_blooms(ctx, remaining * 2, days).await?;
         let recent: Vec<_> = all_recent
             .into_iter()
             .filter(|e| !core_ids.contains(&e.id))
-            .take(recent_limit)
+            .take(remaining)
             .collect();
+        let remaining = remaining.saturating_sub(recent.len());
 
         // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+)
+        // Use final remaining quota
         let mut anchor_ids: Vec<String> = core
             .iter()
             .chain(recent.iter())
@@ -838,7 +838,7 @@ impl SurrealDatabase {
         anchor_ids.sort();
         anchor_ids.dedup();
 
-        let bridges = if anchor_ids.is_empty() {
+        let bridges = if anchor_ids.is_empty() || remaining == 0 {
             Vec::new()
         } else {
             // Exclude IDs already in core/recent
@@ -846,12 +846,12 @@ impl SurrealDatabase {
             existing_ids.extend(recent.iter().map(|e| e.id.clone()));
 
             let all_bridges = self
-                .query_bridge_blooms(ctx, bridge_limit * 2, &anchor_ids)
+                .query_bridge_blooms(ctx, remaining * 2, &anchor_ids)
                 .await?;
             all_bridges
                 .into_iter()
                 .filter(|e| !existing_ids.contains(&e.id))
-                .take(bridge_limit)
+                .take(remaining)
                 .collect()
         };
 
