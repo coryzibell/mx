@@ -351,7 +351,6 @@ impl SurrealDatabase {
             content_type = type::thing('content_type', $content_type_id),
             resonance = $resonance,
             resonance_type = $resonance_type,
-            last_activated = $last_activated,
             activation_count = $activation_count,
             decay_rate = $decay_rate,
             anchors = $anchors"
@@ -372,6 +371,9 @@ impl SurrealDatabase {
         }
         if entry.updated_at.is_some() {
             query.push_str(", updated_at = <datetime>$updated_at");
+        }
+        if entry.last_activated.is_some() {
+            query.push_str(", last_activated = <datetime>$last_activated");
         }
 
         // Bind required parameters
@@ -414,7 +416,6 @@ impl SurrealDatabase {
             ))
             .bind(("resonance", entry.resonance))
             .bind(("resonance_type", entry.resonance_type.clone()))
-            .bind(("last_activated", entry.last_activated.clone()))
             .bind(("activation_count", entry.activation_count))
             .bind(("decay_rate", entry.decay_rate))
             .bind(("anchors", entry.anchors.clone()));
@@ -434,6 +435,9 @@ impl SurrealDatabase {
         }
         if let Some(ref updated) = entry.updated_at {
             q = q.bind(("updated_at", normalize_datetime(updated)));
+        }
+        if let Some(ref activated) = entry.last_activated {
+            q = q.bind(("last_activated", normalize_datetime(activated)));
         }
 
         // Execute the update
