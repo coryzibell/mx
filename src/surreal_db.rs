@@ -133,6 +133,10 @@ pub struct SurrealKnowledgeRecord {
     /// Anchor IDs (related blooms this connects to)
     #[serde(default)]
     pub anchors: Vec<String>,
+
+    /// Wake phrase for memory ritual verification
+    #[serde(default)]
+    pub wake_phrase: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -173,6 +177,7 @@ impl SurrealKnowledgeRecord {
             activation_count: self.activation_count,
             decay_rate: self.decay_rate,
             anchors: self.anchors,
+            wake_phrase: self.wake_phrase,
         }
     }
 }
@@ -773,6 +778,7 @@ impl SurrealDatabase {
             activation_count: serde_json::from_value(obj["activation_count"].clone()).unwrap_or(0),
             decay_rate: serde_json::from_value(obj["decay_rate"].clone()).unwrap_or(0.0),
             anchors: serde_json::from_value(obj["anchors"].clone()).unwrap_or_default(),
+            wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
         })
     }
 

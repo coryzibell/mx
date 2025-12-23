@@ -374,6 +374,10 @@ enum MemoryCommands {
         /// Resonance type (foundational, transformative, relational, operational, ephemeral)
         #[arg(long)]
         resonance_type: Option<String>,
+
+        /// Wake phrase for memory ritual verification
+        #[arg(long)]
+        wake_phrase: Option<String>,
     },
 
     /// Update an existing entry in the database
@@ -420,6 +424,10 @@ enum MemoryCommands {
         /// Update anchors (comma-separated bloom IDs this connects to)
         #[arg(long)]
         anchors: Option<String>,
+
+        /// Update wake phrase for memory ritual verification
+        #[arg(long)]
+        wake_phrase: Option<String>,
     },
 
     /// Apply database schema migrations
@@ -1049,6 +1057,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             owner,
             resonance,
             resonance_type,
+            wake_phrase,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1157,6 +1166,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 activation_count: 0,
                 decay_rate: 0.0,
                 anchors: vec![],
+                wake_phrase,
             };
 
             // Insert into database
@@ -1186,6 +1196,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             if !applicability_list.is_empty() {
                 println!("  Applicability: {}", applicability_list.join(", "));
             }
+            if let Some(ref phrase) = entry.wake_phrase {
+                println!("  Wake Phrase: {}", phrase);
+            }
         }
 
         MemoryCommands::Update {
@@ -1200,6 +1213,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             resonance,
             resonance_type,
             anchors,
+            wake_phrase,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1297,6 +1311,15 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     .collect();
                 changes.push(format!("anchors: {:?} -> {:?}", entry.anchors, anchor_list));
                 entry.anchors = anchor_list;
+            }
+
+            // Update wake phrase if provided
+            if let Some(ref new_phrase) = wake_phrase {
+                changes.push(format!(
+                    "wake_phrase: {:?} -> {}",
+                    entry.wake_phrase, new_phrase
+                ));
+                entry.wake_phrase = Some(new_phrase.clone());
             }
 
             // Update timestamp
@@ -2393,6 +2416,9 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
+            if let Some(ref phrase) = entry.wake_phrase {
+                println!("# Wake phrase: \"{}\"", phrase);
+            }
             println!("echo \"\"");
             println!("echo \"---\"");
             println!("echo \"\"");
@@ -2411,6 +2437,9 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
+            if let Some(ref phrase) = entry.wake_phrase {
+                println!("# Wake phrase: \"{}\"", phrase);
+            }
             println!("echo \"\"");
             println!("echo \"---\"");
             println!("echo \"\"");
@@ -2429,6 +2458,9 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
+            if let Some(ref phrase) = entry.wake_phrase {
+                println!("# Wake phrase: \"{}\"", phrase);
+            }
             println!("echo \"\"");
             println!("echo \"---\"");
             println!("echo \"\"");
@@ -2466,6 +2498,9 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     }
     if let Some(ref rtype) = entry.resonance_type {
         println!("Resonance Type: {}", rtype);
+    }
+    if let Some(ref phrase) = entry.wake_phrase {
+        println!("Wake Phrase: {}", phrase);
     }
     if let Some(path) = &entry.file_path {
         println!("File:     {}", path);
