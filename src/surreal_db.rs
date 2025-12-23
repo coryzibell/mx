@@ -525,7 +525,10 @@ impl SurrealDatabase {
             ));
         }
 
-        eprintln!("DEBUG: About to loop through {} applicability types", entry.applicability.len());
+        eprintln!(
+            "DEBUG: About to loop through {} applicability types",
+            entry.applicability.len()
+        );
         for app_type in &entry.applicability {
             eprintln!("DEBUG: Processing applicability type: {}", app_type);
             // Ensure applicability_type exists - use query UPSERT to handle schema defaults
@@ -539,7 +542,10 @@ impl SurrealDatabase {
 
             let app_type_errors = app_type_response.take_errors();
             if !app_type_errors.is_empty() {
-                return Err(anyhow::anyhow!("Failed to create applicability_type: {:?}", app_type_errors));
+                return Err(anyhow::anyhow!(
+                    "Failed to create applicability_type: {:?}",
+                    app_type_errors
+                ));
             }
 
             let app_id = RecordId::new("applicability_type", app_type);
@@ -1398,7 +1404,10 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
-        eprintln!("DEBUG GET: Looking for applicability for entry_id={}, id_part={}", entry_id, id_part);
+        eprintln!(
+            "DEBUG GET: Looking for applicability for entry_id={}, id_part={}",
+            entry_id, id_part
+        );
         let mut app_response = self
             .db
             .query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
@@ -1407,7 +1416,11 @@ impl SurrealDatabase {
             .context("Failed to query applicability")?;
 
         let applicability_raw: Vec<Thing> = app_response.take(0).unwrap_or_default();
-        eprintln!("DEBUG GET: Found {} applicability types: {:?}", applicability_raw.len(), applicability_raw);
+        eprintln!(
+            "DEBUG GET: Found {} applicability types: {:?}",
+            applicability_raw.len(),
+            applicability_raw
+        );
         let applicability: Vec<String> = applicability_raw
             .into_iter()
             .map(|t| t.id.to_string())
