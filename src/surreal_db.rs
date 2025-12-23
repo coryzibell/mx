@@ -592,15 +592,43 @@ impl SurrealDatabase {
 
     async fn delete_knowledge_async(&self, id: &str) -> Result<bool> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
-        let record_id = RecordId::new("knowledge", id_part);
 
-        let result: Option<Value> = self
+        // First check if the record exists
+        let mut check_response = self
             .db
-            .delete(record_id.to_record_id())
+            .query("SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id GROUP ALL")
+            .bind(("id", id_part.to_string()))
+            .await
+            .context("Failed to check knowledge record existence")?;
+
+        let count_results: Vec<serde_json::Value> = check_response.take(0)?;
+        let exists = count_results
+            .first()
+            .and_then(|v| v["c"].as_i64())
+            .unwrap_or(0)
+            > 0;
+
+        if !exists {
+            return Ok(false);
+        }
+
+        // Delete without RETURN to avoid deserialization issues with Thing fields
+        // The knowledge table has many Thing fields (category, source_type, etc) that
+        // surrealdb::sql::Value cannot deserialize
+        let mut response = self
+            .db
+            .query("DELETE type::thing('knowledge', $id)")
+            .bind(("id", id_part.to_string()))
             .await
             .context("Failed to delete knowledge record")?;
 
-        Ok(result.is_some())
+        // Check for errors
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Delete failed: {:?}", errors));
+        }
+
+        Ok(true)
     }
 
     /// Search knowledge using BM25 full-text indexes
