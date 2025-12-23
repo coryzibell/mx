@@ -366,6 +366,14 @@ enum MemoryCommands {
         /// Explicit owner (defaults to source_agent if private)
         #[arg(long)]
         owner: Option<String>,
+
+        /// Resonance level (1-10, or higher for transcendent)
+        #[arg(long)]
+        resonance: Option<i32>,
+
+        /// Resonance type (foundational, transformative, relational, operational, ephemeral)
+        #[arg(long)]
+        resonance_type: Option<String>,
     },
 
     /// Update an existing entry in the database
@@ -1039,6 +1047,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             content_type,
             private,
             owner,
+            resonance,
+            resonance_type,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1098,6 +1108,22 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 None
             };
 
+            // Validate resonance_type if provided
+            if let Some(ref rtype) = resonance_type {
+                let valid_types = [
+                    "foundational",
+                    "transformative",
+                    "relational",
+                    "operational",
+                    "ephemeral",
+                ];
+                if !valid_types.contains(&rtype.as_str()) {
+                    eprintln!("Error: Invalid resonance type '{}'", rtype);
+                    eprintln!("Valid types: {}", valid_types.join(", "));
+                    std::process::exit(1);
+                }
+            }
+
             // Generate ID
             let path_hint = domain.unwrap_or_else(|| category.clone());
             let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &title);
@@ -1125,8 +1151,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 content_type_id: Some(content_type),
                 owner: entry_owner.clone(),
                 visibility: visibility.clone(),
-                resonance: 0,
-                resonance_type: None,
+                resonance: resonance.unwrap_or(0),
+                resonance_type,
                 last_activated: None,
                 activation_count: 0,
                 decay_rate: 0.0,
@@ -1147,6 +1173,12 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             println!("  Visibility: {}", visibility);
             if let Some(ref o) = entry_owner {
                 println!("  Owner: {}", o);
+            }
+            if entry.resonance > 0 {
+                println!("  Resonance: {}", entry.resonance);
+            }
+            if let Some(ref rtype) = entry.resonance_type {
+                println!("  Resonance Type: {}", rtype);
             }
             if !entry.tags.is_empty() {
                 println!("  Tags: {}", entry.tags.join(", "));
@@ -2431,6 +2463,9 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     println!("Title:    {}", entry.title);
     if entry.resonance > 0 {
         println!("Resonance: {}", entry.resonance);
+    }
+    if let Some(ref rtype) = entry.resonance_type {
+        println!("Resonance Type: {}", rtype);
     }
     if let Some(path) = &entry.file_path {
         println!("File:     {}", path);
