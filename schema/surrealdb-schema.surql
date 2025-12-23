@@ -120,6 +120,7 @@ DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
 DEFINE FIELD IF NOT EXISTS anchors ON knowledge TYPE option<array<string>>;
+DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
 
 -- Indexes for common queries
 DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
