@@ -978,6 +978,17 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
 
+            // Validate category if provided
+            if let Some(ref cat) = category
+                && db.get_category(cat)?.is_none()
+            {
+                let categories = db.list_categories()?;
+                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+                eprintln!("Error: Unknown category '{}'", cat);
+                eprintln!("Valid categories: {}", valid_ids.join(", "));
+                std::process::exit(1);
+            }
+
             // Privacy filtering happens at the database level now
             let entries = if let Some(cat) = &category {
                 db.list_by_category(cat, &ctx)?
