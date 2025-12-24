@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use crate::engage::{MatchResult, fuzzy_match};
 use crate::knowledge::KnowledgeEntry;
-use crate::store::WakeCascade;
+use crate::store::{AgentContext, KnowledgeStore, WakeCascade};
 use crate::wake_token::*;
 
 /// Start a new wake ritual session
@@ -44,15 +44,16 @@ pub fn begin_ritual(cascade: &WakeCascade) -> Result<String> {
 
 /// Process a wake phrase response
 pub fn respond_ritual(
-    cascade: &WakeCascade,
+    db: &dyn KnowledgeStore,
+    ctx: &AgentContext,
     bloom_id: &str,
     phrase: &str,
     session_token: &str,
 ) -> Result<String> {
     let mut token = WakeSessionToken::verify(session_token)?;
 
-    // Build bloom map
-    let all_blooms = build_bloom_map(cascade);
+    // Fetch blooms by ID from token (source of truth!)
+    let all_blooms = fetch_blooms_by_ids(db, ctx, &token.bloom_ids)?;
 
     // Verify we're on the right bloom
     let expected_id = token
@@ -108,7 +109,7 @@ pub fn respond_ritual(
             let response = WakeRespondResponse {
                 status: "remembered".to_string(),
                 match_type: Some(match_type.to_string()),
-                bloom: Some(BloomFull::from(*bloom)),
+                bloom: Some(BloomFull::from(bloom)),
                 attempt: None,
                 max_attempts: None,
                 hint: None,
@@ -135,7 +136,7 @@ pub fn respond_ritual(
                 let response = WakeRespondResponse {
                     status: "revealed".to_string(),
                     match_type: None,
-                    bloom: Some(BloomFull::from(*bloom)),
+                    bloom: Some(BloomFull::from(bloom)),
                     attempt: None,
                     max_attempts: None,
                     hint: None,
@@ -158,7 +159,7 @@ pub fn respond_ritual(
                     attempt: Some(attempt),
                     max_attempts: Some(3),
                     hint: Some(hint),
-                    prompt: Some(BloomPrompt::from(*bloom)),
+                    prompt: Some(BloomPrompt::from(bloom)),
                     session: token.sign()?,
                     next: None,
                     progress: None,
@@ -172,11 +173,16 @@ pub fn respond_ritual(
 }
 
 /// Skip a bloom (for blooms without wake phrase)
-pub fn skip_ritual(cascade: &WakeCascade, bloom_id: &str, session_token: &str) -> Result<String> {
+pub fn skip_ritual(
+    db: &dyn KnowledgeStore,
+    ctx: &AgentContext,
+    bloom_id: &str,
+    session_token: &str,
+) -> Result<String> {
     let mut token = WakeSessionToken::verify(session_token)?;
 
-    // Build bloom map
-    let all_blooms = build_bloom_map(cascade);
+    // Fetch blooms by ID from token (source of truth!)
+    let all_blooms = fetch_blooms_by_ids(db, ctx, &token.bloom_ids)?;
 
     // Verify we're on the right bloom
     let expected_id = token
@@ -205,7 +211,7 @@ pub fn skip_ritual(cascade: &WakeCascade, bloom_id: &str, session_token: &str) -
 
     let response = WakeSkipResponse {
         status: "skipped".to_string(),
-        bloom: BloomFull::from(*bloom),
+        bloom: BloomFull::from(bloom),
         session: token.sign()?,
         next,
         progress: Some(progress),
@@ -213,6 +219,25 @@ pub fn skip_ritual(cascade: &WakeCascade, bloom_id: &str, session_token: &str) -
     };
 
     Ok(serde_json::to_string_pretty(&response)?)
+}
+
+/// Fetch blooms by IDs and build lookup map
+fn fetch_blooms_by_ids(
+    db: &dyn KnowledgeStore,
+    ctx: &AgentContext,
+    bloom_ids: &[String],
+) -> Result<HashMap<String, KnowledgeEntry>> {
+    let mut map = HashMap::new();
+
+    for id in bloom_ids {
+        if let Some(entry) = db.get(id, ctx)? {
+            map.insert(id.clone(), entry);
+        } else {
+            bail!("Bloom not found in database: {}", id);
+        }
+    }
+
+    Ok(map)
 }
 
 /// Build lookup map of all blooms
@@ -235,7 +260,7 @@ fn build_bloom_map(cascade: &WakeCascade) -> HashMap<String, &KnowledgeEntry> {
 /// Get next bloom prompt and current progress
 fn get_next_and_progress(
     token: &WakeSessionToken,
-    all_blooms: &HashMap<String, &KnowledgeEntry>,
+    all_blooms: &HashMap<String, KnowledgeEntry>,
 ) -> Result<(Option<BloomPrompt>, Progress, Option<Summary>)> {
     let current = token.current_position();
     let total = token.total();
@@ -266,7 +291,7 @@ fn get_next_and_progress(
             .get(next_id)
             .ok_or_else(|| anyhow::anyhow!("Next bloom not found: {}", next_id))?;
 
-        Ok((Some(BloomPrompt::from(*next_bloom)), progress, None))
+        Ok((Some(BloomPrompt::from(next_bloom)), progress, None))
     }
 }
 

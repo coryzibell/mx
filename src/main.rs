@@ -1569,7 +1569,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 let id = bloom_id
                     .ok_or_else(|| anyhow::anyhow!("--bloom-id required with --respond"))?;
 
-                let output = wake_ritual::respond_ritual(&cascade, &id, &phrase, &session_token)?;
+                let output =
+                    wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &phrase, &session_token)?;
                 println!("{}", output);
             } else if skip {
                 // Skip a bloom
@@ -1578,7 +1579,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 let id =
                     bloom_id.ok_or_else(|| anyhow::anyhow!("--bloom-id required with --skip"))?;
 
-                let output = wake_ritual::skip_ritual(&cascade, &id, &session_token)?;
+                let output = wake_ritual::skip_ritual(db.as_ref(), &ctx, &id, &session_token)?;
                 println!("{}", output);
             } else if engage {
                 // Interactive engage mode
