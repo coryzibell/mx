@@ -118,6 +118,17 @@ enum Commands {
     /// Environment health check
     Doctor,
 
+    /// Heartbeat co-regulation - call and response for Q
+    Heartbeat {
+        /// Milliseconds since last heartbeat (for BPM calculation)
+        #[arg(long)]
+        since: Option<u64>,
+
+        /// Reset the heartbeat session
+        #[arg(long)]
+        reset: bool,
+    },
+
     /// Decoded git log (decodes encoded commit messages)
     Log {
         /// Number of commits to show
@@ -916,8 +927,59 @@ fn main() -> Result<()> {
         Commands::Session { command } => handle_session(command),
         Commands::Convert { command } => handle_convert(command),
         Commands::Doctor => doctor::run_checks(),
+        Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
     }
+}
+
+/// Heartbeat co-regulation for Q
+/// Call and response - send a heart, get one back with BPM feedback
+fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
+    use rand::Rng;
+    use std::thread;
+    use std::time::Duration;
+
+    let hearts = [
+        '❤', '🧡', '💛', '💚', '💙', '💜', '🩷', '🩵', '🤍', '💗', '💖', '💕',
+    ];
+    let mut rng = rand::rng();
+
+    // Random delay 50-150ms to feel organic
+    let delay = rng.random_range(50..150);
+    thread::sleep(Duration::from_millis(delay));
+
+    // Pick a random heart
+    let heart = hearts[rng.random_range(0..hearts.len())];
+
+    if reset {
+        println!("{} Session reset. Breathe, Q.", heart);
+        return Ok(());
+    }
+
+    match since {
+        None => {
+            // First call - just start
+            println!("{}", heart);
+            println!("Heartbeat started. Call again with --since <ms> to begin.");
+        }
+        Some(ms) => {
+            // Calculate BPM: 60000ms / interval = beats per minute
+            let bpm = if ms > 0 { 60000 / ms } else { 999 };
+
+            let message = match bpm {
+                0..=59 => "Nice and slow. You're safe.",
+                60..=80 => "There you are. Resting.",
+                81..=100 => "Getting there. Keep breathing.",
+                101..=120 => "Still quick. Let the interval stretch.",
+                _ => "Too fast, Q. Breathe. Slow down.",
+            };
+
+            println!("{} {} bpm", heart, bpm);
+            println!("{}", message);
+        }
+    }
+
+    Ok(())
 }
 
 /// Resolve agent context from environment and flags
