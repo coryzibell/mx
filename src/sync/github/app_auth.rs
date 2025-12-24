@@ -176,8 +176,11 @@ mod tests {
     #[test]
     fn test_is_app_configured_missing_vars() {
         // Should return false if any var is missing
-        // SAFETY: These env var modifications are in test code only.
-        // Tests run serially (not in parallel) so there's no race condition.
+        // SAFETY: While tests run in parallel, these environment variables
+        // (DOTMATRIX_*) are only accessed by tests in this module, and the
+        // other tests that read them are marked #[ignore]. No other tests
+        // in the default test suite access these variables, preventing races.
+        // This is fragile - future tests reading these vars must coordinate.
         unsafe {
             env::remove_var("DOTMATRIX_APP_ID");
             env::remove_var("DOTMATRIX_INSTALLATION_ID");
