@@ -89,7 +89,13 @@ pub trait KnowledgeStore {
     fn count(&self) -> Result<usize>;
 
     /// Wake-up cascade query (three-layer resonance)
-    fn wake_cascade(&self, ctx: &AgentContext, limit: usize, days: i64) -> Result<WakeCascade>;
+    fn wake_cascade(
+        &self,
+        ctx: &AgentContext,
+        limit: usize,
+        min_resonance: Option<i32>,
+        days: i64,
+    ) -> Result<WakeCascade>;
 
     /// Update activation counts for loaded blooms
     fn update_activations(&self, ids: &[String]) -> Result<()>;

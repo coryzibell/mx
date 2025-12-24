@@ -1092,6 +1092,7 @@ impl KnowledgeStore for Database {
         &self,
         _ctx: &crate::store::AgentContext,
         _limit: usize,
+        _min_resonance: Option<i32>,
         _days: i64,
     ) -> Result<crate::store::WakeCascade> {
         // SQLite backend doesn't support wake cascade yet - return empty cascade

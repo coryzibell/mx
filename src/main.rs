@@ -531,6 +531,10 @@ enum MemoryCommands {
         #[arg(short, long, default_value = "20")]
         limit: usize,
 
+        /// Minimum resonance threshold - get ALL blooms >= this value (overrides --limit)
+        #[arg(long)]
+        min_resonance: Option<i32>,
+
         /// Include memories activated in last N days (default: 7)
         #[arg(short, long, default_value = "7")]
         days: i64,
@@ -1516,6 +1520,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
         MemoryCommands::Wake {
             limit,
+            min_resonance,
             days,
             json,
             ritual,
@@ -1542,7 +1547,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             let ctx = store::AgentContext::for_agent(current_agent.clone());
 
             // Run cascade
-            let cascade = db.wake_cascade(&ctx, limit, days)?;
+            let cascade = db.wake_cascade(&ctx, limit, min_resonance, days)?;
 
             // Update activations unless disabled
             if !no_activate {

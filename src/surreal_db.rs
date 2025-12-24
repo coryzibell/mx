@@ -818,17 +818,29 @@ impl SurrealDatabase {
         &self,
         ctx: &crate::store::AgentContext,
         limit: usize,
+        min_resonance: Option<i32>,
         days: i64,
     ) -> Result<crate::store::WakeCascade> {
-        Self::runtime().block_on(self.wake_cascade_async(ctx, limit, days))
+        Self::runtime().block_on(self.wake_cascade_async(ctx, limit, min_resonance, days))
     }
 
     async fn wake_cascade_async(
         &self,
         ctx: &crate::store::AgentContext,
         limit: usize,
+        min_resonance: Option<i32>,
         days: i64,
     ) -> Result<crate::store::WakeCascade> {
+        // If min_resonance is set, use simple query for all blooms >= threshold
+        if let Some(threshold) = min_resonance {
+            let blooms = self.query_blooms_by_resonance(ctx, threshold).await?;
+            return Ok(crate::store::WakeCascade {
+                core: blooms,
+                recent: Vec::new(),
+                bridges: Vec::new(),
+            });
+        }
+
         // Sequential filling: core first, then recent, then bridges
         // This ensures we get the most important blooms first
 
@@ -884,6 +896,40 @@ impl SurrealDatabase {
             recent,
             bridges,
         })
+    }
+
+    /// Query all blooms with resonance >= threshold (for --min-resonance flag)
+    async fn query_blooms_by_resonance(
+        &self,
+        ctx: &crate::store::AgentContext,
+        threshold: i32,
+    ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE resonance >= $threshold
+            {}
+            ORDER BY resonance DESC",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut query = self.db.query(&sql).bind(("threshold", threshold));
+        if let Some(agent) = current_agent {
+            query = query.bind(("current_agent", agent));
+        }
+
+        let mut response = query.await.context("Failed to query blooms by resonance")?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
     }
 
     /// Layer 1: Query core blooms (resonance 8+, foundational/transformative)
@@ -1987,9 +2033,10 @@ impl KnowledgeStore for SurrealDatabase {
         &self,
         ctx: &crate::store::AgentContext,
         limit: usize,
+        min_resonance: Option<i32>,
         days: i64,
     ) -> Result<crate::store::WakeCascade> {
-        self.wake_cascade(ctx, limit, days)
+        self.wake_cascade(ctx, limit, min_resonance, days)
     }
 
     fn update_activations(&self, ids: &[String]) -> Result<()> {
