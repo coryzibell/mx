@@ -214,6 +214,7 @@ UPSERT category:gotcha SET description = 'Pitfalls and things to watch for';
 UPSERT category:reference SET description = 'Reference material and documentation';
 UPSERT category:decision SET description = 'Architectural and design decisions';
 UPSERT category:bloom SET description = 'Identity discoveries and personal growth - Q private';
+UPSERT category:session SET description = 'Daily session logs and activity records';
 
 -- Source types
 UPSERT source_type:manual SET description = 'Manually entered by human';

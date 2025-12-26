@@ -64,7 +64,8 @@ INSERT OR IGNORE INTO categories (id, description, created_at) VALUES
     ('artifact', 'Tools, scripts, templates', datetime('now')),
     ('chronicle', 'Historical records and narratives', datetime('now')),
     ('project', 'Project-specific knowledge', datetime('now')),
-    ('future', 'Ideas and plans', datetime('now'));
+    ('future', 'Ideas and plans', datetime('now')),
+    ('session', 'Daily session logs and activity records', datetime('now'));
 
 INSERT OR IGNORE INTO source_types (id, description, created_at) VALUES
     ('manual', 'Manually entered knowledge', datetime('now')),

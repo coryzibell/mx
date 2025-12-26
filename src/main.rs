@@ -273,7 +273,7 @@ enum MemoryCommands {
 
     /// List entries by category
     List {
-        /// Category to list (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future)
+        /// Category to list (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future, session)
         #[arg(short, long)]
         category: Option<String>,
 
@@ -317,7 +317,7 @@ enum MemoryCommands {
 
     /// Add a new entry directly to the database
     Add {
-        /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future)
+        /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future, session)
         #[arg(long)]
         category: String,
 
