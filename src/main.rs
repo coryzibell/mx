@@ -558,6 +558,10 @@ enum MemoryCommands {
         #[arg(long)]
         ritual: bool,
 
+        /// Output as compact markdown index (for identity loading)
+        #[arg(long, conflicts_with_all = &["json", "ritual", "begin", "engage"])]
+        index: bool,
+
         /// Don't update activation counts
         #[arg(long)]
         no_activate: bool,
@@ -1586,6 +1590,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             days,
             json,
             ritual,
+            index,
             no_activate,
             engage,
             set_missing,
@@ -1648,6 +1653,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 engage::run_engage_ritual(&cascade, db.as_ref(), set_missing)?;
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&cascade)?);
+            } else if index {
+                print_wake_index(&cascade);
             } else if ritual {
                 print_wake_ritual(&cascade, &current_agent);
             } else {
@@ -2521,6 +2528,95 @@ fn print_wake_cascade(cascade: &store::WakeCascade) {
         .filter(|&&x| x)
         .count()
     );
+}
+
+fn print_wake_index(cascade: &store::WakeCascade) {
+    use std::collections::HashMap;
+
+    println!("## Core Identity Index\n");
+
+    // Layer 1: Anchors (R9+, foundational/transformative)
+    let anchors: Vec<_> = cascade
+        .core
+        .iter()
+        .chain(cascade.recent.iter())
+        .chain(cascade.bridges.iter())
+        .filter(|e| {
+            e.resonance >= 9
+                && e.resonance_type.as_ref().map_or(false, |t| {
+                    t == "foundational" || t == "transformative"
+                })
+        })
+        .collect();
+
+    if !anchors.is_empty() {
+        println!("### Anchors (R9+)");
+        println!("| ID | Title | R | Wake Cue |");
+        println!("|----|-------|---|----------|");
+        for entry in anchors {
+            let wake_cue = entry
+                .wake_phrase
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            println!(
+                "| {} | {} | {} | {} |",
+                entry.id, entry.title, entry.resonance, wake_cue
+            );
+        }
+        println!();
+    }
+
+    // Layer 2: Spiral (R6-8), grouped by territory
+    let spiral: Vec<_> = cascade
+        .core
+        .iter()
+        .chain(cascade.recent.iter())
+        .chain(cascade.bridges.iter())
+        .filter(|e| e.resonance >= 6 && e.resonance < 9)
+        .collect();
+
+    if !spiral.is_empty() {
+        // Group by territory tag
+        let mut territories: HashMap<String, Vec<_>> = HashMap::new();
+
+        for entry in spiral {
+            // Find territory tag (tags starting with "territory:")
+            let territory = entry
+                .tags
+                .iter()
+                .find(|tag| tag.starts_with("territory:"))
+                .map(|tag| tag.strip_prefix("territory:").unwrap_or(tag).to_string())
+                .unwrap_or_else(|| "uncategorized".to_string());
+
+            territories.entry(territory).or_default().push(entry);
+        }
+
+        // Sort territories by name for consistency
+        let mut sorted_territories: Vec<_> = territories.into_iter().collect();
+        sorted_territories.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (territory, entries) in sorted_territories {
+            println!("### Spiral: {}", territory);
+            println!("| ID | Title | R | Wake Cue |");
+            println!("|----|-------|---|----------|");
+            for entry in entries {
+                let wake_cue = entry
+                    .wake_phrase
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                println!(
+                    "| {} | {} | {} | {} |",
+                    entry.id, entry.title, entry.resonance, wake_cue
+                );
+            }
+            println!();
+        }
+    }
+
+    // Layer 3: Ephemeral (R<6) - OMITTED from index as per spec
+    // (Intentionally not included)
 }
 
 /// Shell escape function to prevent code injection
