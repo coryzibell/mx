@@ -1106,13 +1106,23 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             let mut entries = db.search(&query, &ctx, &filter)?;
 
             // Apply in-memory field presence filters
-            entries = entries.into_iter()
-                .filter(|e| !has_wake_phrase || e.wake_phrase.as_ref().map_or(false, |s| !s.is_empty()))
-                .filter(|e| !missing_wake_phrase || e.wake_phrase.as_ref().map_or(true, |s| s.is_empty()))
+            entries = entries
+                .into_iter()
+                .filter(|e| {
+                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+                })
                 .filter(|e| !has_anchors || !e.anchors.is_empty())
                 .filter(|e| !missing_anchors || e.anchors.is_empty())
-                .filter(|e| !has_resonance_type || e.resonance_type.as_ref().map_or(false, |s| !s.is_empty()))
-                .filter(|e| !missing_resonance_type || e.resonance_type.as_ref().map_or(true, |s| s.is_empty()))
+                .filter(|e| {
+                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_resonance_type
+                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+                })
                 .collect::<Vec<_>>();
 
             if json {
@@ -1175,13 +1185,23 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             };
 
             // Apply in-memory field presence filters
-            entries = entries.into_iter()
-                .filter(|e| !has_wake_phrase || e.wake_phrase.as_ref().map_or(false, |s| !s.is_empty()))
-                .filter(|e| !missing_wake_phrase || e.wake_phrase.as_ref().map_or(true, |s| s.is_empty()))
+            entries = entries
+                .into_iter()
+                .filter(|e| {
+                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+                })
                 .filter(|e| !has_anchors || !e.anchors.is_empty())
                 .filter(|e| !missing_anchors || e.anchors.is_empty())
-                .filter(|e| !has_resonance_type || e.resonance_type.as_ref().map_or(false, |s| !s.is_empty()))
-                .filter(|e| !missing_resonance_type || e.resonance_type.as_ref().map_or(true, |s| s.is_empty()))
+                .filter(|e| {
+                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_resonance_type
+                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+                })
                 .collect::<Vec<_>>();
 
             if json {
@@ -2656,9 +2676,9 @@ fn print_wake_index(cascade: &store::WakeCascade) {
         .chain(cascade.bridges.iter())
         .filter(|e| {
             e.resonance >= 9
-                && e.resonance_type.as_ref().map_or(false, |t| {
-                    t == "foundational" || t == "transformative"
-                })
+                && e.resonance_type
+                    .as_ref()
+                    .is_some_and(|t| t == "foundational" || t == "transformative")
         })
         .collect();
 
@@ -2667,11 +2687,7 @@ fn print_wake_index(cascade: &store::WakeCascade) {
         println!("| ID | Title | R | Wake Cue |");
         println!("|----|-------|---|----------|");
         for entry in anchors {
-            let wake_cue = entry
-                .wake_phrase
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
             println!(
                 "| {} | {} | {} | {} |",
                 entry.id, entry.title, entry.resonance, wake_cue
@@ -2714,11 +2730,7 @@ fn print_wake_index(cascade: &store::WakeCascade) {
             println!("| ID | Title | R | Wake Cue |");
             println!("|----|-------|---|----------|");
             for entry in entries {
-                let wake_cue = entry
-                    .wake_phrase
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
+                let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
                 println!(
                     "| {} | {} | {} | {} |",
                     entry.id, entry.title, entry.resonance, wake_cue

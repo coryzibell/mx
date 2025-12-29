@@ -87,10 +87,20 @@ pub trait KnowledgeStore {
     fn delete(&self, id: &str) -> Result<bool>;
 
     /// Search knowledge entries
-    fn search(&self, query: &str, ctx: &AgentContext, filter: &KnowledgeFilter) -> Result<Vec<KnowledgeEntry>>;
+    fn search(
+        &self,
+        query: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// List entries by category
-    fn list_by_category(&self, category: &str, ctx: &AgentContext, filter: &KnowledgeFilter) -> Result<Vec<KnowledgeEntry>>;
+    fn list_by_category(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// Count total entries
     fn count(&self) -> Result<usize>;

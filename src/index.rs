@@ -172,7 +172,11 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
 
             if let Some(ref wake_phrase) = entry.wake_phrase {
                 // Quote it because wake phrases may contain special YAML characters
-                writeln!(writer, "wake_phrase: \"{}\"", wake_phrase.replace("\"", "\\\""))?;
+                writeln!(
+                    writer,
+                    "wake_phrase: \"{}\"",
+                    wake_phrase.replace("\"", "\\\"")
+                )?;
             }
 
             writeln!(writer, "---\n")?;

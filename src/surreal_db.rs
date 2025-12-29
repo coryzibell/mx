@@ -2040,7 +2040,12 @@ impl KnowledgeStore for SurrealDatabase {
         self.delete_knowledge(id)
     }
 
-    fn search(&self, query: &str, ctx: &crate::store::AgentContext, filter: &crate::store::KnowledgeFilter) -> Result<Vec<KnowledgeEntry>> {
+    fn search(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
         self.search_knowledge(query, ctx, filter)
     }
 
