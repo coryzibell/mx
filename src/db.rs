@@ -1070,8 +1070,9 @@ impl KnowledgeStore for Database {
         &self,
         query: &str,
         _ctx: &crate::store::AgentContext,
+        _filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        // SQLite backend doesn't support privacy filtering yet - return all results
+        // SQLite backend doesn't support privacy filtering or resonance filtering yet - return all results
         self.search(query)
     }
 
@@ -1079,8 +1080,9 @@ impl KnowledgeStore for Database {
         &self,
         category: &str,
         _ctx: &crate::store::AgentContext,
+        _filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        // SQLite backend doesn't support privacy filtering yet - return all results
+        // SQLite backend doesn't support privacy filtering or resonance filtering yet - return all results
         self.list_by_category(category)
     }
 
