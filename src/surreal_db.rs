@@ -327,6 +327,25 @@ impl SurrealDatabase {
         }
     }
 
+    /// Build resonance filter clauses
+    fn build_resonance_filter(filter: &crate::store::KnowledgeFilter) -> String {
+        let mut clauses = Vec::new();
+
+        if let Some(min) = filter.min_resonance {
+            clauses.push(format!("resonance >= {}", min));
+        }
+
+        if let Some(max) = filter.max_resonance {
+            clauses.push(format!("resonance <= {}", max));
+        }
+
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("AND ({})", clauses.join(" AND "))
+        }
+    }
+
     // =========================================================================
     // KNOWLEDGE CRUD OPERATIONS
     // =========================================================================
@@ -668,25 +687,29 @@ impl SurrealDatabase {
         &self,
         query: &str,
         ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.search_knowledge_async(query, ctx))
+        Self::runtime().block_on(self.search_knowledge_async(query, ctx, filter))
     }
 
     async fn search_knowledge_async(
         &self,
         query: &str,
         ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         let query_owned = query.to_string();
 
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let resonance_clause = Self::build_resonance_filter(filter);
 
         let sql = format!(
             "SELECT {}
             FROM knowledge
-            WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {}",
+            WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {} {}",
             Self::knowledge_select_fields(),
-            visibility_clause
+            visibility_clause,
+            resonance_clause
         );
 
         let mut query_builder = self.db.query(&sql).bind(("query", query_owned));
@@ -1787,26 +1810,30 @@ impl SurrealDatabase {
         &self,
         category: &str,
         ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.list_by_category_async(category, ctx))
+        Self::runtime().block_on(self.list_by_category_async(category, ctx, filter))
     }
 
     async fn list_by_category_async(
         &self,
         category: &str,
         ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         let category_thing = Thing::from(("category", category));
 
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let resonance_clause = Self::build_resonance_filter(filter);
 
         let sql = format!(
             "SELECT {}
             FROM knowledge
-            WHERE category = $category {}
+            WHERE category = $category {} {}
             ORDER BY title",
             Self::knowledge_select_fields(),
-            visibility_clause
+            visibility_clause,
+            resonance_clause
         );
 
         let mut query = self.db.query(&sql).bind(("category", category_thing));
@@ -2013,16 +2040,22 @@ impl KnowledgeStore for SurrealDatabase {
         self.delete_knowledge(id)
     }
 
-    fn search(&self, query: &str, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
-        self.search_knowledge(query, ctx)
+    fn search(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.search_knowledge(query, ctx, filter)
     }
 
     fn list_by_category(
         &self,
         category: &str,
         ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        self.list_by_category(category, ctx)
+        self.list_by_category(category, ctx, filter)
     }
 
     fn count(&self) -> Result<usize> {

@@ -98,9 +98,10 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
     // Export all categories dynamically
     // Use public_only context to export all non-private entries
     let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
-        let entries = db.list_by_category(&category.id, &ctx)?;
+        let entries = db.list_by_category(&category.id, &ctx, &filter)?;
         if entries.is_empty() {
             continue;
         }
@@ -158,6 +159,24 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
 
             if let Some(source_agent) = &entry.source_agent_id {
                 writeln!(writer, "source_agent: {}", source_agent)?;
+            }
+
+            // Only write resonance if it's meaningful (non-zero)
+            if entry.resonance > 0 {
+                writeln!(writer, "resonance: {}", entry.resonance)?;
+            }
+
+            if let Some(ref resonance_type) = entry.resonance_type {
+                writeln!(writer, "resonance_type: {}", resonance_type)?;
+            }
+
+            if let Some(ref wake_phrase) = entry.wake_phrase {
+                // Quote it because wake phrases may contain special YAML characters
+                writeln!(
+                    writer,
+                    "wake_phrase: \"{}\"",
+                    wake_phrase.replace("\"", "\\\"")
+                )?;
             }
 
             writeln!(writer, "---\n")?;
@@ -227,9 +246,10 @@ pub fn export_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     // Export all categories dynamically
     // Use public_only context to export all non-private entries
     let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id, &ctx)? {
+        for entry in db.list_by_category(&category.id, &ctx, &filter)? {
             let json = serde_json::to_string(&entry)?;
             writeln!(writer, "{}", json)?;
         }
@@ -253,9 +273,10 @@ pub fn export_csv(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     // Export all categories dynamically
     // Use public_only context to export all non-private entries
     let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id, &ctx)? {
+        for entry in db.list_by_category(&category.id, &ctx, &filter)? {
             let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
             let applicability = entry.applicability.join(";");
             let source_project = entry.source_project_id.as_deref().unwrap_or("");

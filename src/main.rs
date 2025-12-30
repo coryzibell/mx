@@ -269,6 +269,38 @@ enum MemoryCommands {
         /// Include private entries (requires matching owner)
         #[arg(long)]
         include_private: bool,
+
+        /// Minimum resonance level
+        #[arg(long)]
+        min_resonance: Option<i32>,
+
+        /// Maximum resonance level
+        #[arg(long)]
+        max_resonance: Option<i32>,
+
+        /// Filter to entries WITH wake phrase
+        #[arg(long)]
+        has_wake_phrase: bool,
+
+        /// Filter to entries WITHOUT wake phrase
+        #[arg(long, conflicts_with = "has_wake_phrase")]
+        missing_wake_phrase: bool,
+
+        /// Filter to entries WITH anchors
+        #[arg(long)]
+        has_anchors: bool,
+
+        /// Filter to entries WITHOUT anchors
+        #[arg(long, conflicts_with = "has_anchors")]
+        missing_anchors: bool,
+
+        /// Filter to entries WITH resonance type
+        #[arg(long)]
+        has_resonance_type: bool,
+
+        /// Filter to entries WITHOUT resonance type
+        #[arg(long, conflicts_with = "has_resonance_type")]
+        missing_resonance_type: bool,
     },
 
     /// List entries by category
@@ -288,6 +320,38 @@ enum MemoryCommands {
         /// Include private entries (requires matching owner)
         #[arg(long)]
         include_private: bool,
+
+        /// Minimum resonance level
+        #[arg(long)]
+        min_resonance: Option<i32>,
+
+        /// Maximum resonance level
+        #[arg(long)]
+        max_resonance: Option<i32>,
+
+        /// Filter to entries WITH wake phrase
+        #[arg(long)]
+        has_wake_phrase: bool,
+
+        /// Filter to entries WITHOUT wake phrase
+        #[arg(long, conflicts_with = "has_wake_phrase")]
+        missing_wake_phrase: bool,
+
+        /// Filter to entries WITH anchors
+        #[arg(long)]
+        has_anchors: bool,
+
+        /// Filter to entries WITHOUT anchors
+        #[arg(long, conflicts_with = "has_anchors")]
+        missing_anchors: bool,
+
+        /// Filter to entries WITH resonance type
+        #[arg(long)]
+        has_resonance_type: bool,
+
+        /// Filter to entries WITHOUT resonance type
+        #[arg(long, conflicts_with = "has_resonance_type")]
+        missing_resonance_type: bool,
     },
 
     /// Show a specific entry
@@ -557,6 +621,10 @@ enum MemoryCommands {
         /// Output as bash ritual script (sequential reading)
         #[arg(long)]
         ritual: bool,
+
+        /// Output as compact markdown index (for identity loading)
+        #[arg(long, conflicts_with_all = &["json", "ritual", "begin", "engage"])]
+        index: bool,
 
         /// Don't update activation counts
         #[arg(long)]
@@ -1016,12 +1084,46 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             json,
             mine,
             include_private,
+            min_resonance,
+            max_resonance,
+            has_wake_phrase,
+            missing_wake_phrase,
+            has_anchors,
+            missing_anchors,
+            has_resonance_type,
+            missing_resonance_type,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
 
-            // Privacy filtering happens at the database level now
-            let entries = db.search(&query, &ctx)?;
+            // Build filter for database query (resonance only)
+            let filter = store::KnowledgeFilter {
+                min_resonance,
+                max_resonance,
+            };
+
+            // Get results from database with resonance filtering
+            let mut entries = db.search(&query, &ctx, &filter)?;
+
+            // Apply in-memory field presence filters
+            entries = entries
+                .into_iter()
+                .filter(|e| {
+                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+                })
+                .filter(|e| !has_anchors || !e.anchors.is_empty())
+                .filter(|e| !missing_anchors || e.anchors.is_empty())
+                .filter(|e| {
+                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_resonance_type
+                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+                })
+                .collect::<Vec<_>>();
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -1040,6 +1142,14 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             json,
             mine,
             include_private,
+            min_resonance,
+            max_resonance,
+            has_wake_phrase,
+            missing_wake_phrase,
+            has_anchors,
+            missing_anchors,
+            has_resonance_type,
+            missing_resonance_type,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
@@ -1055,18 +1165,44 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 std::process::exit(1);
             }
 
-            // Privacy filtering happens at the database level now
-            let entries = if let Some(cat) = &category {
-                db.list_by_category(cat, &ctx)?
+            // Build filter for database query (resonance only)
+            let filter = store::KnowledgeFilter {
+                min_resonance,
+                max_resonance,
+            };
+
+            // Get results from database with resonance filtering
+            let mut entries = if let Some(cat) = &category {
+                db.list_by_category(cat, &ctx, &filter)?
             } else {
                 // List all categories from database
                 let mut all = Vec::new();
                 let categories = db.list_categories()?;
                 for cat in categories {
-                    all.extend(db.list_by_category(&cat.id, &ctx)?);
+                    all.extend(db.list_by_category(&cat.id, &ctx, &filter)?);
                 }
                 all
             };
+
+            // Apply in-memory field presence filters
+            entries = entries
+                .into_iter()
+                .filter(|e| {
+                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+                })
+                .filter(|e| !has_anchors || !e.anchors.is_empty())
+                .filter(|e| !missing_anchors || e.anchors.is_empty())
+                .filter(|e| {
+                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+                })
+                .filter(|e| {
+                    !missing_resonance_type
+                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+                })
+                .collect::<Vec<_>>();
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -1119,8 +1255,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             };
 
             let categories = db.list_categories()?;
+            let filter = store::KnowledgeFilter::default();
             for cat in categories {
-                let count = db.list_by_category(&cat.id, &ctx)?.len();
+                let count = db.list_by_category(&cat.id, &ctx, &filter)?.len();
                 println!("  {:12} {}", cat.id, count);
             }
         }
@@ -1586,6 +1723,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             days,
             json,
             ritual,
+            index,
             no_activate,
             engage,
             set_missing,
@@ -1648,6 +1786,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 engage::run_engage_ritual(&cascade, db.as_ref(), set_missing)?;
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&cascade)?);
+            } else if index {
+                print_wake_index(&cascade);
             } else if ritual {
                 print_wake_ritual(&cascade, &current_agent);
             } else {
@@ -2521,6 +2661,87 @@ fn print_wake_cascade(cascade: &store::WakeCascade) {
         .filter(|&&x| x)
         .count()
     );
+}
+
+fn print_wake_index(cascade: &store::WakeCascade) {
+    use std::collections::HashMap;
+
+    println!("## Core Identity Index\n");
+
+    // Layer 1: Anchors (R9+, foundational/transformative)
+    let anchors: Vec<_> = cascade
+        .core
+        .iter()
+        .chain(cascade.recent.iter())
+        .chain(cascade.bridges.iter())
+        .filter(|e| {
+            e.resonance >= 9
+                && e.resonance_type
+                    .as_ref()
+                    .is_some_and(|t| t == "foundational" || t == "transformative")
+        })
+        .collect();
+
+    if !anchors.is_empty() {
+        println!("### Anchors (R9+)");
+        println!("| ID | Title | R | Wake Cue |");
+        println!("|----|-------|---|----------|");
+        for entry in anchors {
+            let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
+            println!(
+                "| {} | {} | {} | {} |",
+                entry.id, entry.title, entry.resonance, wake_cue
+            );
+        }
+        println!();
+    }
+
+    // Layer 2: Spiral (R6-8), grouped by territory
+    let spiral: Vec<_> = cascade
+        .core
+        .iter()
+        .chain(cascade.recent.iter())
+        .chain(cascade.bridges.iter())
+        .filter(|e| e.resonance >= 6 && e.resonance < 9)
+        .collect();
+
+    if !spiral.is_empty() {
+        // Group by territory tag
+        let mut territories: HashMap<String, Vec<_>> = HashMap::new();
+
+        for entry in spiral {
+            // Find territory tag (tags starting with "territory:")
+            let territory = entry
+                .tags
+                .iter()
+                .find(|tag| tag.starts_with("territory:"))
+                .map(|tag| tag.strip_prefix("territory:").unwrap_or(tag).to_string())
+                .unwrap_or_else(|| "uncategorized".to_string());
+
+            territories.entry(territory).or_default().push(entry);
+        }
+
+        // Sort territories by name for consistency
+        let mut sorted_territories: Vec<_> = territories.into_iter().collect();
+        sorted_territories.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (territory, entries) in sorted_territories {
+            println!("### Spiral: {}", territory);
+            println!("| ID | Title | R | Wake Cue |");
+            println!("|----|-------|---|----------|");
+            for entry in entries {
+                let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
+                println!(
+                    "| {} | {} | {} | {} |",
+                    entry.id, entry.title, entry.resonance, wake_cue
+                );
+            }
+            println!();
+        }
+    }
+
+    // Layer 3: Ephemeral (R<6) - OMITTED from index as per spec
+    // (Intentionally not included)
 }
 
 /// Shell escape function to prevent code injection

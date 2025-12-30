@@ -42,6 +42,13 @@ impl AgentContext {
     }
 }
 
+/// Filter for resonance-based queries
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeFilter {
+    pub min_resonance: Option<i32>,
+    pub max_resonance: Option<i32>,
+}
+
 /// Result of a wake-up cascade query
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WakeCascade {
@@ -80,10 +87,20 @@ pub trait KnowledgeStore {
     fn delete(&self, id: &str) -> Result<bool>;
 
     /// Search knowledge entries
-    fn search(&self, query: &str, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
+    fn search(
+        &self,
+        query: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// List entries by category
-    fn list_by_category(&self, category: &str, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
+    fn list_by_category(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// Count total entries
     fn count(&self) -> Result<usize>;
