@@ -301,6 +301,10 @@ enum MemoryCommands {
         /// Filter to entries WITHOUT resonance type
         #[arg(long, conflicts_with = "has_resonance_type")]
         missing_resonance_type: bool,
+
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// List entries by category
@@ -394,7 +398,12 @@ enum MemoryCommands {
         content: Option<String>,
 
         /// Content from file
-        #[arg(short, long, conflicts_with = "content")]
+        #[arg(
+            short,
+            long,
+            visible_alias = "content-file",
+            conflicts_with = "content"
+        )]
         file: Option<String>,
 
         /// Comma-separated tags
@@ -456,6 +465,10 @@ enum MemoryCommands {
         /// Wake phrase for memory ritual verification
         #[arg(long)]
         wake_phrase: Option<String>,
+
+        /// Anchors (comma-separated bloom IDs this connects to)
+        #[arg(long)]
+        anchors: Option<String>,
     },
 
     /// Update an existing entry in the database
@@ -1092,6 +1105,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             missing_anchors,
             has_resonance_type,
             missing_resonance_type,
+            limit,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
@@ -1124,6 +1138,11 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                         || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
                 })
                 .collect::<Vec<_>>();
+
+            // Apply limit if specified
+            if let Some(n) = limit {
+                entries.truncate(n);
+            }
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
@@ -1303,6 +1322,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             resonance,
             resonance_type,
             wake_phrase,
+            anchors,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1341,6 +1361,16 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
             // Parse applicability CSV
             let applicability_list: Vec<String> = applicability
+                .map(|a| {
+                    a.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Parse anchors CSV
+            let anchor_list: Vec<String> = anchors
                 .map(|a| {
                     a.split(',')
                         .map(|s| s.trim().to_string())
@@ -1410,7 +1440,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 last_activated: None,
                 activation_count: 0,
                 decay_rate: 0.0,
-                anchors: vec![],
+                anchors: anchor_list,
                 wake_phrase,
             };
 
@@ -1435,6 +1465,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
             if !entry.applicability.is_empty() {
                 println!("  Applicability: {}", entry.applicability.join(", "));
+            }
+            if !entry.anchors.is_empty() {
+                println!("  Anchors: {}", entry.anchors.join(", "));
             }
             if let Some(ref phrase) = entry.wake_phrase {
                 println!("  Wake Phrase: {}", phrase);
