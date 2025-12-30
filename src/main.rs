@@ -2543,9 +2543,9 @@ fn print_wake_index(cascade: &store::WakeCascade) {
         .chain(cascade.bridges.iter())
         .filter(|e| {
             e.resonance >= 9
-                && e.resonance_type.as_ref().map_or(false, |t| {
-                    t == "foundational" || t == "transformative"
-                })
+                && e.resonance_type
+                    .as_ref()
+                    .is_some_and(|t| t == "foundational" || t == "transformative")
         })
         .collect();
 
@@ -2554,11 +2554,7 @@ fn print_wake_index(cascade: &store::WakeCascade) {
         println!("| ID | Title | R | Wake Cue |");
         println!("|----|-------|---|----------|");
         for entry in anchors {
-            let wake_cue = entry
-                .wake_phrase
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
             println!(
                 "| {} | {} | {} | {} |",
                 entry.id, entry.title, entry.resonance, wake_cue
@@ -2601,11 +2597,7 @@ fn print_wake_index(cascade: &store::WakeCascade) {
             println!("| ID | Title | R | Wake Cue |");
             println!("|----|-------|---|----------|");
             for entry in entries {
-                let wake_cue = entry
-                    .wake_phrase
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
+                let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
                 println!(
                     "| {} | {} | {} | {} |",
                     entry.id, entry.title, entry.resonance, wake_cue
