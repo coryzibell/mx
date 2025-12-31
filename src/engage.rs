@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
-use std::io::{self, Write, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::{KnowledgeStore, WakeCascade};

@@ -81,7 +81,9 @@ pub fn respond_ritual(
         .ok_or_else(|| anyhow::anyhow!("This bloom has no wake phrase - use --skip instead"))?;
 
     let wake_phrase = if !bloom.wake_phrases.is_empty() {
-        bloom.wake_phrases.get(phrase_idx)
+        bloom
+            .wake_phrases
+            .get(phrase_idx)
             .ok_or_else(|| anyhow::anyhow!("Invalid phrase index"))?
             .clone()
     } else if let Some(ref phrase) = bloom.wake_phrase {

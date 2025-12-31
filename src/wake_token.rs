@@ -33,7 +33,12 @@ impl WakeSessionToken {
         let mut selected_phrase_indices = Vec::new();
 
         // Collect blooms and select phrase indices
-        for entry in cascade.core.iter().chain(cascade.recent.iter()).chain(cascade.bridges.iter()) {
+        for entry in cascade
+            .core
+            .iter()
+            .chain(cascade.recent.iter())
+            .chain(cascade.bridges.iter())
+        {
             bloom_ids.push(entry.id.clone());
 
             // Select random phrase index if bloom has phrases
@@ -67,7 +72,9 @@ impl WakeSessionToken {
 
     /// Get selected phrase index for current bloom
     pub fn current_phrase_index(&self) -> Option<usize> {
-        self.selected_phrase_indices.get(self.current_index).and_then(|&idx| idx)
+        self.selected_phrase_indices
+            .get(self.current_index)
+            .and_then(|&idx| idx)
     }
 
     /// Total blooms in session

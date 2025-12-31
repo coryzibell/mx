@@ -1664,7 +1664,11 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
             // Remove a specific wake phrase
             if let Some(ref phrase_to_remove) = remove_wake_phrase {
-                if let Some(pos) = entry.wake_phrases.iter().position(|p| p == phrase_to_remove) {
+                if let Some(pos) = entry
+                    .wake_phrases
+                    .iter()
+                    .position(|p| p == phrase_to_remove)
+                {
                     entry.wake_phrases.remove(pos);
                     changes.push(format!("wake_phrases: removed '{}'", phrase_to_remove));
                 }
@@ -1682,7 +1686,10 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     ));
                     entry.wake_order = Some(order_value);
                 } else {
-                    eprintln!("Error: Invalid wake_order value '{}' (use number or '-' to clear)", order_str);
+                    eprintln!(
+                        "Error: Invalid wake_order value '{}' (use number or '-' to clear)",
+                        order_str
+                    );
                     std::process::exit(1);
                 }
             }
