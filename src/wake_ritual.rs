@@ -75,22 +75,23 @@ pub fn respond_ritual(
         .get(expected_id)
         .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", expected_id))?;
 
-    // Check if bloom has wake phrase
-    let wake_phrase = match &bloom.wake_phrase {
-        Some(p) => p,
-        None => {
-            let response = WakeErrorResponse {
-                status: "error".to_string(),
-                error: "no_wake_phrase".to_string(),
-                message: "This bloom has no wake phrase - use --skip instead".to_string(),
-                expected_id: None,
-            };
-            return Ok(serde_json::to_string_pretty(&response)?);
-        }
+    // Get the pre-selected wake phrase from token
+    let phrase_idx = token
+        .current_phrase_index()
+        .ok_or_else(|| anyhow::anyhow!("This bloom has no wake phrase - use --skip instead"))?;
+
+    let wake_phrase = if !bloom.wake_phrases.is_empty() {
+        bloom.wake_phrases.get(phrase_idx)
+            .ok_or_else(|| anyhow::anyhow!("Invalid phrase index"))?
+            .clone()
+    } else if let Some(ref phrase) = bloom.wake_phrase {
+        phrase.clone()
+    } else {
+        bail!("This bloom has no wake phrase - use --skip instead");
     };
 
     // Match the phrase
-    let match_result = fuzzy_match(phrase, wake_phrase);
+    let match_result = fuzzy_match(phrase, &wake_phrase);
 
     match match_result {
         MatchResult::Exact | MatchResult::Close => {
@@ -106,10 +107,14 @@ pub fn respond_ritual(
             // Get next bloom if any
             let (next, progress, summary) = get_next_and_progress(&token, &all_blooms)?;
 
+            // Create BloomFull with matched phrase
+            let mut bloom_full = BloomFull::from(bloom);
+            bloom_full.matched_phrase = Some(wake_phrase.clone());
+
             let response = WakeRespondResponse {
                 status: "remembered".to_string(),
                 match_type: Some(match_type.to_string()),
-                bloom: Some(BloomFull::from(bloom)),
+                bloom: Some(bloom_full),
                 attempt: None,
                 max_attempts: None,
                 hint: None,
@@ -133,10 +138,14 @@ pub fn respond_ritual(
 
                 let (next, progress, summary) = get_next_and_progress(&token, &all_blooms)?;
 
+                // Create BloomFull with revealed phrase
+                let mut bloom_full = BloomFull::from(bloom);
+                bloom_full.matched_phrase = Some(wake_phrase.clone());
+
                 let response = WakeRespondResponse {
                     status: "revealed".to_string(),
                     match_type: None,
-                    bloom: Some(BloomFull::from(bloom)),
+                    bloom: Some(bloom_full),
                     attempt: None,
                     max_attempts: None,
                     hint: None,
@@ -150,7 +159,7 @@ pub fn respond_ritual(
                 Ok(serde_json::to_string_pretty(&response)?)
             } else {
                 // Give hint and ask for retry
-                let hint = generate_hint(wake_phrase, attempt);
+                let hint = generate_hint(&wake_phrase, attempt);
 
                 let response = WakeRespondResponse {
                     status: "incorrect".to_string(),

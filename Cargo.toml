@@ -62,9 +62,8 @@ lazy_static = "1"
 # Temporary directories
 tempfile = "3"
 
-# Terminal colors and TTY detection
+# Terminal colors
 colored = "2"
-atty = "0.2"
 
 [dev-dependencies.cargo-husky]
 version = "1"

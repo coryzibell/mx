@@ -290,6 +290,8 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
                     wake_phrase: None,
                 })
             })?
@@ -346,6 +348,8 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
                     wake_phrase: None,
                 })
             })?
@@ -401,6 +405,8 @@ impl Database {
                     activation_count: 0,
                     decay_rate: 0.0,
                     anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
                     wake_phrase: None,
                 })
             })

@@ -120,6 +120,15 @@ DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
 DEFINE FIELD IF NOT EXISTS anchors ON knowledge TYPE option<array<string>>;
+
+-- Issue #72: Multiple wake phrases for ritual variety
+DEFINE FIELD IF NOT EXISTS wake_phrases ON knowledge TYPE array<string> DEFAULT [];
+
+-- Issue #73: Custom wake order (separate from resonance)
+DEFINE FIELD IF NOT EXISTS wake_order ON knowledge TYPE option<int>;
+DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
+
+-- DEPRECATED: Kept for backward compatibility during migration
 DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
 
 -- Indexes for common queries
@@ -260,3 +269,12 @@ UPSERT applicability_type:shell SET description = 'Shell scripting', scope = 'la
 UPSERT applicability_type:async SET description = 'Async/concurrent patterns', scope = 'domain';
 UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'domain';
 UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
+
+-- =============================================================================
+-- DATA MIGRATION (Issues #72, #73)
+-- =============================================================================
+
+-- Migrate existing single wake_phrase to wake_phrases array
+-- Only migrate if wake_phrases is empty and wake_phrase exists
+UPDATE knowledge SET wake_phrases = [wake_phrase]
+WHERE array::len(wake_phrases) = 0 AND wake_phrase != NONE;
