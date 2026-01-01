@@ -358,6 +358,25 @@ impl SurrealDatabase {
         }
     }
 
+    /// Build category filter clauses
+    fn build_category_filter(filter: &crate::store::KnowledgeFilter) -> String {
+        match &filter.categories {
+            Some(cats) if !cats.is_empty() => {
+                if cats.len() == 1 {
+                    format!("AND category = type::thing('category', '{}')", cats[0])
+                } else {
+                    // Multiple categories: use IN clause
+                    let quoted: Vec<String> = cats
+                        .iter()
+                        .map(|c| format!("type::thing('category', '{}')", c))
+                        .collect();
+                    format!("AND category IN [{}]", quoted.join(", "))
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
     // =========================================================================
     // KNOWLEDGE CRUD OPERATIONS
     // =========================================================================
@@ -714,14 +733,16 @@ impl SurrealDatabase {
 
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
+        let category_clause = Self::build_category_filter(filter);
 
         let sql = format!(
             "SELECT {}
             FROM knowledge
-            WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {} {}",
+            WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {} {} {}",
             Self::knowledge_select_fields(),
             visibility_clause,
-            resonance_clause
+            resonance_clause,
+            category_clause
         );
 
         let mut query_builder = self.db.query(&sql).bind(("query", query_owned));
