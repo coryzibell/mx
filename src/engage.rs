@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::{KnowledgeStore, WakeCascade};
@@ -88,7 +88,7 @@ pub fn run_engage_ritual(
 
 /// Check if stdin is a TTY
 fn is_tty() -> bool {
-    atty::is(atty::Stream::Stdin)
+    io::stdin().is_terminal()
 }
 
 /// Print bloom header with progress and metadata

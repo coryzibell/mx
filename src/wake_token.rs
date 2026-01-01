@@ -20,15 +20,37 @@ pub struct WakeSessionToken {
     pub needed_help_count: u32,
     pub skipped_count: u32,
     pub created_at: i64,
+    /// Selected phrase indices for each bloom (None if bloom has no phrases)
+    pub selected_phrase_indices: Vec<Option<usize>>,
 }
 
 impl WakeSessionToken {
     /// Create new session from cascade
     pub fn new(cascade: &WakeCascade) -> Self {
+        use rand::Rng;
+
         let mut bloom_ids = Vec::new();
-        bloom_ids.extend(cascade.core.iter().map(|e| e.id.clone()));
-        bloom_ids.extend(cascade.recent.iter().map(|e| e.id.clone()));
-        bloom_ids.extend(cascade.bridges.iter().map(|e| e.id.clone()));
+        let mut selected_phrase_indices = Vec::new();
+
+        // Collect blooms and select phrase indices
+        for entry in cascade
+            .core
+            .iter()
+            .chain(cascade.recent.iter())
+            .chain(cascade.bridges.iter())
+        {
+            bloom_ids.push(entry.id.clone());
+
+            // Select random phrase index if bloom has phrases
+            let phrase_idx = if !entry.wake_phrases.is_empty() {
+                Some(rand::rng().random_range(0..entry.wake_phrases.len()))
+            } else if entry.wake_phrase.is_some() {
+                Some(0) // Single wake_phrase maps to index 0
+            } else {
+                None // No phrases
+            };
+            selected_phrase_indices.push(phrase_idx);
+        }
 
         Self {
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -39,12 +61,20 @@ impl WakeSessionToken {
             needed_help_count: 0,
             skipped_count: 0,
             created_at: chrono::Utc::now().timestamp(),
+            selected_phrase_indices,
         }
     }
 
     /// Get current bloom ID
     pub fn current_bloom_id(&self) -> Option<&str> {
         self.bloom_ids.get(self.current_index).map(|s| s.as_str())
+    }
+
+    /// Get selected phrase index for current bloom
+    pub fn current_phrase_index(&self) -> Option<usize> {
+        self.selected_phrase_indices
+            .get(self.current_index)
+            .and_then(|&idx| idx)
     }
 
     /// Total blooms in session
@@ -204,6 +234,7 @@ pub struct BloomPrompt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
     pub has_wake_phrase: bool,
+    pub wake_phrase_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -215,7 +246,10 @@ pub struct BloomFull {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub wake_phrase: Option<String>,
+    pub wake_phrase: Option<String>, // DEPRECATED: kept for backward compat
+    pub all_phrases: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_phrase: Option<String>, // Which phrase was matched/selected
 }
 
 #[derive(Debug, Serialize)]
@@ -241,12 +275,22 @@ pub struct Summary {
 /// Convert KnowledgeEntry to BloomPrompt
 impl From<&KnowledgeEntry> for BloomPrompt {
     fn from(entry: &KnowledgeEntry) -> Self {
+        let has_phrase = !entry.wake_phrases.is_empty() || entry.wake_phrase.is_some();
+        let phrase_count = if !entry.wake_phrases.is_empty() {
+            entry.wake_phrases.len()
+        } else if entry.wake_phrase.is_some() {
+            1
+        } else {
+            0
+        };
+
         Self {
             id: entry.id.clone(),
             title: entry.title.clone(),
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            has_wake_phrase: entry.wake_phrase.is_some(),
+            has_wake_phrase: has_phrase,
+            wake_phrase_count: phrase_count,
         }
     }
 }
@@ -260,13 +304,24 @@ impl From<&KnowledgeEntry> for BloomFull {
             .or_else(|| entry.summary.clone())
             .unwrap_or_else(|| "(no content)".to_string());
 
+        // Collect all phrases (wake_phrases array takes priority)
+        let all_phrases = if !entry.wake_phrases.is_empty() {
+            entry.wake_phrases.clone()
+        } else if let Some(ref phrase) = entry.wake_phrase {
+            vec![phrase.clone()]
+        } else {
+            vec![]
+        };
+
         Self {
             id: entry.id.clone(),
             title: entry.title.clone(),
             content,
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            wake_phrase: entry.wake_phrase.clone(),
+            wake_phrase: entry.wake_phrase.clone(), // Deprecated, kept for backward compat
+            all_phrases,
+            matched_phrase: None, // Not set by default, populated during ritual
         }
     }
 }

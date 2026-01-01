@@ -466,6 +466,14 @@ enum MemoryCommands {
         #[arg(long)]
         wake_phrase: Option<String>,
 
+        /// Multiple wake phrases (comma-separated, for ritual variety)
+        #[arg(long)]
+        wake_phrases: Option<String>,
+
+        /// Custom wake order (lower = earlier in sequence)
+        #[arg(long)]
+        wake_order: Option<i32>,
+
         /// Anchors (comma-separated bloom IDs this connects to)
         #[arg(long)]
         anchors: Option<String>,
@@ -519,6 +527,22 @@ enum MemoryCommands {
         /// Update wake phrase for memory ritual verification
         #[arg(long)]
         wake_phrase: Option<String>,
+
+        /// Update multiple wake phrases (comma-separated, replaces all)
+        #[arg(long)]
+        wake_phrases: Option<String>,
+
+        /// Add a single wake phrase to existing phrases
+        #[arg(long, conflicts_with = "wake_phrases")]
+        add_wake_phrase: Option<String>,
+
+        /// Remove a specific wake phrase
+        #[arg(long, conflicts_with = "wake_phrases")]
+        remove_wake_phrase: Option<String>,
+
+        /// Update wake order (use '-' to clear)
+        #[arg(long)]
+        wake_order: Option<String>,
     },
 
     /// Apply database schema migrations
@@ -1322,6 +1346,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             resonance,
             resonance_type,
             wake_phrase,
+            wake_phrases,
+            wake_order,
             anchors,
         } => {
             use anyhow::Context;
@@ -1378,6 +1404,19 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                         .collect()
                 })
                 .unwrap_or_default();
+
+            // Parse wake_phrases CSV or use single wake_phrase
+            let wake_phrase_list: Vec<String> = if let Some(phrases) = wake_phrases {
+                phrases
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            } else if let Some(ref single_phrase) = wake_phrase {
+                vec![single_phrase.clone()]
+            } else {
+                vec![]
+            };
 
             // Determine visibility and owner
             let visibility = if private {
@@ -1441,6 +1480,8 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 activation_count: 0,
                 decay_rate: 0.0,
                 anchors: anchor_list,
+                wake_phrases: wake_phrase_list,
+                wake_order,
                 wake_phrase,
             };
 
@@ -1487,6 +1528,10 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             resonance_type,
             anchors,
             wake_phrase,
+            wake_phrases,
+            add_wake_phrase,
+            remove_wake_phrase,
+            wake_order,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1593,6 +1638,59 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     entry.wake_phrase, new_phrase
                 ));
                 entry.wake_phrase = Some(new_phrase.clone());
+            }
+
+            // Update wake_phrases (replaces all)
+            if let Some(ref phrases_str) = wake_phrases {
+                let phrase_list: Vec<String> = phrases_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                changes.push(format!(
+                    "wake_phrases: {:?} -> {:?}",
+                    entry.wake_phrases, phrase_list
+                ));
+                entry.wake_phrases = phrase_list;
+            }
+
+            // Add a single wake phrase
+            if let Some(ref new_phrase) = add_wake_phrase
+                && !entry.wake_phrases.contains(new_phrase)
+            {
+                entry.wake_phrases.push(new_phrase.clone());
+                changes.push(format!("wake_phrases: added '{}'", new_phrase));
+            }
+
+            // Remove a specific wake phrase
+            if let Some(ref phrase_to_remove) = remove_wake_phrase
+                && let Some(pos) = entry
+                    .wake_phrases
+                    .iter()
+                    .position(|p| p == phrase_to_remove)
+            {
+                entry.wake_phrases.remove(pos);
+                changes.push(format!("wake_phrases: removed '{}'", phrase_to_remove));
+            }
+
+            // Update wake_order (use '-' to clear)
+            if let Some(ref order_str) = wake_order {
+                if order_str == "-" {
+                    changes.push("wake_order: cleared".to_string());
+                    entry.wake_order = None;
+                } else if let Ok(order_value) = order_str.parse::<i32>() {
+                    changes.push(format!(
+                        "wake_order: {:?} -> {}",
+                        entry.wake_order, order_value
+                    ));
+                    entry.wake_order = Some(order_value);
+                } else {
+                    eprintln!(
+                        "Error: Invalid wake_order value '{}' (use number or '-' to clear)",
+                        order_str
+                    );
+                    std::process::exit(1);
+                }
             }
 
             // Update timestamp

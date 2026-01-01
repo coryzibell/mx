@@ -134,7 +134,15 @@ pub struct SurrealKnowledgeRecord {
     #[serde(default)]
     pub anchors: Vec<String>,
 
-    /// Wake phrase for memory ritual verification
+    // Issue #72: Multiple wake phrases
+    #[serde(default)]
+    pub wake_phrases: Vec<String>,
+
+    // Issue #73: Custom wake order
+    #[serde(default)]
+    pub wake_order: Option<i32>,
+
+    /// DEPRECATED: Wake phrase for memory ritual verification (kept for backward compat)
     #[serde(default)]
     pub wake_phrase: Option<String>,
 }
@@ -177,6 +185,8 @@ impl SurrealKnowledgeRecord {
             activation_count: self.activation_count,
             decay_rate: self.decay_rate,
             anchors: self.anchors,
+            wake_phrases: self.wake_phrases,
+            wake_order: self.wake_order,
             wake_phrase: self.wake_phrase,
         }
     }
@@ -308,6 +318,8 @@ impl SurrealDatabase {
         IF activation_count THEN activation_count ELSE 0 END AS activation_count,
         IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
         IF anchors THEN anchors ELSE [] END AS anchors,
+        IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
+        wake_order,
         wake_phrase"
     }
 
@@ -828,6 +840,8 @@ impl SurrealDatabase {
             activation_count: serde_json::from_value(obj["activation_count"].clone()).unwrap_or(0),
             decay_rate: serde_json::from_value(obj["decay_rate"].clone()).unwrap_or(0.0),
             anchors: serde_json::from_value(obj["anchors"].clone()).unwrap_or_default(),
+            wake_phrases: serde_json::from_value(obj["wake_phrases"].clone()).unwrap_or_default(),
+            wake_order: serde_json::from_value(obj["wake_order"].clone()).ok(),
             wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
         })
     }
@@ -969,7 +983,10 @@ impl SurrealDatabase {
             WHERE resonance >= 8
             AND resonance_type IN ['foundational', 'transformative']
             {}
-            ORDER BY resonance DESC
+            ORDER BY
+                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
+                wake_order ASC,
+                resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -1009,7 +1026,10 @@ impl SurrealDatabase {
             FROM knowledge
             WHERE last_activated > <datetime>$cutoff
             {}
-            ORDER BY resonance DESC
+            ORDER BY
+                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
+                wake_order ASC,
+                resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -1052,7 +1072,10 @@ impl SurrealDatabase {
             WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
             AND resonance >= 5
             {}
-            ORDER BY resonance DESC
+            ORDER BY
+                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
+                wake_order ASC,
+                resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause

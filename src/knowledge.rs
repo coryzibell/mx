@@ -73,6 +73,15 @@ pub struct KnowledgeEntry {
     #[serde(default)]
     pub anchors: Vec<String>, // IDs of related blooms this connects to
 
+    // Issue #72: Multiple wake phrases
+    #[serde(default)]
+    pub wake_phrases: Vec<String>, // Multiple phrases for ritual variety
+
+    // Issue #73: Custom wake order
+    #[serde(default)]
+    pub wake_order: Option<i32>, // Custom wake sequence (lower = earlier)
+
+    // DEPRECATED - kept for backward compatibility during migration
     #[serde(default)]
     pub wake_phrase: Option<String>, // Verification phrase for memory rituals
 }
@@ -217,6 +226,8 @@ impl KnowledgeEntry {
             activation_count: 0,
             decay_rate: 0.0,
             anchors: vec![],
+            wake_phrases: vec![],
+            wake_order: None,
             wake_phrase: None,
         })
     }
