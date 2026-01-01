@@ -1655,23 +1655,22 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
 
             // Add a single wake phrase
-            if let Some(ref new_phrase) = add_wake_phrase {
-                if !entry.wake_phrases.contains(new_phrase) {
-                    entry.wake_phrases.push(new_phrase.clone());
-                    changes.push(format!("wake_phrases: added '{}'", new_phrase));
-                }
+            if let Some(ref new_phrase) = add_wake_phrase
+                && !entry.wake_phrases.contains(new_phrase)
+            {
+                entry.wake_phrases.push(new_phrase.clone());
+                changes.push(format!("wake_phrases: added '{}'", new_phrase));
             }
 
             // Remove a specific wake phrase
-            if let Some(ref phrase_to_remove) = remove_wake_phrase {
-                if let Some(pos) = entry
+            if let Some(ref phrase_to_remove) = remove_wake_phrase
+                && let Some(pos) = entry
                     .wake_phrases
                     .iter()
                     .position(|p| p == phrase_to_remove)
-                {
-                    entry.wake_phrases.remove(pos);
-                    changes.push(format!("wake_phrases: removed '{}'", phrase_to_remove));
-                }
+            {
+                entry.wake_phrases.remove(pos);
+                changes.push(format!("wake_phrases: removed '{}'", phrase_to_remove));
             }
 
             // Update wake_order (use '-' to clear)
