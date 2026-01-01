@@ -47,6 +47,7 @@ impl AgentContext {
 pub struct KnowledgeFilter {
     pub min_resonance: Option<i32>,
     pub max_resonance: Option<i32>,
+    pub categories: Option<Vec<String>>,
 }
 
 /// Result of a wake-up cascade query

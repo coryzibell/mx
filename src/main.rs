@@ -258,6 +258,10 @@ enum MemoryCommands {
         /// Search query
         query: String,
 
+        /// Filter by category (can specify multiple: bloom,technique)
+        #[arg(short, long, value_delimiter = ',')]
+        category: Option<Vec<String>>,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -1118,6 +1122,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
 
         MemoryCommands::Search {
             query,
+            category,
             json,
             mine,
             include_private,
@@ -1134,10 +1139,11 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
 
-            // Build filter for database query (resonance only)
+            // Build filter for database query (resonance and category)
             let filter = store::KnowledgeFilter {
                 min_resonance,
                 max_resonance,
+                categories: category,
             };
 
             // Get results from database with resonance filtering
@@ -1212,6 +1218,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             let filter = store::KnowledgeFilter {
                 min_resonance,
                 max_resonance,
+                categories: None,
             };
 
             // Get results from database with resonance filtering
