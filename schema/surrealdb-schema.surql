@@ -275,6 +275,6 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 -- =============================================================================
 
 -- Migrate existing single wake_phrase to wake_phrases array
--- Only migrate if wake_phrases is empty and wake_phrase exists
-UPDATE knowledge SET wake_phrases = [wake_phrase]
-WHERE array::len(wake_phrases) = 0 AND wake_phrase != NONE;
+-- Handle records where wake_phrases is NONE (not yet created)
+UPDATE knowledge SET wake_phrases = IF wake_phrase != NONE THEN [wake_phrase] ELSE [] END
+WHERE wake_phrases IS NONE;

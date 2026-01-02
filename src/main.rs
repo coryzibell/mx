@@ -360,6 +360,10 @@ enum MemoryCommands {
         /// Filter to entries WITHOUT resonance type
         #[arg(long, conflicts_with = "has_resonance_type")]
         missing_resonance_type: bool,
+
+        /// Limit number of results
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Show a specific entry
@@ -1199,6 +1203,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             missing_anchors,
             has_resonance_type,
             missing_resonance_type,
+            limit,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
@@ -1253,6 +1258,11 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                         || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
                 })
                 .collect::<Vec<_>>();
+
+            // Apply limit if specified
+            if let Some(n) = limit {
+                entries.truncate(n);
+            }
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
