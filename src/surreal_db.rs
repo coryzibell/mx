@@ -1003,14 +1003,19 @@ impl SurrealDatabase {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
         let sql = format!(
-            "SELECT {}
-            FROM knowledge
-            WHERE resonance >= 8
-            AND resonance_type IN ['foundational', 'transformative']
-            {}
+            "SELECT *,
+                (wake_order IS NOT NULL) AS has_wake_order,
+                wake_order ?? 999999 AS effective_wake_order
+            FROM (
+                SELECT {}
+                FROM knowledge
+                WHERE resonance >= 8
+                AND resonance_type IN ['foundational', 'transformative']
+                {}
+            )
             ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
+                has_wake_order DESC,
+                effective_wake_order ASC,
                 resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
@@ -1047,13 +1052,18 @@ impl SurrealDatabase {
         let cutoff_str = cutoff.to_rfc3339();
 
         let sql = format!(
-            "SELECT {}
-            FROM knowledge
-            WHERE last_activated > <datetime>$cutoff
-            {}
+            "SELECT *,
+                (wake_order IS NOT NULL) AS has_wake_order,
+                wake_order ?? 999999 AS effective_wake_order
+            FROM (
+                SELECT {}
+                FROM knowledge
+                WHERE last_activated > <datetime>$cutoff
+                {}
+            )
             ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
+                has_wake_order DESC,
+                effective_wake_order ASC,
                 resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
@@ -1092,14 +1102,19 @@ impl SurrealDatabase {
         // Use array::intersect to check if anchors array has any overlap with anchor_ids
         // If intersection is non-empty, this bloom is anchored to a core/recent bloom
         let sql = format!(
-            "SELECT {}
-            FROM knowledge
-            WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
-            AND resonance >= 5
-            {}
+            "SELECT *,
+                (wake_order IS NOT NULL) AS has_wake_order,
+                wake_order ?? 999999 AS effective_wake_order
+            FROM (
+                SELECT {}
+                FROM knowledge
+                WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
+                AND resonance >= 5
+                {}
+            )
             ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
+                has_wake_order DESC,
+                effective_wake_order ASC,
                 resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
