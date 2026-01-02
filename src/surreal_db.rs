@@ -410,6 +410,8 @@ impl SurrealDatabase {
             activation_count = $activation_count,
             decay_rate = $decay_rate,
             anchors = $anchors,
+            wake_phrases = $wake_phrases,
+            wake_order = $wake_order,
             wake_phrase = $wake_phrase"
             .to_string();
 
@@ -476,6 +478,8 @@ impl SurrealDatabase {
             .bind(("activation_count", entry.activation_count))
             .bind(("decay_rate", entry.decay_rate))
             .bind(("anchors", entry.anchors.clone()))
+            .bind(("wake_phrases", entry.wake_phrases.clone()))
+            .bind(("wake_order", entry.wake_order))
             .bind(("wake_phrase", entry.wake_phrase.clone()));
 
         // Bind optional parameters
