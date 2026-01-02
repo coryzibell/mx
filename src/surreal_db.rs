@@ -998,16 +998,17 @@ impl SurrealDatabase {
     ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
+        // SurrealDB doesn't support IF/CASE in ORDER BY, so we compute a sort_priority alias
+        // in SELECT and order by that. Blooms WITH wake_order come first (sorted ASC),
+        // blooms WITHOUT wake_order come after (sorted by resonance DESC within that group).
         let sql = format!(
-            "SELECT {}
+            "SELECT {},
+                IF wake_order IS NONE THEN 999999 ELSE wake_order END AS sort_priority
             FROM knowledge
             WHERE resonance >= 8
             AND resonance_type IN ['foundational', 'transformative']
             {}
-            ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
-                resonance DESC
+            ORDER BY sort_priority ASC, resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -1042,15 +1043,14 @@ impl SurrealDatabase {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
         let cutoff_str = cutoff.to_rfc3339();
 
+        // SurrealDB doesn't support IF/CASE in ORDER BY, so we compute a sort_priority alias
         let sql = format!(
-            "SELECT {}
+            "SELECT {},
+                IF wake_order IS NONE THEN 999999 ELSE wake_order END AS sort_priority
             FROM knowledge
             WHERE last_activated > <datetime>$cutoff
             {}
-            ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
-                resonance DESC
+            ORDER BY sort_priority ASC, resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -1087,16 +1087,15 @@ impl SurrealDatabase {
 
         // Use array::intersect to check if anchors array has any overlap with anchor_ids
         // If intersection is non-empty, this bloom is anchored to a core/recent bloom
+        // SurrealDB doesn't support IF/CASE in ORDER BY, so we compute a sort_priority alias
         let sql = format!(
-            "SELECT {}
+            "SELECT {},
+                IF wake_order IS NONE THEN 999999 ELSE wake_order END AS sort_priority
             FROM knowledge
             WHERE array::len(array::intersect(anchors, $anchor_ids)) > 0
             AND resonance >= 5
             {}
-            ORDER BY
-                CASE WHEN wake_order IS NOT NULL THEN 0 ELSE 1 END,
-                wake_order ASC,
-                resonance DESC
+            ORDER BY sort_priority ASC, resonance DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
