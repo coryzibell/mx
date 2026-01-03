@@ -100,10 +100,7 @@ pub fn list_sessions(all: bool) -> Result<()> {
         println!(
             "{:<25} {:<20} {:<8} {:<8} {:<10}",
             format!("{}{}", archive.short_id, incremental_suffix),
-            archive
-                .manifest
-                .archived_at
-                .format("%Y-%m-%d %H:%M:%S"),
+            archive.manifest.archived_at.format("%Y-%m-%d %H:%M:%S"),
             archive.manifest.message_count,
             archive.manifest.agent_count,
             format!("{}KB", size_kb)
@@ -114,7 +111,12 @@ pub fn list_sessions(all: bool) -> Result<()> {
 }
 
 /// Read and display an archived session
-pub fn read_session(id: String, human: bool, grep_pattern: Option<String>, include_agents: bool) -> Result<()> {
+pub fn read_session(
+    id: String,
+    human: bool,
+    grep_pattern: Option<String>,
+    include_agents: bool,
+) -> Result<()> {
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
 
@@ -148,7 +150,10 @@ pub fn read_session(id: String, human: bool, grep_pattern: Option<String>, inclu
                 let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    println!("\n--- Agent: {} ---\n", path.file_stem().unwrap().to_string_lossy());
+                    println!(
+                        "\n--- Agent: {} ---\n",
+                        path.file_stem().unwrap().to_string_lossy()
+                    );
                     let agent_content = fs::read_to_string(&path)?;
                     if human {
                         print_human_readable(&agent_content)?;
@@ -279,7 +284,8 @@ fn archive_session(session_path: &Path) -> Result<()> {
 
         for agent in &agents {
             let source_path = PathBuf::from(&agent.id);
-            let agent_filename = source_path.file_name()
+            let agent_filename = source_path
+                .file_name()
                 .context("Agent path has no filename")?;
             let dest_agent = agents_dir.join(agent_filename);
             fs::copy(&source_path, &dest_agent)?;
@@ -312,7 +318,10 @@ fn archive_session(session_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_agent_sessions(session_path: &Path, _session_modified: &SystemTime) -> Result<Vec<AgentInfo>> {
+fn find_agent_sessions(
+    session_path: &Path,
+    _session_modified: &SystemTime,
+) -> Result<Vec<AgentInfo>> {
     let parent_dir = session_path
         .parent()
         .context("Session file has no parent directory")?;
@@ -325,7 +334,9 @@ fn find_agent_sessions(session_path: &Path, _session_modified: &SystemTime) -> R
 
         // Check if it's an agent-*.jsonl file
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("agent-") && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            if name.starts_with("agent-")
+                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+            {
                 // Check if modification time is within session window
                 if let Ok(meta) = entry.metadata() {
                     if let Ok(_modified) = meta.modified() {

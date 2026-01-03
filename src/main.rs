@@ -2596,7 +2596,12 @@ fn handle_codex(cmd: CodexCommands) -> Result<()> {
             codex::list_sessions(all)?;
             Ok(())
         }
-        CodexCommands::Read { id, human, agents, grep } => {
+        CodexCommands::Read {
+            id,
+            human,
+            agents,
+            grep,
+        } => {
             codex::read_session(id, human, grep, agents)?;
             Ok(())
         }
