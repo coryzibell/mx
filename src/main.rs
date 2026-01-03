@@ -558,6 +558,18 @@ enum MemoryCommands {
         /// Update wake order (use '-' to clear)
         #[arg(long)]
         wake_order: Option<String>,
+
+        /// Change visibility (public or private)
+        #[arg(long)]
+        visibility: Option<String>,
+
+        /// Update owner (only valid when visibility is private)
+        #[arg(long)]
+        owner: Option<String>,
+
+        /// Force dangerous visibility changes (e.g., making blooms public)
+        #[arg(long)]
+        force: bool,
     },
 
     /// Apply database schema migrations
@@ -1601,6 +1613,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             add_wake_phrase,
             remove_wake_phrase,
             wake_order,
+            visibility,
+            owner,
+            force,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1760,6 +1775,68 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     );
                     std::process::exit(1);
                 }
+            }
+
+            // Update visibility if provided
+            if let Some(ref new_vis) = visibility {
+                // Validate value
+                if new_vis != "public" && new_vis != "private" {
+                    eprintln!("Error: visibility must be 'public' or 'private'");
+                    std::process::exit(1);
+                }
+
+                let old_vis = entry.visibility.clone();
+
+                // Bloom protection: warn when making blooms public
+                if new_vis == "public" && entry.category_id == "bloom" && !force {
+                    eprintln!(
+                        "Warning: Making bloom '{}' public will expose identity data.",
+                        entry.id
+                    );
+                    eprintln!("Use --force to confirm this change.");
+                    std::process::exit(1);
+                }
+
+                // Handle public -> private: require owner
+                if new_vis == "private" && old_vis == "public" {
+                    let new_owner = owner.clone().or_else(|| {
+                        std::env::var("MX_CURRENT_AGENT")
+                            .ok()
+                            .filter(|s| !s.is_empty())
+                    });
+
+                    if new_owner.is_none() {
+                        eprintln!("Error: Cannot make entry private without an owner.");
+                        eprintln!("Provide --owner or set MX_CURRENT_AGENT.");
+                        std::process::exit(1);
+                    }
+
+                    entry.owner = new_owner;
+                }
+
+                // Handle private -> public: clear owner
+                if new_vis == "public" && old_vis == "private" {
+                    entry.owner = None;
+                }
+
+                changes.push(format!("visibility: {} -> {}", old_vis, new_vis));
+                entry.visibility = new_vis.clone();
+            }
+
+            // Update owner if provided (only for private entries)
+            if let Some(ref new_owner) = owner {
+                // Only allow owner update if entry is or will be private
+                let is_private =
+                    visibility.as_deref() == Some("private") || entry.visibility == "private";
+
+                if !is_private {
+                    eprintln!("Error: Cannot set owner on public entry.");
+                    eprintln!("Use --visibility private to make entry private first.");
+                    std::process::exit(1);
+                }
+
+                changes.push(format!("owner: {:?} -> {}", entry.owner, new_owner));
+                entry.owner = Some(new_owner.clone());
             }
 
             // Update timestamp
