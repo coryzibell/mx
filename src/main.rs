@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod codex;
 mod commit;
 mod convert;
 mod db;
@@ -107,6 +108,12 @@ enum Commands {
     Session {
         #[command(subcommand)]
         command: SessionCommands,
+    },
+
+    /// Codex - session conversation archival
+    Codex {
+        #[command(subcommand)]
+        command: CodexCommands,
     },
 
     /// Conversion utilities
@@ -781,6 +788,50 @@ enum SessionCommands {
 }
 
 #[derive(Subcommand)]
+enum CodexCommands {
+    /// Archive current session to permanent storage
+    Save {
+        /// Path to session JSONL file (defaults to most recent non-agent session)
+        path: Option<String>,
+
+        /// Archive all unarchived sessions
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// List archived sessions
+    List {
+        /// Show all archives including incremental saves
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Read an archived session
+    Read {
+        /// Archive ID (short UUID from list)
+        id: String,
+
+        /// Display in human-readable format
+        #[arg(long)]
+        human: bool,
+
+        /// Include agent transcripts
+        #[arg(long)]
+        agents: bool,
+
+        /// Filter lines matching pattern
+        #[arg(long)]
+        grep: Option<String>,
+    },
+
+    /// Search all archives for a pattern
+    Search {
+        /// Pattern to search for
+        pattern: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentsCommands {
     /// List all agents
     List,
@@ -1038,6 +1089,7 @@ fn main() -> Result<()> {
         Commands::Github { command } => handle_github(command),
         Commands::Wiki { command } => handle_wiki(command),
         Commands::Session { command } => handle_session(command),
+        Commands::Codex { command } => handle_codex(command),
         Commands::Convert { command } => handle_convert(command),
         Commands::Doctor => doctor::run_checks(),
         Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
@@ -2529,6 +2581,27 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
     match cmd {
         SessionCommands::Export { path, output } => {
             session::export_session(path, output)?;
+            Ok(())
+        }
+    }
+}
+
+fn handle_codex(cmd: CodexCommands) -> Result<()> {
+    match cmd {
+        CodexCommands::Save { path, all } => {
+            codex::save_session(path, all)?;
+            Ok(())
+        }
+        CodexCommands::List { all } => {
+            codex::list_sessions(all)?;
+            Ok(())
+        }
+        CodexCommands::Read { id, human, agents, grep } => {
+            codex::read_session(id, human, grep, agents)?;
+            Ok(())
+        }
+        CodexCommands::Search { pattern } => {
+            codex::search_archives(pattern)?;
             Ok(())
         }
     }

@@ -137,7 +137,7 @@ pub fn export_session(path: Option<String>, output: Option<String>) -> Result<()
     Ok(())
 }
 
-fn find_most_recent_session() -> Result<PathBuf> {
+pub fn find_most_recent_session() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let projects_dir = home.join(".claude").join("projects");
 
