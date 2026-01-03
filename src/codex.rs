@@ -181,14 +181,14 @@ pub fn search_archives(pattern: String) -> Result<()> {
 
     for archive in archives {
         let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
-        if let Ok(content) = fs::read_to_string(&session_file) {
-            if content.contains(&pattern) {
-                println!("Match in {}: {}", archive.short_id, session_file.display());
-                // Print matching lines
-                for (i, line) in content.lines().enumerate() {
-                    if line.contains(&pattern) {
-                        println!("  Line {}: {}", i + 1, line);
-                    }
+        if let Ok(content) = fs::read_to_string(&session_file)
+            && content.contains(&pattern)
+        {
+            println!("Match in {}: {}", archive.short_id, session_file.display());
+            // Print matching lines
+            for (i, line) in content.lines().enumerate() {
+                if line.contains(&pattern) {
+                    println!("  Line {}: {}", i + 1, line);
                 }
             }
         }
@@ -333,25 +333,24 @@ fn find_agent_sessions(
         let path = entry.path();
 
         // Check if it's an agent-*.jsonl file
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with("agent-")
-                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.starts_with("agent-")
+            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        {
+            // Check if modification time is within session window
+            if let Ok(meta) = entry.metadata()
+                && let Ok(_modified) = meta.modified()
             {
-                // Check if modification time is within session window
-                if let Ok(meta) = entry.metadata() {
-                    if let Ok(_modified) = meta.modified() {
-                        // Simple heuristic: agent file modified around same time as session
-                        // Could be improved with actual timestamp parsing from JSONL
-                        let content = fs::read_to_string(&path)?;
-                        let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
+                // Simple heuristic: agent file modified around same time as session
+                // Could be improved with actual timestamp parsing from JSONL
+                let content = fs::read_to_string(&path)?;
+                let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
 
-                        agents.push(AgentInfo {
-                            id: path.to_string_lossy().to_string(), // Store full path temporarily
-                            file: format!("agents/{}", name),
-                            messages,
-                        });
-                    }
-                }
+                agents.push(AgentInfo {
+                    id: path.to_string_lossy().to_string(), // Store full path temporarily
+                    file: format!("agents/{}", name),
+                    messages,
+                });
             }
         }
     }
@@ -373,14 +372,12 @@ fn determine_archive_dir(codex_dir: &Path, base_name: &str) -> Result<PathBuf> {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if name_str.starts_with(base_name) {
-            if let Some(suffix) = name_str.strip_prefix(base_name) {
-                if let Some(num_str) = suffix.strip_prefix('.') {
-                    if let Ok(num) = num_str.parse::<u32>() {
-                        max_incremental = max_incremental.max(num);
-                    }
-                }
-            }
+        if name_str.starts_with(base_name)
+            && let Some(suffix) = name_str.strip_prefix(base_name)
+            && let Some(num_str) = suffix.strip_prefix('.')
+            && let Ok(num) = num_str.parse::<u32>()
+        {
+            max_incremental = max_incremental.max(num);
         }
     }
 
@@ -422,12 +419,12 @@ fn collect_archives(codex_dir: &Path) -> Result<Vec<ArchiveEntry>> {
 
 fn parse_archive_name(name: &str) -> (String, u32) {
     // Extract short UUID from name like "2026-01-03-141500-abc12345" or "2026-01-03-141500-abc12345.1"
-    if let Some(dot_pos) = name.rfind('.') {
-        if let Ok(num) = name[dot_pos + 1..].parse::<u32>() {
-            let base = &name[..dot_pos];
-            let short_id = extract_short_id(base);
-            return (short_id, num);
-        }
+    if let Some(dot_pos) = name.rfind('.')
+        && let Ok(num) = name[dot_pos + 1..].parse::<u32>()
+    {
+        let base = &name[..dot_pos];
+        let short_id = extract_short_id(base);
+        return (short_id, num);
     }
 
     (extract_short_id(name), 0)
@@ -435,15 +432,15 @@ fn parse_archive_name(name: &str) -> (String, u32) {
 
 fn extract_short_id(name: &str) -> String {
     // Extract last part after last hyphen (the short UUID)
-    name.split('-').last().unwrap_or(name).to_string()
+    name.split('-').next_back().unwrap_or(name).to_string()
 }
 
 fn get_base_archive_name(name: &str) -> String {
     // Strip incremental suffix (.N) if present
-    if let Some(dot_pos) = name.rfind('.') {
-        if name[dot_pos + 1..].parse::<u32>().is_ok() {
-            return name[..dot_pos].to_string();
-        }
+    if let Some(dot_pos) = name.rfind('.')
+        && name[dot_pos + 1..].parse::<u32>().is_ok()
+    {
+        return name[..dot_pos].to_string();
     }
     name.to_string()
 }
