@@ -647,7 +647,10 @@ impl SurrealDatabase {
                 }
 
                 if valid_cats.len() == 1 {
-                    format!("AND category = type::thing('category', '{}')", valid_cats[0])
+                    format!(
+                        "AND category = type::thing('category', '{}')",
+                        valid_cats[0]
+                    )
                 } else {
                     // Multiple categories: use IN clause
                     let quoted: Vec<String> = valid_cats
