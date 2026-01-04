@@ -6,6 +6,8 @@ use std::sync::OnceLock;
 use surrealdb::RecordId as SurrealRecordId;
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
+use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
+use surrealdb::opt::auth::Root;
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
@@ -15,6 +17,100 @@ use crate::db::{
 };
 use crate::knowledge::KnowledgeEntry;
 use crate::store::KnowledgeStore;
+
+// ============================================================================
+// CONNECTION MODE CONFIGURATION
+// ============================================================================
+
+/// Connection mode for SurrealDB
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum SurrealMode {
+    /// Embedded SurrealKV (local file-based, default)
+    #[default]
+    Embedded,
+    /// Network connection via WebSocket
+    Network,
+}
+
+/// Configuration for SurrealDB connection
+///
+/// Parsed from environment variables:
+/// - `MX_SURREAL_MODE`: "embedded" (default) or "network"
+/// - `MX_SURREAL_URL`: WebSocket URL for network mode (default: ws://localhost:8000)
+/// - `MX_SURREAL_USER`: Username for network auth (default: root)
+/// - `MX_SURREAL_PASS`: Password for network auth (from agenix secret)
+/// - `MX_SURREAL_NS`: Namespace (default: memory)
+/// - `MX_SURREAL_DB`: Database name (default: knowledge)
+#[derive(Debug, Clone)]
+pub struct SurrealConfig {
+    /// Connection mode
+    pub mode: SurrealMode,
+    /// WebSocket URL for network mode
+    pub url: String,
+    /// Username for network authentication
+    pub user: String,
+    /// Password for network authentication
+    pub pass: Option<String>,
+    /// SurrealDB namespace
+    pub namespace: String,
+    /// SurrealDB database name
+    pub database: String,
+}
+
+impl Default for SurrealConfig {
+    fn default() -> Self {
+        Self {
+            mode: SurrealMode::Embedded,
+            url: "ws://localhost:8000".to_string(),
+            user: "root".to_string(),
+            pass: None,
+            namespace: "memory".to_string(),
+            database: "knowledge".to_string(),
+        }
+    }
+}
+
+impl SurrealConfig {
+    /// Parse configuration from environment variables
+    pub fn from_env() -> Self {
+        let mode = match std::env::var("MX_SURREAL_MODE")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "network" => SurrealMode::Network,
+            _ => SurrealMode::Embedded,
+        };
+
+        let url =
+            std::env::var("MX_SURREAL_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
+
+        let user = std::env::var("MX_SURREAL_USER").unwrap_or_else(|_| "root".to_string());
+
+        // Filter out empty password strings - treat them as "no password"
+        let pass = std::env::var("MX_SURREAL_PASS")
+            .ok()
+            .filter(|p| !p.is_empty());
+
+        let namespace = std::env::var("MX_SURREAL_NS").unwrap_or_else(|_| "memory".to_string());
+
+        let database = std::env::var("MX_SURREAL_DB").unwrap_or_else(|_| "knowledge".to_string());
+
+        Self {
+            mode,
+            url,
+            user,
+            pass,
+            namespace,
+            database,
+        }
+    }
+
+    /// Check if we're in network mode
+    pub fn is_network(&self) -> bool {
+        self.mode == SurrealMode::Network
+    }
+}
 
 /// Embedded SurrealDB schema - applied on database open
 const SCHEMA: &str = include_str!("../schema/surrealdb-schema.surql");
@@ -234,10 +330,40 @@ fn normalize_datetime(s: &str) -> String {
     s.to_string()
 }
 
+/// Connection abstraction for SurrealDB - supports both embedded and network modes
+pub enum SurrealConnection {
+    /// Embedded SurrealKV database (local file-based)
+    Embedded(Surreal<surrealdb::engine::local::Db>),
+    /// Network connection via WebSocket
+    Network(Surreal<WsClient>),
+}
+
 /// SurrealDB-backed knowledge store
 pub struct SurrealDatabase {
-    db: Surreal<surrealdb::engine::local::Db>,
+    conn: SurrealConnection,
 }
+
+/// Macro to execute code with the appropriate database connection (embedded or network)
+///
+/// This macro handles the connection type dispatch, allowing the same query code
+/// to work with both embedded (SurrealKV) and network (WebSocket) connections.
+///
+/// # Usage
+/// ```rust,ignore
+/// with_db!(self, db, {
+///     db.query(&sql).bind(("key", value)).await?
+/// })
+/// ```
+macro_rules! with_db {
+    ($self:expr, $db:ident, $body:expr) => {
+        match &$self.conn {
+            SurrealConnection::Embedded($db) => $body,
+            SurrealConnection::Network($db) => $body,
+        }
+    };
+}
+
+impl SurrealDatabase {}
 
 impl SurrealDatabase {
     /// Get or initialize the global tokio runtime
@@ -247,12 +373,42 @@ impl SurrealDatabase {
     }
 
     /// Open database at path, create if not exists, apply schema
+    ///
+    /// This method checks environment variables first - if `MX_SURREAL_MODE=network`,
+    /// the path is ignored and a network connection is established instead.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        Self::runtime().block_on(Self::open_async(path))
+        let config = SurrealConfig::from_env();
+        Self::runtime().block_on(Self::open_with_config_async(path, &config))
     }
 
-    async fn open_async<P: AsRef<Path>>(path: P) -> Result<Self> {
+    /// Connect using explicit configuration
+    ///
+    /// For embedded mode, `path` specifies the database location.
+    /// For network mode, `path` is ignored.
+    pub fn connect<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
+        Self::runtime().block_on(Self::open_with_config_async(path, config))
+    }
+
+    /// Internal: open with config, branching on mode
+    async fn open_with_config_async<P: AsRef<Path>>(
+        path: P,
+        config: &SurrealConfig,
+    ) -> Result<Self> {
+        match config.mode {
+            SurrealMode::Embedded => Self::open_embedded_async(path, config).await,
+            SurrealMode::Network => Self::open_network_async(config).await,
+        }
+    }
+
+    /// Open embedded SurrealKV database
+    async fn open_embedded_async<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
         let path = path.as_ref();
+
+        // Diagnostic: Log connection mode
+        eprintln!(
+            "[mx] Connecting to SurrealDB in embedded mode: {}",
+            path.display()
+        );
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -261,17 +417,25 @@ impl SurrealDatabase {
         }
 
         // Connect to SurrealKv backend
-        let db = Surreal::new::<SurrealKv>(path)
-            .await
-            .with_context(|| format!("Failed to open SurrealDB at {:?}", path))?;
+        let db = Surreal::new::<SurrealKv>(path).await.with_context(|| {
+            format!(
+                "Failed to open SurrealDB at {} (check file permissions and disk space)",
+                path.display()
+            )
+        })?;
 
-        // Use namespace and database
-        db.use_ns("memory")
-            .use_db("knowledge")
+        // Use namespace and database from config
+        eprintln!(
+            "[mx] Using namespace '{}' and database '{}'",
+            config.namespace, config.database
+        );
+        db.use_ns(&config.namespace)
+            .use_db(&config.database)
             .await
             .context("Failed to set namespace and database")?;
 
         // Apply schema (idempotent)
+        eprintln!("[mx] Applying database schema");
         let mut response = db
             .query(SCHEMA)
             .await
@@ -283,7 +447,99 @@ impl SurrealDatabase {
             return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
         }
 
-        Ok(Self { db })
+        eprintln!("[mx] Embedded connection established successfully");
+
+        Ok(Self {
+            conn: SurrealConnection::Embedded(db),
+        })
+    }
+
+    /// Check if URL is localhost (safe for unencrypted traffic)
+    fn is_localhost_url(url: &str) -> bool {
+        url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]")
+    }
+
+    /// Open network connection via WebSocket
+    ///
+    /// Authenticates with the remote SurrealDB server using credentials from config.
+    async fn open_network_async(config: &SurrealConfig) -> Result<Self> {
+        // Diagnostic: Log connection attempt (to stderr, doesn't interfere with stdout)
+        eprintln!(
+            "[mx] Connecting to SurrealDB in network mode: {}",
+            config.url
+        );
+
+        // Security warning: credentials over unencrypted WebSocket to non-localhost
+        if config.pass.is_some()
+            && config.url.starts_with("ws://")
+            && !Self::is_localhost_url(&config.url)
+        {
+            eprintln!(
+                "[mx] WARNING: Sending credentials over unencrypted WebSocket to {}",
+                config.url
+            );
+            eprintln!("[mx] WARNING: Consider using wss:// (TLS) for secure authentication");
+        }
+
+        // Connect to remote SurrealDB via WebSocket
+        let db = Surreal::new::<Ws>(&config.url)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                    config.url
+                )
+            })?;
+
+        // Authenticate with the server
+        // If no password is provided, attempt connection without auth (will fail if server requires it)
+        if let Some(pass) = &config.pass {
+            eprintln!("[mx] Authenticating as user '{}'", config.user);
+            db.signin(Root {
+                username: &config.user,
+                password: pass,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to authenticate to SurrealDB at {} as user '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
+                    config.url, config.user
+                )
+            })?;
+        } else {
+            eprintln!("[mx] No password provided, connecting without authentication");
+        }
+
+        // Use namespace and database from config
+        eprintln!(
+            "[mx] Using namespace '{}' and database '{}'",
+            config.namespace, config.database
+        );
+        db.use_ns(&config.namespace)
+            .use_db(&config.database)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to set namespace '{}' and database '{}' (check that they exist on the server)",
+                    config.namespace, config.database
+                )
+            })?;
+
+        eprintln!("[mx] Network connection established successfully");
+
+        // Note: Schema is NOT applied for network mode
+        // The remote server should already have the schema
+        // (Schema is applied via NixOS module or manual setup)
+
+        Ok(Self {
+            conn: SurrealConnection::Network(db),
+        })
+    }
+
+    /// Legacy async open - kept for compatibility
+    async fn open_async<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let config = SurrealConfig::from_env();
+        Self::open_with_config_async(path, &config).await
     }
 
     /// Test helper - open temporary database
@@ -295,9 +551,16 @@ impl SurrealDatabase {
         Self::open(temp_dir.path())
     }
 
-    /// Get reference to underlying Surreal instance
-    pub fn inner(&self) -> &Surreal<surrealdb::engine::local::Db> {
-        &self.db
+    /// Get reference to underlying Surreal instance (embedded only)
+    ///
+    /// Returns `None` if called on a network connection.
+    /// Prefer using connection-agnostic methods instead.
+    #[deprecated(note = "Use connection-agnostic methods instead")]
+    pub fn inner(&self) -> Option<&Surreal<surrealdb::engine::local::Db>> {
+        match &self.conn {
+            SurrealConnection::Embedded(db) => Some(db),
+            SurrealConnection::Network(_) => None,
+        }
     }
 
     /// Build standard knowledge entry SELECT fields
@@ -358,15 +621,39 @@ impl SurrealDatabase {
         }
     }
 
+    /// Validate category name to prevent SQL injection
+    /// Only allows alphanumeric characters, underscores, and hyphens
+    fn is_valid_category_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
     /// Build category filter clauses
+    /// Category names are validated to prevent SQL injection
     fn build_category_filter(filter: &crate::store::KnowledgeFilter) -> String {
         match &filter.categories {
             Some(cats) if !cats.is_empty() => {
-                if cats.len() == 1 {
-                    format!("AND category = type::thing('category', '{}')", cats[0])
+                // Filter out invalid category names to prevent injection
+                let valid_cats: Vec<&String> = cats
+                    .iter()
+                    .filter(|c| Self::is_valid_category_name(c))
+                    .collect();
+
+                if valid_cats.is_empty() {
+                    return String::new();
+                }
+
+                if valid_cats.len() == 1 {
+                    format!(
+                        "AND category = type::thing('category', '{}')",
+                        valid_cats[0]
+                    )
                 } else {
                     // Multiple categories: use IN clause
-                    let quoted: Vec<String> = cats
+                    let quoted: Vec<String> = valid_cats
                         .iter()
                         .map(|c| format!("type::thing('category', '{}')", c))
                         .collect();
@@ -435,75 +722,75 @@ impl SurrealDatabase {
             query.push_str(", last_activated = <datetime>$last_activated");
         }
 
-        // Bind required parameters
-        let mut q = self
-            .db
-            .query(&query)
-            .bind(("id", id_part.to_string()))
-            .bind(("title", entry.title.clone()))
-            .bind(("body", entry.body.clone()))
-            .bind(("summary", entry.summary.clone()))
-            .bind(("file_path", entry.file_path.clone()))
-            .bind((
-                "content_hash",
-                entry.content_hash.clone().unwrap_or_default(),
-            ))
-            .bind(("ephemeral", entry.ephemeral))
-            .bind(("owner", entry.owner.clone()))
-            .bind(("visibility", entry.visibility.clone()))
-            .bind(("category_id", entry.category_id.clone()))
-            .bind((
-                "source_type_id",
-                entry
-                    .source_type_id
-                    .clone()
-                    .unwrap_or_else(|| "manual".to_string()),
-            ))
-            .bind((
-                "entry_type_id",
-                entry
-                    .entry_type_id
-                    .clone()
-                    .unwrap_or_else(|| "primary".to_string()),
-            ))
-            .bind((
-                "content_type_id",
-                entry
-                    .content_type_id
-                    .clone()
-                    .unwrap_or_else(|| "text".to_string()),
-            ))
-            .bind(("resonance", entry.resonance))
-            .bind(("resonance_type", entry.resonance_type.clone()))
-            .bind(("activation_count", entry.activation_count))
-            .bind(("decay_rate", entry.decay_rate))
-            .bind(("anchors", entry.anchors.clone()))
-            .bind(("wake_phrases", entry.wake_phrases.clone()))
-            .bind(("wake_order", entry.wake_order))
-            .bind(("wake_phrase", entry.wake_phrase.clone()));
+        // Bind all parameters and execute query
+        let mut response = with_db!(self, db, {
+            let mut q = db
+                .query(&query)
+                .bind(("id", id_part.to_string()))
+                .bind(("title", entry.title.clone()))
+                .bind(("body", entry.body.clone()))
+                .bind(("summary", entry.summary.clone()))
+                .bind(("file_path", entry.file_path.clone()))
+                .bind((
+                    "content_hash",
+                    entry.content_hash.clone().unwrap_or_default(),
+                ))
+                .bind(("ephemeral", entry.ephemeral))
+                .bind(("owner", entry.owner.clone()))
+                .bind(("visibility", entry.visibility.clone()))
+                .bind(("category_id", entry.category_id.clone()))
+                .bind((
+                    "source_type_id",
+                    entry
+                        .source_type_id
+                        .clone()
+                        .unwrap_or_else(|| "manual".to_string()),
+                ))
+                .bind((
+                    "entry_type_id",
+                    entry
+                        .entry_type_id
+                        .clone()
+                        .unwrap_or_else(|| "primary".to_string()),
+                ))
+                .bind((
+                    "content_type_id",
+                    entry
+                        .content_type_id
+                        .clone()
+                        .unwrap_or_else(|| "text".to_string()),
+                ))
+                .bind(("resonance", entry.resonance))
+                .bind(("resonance_type", entry.resonance_type.clone()))
+                .bind(("activation_count", entry.activation_count))
+                .bind(("decay_rate", entry.decay_rate))
+                .bind(("anchors", entry.anchors.clone()))
+                .bind(("wake_phrases", entry.wake_phrases.clone()))
+                .bind(("wake_order", entry.wake_order))
+                .bind(("wake_phrase", entry.wake_phrase.clone()));
 
-        // Bind optional parameters
-        if let Some(ref proj) = entry.source_project_id {
-            q = q.bind(("source_project_id", proj.clone()));
-        }
-        if let Some(ref agent) = entry.source_agent_id {
-            q = q.bind(("source_agent_id", agent.clone()));
-        }
-        if let Some(ref sess) = entry.session_id {
-            q = q.bind(("session_id", sess.clone()));
-        }
-        if let Some(ref created) = entry.created_at {
-            q = q.bind(("created_at", normalize_datetime(created)));
-        }
-        if let Some(ref updated) = entry.updated_at {
-            q = q.bind(("updated_at", normalize_datetime(updated)));
-        }
-        if let Some(ref activated) = entry.last_activated {
-            q = q.bind(("last_activated", normalize_datetime(activated)));
-        }
+            // Bind optional parameters
+            if let Some(ref proj) = entry.source_project_id {
+                q = q.bind(("source_project_id", proj.clone()));
+            }
+            if let Some(ref agent) = entry.source_agent_id {
+                q = q.bind(("source_agent_id", agent.clone()));
+            }
+            if let Some(ref sess) = entry.session_id {
+                q = q.bind(("session_id", sess.clone()));
+            }
+            if let Some(ref created) = entry.created_at {
+                q = q.bind(("created_at", normalize_datetime(created)));
+            }
+            if let Some(ref updated) = entry.updated_at {
+                q = q.bind(("updated_at", normalize_datetime(updated)));
+            }
+            if let Some(ref activated) = entry.last_activated {
+                q = q.bind(("last_activated", normalize_datetime(activated)));
+            }
 
-        // Execute the update
-        let mut response = q.await.context("Failed to upsert knowledge record")?;
+            q.await.context("Failed to upsert knowledge record")
+        })?;
 
         // Check for errors in the response
         let errors = response.take_errors();
@@ -512,12 +799,12 @@ impl SurrealDatabase {
         }
 
         // Manage tags - delete old, create new
-        let mut tag_delete_response = self
-            .db
-            .query("DELETE tagged_with WHERE in = $knowledge")
-            .bind(("knowledge", record_id.0.clone()))
-            .await
-            .context("Failed to clear existing tags")?;
+        let mut tag_delete_response = with_db!(self, db, {
+            db.query("DELETE tagged_with WHERE in = $knowledge")
+                .bind(("knowledge", record_id.0.clone()))
+                .await
+                .context("Failed to clear existing tags")
+        })?;
 
         let tag_delete_errors = tag_delete_response.take_errors();
         if !tag_delete_errors.is_empty() {
@@ -529,13 +816,13 @@ impl SurrealDatabase {
 
         for tag_name in &entry.tags {
             // Ensure tag exists - use query UPSERT to handle schema defaults
-            let mut tag_response = self
-                .db
-                .query("UPSERT type::thing('tag', $tag_id) SET name = $tag_name")
-                .bind(("tag_id", tag_name.clone()))
-                .bind(("tag_name", tag_name.clone()))
-                .await
-                .context("Failed to create tag")?;
+            let mut tag_response = with_db!(self, db, {
+                db.query("UPSERT type::thing('tag', $tag_id) SET name = $tag_name")
+                    .bind(("tag_id", tag_name.clone()))
+                    .bind(("tag_name", tag_name.clone()))
+                    .await
+                    .context("Failed to create tag")
+            })?;
 
             let tag_errors = tag_response.take_errors();
             if !tag_errors.is_empty() {
@@ -545,13 +832,13 @@ impl SurrealDatabase {
             let tag_id = RecordId::new("tag", tag_name);
 
             // Create edge
-            let mut tag_edge_response = self
-                .db
-                .query("RELATE $knowledge->tagged_with->$tag")
-                .bind(("knowledge", record_id.0.clone()))
-                .bind(("tag", tag_id.0.clone()))
-                .await
-                .context("Failed to create tag edge")?;
+            let mut tag_edge_response = with_db!(self, db, {
+                db.query("RELATE $knowledge->tagged_with->$tag")
+                    .bind(("knowledge", record_id.0.clone()))
+                    .bind(("tag", tag_id.0.clone()))
+                    .await
+                    .context("Failed to create tag edge")
+            })?;
 
             let tag_edge_errors = tag_edge_response.take_errors();
             if !tag_edge_errors.is_empty() {
@@ -563,12 +850,12 @@ impl SurrealDatabase {
         }
 
         // Manage applicability - delete old, create new
-        let mut app_delete_response = self
-            .db
-            .query("DELETE applies_to WHERE in = $knowledge")
-            .bind(("knowledge", record_id.0.clone()))
-            .await
-            .context("Failed to clear existing applicability")?;
+        let mut app_delete_response = with_db!(self, db, {
+            db.query("DELETE applies_to WHERE in = $knowledge")
+                .bind(("knowledge", record_id.0.clone()))
+                .await
+                .context("Failed to clear existing applicability")
+        })?;
 
         let app_delete_errors = app_delete_response.take_errors();
         if !app_delete_errors.is_empty() {
@@ -580,13 +867,13 @@ impl SurrealDatabase {
 
         for app_type in &entry.applicability {
             // Ensure applicability_type exists - use query UPSERT to handle schema defaults
-            let mut app_type_response = self
-                .db
-                .query("UPSERT type::thing('applicability_type', $app_type_id) SET description = $app_type_desc")
-                .bind(("app_type_id", app_type.clone()))
-                .bind(("app_type_desc", format!("Applicability: {}", app_type)))
-                .await
-                .context("Failed to create applicability_type")?;
+            let mut app_type_response = with_db!(self, db, {
+                db.query("UPSERT type::thing('applicability_type', $app_type_id) SET description = $app_type_desc")
+                    .bind(("app_type_id", app_type.clone()))
+                    .bind(("app_type_desc", format!("Applicability: {}", app_type)))
+                    .await
+                    .context("Failed to create applicability_type")
+            })?;
 
             let app_type_errors = app_type_response.take_errors();
             if !app_type_errors.is_empty() {
@@ -599,13 +886,13 @@ impl SurrealDatabase {
             let app_id = RecordId::new("applicability_type", app_type);
 
             // Create edge
-            let mut app_edge_response = self
-                .db
-                .query("RELATE $knowledge->applies_to->$app_type")
-                .bind(("knowledge", record_id.0.clone()))
-                .bind(("app_type", app_id.0.clone()))
-                .await
-                .context("Failed to create applicability edge")?;
+            let mut app_edge_response = with_db!(self, db, {
+                db.query("RELATE $knowledge->applies_to->$app_type")
+                    .bind(("knowledge", record_id.0.clone()))
+                    .bind(("app_type", app_id.0.clone()))
+                    .await
+                    .context("Failed to create applicability edge")
+            })?;
 
             let app_edge_errors = app_edge_response.take_errors();
             if !app_edge_errors.is_empty() {
@@ -645,11 +932,13 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self.db.query(&sql).bind(("id", id_part.to_string()));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-        let mut response = query.await.context("Failed to query knowledge record")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("id", id_part.to_string()));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query knowledge record")
+        })?;
 
         // Direct deserialization to DTO - no manual JSON parsing!
         let records: Vec<SurrealKnowledgeRecord> = response.take(0)?;
@@ -680,12 +969,12 @@ impl SurrealDatabase {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
         // First check if the record exists
-        let mut check_response = self
-            .db
-            .query("SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id GROUP ALL")
-            .bind(("id", id_part.to_string()))
-            .await
-            .context("Failed to check knowledge record existence")?;
+        let mut check_response = with_db!(self, db, {
+            db.query("SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id GROUP ALL")
+                .bind(("id", id_part.to_string()))
+                .await
+                .context("Failed to check knowledge record existence")
+        })?;
 
         let count_results: Vec<serde_json::Value> = check_response.take(0)?;
         let exists = count_results
@@ -701,12 +990,12 @@ impl SurrealDatabase {
         // Delete without RETURN to avoid deserialization issues with Thing fields
         // The knowledge table has many Thing fields (category, source_type, etc) that
         // surrealdb::sql::Value cannot deserialize
-        let mut response = self
-            .db
-            .query("DELETE type::thing('knowledge', $id)")
-            .bind(("id", id_part.to_string()))
-            .await
-            .context("Failed to delete knowledge record")?;
+        let mut response = with_db!(self, db, {
+            db.query("DELETE type::thing('knowledge', $id)")
+                .bind(("id", id_part.to_string()))
+                .await
+                .context("Failed to delete knowledge record")
+        })?;
 
         // Check for errors
         let errors = response.take_errors();
@@ -749,13 +1038,15 @@ impl SurrealDatabase {
             category_clause
         );
 
-        let mut query_builder = self.db.query(&sql).bind(("query", query_owned));
-        if let Some(agent) = current_agent {
-            query_builder = query_builder.bind(("current_agent", agent));
-        }
-        let mut response = query_builder
-            .await
-            .context("Failed to execute search query")?;
+        let mut response = with_db!(self, db, {
+            let mut query_builder = db.query(&sql).bind(("query", query_owned));
+            if let Some(agent) = current_agent {
+                query_builder = query_builder.bind(("current_agent", agent));
+            }
+            query_builder
+                .await
+                .context("Failed to execute search query")
+        })?;
 
         let results: Vec<serde_json::Value> =
             response.take(0).context("Failed to parse search results")?;
@@ -816,21 +1107,21 @@ impl SurrealDatabase {
 
         // Fetch tags
         let knowledge_thing = Thing::from(("knowledge", id_str));
-        let mut tags_response = self
-            .db
-            .query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
-            .bind(("knowledge", knowledge_thing.clone()))
-            .await
-            .context("Failed to query tags")?;
+        let mut tags_response = with_db!(self, db, {
+            db.query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
+                .bind(("knowledge", knowledge_thing.clone()))
+                .await
+                .context("Failed to query tags")
+        })?;
         let tags: Vec<String> = tags_response.take(0).unwrap_or_default();
 
         // Fetch applicability
-        let mut app_response = self
-            .db
-            .query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
-            .bind(("knowledge", knowledge_thing))
-            .await
-            .context("Failed to query applicability")?;
+        let mut app_response = with_db!(self, db, {
+            db.query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
+                .bind(("knowledge", knowledge_thing))
+                .await
+                .context("Failed to query applicability")
+        })?;
         let applicability_raw: Vec<Thing> = app_response.take(0).unwrap_or_default();
         let applicability: Vec<String> = applicability_raw
             .into_iter()
@@ -978,12 +1269,13 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self.db.query(&sql).bind(("threshold", threshold));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-
-        let mut response = query.await.context("Failed to query blooms by resonance")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("threshold", threshold));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query blooms by resonance")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -1022,12 +1314,13 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self.db.query(&sql).bind(("limit", limit as i64));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-
-        let mut response = query.await.context("Failed to query core blooms")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("limit", limit as i64));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query core blooms")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -1070,16 +1363,16 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self
-            .db
-            .query(&sql)
-            .bind(("cutoff", cutoff_str))
-            .bind(("limit", limit as i64));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-
-        let mut response = query.await.context("Failed to query recent blooms")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db
+                .query(&sql)
+                .bind(("cutoff", cutoff_str))
+                .bind(("limit", limit as i64));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query recent blooms")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -1121,16 +1414,16 @@ impl SurrealDatabase {
             visibility_clause
         );
 
-        let mut query = self
-            .db
-            .query(&sql)
-            .bind(("anchor_ids", anchor_ids.to_vec()))
-            .bind(("limit", limit as i64));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-
-        let mut response = query.await.context("Failed to query bridge blooms")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db
+                .query(&sql)
+                .bind(("anchor_ids", anchor_ids.to_vec()))
+                .bind(("limit", limit as i64));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query bridge blooms")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -1163,9 +1456,8 @@ impl SurrealDatabase {
             .map(|id| Thing::from(("knowledge", id.as_str())))
             .collect();
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "UPDATE knowledge SET
                 activation_count += 1,
                 last_activated = time::now()
@@ -1173,7 +1465,8 @@ impl SurrealDatabase {
             )
             .bind(("ids", things))
             .await
-            .context("Failed to update activations")?;
+            .context("Failed to update activations")
+        })?;
 
         let errors = response.take_errors();
         if !errors.is_empty() {
@@ -1196,10 +1489,11 @@ impl SurrealDatabase {
     }
 
     async fn list_categories_async(&self) -> Result<Vec<Category>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM category ORDER BY id")
-            .await
-            .context("Failed to list categories")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM category ORDER BY id")
+                .await
+                .context("Failed to list categories")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
 
@@ -1224,10 +1518,11 @@ impl SurrealDatabase {
     }
 
     async fn list_projects_async(&self) -> Result<Vec<Project>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, name, path, repo_url, description, active, <string>created_at AS created_at, <string>updated_at AS updated_at FROM project ORDER BY name")
-            .await
-            .context("Failed to list projects")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, name, path, repo_url, description, active, <string>created_at AS created_at, <string>updated_at AS updated_at FROM project ORDER BY name")
+                .await
+                .context("Failed to list projects")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut projects = Vec::new();
@@ -1256,10 +1551,11 @@ impl SurrealDatabase {
     }
 
     async fn list_agents_async(&self) -> Result<Vec<Agent>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, domain, <string>created_at AS created_at, <string>updated_at AS updated_at FROM agent ORDER BY id")
-            .await
-            .context("Failed to list agents")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, domain, <string>created_at AS created_at, <string>updated_at AS updated_at FROM agent ORDER BY id")
+                .await
+                .context("Failed to list agents")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut agents = Vec::new();
@@ -1285,10 +1581,11 @@ impl SurrealDatabase {
     }
 
     async fn list_tags_async(&self) -> Result<Vec<Tag>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, name, <string>created_at AS created_at FROM tag ORDER BY name")
-            .await
-            .context("Failed to list tags")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, name, <string>created_at AS created_at FROM tag ORDER BY name")
+                .await
+                .context("Failed to list tags")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut tags = Vec::new();
@@ -1309,10 +1606,11 @@ impl SurrealDatabase {
     }
 
     async fn list_applicability_types_async(&self) -> Result<Vec<ApplicabilityType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, scope, <string>created_at AS created_at FROM applicability_type ORDER BY id")
-            .await
-            .context("Failed to list applicability types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, scope, <string>created_at AS created_at FROM applicability_type ORDER BY id")
+                .await
+                .context("Failed to list applicability types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
@@ -1353,9 +1651,8 @@ impl SurrealDatabase {
             project.updated_at.clone()
         };
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "UPSERT type::thing('project', $id) SET
                 name = $name,
                 path = $path,
@@ -1375,7 +1672,8 @@ impl SurrealDatabase {
             .bind(("created_at", normalize_datetime(&created_at)))
             .bind(("updated_at", normalize_datetime(&updated_at)))
             .await
-            .context("Failed to upsert project")?;
+            .context("Failed to upsert project")
+        })?;
 
         // Check for errors in the response
         let errors = response.take_errors();
@@ -1403,13 +1701,14 @@ impl SurrealDatabase {
         let to_thing = Thing::from(("knowledge", to_id));
         let rel_type_thing = Thing::from(("relationship_type", rel_type));
 
-        self.db
-            .query("RELATE $from->relates_to->$to SET relationship_type = $rel_type")
-            .bind(("from", from_thing))
-            .bind(("to", to_thing))
-            .bind(("rel_type", rel_type_thing))
-            .await
-            .context("Failed to create relationship")?;
+        with_db!(self, db, {
+            db.query("RELATE $from->relates_to->$to SET relationship_type = $rel_type")
+                .bind(("from", from_thing))
+                .bind(("to", to_thing))
+                .bind(("rel_type", rel_type_thing))
+                .await
+                .context("Failed to create relationship")
+        })?;
 
         Ok(())
     }
@@ -1424,8 +1723,8 @@ impl SurrealDatabase {
         let entry_thing = Thing::from(("knowledge", id_part));
 
         // Query both outgoing and incoming relationships
-        let mut response = self.db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "SELECT id, in AS from_entry_id, out AS to_entry_id, relationship_type, <string>created_at AS created_at
                  FROM relates_to
                  WHERE in = $entry OR out = $entry
@@ -1433,7 +1732,8 @@ impl SurrealDatabase {
             )
             .bind(("entry", entry_thing))
             .await
-            .context("Failed to query relationships")?;
+            .context("Failed to query relationships")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut relationships = Vec::new();
@@ -1474,9 +1774,8 @@ impl SurrealDatabase {
         let to_thing = Thing::from(("knowledge", to_id));
         let rel_type_thing = Thing::from(("relationship_type", rel_type));
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "DELETE relates_to
                  WHERE in = $from AND out = $to AND relationship_type = $rel_type
                  RETURN BEFORE",
@@ -1485,7 +1784,8 @@ impl SurrealDatabase {
             .bind(("to", to_thing))
             .bind(("rel_type", rel_type_thing))
             .await
-            .context("Failed to delete relationship")?;
+            .context("Failed to delete relationship")
+        })?;
 
         let deleted: Vec<Value> = response.take(0)?;
         Ok(!deleted.is_empty())
@@ -1504,12 +1804,12 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
-        let mut tags_response = self
-            .db
-            .query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
-            .bind(("knowledge", entry_thing))
-            .await
-            .context("Failed to query tags")?;
+        let mut tags_response = with_db!(self, db, {
+            db.query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
+                .bind(("knowledge", entry_thing))
+                .await
+                .context("Failed to query tags")
+        })?;
 
         let tags: Vec<String> = tags_response.take(0).unwrap_or_default();
         Ok(tags)
@@ -1530,12 +1830,12 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
-        let mut app_response = self
-            .db
-            .query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
-            .bind(("knowledge", entry_thing))
-            .await
-            .context("Failed to query applicability")?;
+        let mut app_response = with_db!(self, db, {
+            db.query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
+                .bind(("knowledge", entry_thing))
+                .await
+                .context("Failed to query applicability")
+        })?;
 
         let applicability_raw: Vec<Thing> = app_response.take(0).unwrap_or_default();
         let applicability: Vec<String> = applicability_raw
@@ -1566,9 +1866,8 @@ impl SurrealDatabase {
             atype.created_at.clone()
         };
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "UPSERT type::thing('applicability_type', $id) SET
                 description = $description,
                 scope = $scope,
@@ -1580,7 +1879,8 @@ impl SurrealDatabase {
             .bind(("scope", atype.scope.clone()))
             .bind(("created_at", normalize_datetime(&created_at)))
             .await
-            .context("Failed to upsert applicability type")?;
+            .context("Failed to upsert applicability type")
+        })?;
 
         // Check for errors in the response
         let errors = response.take_errors();
@@ -1597,11 +1897,12 @@ impl SurrealDatabase {
     }
 
     async fn get_category_async(&self, id: &str) -> Result<Option<Category>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM category WHERE id = type::thing('category', $id)")
-            .bind(("id", id.to_string()))
-            .await
-            .context("Failed to query category")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM category WHERE id = type::thing('category', $id)")
+                .bind(("id", id.to_string()))
+                .await
+                .context("Failed to query category")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
 
@@ -1633,9 +1934,8 @@ impl SurrealDatabase {
             category.created_at.clone()
         };
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "UPSERT type::thing('category', $id) SET
                 description = $description,
                 created_at = <datetime>$created_at
@@ -1645,7 +1945,8 @@ impl SurrealDatabase {
             .bind(("description", category.description.clone()))
             .bind(("created_at", normalize_datetime(&created_at)))
             .await
-            .context("Failed to upsert category")?;
+            .context("Failed to upsert category")
+        })?;
 
         // Check for errors in the response
         let errors = response.take_errors();
@@ -1665,12 +1966,12 @@ impl SurrealDatabase {
         let category_thing = Thing::from(("category", id));
 
         // Check if any knowledge entries use this category
-        let mut count_response = self
-            .db
-            .query("SELECT count() AS c FROM knowledge WHERE category = $category GROUP ALL")
-            .bind(("category", category_thing.clone()))
-            .await
-            .context("Failed to count knowledge entries for category")?;
+        let mut count_response = with_db!(self, db, {
+            db.query("SELECT count() AS c FROM knowledge WHERE category = $category GROUP ALL")
+                .bind(("category", category_thing.clone()))
+                .await
+                .context("Failed to count knowledge entries for category")
+        })?;
 
         let count_results: Vec<serde_json::Value> = count_response.take(0)?;
         let count = count_results
@@ -1688,11 +1989,11 @@ impl SurrealDatabase {
 
         // Delete the category
         let record_id = RecordId::new("category", id);
-        let result: Option<Value> = self
-            .db
-            .delete(record_id.to_record_id())
-            .await
-            .context("Failed to delete category")?;
+        let result: Option<Value> = with_db!(self, db, {
+            db.delete(record_id.to_record_id())
+                .await
+                .context("Failed to delete category")
+        })?;
 
         Ok(result.is_some())
     }
@@ -1703,11 +2004,12 @@ impl SurrealDatabase {
     }
 
     async fn get_project_async(&self, id: &str) -> Result<Option<Project>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, name, path, repo_url, description, active, <string>created_at AS created_at, <string>updated_at AS updated_at FROM project WHERE id = type::thing('project', $id)")
-            .bind(("id", id.to_string()))
-            .await
-            .context("Failed to query project")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, name, path, repo_url, description, active, <string>created_at AS created_at, <string>updated_at AS updated_at FROM project WHERE id = type::thing('project', $id)")
+                .bind(("id", id.to_string()))
+                .await
+                .context("Failed to query project")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
 
@@ -1736,11 +2038,12 @@ impl SurrealDatabase {
     }
 
     async fn get_agent_async(&self, id: &str) -> Result<Option<Agent>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, domain, <string>created_at AS created_at, <string>updated_at AS updated_at FROM agent WHERE id = type::thing('agent', $id)")
-            .bind(("id", id.to_string()))
-            .await
-            .context("Failed to query agent")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, domain, <string>created_at AS created_at, <string>updated_at AS updated_at FROM agent WHERE id = type::thing('agent', $id)")
+                .bind(("id", id.to_string()))
+                .await
+                .context("Failed to query agent")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
 
@@ -1771,9 +2074,8 @@ impl SurrealDatabase {
         let created_at = agent.created_at.clone().unwrap_or_else(|| now.clone());
         let updated_at = agent.updated_at.clone().unwrap_or_else(|| now.clone());
 
-        let mut response = self
-            .db
-            .query(
+        let mut response = with_db!(self, db, {
+            db.query(
                 "UPSERT type::thing('agent', $id) SET
                 description = $description,
                 domain = $domain,
@@ -1787,7 +2089,8 @@ impl SurrealDatabase {
             .bind(("created_at", normalize_datetime(&created_at)))
             .bind(("updated_at", normalize_datetime(&updated_at)))
             .await
-            .context("Failed to upsert agent")?;
+            .context("Failed to upsert agent")
+        })?;
 
         // Check for errors in the response
         let errors = response.take_errors();
@@ -1828,11 +2131,11 @@ impl SurrealDatabase {
     }
 
     async fn list_tables_async(&self) -> Result<Vec<String>> {
-        let mut response = self
-            .db
-            .query("INFO FOR DB")
-            .await
-            .context("Failed to query database info")?;
+        let mut response = with_db!(self, db, {
+            db.query("INFO FOR DB")
+                .await
+                .context("Failed to query database info")
+        })?;
 
         // SurrealDB INFO returns complex metadata - convert to JSON
         let info: Option<Value> = response.take(0)?;
@@ -1857,11 +2160,11 @@ impl SurrealDatabase {
     }
 
     async fn count_async(&self) -> Result<usize> {
-        let mut response = self
-            .db
-            .query("SELECT count() AS c FROM knowledge GROUP ALL")
-            .await
-            .context("Failed to count knowledge entries")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT count() AS c FROM knowledge GROUP ALL")
+                .await
+                .context("Failed to count knowledge entries")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let count = results.first().and_then(|v| v["c"].as_i64()).unwrap_or(0) as usize;
@@ -1899,13 +2202,13 @@ impl SurrealDatabase {
             resonance_clause
         );
 
-        let mut query = self.db.query(&sql).bind(("category", category_thing));
-        if let Some(agent) = current_agent {
-            query = query.bind(("current_agent", agent));
-        }
-        let mut response = query
-            .await
-            .context("Failed to query knowledge by category")?;
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("category", category_thing));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query knowledge by category")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut entries = Vec::new();
@@ -1941,10 +2244,11 @@ impl SurrealDatabase {
     }
 
     async fn list_source_types_async(&self) -> Result<Vec<SourceType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM source_type ORDER BY id")
-            .await
-            .context("Failed to list source types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM source_type ORDER BY id")
+                .await
+                .context("Failed to list source types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
@@ -1969,10 +2273,11 @@ impl SurrealDatabase {
     }
 
     async fn list_entry_types_async(&self) -> Result<Vec<EntryType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM entry_type ORDER BY id")
-            .await
-            .context("Failed to list entry types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM entry_type ORDER BY id")
+                .await
+                .context("Failed to list entry types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
@@ -1997,10 +2302,11 @@ impl SurrealDatabase {
     }
 
     async fn list_content_types_async(&self) -> Result<Vec<ContentType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, file_extensions, <string>created_at AS created_at FROM content_type ORDER BY id")
-            .await
-            .context("Failed to list content types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, file_extensions, <string>created_at AS created_at FROM content_type ORDER BY id")
+                .await
+                .context("Failed to list content types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
@@ -2033,10 +2339,11 @@ impl SurrealDatabase {
     }
 
     async fn list_session_types_async(&self) -> Result<Vec<SessionType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM session_type ORDER BY id")
-            .await
-            .context("Failed to list session types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, <string>created_at AS created_at FROM session_type ORDER BY id")
+                .await
+                .context("Failed to list session types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
@@ -2061,10 +2368,11 @@ impl SurrealDatabase {
     }
 
     async fn list_relationship_types_async(&self) -> Result<Vec<RelationshipType>> {
-        let mut response = self.db
-            .query("SELECT meta::id(id) AS id, description, directional, <string>created_at AS created_at FROM relationship_type ORDER BY id")
-            .await
-            .context("Failed to list relationship types")?;
+        let mut response = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id, description, directional, <string>created_at AS created_at FROM relationship_type ORDER BY id")
+                .await
+                .context("Failed to list relationship types")
+        })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
         let mut types = Vec::new();
