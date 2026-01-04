@@ -38,7 +38,8 @@ pub enum SurrealMode {
 /// - `MX_SURREAL_MODE`: "embedded" (default) or "network"
 /// - `MX_SURREAL_URL`: WebSocket URL for network mode (default: ws://localhost:8000)
 /// - `MX_SURREAL_USER`: Username for network auth (default: root)
-/// - `MX_SURREAL_PASS`: Password for network auth (from agenix secret)
+/// - `MX_SURREAL_PASS`: Password for network auth (direct value)
+/// - `MX_SURREAL_PASS_FILE`: Path to file containing password (e.g., agenix secret)
 /// - `MX_SURREAL_NS`: Namespace (default: memory)
 /// - `MX_SURREAL_DB`: Database name (default: knowledge)
 #[derive(Debug, Clone)]
@@ -87,9 +88,16 @@ impl SurrealConfig {
 
         let user = std::env::var("MX_SURREAL_USER").unwrap_or_else(|_| "root".to_string());
 
-        // Filter out empty password strings - treat them as "no password"
+        // Get password: try direct value first, then file path, filter empty strings
         let pass = std::env::var("MX_SURREAL_PASS")
             .ok()
+            .or_else(|| {
+                // Try reading from file path (e.g., agenix secret)
+                std::env::var("MX_SURREAL_PASS_FILE")
+                    .ok()
+                    .and_then(|path| std::fs::read_to_string(path).ok())
+            })
+            .map(|s| s.trim().to_string())
             .filter(|p| !p.is_empty());
 
         let namespace = std::env::var("MX_SURREAL_NS").unwrap_or_else(|_| "memory".to_string());
