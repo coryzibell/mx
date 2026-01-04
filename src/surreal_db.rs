@@ -87,7 +87,10 @@ impl SurrealConfig {
 
         let user = std::env::var("MX_SURREAL_USER").unwrap_or_else(|_| "root".to_string());
 
-        let pass = std::env::var("MX_SURREAL_PASS").ok();
+        // Filter out empty password strings - treat them as "no password"
+        let pass = std::env::var("MX_SURREAL_PASS")
+            .ok()
+            .filter(|p| !p.is_empty());
 
         let namespace = std::env::var("MX_SURREAL_NS").unwrap_or_else(|_| "memory".to_string());
 
@@ -451,6 +454,11 @@ impl SurrealDatabase {
         })
     }
 
+    /// Check if URL is localhost (safe for unencrypted traffic)
+    fn is_localhost_url(url: &str) -> bool {
+        url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]")
+    }
+
     /// Open network connection via WebSocket
     ///
     /// Authenticates with the remote SurrealDB server using credentials from config.
@@ -460,6 +468,18 @@ impl SurrealDatabase {
             "[mx] Connecting to SurrealDB in network mode: {}",
             config.url
         );
+
+        // Security warning: credentials over unencrypted WebSocket to non-localhost
+        if config.pass.is_some()
+            && config.url.starts_with("ws://")
+            && !Self::is_localhost_url(&config.url)
+        {
+            eprintln!(
+                "[mx] WARNING: Sending credentials over unencrypted WebSocket to {}",
+                config.url
+            );
+            eprintln!("[mx] WARNING: Consider using wss:// (TLS) for secure authentication");
+        }
 
         // Connect to remote SurrealDB via WebSocket
         let db = Surreal::new::<Ws>(&config.url)
@@ -533,16 +553,13 @@ impl SurrealDatabase {
 
     /// Get reference to underlying Surreal instance (embedded only)
     ///
-    /// # Panics
-    /// Panics if called on a network connection. This method exists for backwards
-    /// compatibility and will be removed in a future version.
+    /// Returns `None` if called on a network connection.
+    /// Prefer using connection-agnostic methods instead.
     #[deprecated(note = "Use connection-agnostic methods instead")]
-    pub fn inner(&self) -> &Surreal<surrealdb::engine::local::Db> {
+    pub fn inner(&self) -> Option<&Surreal<surrealdb::engine::local::Db>> {
         match &self.conn {
-            SurrealConnection::Embedded(db) => db,
-            SurrealConnection::Network(_) => {
-                panic!("inner() called on network connection - use connection-agnostic methods")
-            }
+            SurrealConnection::Embedded(db) => Some(db),
+            SurrealConnection::Network(_) => None,
         }
     }
 
@@ -604,15 +621,36 @@ impl SurrealDatabase {
         }
     }
 
+    /// Validate category name to prevent SQL injection
+    /// Only allows alphanumeric characters, underscores, and hyphens
+    fn is_valid_category_name(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
     /// Build category filter clauses
+    /// Category names are validated to prevent SQL injection
     fn build_category_filter(filter: &crate::store::KnowledgeFilter) -> String {
         match &filter.categories {
             Some(cats) if !cats.is_empty() => {
-                if cats.len() == 1 {
-                    format!("AND category = type::thing('category', '{}')", cats[0])
+                // Filter out invalid category names to prevent injection
+                let valid_cats: Vec<&String> = cats
+                    .iter()
+                    .filter(|c| Self::is_valid_category_name(c))
+                    .collect();
+
+                if valid_cats.is_empty() {
+                    return String::new();
+                }
+
+                if valid_cats.len() == 1 {
+                    format!("AND category = type::thing('category', '{}')", valid_cats[0])
                 } else {
                     // Multiple categories: use IN clause
-                    let quoted: Vec<String> = cats
+                    let quoted: Vec<String> = valid_cats
                         .iter()
                         .map(|c| format!("type::thing('category', '{}')", c))
                         .collect();
