@@ -15,7 +15,7 @@ clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 # SurrealDB
-surrealdb = { version = "2", features = ["kv-surrealkv"] }
+surrealdb = { version = "2", features = ["kv-surrealkv", "protocol-ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
