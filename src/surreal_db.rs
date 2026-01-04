@@ -459,6 +459,17 @@ impl SurrealDatabase {
         url.contains("://localhost") || url.contains("://127.0.0.1") || url.contains("://[::1]")
     }
 
+    /// Strip protocol prefix from WebSocket URL
+    ///
+    /// The surrealdb crate expects just `host:port`, not `ws://host:port`.
+    /// Users may provide the full URL with protocol, so we strip it if present.
+    fn sanitize_ws_url(url: &str) -> String {
+        url.strip_prefix("ws://")
+            .or_else(|| url.strip_prefix("wss://"))
+            .unwrap_or(url)
+            .to_string()
+    }
+
     /// Open network connection via WebSocket
     ///
     /// Authenticates with the remote SurrealDB server using credentials from config.
@@ -481,8 +492,11 @@ impl SurrealDatabase {
             eprintln!("[mx] WARNING: Consider using wss:// (TLS) for secure authentication");
         }
 
+        // Strip protocol prefix from URL - surrealdb crate expects just host:port
+        let sanitized_url = Self::sanitize_ws_url(&config.url);
+
         // Connect to remote SurrealDB via WebSocket
-        let db = Surreal::new::<Ws>(&config.url)
+        let db = Surreal::new::<Ws>(sanitized_url.as_str())
             .await
             .with_context(|| {
                 format!(
