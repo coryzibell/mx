@@ -7,6 +7,7 @@ use surrealdb::RecordId as SurrealRecordId;
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
 use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
+use surrealdb::opt::auth::Root;
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
@@ -400,6 +401,12 @@ impl SurrealDatabase {
     async fn open_embedded_async<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
         let path = path.as_ref();
 
+        // Diagnostic: Log connection mode
+        eprintln!(
+            "[mx] Connecting to SurrealDB in embedded mode: {}",
+            path.display()
+        );
+
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -407,17 +414,25 @@ impl SurrealDatabase {
         }
 
         // Connect to SurrealKv backend
-        let db = Surreal::new::<SurrealKv>(path)
-            .await
-            .with_context(|| format!("Failed to open SurrealDB at {:?}", path))?;
+        let db = Surreal::new::<SurrealKv>(path).await.with_context(|| {
+            format!(
+                "Failed to open SurrealDB at {} (check file permissions and disk space)",
+                path.display()
+            )
+        })?;
 
         // Use namespace and database from config
+        eprintln!(
+            "[mx] Using namespace '{}' and database '{}'",
+            config.namespace, config.database
+        );
         db.use_ns(&config.namespace)
             .use_db(&config.database)
             .await
             .context("Failed to set namespace and database")?;
 
         // Apply schema (idempotent)
+        eprintln!("[mx] Applying database schema");
         let mut response = db
             .query(SCHEMA)
             .await
@@ -429,6 +444,8 @@ impl SurrealDatabase {
             return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
         }
 
+        eprintln!("[mx] Embedded connection established successfully");
+
         Ok(Self {
             conn: SurrealConnection::Embedded(db),
         })
@@ -436,21 +453,59 @@ impl SurrealDatabase {
 
     /// Open network connection via WebSocket
     ///
-    /// Note: Authentication is handled separately in a later chunk.
+    /// Authenticates with the remote SurrealDB server using credentials from config.
     async fn open_network_async(config: &SurrealConfig) -> Result<Self> {
+        // Diagnostic: Log connection attempt (to stderr, doesn't interfere with stdout)
+        eprintln!(
+            "[mx] Connecting to SurrealDB in network mode: {}",
+            config.url
+        );
+
         // Connect to remote SurrealDB via WebSocket
         let db = Surreal::new::<Ws>(&config.url)
             .await
-            .with_context(|| format!("Failed to connect to SurrealDB at {}", config.url))?;
+            .with_context(|| {
+                format!(
+                    "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                    config.url
+                )
+            })?;
+
+        // Authenticate with the server
+        // If no password is provided, attempt connection without auth (will fail if server requires it)
+        if let Some(pass) = &config.pass {
+            eprintln!("[mx] Authenticating as user '{}'", config.user);
+            db.signin(Root {
+                username: &config.user,
+                password: pass,
+            })
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to authenticate to SurrealDB at {} as user '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
+                    config.url, config.user
+                )
+            })?;
+        } else {
+            eprintln!("[mx] No password provided, connecting without authentication");
+        }
 
         // Use namespace and database from config
+        eprintln!(
+            "[mx] Using namespace '{}' and database '{}'",
+            config.namespace, config.database
+        );
         db.use_ns(&config.namespace)
             .use_db(&config.database)
             .await
-            .context("Failed to set namespace and database")?;
+            .with_context(|| {
+                format!(
+                    "Failed to set namespace '{}' and database '{}' (check that they exist on the server)",
+                    config.namespace, config.database
+                )
+            })?;
 
-        // TODO (Chunk 5): Authentication goes here
-        // For now, unauthenticated connections will fail if server requires auth
+        eprintln!("[mx] Network connection established successfully");
 
         // Note: Schema is NOT applied for network mode
         // The remote server should already have the schema
