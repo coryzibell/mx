@@ -5,6 +5,7 @@ mod commit;
 mod convert;
 mod db;
 mod doctor;
+mod embeddings;
 mod engage;
 mod github;
 mod index;

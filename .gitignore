@@ -125,3 +125,4 @@ GitHub.sublime-settings
 .env.*.local
 SESSION_CONTEXT.md
 Cargo.lock
+.fastembed_cache/
