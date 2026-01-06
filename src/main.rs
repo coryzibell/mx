@@ -1198,6 +1198,71 @@ fn resolve_agent_context(mine: bool, include_private: bool) -> store::AgentConte
     }
 }
 
+/// Auto-embed a knowledge entry if in network SurrealDB mode
+///
+/// This silently generates and updates the embedding for a single entry.
+/// Only runs when MX_MEMORY_BACKEND=surrealdb and MX_SURREAL_MODE=network.
+fn auto_embed_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+    use crate::surreal_db::SurrealConfig;
+
+    // Only auto-embed in network SurrealDB mode
+    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
+
+    if backend != "surrealdb" && backend != "surreal" {
+        return Ok(()); // Not SurrealDB, skip
+    }
+
+    let config = SurrealConfig::from_env();
+    if !config.is_network() {
+        return Ok(()); // Not network mode, skip
+    }
+
+    // Get agent context for fetching the entry
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+        _ => store::AgentContext::public_only(),
+    };
+
+    // Fetch the entry
+    let mut entry = match db.get(entry_id, &ctx)? {
+        Some(e) => e,
+        None => return Ok(()), // Entry not found, skip silently
+    };
+
+    // Initialize embedding provider
+    let mut provider = FastEmbedProvider::new()?;
+
+    // Construct embedding text from title + summary/body + tags
+    let mut parts = vec![entry.title.clone()];
+
+    if let Some(summary) = &entry.summary {
+        parts.push(summary.clone());
+    } else if let Some(body) = &entry.body {
+        parts.push(body.chars().take(2000).collect());
+    }
+
+    if !entry.tags.is_empty() {
+        parts.push(format!("Tags: {}", entry.tags.join(", ")));
+    }
+
+    let embedding_text = parts.join("\n\n");
+
+    // Generate embedding
+    let embedding = provider.embed(&embedding_text)?;
+
+    // Update entry with embedding
+    entry.embedding = Some(embedding);
+    entry.embedding_model = Some(provider.model_id().to_string());
+    entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+    // Save to database
+    db.upsert_knowledge(&entry)?;
+
+    Ok(())
+}
+
 fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -1603,6 +1668,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Insert into database (applicability already set in struct)
             db.upsert_knowledge(&entry)?;
 
+            // Auto-generate embedding if in network SurrealDB mode
+            auto_embed_if_network(&id, db.as_ref())?;
+
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
             println!("  Title: {}", title);
@@ -1920,6 +1988,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // Re-upsert to update content_type_id
                 db.upsert_knowledge(&entry)?;
             }
+
+            // Auto-generate embedding if in network SurrealDB mode
+            auto_embed_if_network(&id, db.as_ref())?;
 
             println!("Updated entry: {}", id);
             if changes.is_empty() {

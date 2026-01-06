@@ -2288,13 +2288,13 @@ impl SurrealDatabase {
         let info: Option<serde_json::Value> = response.take(0)?;
         let mut tables = Vec::new();
 
-        if let Some(info_json) = info {
-            if let Some(tables_obj) = info_json.get("tables").and_then(|v| v.as_object()) {
-                for table_name in tables_obj.keys() {
-                    tables.push(table_name.clone());
-                }
-                tables.sort();
+        if let Some(info_json) = info
+            && let Some(tables_obj) = info_json.get("tables").and_then(|v| v.as_object())
+        {
+            for table_name in tables_obj.keys() {
+                tables.push(table_name.clone());
             }
+            tables.sort();
         }
 
         Ok(tables)
