@@ -249,6 +249,19 @@ pub struct SurrealKnowledgeRecord {
     /// DEPRECATED: Wake phrase for memory ritual verification (kept for backward compat)
     #[serde(default)]
     pub wake_phrase: Option<String>,
+
+    // === Vector embeddings (PR #89) ===
+    /// 768-dimensional embedding vector (BGE-Base-EN-v1.5)
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+
+    /// Model ID that generated the embedding
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+
+    /// Timestamp when embedded
+    #[serde(default)]
+    pub embedded_at: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -292,6 +305,9 @@ impl SurrealKnowledgeRecord {
             wake_phrases: self.wake_phrases,
             wake_order: self.wake_order,
             wake_phrase: self.wake_phrase,
+            embedding: self.embedding,
+            embedding_model: self.embedding_model,
+            embedded_at: self.embedded_at,
         }
     }
 }
@@ -605,7 +621,10 @@ impl SurrealDatabase {
         IF anchors THEN anchors ELSE [] END AS anchors,
         IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
         wake_order,
-        wake_phrase"
+        wake_phrase,
+        embedding,
+        embedding_model,
+        IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at"
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -721,7 +740,9 @@ impl SurrealDatabase {
             anchors = $anchors,
             wake_phrases = $wake_phrases,
             wake_order = $wake_order,
-            wake_phrase = $wake_phrase"
+            wake_phrase = $wake_phrase,
+            embedding = $embedding,
+            embedding_model = $embedding_model"
             .to_string();
 
         // Add optional fields
@@ -742,6 +763,9 @@ impl SurrealDatabase {
         }
         if entry.last_activated.is_some() {
             query.push_str(", last_activated = <datetime>$last_activated");
+        }
+        if entry.embedded_at.is_some() {
+            query.push_str(", embedded_at = <datetime>$embedded_at");
         }
 
         // Bind all parameters and execute query
@@ -789,7 +813,9 @@ impl SurrealDatabase {
                 .bind(("anchors", entry.anchors.clone()))
                 .bind(("wake_phrases", entry.wake_phrases.clone()))
                 .bind(("wake_order", entry.wake_order))
-                .bind(("wake_phrase", entry.wake_phrase.clone()));
+                .bind(("wake_phrase", entry.wake_phrase.clone()))
+                .bind(("embedding", entry.embedding.clone()))
+                .bind(("embedding_model", entry.embedding_model.clone()));
 
             // Bind optional parameters
             if let Some(ref proj) = entry.source_project_id {
@@ -809,6 +835,9 @@ impl SurrealDatabase {
             }
             if let Some(ref activated) = entry.last_activated {
                 q = q.bind(("last_activated", normalize_datetime(activated)));
+            }
+            if let Some(ref embedded) = entry.embedded_at {
+                q = q.bind(("embedded_at", normalize_datetime(embedded)));
             }
 
             q.await.context("Failed to upsert knowledge record")
@@ -1081,6 +1110,71 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// Semantic search using vector similarity (brute force cosine)
+    pub fn semantic_search_knowledge(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.semantic_search_knowledge_async(
+            query_embedding,
+            ctx,
+            filter,
+            limit,
+        ))
+    }
+
+    async fn semantic_search_knowledge_async(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let resonance_clause = Self::build_resonance_filter(filter);
+        let category_clause = Self::build_category_filter(filter);
+
+        // Brute force vector similarity search (no HNSW index)
+        let sql = format!(
+            "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
+            FROM knowledge
+            WHERE embedding IS NOT NONE {} {} {}
+            ORDER BY score DESC
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause,
+            resonance_clause,
+            category_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query_builder = db
+                .query(&sql)
+                .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("limit", limit));
+            if let Some(agent) = current_agent {
+                query_builder = query_builder.bind(("current_agent", agent));
+            }
+            query_builder
+                .await
+                .context("Failed to execute semantic search query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse semantic search results")?;
+
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     /// Helper: Convert SurrealDB query result to KnowledgeEntry
     async fn value_to_knowledge_entry(&self, obj: serde_json::Value) -> Result<KnowledgeEntry> {
         // Extract ID from string (queries use meta::id(id) AS id)
@@ -1181,6 +1275,9 @@ impl SurrealDatabase {
             wake_phrases: serde_json::from_value(obj["wake_phrases"].clone()).unwrap_or_default(),
             wake_order: serde_json::from_value(obj["wake_order"].clone()).ok(),
             wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
+            embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
+            embedding_model: serde_json::from_value(obj["embedding_model"].clone()).ok(),
+            embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
         })
     }
 
@@ -2440,6 +2537,16 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.search_knowledge(query, ctx, filter)
+    }
+
+    fn semantic_search(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.semantic_search_knowledge(query_embedding, ctx, filter, limit)
     }
 
     fn list_by_category(

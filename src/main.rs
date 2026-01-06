@@ -5,6 +5,7 @@ mod commit;
 mod convert;
 mod db;
 mod doctor;
+mod embeddings;
 mod engage;
 mod github;
 mod index;
@@ -316,6 +317,10 @@ enum MemoryCommands {
         /// Limit number of results
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Use semantic (vector) search instead of keyword search
+        #[arg(long)]
+        semantic: bool,
     },
 
     /// List entries by category
@@ -570,6 +575,12 @@ enum MemoryCommands {
         /// Force dangerous visibility changes (e.g., making blooms public)
         #[arg(long)]
         force: bool,
+    },
+
+    /// Generate embedding for a knowledge entry
+    Embed {
+        /// Entry ID to embed
+        id: String,
     },
 
     /// Apply database schema migrations
@@ -1203,6 +1214,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             has_resonance_type,
             missing_resonance_type,
             limit,
+            semantic,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
@@ -1215,7 +1227,17 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             };
 
             // Get results from database with resonance filtering
-            let mut entries = db.search(&query, &ctx, &filter)?;
+            let mut entries = if semantic {
+                use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+
+                eprintln!("Initializing semantic search...");
+                let mut provider = FastEmbedProvider::new()?;
+                let query_embedding = provider.embed(&query)?;
+
+                db.semantic_search(&query_embedding, &ctx, &filter, limit.unwrap_or(20))?
+            } else {
+                db.search(&query, &ctx, &filter)?
+            };
 
             // Apply in-memory field presence filters
             entries = entries
@@ -1564,6 +1586,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 wake_phrases: wake_phrase_list,
                 wake_order,
                 wake_phrase,
+                embedding: None,
+                embedding_model: None,
+                embedded_at: None,
             };
 
             // Insert into database (applicability already set in struct)
@@ -1895,6 +1920,60 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     println!("  {}", change);
                 }
             }
+        }
+
+        MemoryCommands::Embed { id } => {
+            use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+
+            let db = store::create_store(&config.db_path)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            // Fetch entry
+            let mut entry = db
+                .get(&id, &ctx)?
+                .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+            // Construct embedding text from title + summary/body + tags
+            let mut parts = vec![entry.title.clone()];
+
+            if let Some(summary) = &entry.summary {
+                parts.push(summary.clone());
+            } else if let Some(body) = &entry.body {
+                parts.push(body.chars().take(2000).collect());
+            }
+
+            if !entry.tags.is_empty() {
+                parts.push(format!("Tags: {}", entry.tags.join(", ")));
+            }
+
+            let embedding_text = parts.join("\n\n");
+
+            // Initialize embedding provider
+            println!("Initializing FastEmbed model...");
+            let mut provider = FastEmbedProvider::new()?;
+
+            // Generate embedding
+            println!("Generating embedding for '{}'...", entry.title);
+            let embedding = provider.embed(&embedding_text)?;
+
+            // Update entry with embedding
+            entry.embedding = Some(embedding);
+            entry.embedding_model = Some(provider.model_id().to_string());
+            entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+            entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+            // Save to database
+            db.upsert_knowledge(&entry)?;
+
+            println!("✓ Embedding generated and saved!");
+            println!("  Entry: {}", id);
+            println!("  Model: {}", provider.model_id());
+            println!("  Dimensions: {}", provider.dimensions());
         }
 
         MemoryCommands::Migrate { status, from, to } => {

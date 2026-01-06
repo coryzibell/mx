@@ -84,6 +84,14 @@ pub struct KnowledgeEntry {
     // DEPRECATED - kept for backward compatibility during migration
     #[serde(default)]
     pub wake_phrase: Option<String>, // Verification phrase for memory rituals
+
+    // Vector embeddings (PR #89)
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>, // 768-dim vector (BGE-Base-EN-v1.5)
+    #[serde(default)]
+    pub embedding_model: Option<String>, // Model ID that generated the embedding
+    #[serde(default)]
+    pub embedded_at: Option<String>, // RFC3339 timestamp when embedded
 }
 
 fn default_visibility() -> String {
@@ -229,6 +237,10 @@ impl KnowledgeEntry {
             wake_phrases: vec![],
             wake_order: None,
             wake_phrase: None,
+            // Embeddings - not generated from markdown
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
         })
     }
 }

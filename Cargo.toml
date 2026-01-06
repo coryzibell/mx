@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.56"
+version = "0.1.57"
 edition = "2024"
 description = "Matrix CLI - Knowledge indexing and task management"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
@@ -64,6 +64,9 @@ tempfile = "3"
 
 # Terminal colors
 colored = "2"
+
+# Embeddings
+fastembed = "5.6"
 
 [dev-dependencies.cargo-husky]
 version = "1"

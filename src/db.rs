@@ -293,6 +293,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -351,6 +354,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -408,6 +414,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })
             .ok();
@@ -1082,6 +1091,16 @@ impl KnowledgeStore for Database {
         self.search(query)
     }
 
+    fn semantic_search(
+        &self,
+        _query_embedding: &[f32],
+        _ctx: &crate::store::AgentContext,
+        _filter: &crate::store::KnowledgeFilter,
+        _limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        anyhow::bail!("Semantic search requires SurrealDB backend")
+    }
+
     fn list_by_category(
         &self,
         category: &str,
@@ -1307,6 +1326,9 @@ mod tests {
             wake_phrases: vec![],
             wake_order: None,
             wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
         }
     }
 
