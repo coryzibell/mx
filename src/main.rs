@@ -573,6 +573,12 @@ enum MemoryCommands {
         force: bool,
     },
 
+    /// Generate embedding for a knowledge entry
+    Embed {
+        /// Entry ID to embed
+        id: String,
+    },
+
     /// Apply database schema migrations
     Migrate {
         /// Show migration status (list tables)
@@ -1899,6 +1905,60 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                     println!("  {}", change);
                 }
             }
+        }
+
+        MemoryCommands::Embed { id } => {
+            use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+
+            let db = store::create_store(&config.db_path)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            // Fetch entry
+            let mut entry = db
+                .get(&id, &ctx)?
+                .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+            // Construct embedding text from title + summary/body + tags
+            let mut parts = vec![entry.title.clone()];
+
+            if let Some(summary) = &entry.summary {
+                parts.push(summary.clone());
+            } else if let Some(body) = &entry.body {
+                parts.push(body.chars().take(2000).collect());
+            }
+
+            if !entry.tags.is_empty() {
+                parts.push(format!("Tags: {}", entry.tags.join(", ")));
+            }
+
+            let embedding_text = parts.join("\n\n");
+
+            // Initialize embedding provider
+            println!("Initializing FastEmbed model...");
+            let mut provider = FastEmbedProvider::new()?;
+
+            // Generate embedding
+            println!("Generating embedding for '{}'...", entry.title);
+            let embedding = provider.embed(&embedding_text)?;
+
+            // Update entry with embedding
+            entry.embedding = Some(embedding);
+            entry.embedding_model = Some(provider.model_id().to_string());
+            entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+            entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+            // Save to database
+            db.upsert_knowledge(&entry)?;
+
+            println!("✓ Embedding generated and saved!");
+            println!("  Entry: {}", id);
+            println!("  Model: {}", provider.model_id());
+            println!("  Dimensions: {}", provider.dimensions());
         }
 
         MemoryCommands::Migrate { status, from, to } => {

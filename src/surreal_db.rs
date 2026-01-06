@@ -621,7 +621,10 @@ impl SurrealDatabase {
         IF anchors THEN anchors ELSE [] END AS anchors,
         IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
         wake_order,
-        wake_phrase"
+        wake_phrase,
+        embedding,
+        embedding_model,
+        IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at"
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -737,7 +740,9 @@ impl SurrealDatabase {
             anchors = $anchors,
             wake_phrases = $wake_phrases,
             wake_order = $wake_order,
-            wake_phrase = $wake_phrase"
+            wake_phrase = $wake_phrase,
+            embedding = $embedding,
+            embedding_model = $embedding_model"
             .to_string();
 
         // Add optional fields
@@ -758,6 +763,9 @@ impl SurrealDatabase {
         }
         if entry.last_activated.is_some() {
             query.push_str(", last_activated = <datetime>$last_activated");
+        }
+        if entry.embedded_at.is_some() {
+            query.push_str(", embedded_at = <datetime>$embedded_at");
         }
 
         // Bind all parameters and execute query
@@ -805,7 +813,9 @@ impl SurrealDatabase {
                 .bind(("anchors", entry.anchors.clone()))
                 .bind(("wake_phrases", entry.wake_phrases.clone()))
                 .bind(("wake_order", entry.wake_order))
-                .bind(("wake_phrase", entry.wake_phrase.clone()));
+                .bind(("wake_phrase", entry.wake_phrase.clone()))
+                .bind(("embedding", entry.embedding.clone()))
+                .bind(("embedding_model", entry.embedding_model.clone()));
 
             // Bind optional parameters
             if let Some(ref proj) = entry.source_project_id {
@@ -825,6 +835,9 @@ impl SurrealDatabase {
             }
             if let Some(ref activated) = entry.last_activated {
                 q = q.bind(("last_activated", normalize_datetime(activated)));
+            }
+            if let Some(ref embedded) = entry.embedded_at {
+                q = q.bind(("embedded_at", normalize_datetime(embedded)));
             }
 
             q.await.context("Failed to upsert knowledge record")
