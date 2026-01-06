@@ -131,6 +131,17 @@ DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
 -- DEPRECATED: Kept for backward compatibility during migration
 DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
 
+-- =============================================================================
+-- VECTOR EMBEDDINGS (PR #89)
+-- =============================================================================
+-- Semantic search via fastembed-rs (BGE-Base-EN-v1.5, 768 dimensions)
+-- Strategy: Brute force (no HNSW index) - exact results for Luola's scale
+-- Reconsider HNSW when: >50K vectors OR >100ms query latency
+
+DEFINE FIELD IF NOT EXISTS embedding ON knowledge TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS embedding_model ON knowledge TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS embedded_at ON knowledge TYPE option<datetime>;
+
 -- Indexes for common queries
 DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
 DEFINE INDEX IF NOT EXISTS knowledge_source_project ON knowledge FIELDS source_project;

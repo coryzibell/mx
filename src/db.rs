@@ -293,6 +293,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -351,6 +354,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -408,6 +414,9 @@ impl Database {
                     wake_phrases: vec![],
                     wake_order: None,
                     wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
                 })
             })
             .ok();
@@ -1307,6 +1316,9 @@ mod tests {
             wake_phrases: vec![],
             wake_order: None,
             wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
         }
     }
 

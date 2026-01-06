@@ -1565,6 +1565,9 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 wake_phrases: wake_phrase_list,
                 wake_order,
                 wake_phrase,
+                embedding: None,
+                embedding_model: None,
+                embedded_at: None,
             };
 
             // Insert into database (applicability already set in struct)

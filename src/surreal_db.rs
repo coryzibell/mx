@@ -249,6 +249,19 @@ pub struct SurrealKnowledgeRecord {
     /// DEPRECATED: Wake phrase for memory ritual verification (kept for backward compat)
     #[serde(default)]
     pub wake_phrase: Option<String>,
+
+    // === Vector embeddings (PR #89) ===
+    /// 768-dimensional embedding vector (BGE-Base-EN-v1.5)
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
+
+    /// Model ID that generated the embedding
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+
+    /// Timestamp when embedded
+    #[serde(default)]
+    pub embedded_at: Option<String>,
 }
 
 fn default_visibility() -> String {
@@ -292,6 +305,9 @@ impl SurrealKnowledgeRecord {
             wake_phrases: self.wake_phrases,
             wake_order: self.wake_order,
             wake_phrase: self.wake_phrase,
+            embedding: self.embedding,
+            embedding_model: self.embedding_model,
+            embedded_at: self.embedded_at,
         }
     }
 }
@@ -1181,6 +1197,9 @@ impl SurrealDatabase {
             wake_phrases: serde_json::from_value(obj["wake_phrases"].clone()).unwrap_or_default(),
             wake_order: serde_json::from_value(obj["wake_order"].clone()).ok(),
             wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
+            embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
+            embedding_model: serde_json::from_value(obj["embedding_model"].clone()).ok(),
+            embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
         })
     }
 
