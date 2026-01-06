@@ -95,6 +95,15 @@ pub trait KnowledgeStore {
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Semantic search using vector similarity
+    fn semantic_search(
+        &self,
+        query_embedding: &[f32],
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>>;
+
     /// List entries by category
     fn list_by_category(
         &self,

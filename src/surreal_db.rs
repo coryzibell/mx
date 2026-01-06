@@ -1110,6 +1110,71 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// Semantic search using vector similarity (brute force cosine)
+    pub fn semantic_search_knowledge(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.semantic_search_knowledge_async(
+            query_embedding,
+            ctx,
+            filter,
+            limit,
+        ))
+    }
+
+    async fn semantic_search_knowledge_async(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let resonance_clause = Self::build_resonance_filter(filter);
+        let category_clause = Self::build_category_filter(filter);
+
+        // Brute force vector similarity search (no HNSW index)
+        let sql = format!(
+            "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
+            FROM knowledge
+            WHERE embedding IS NOT NONE {} {} {}
+            ORDER BY score DESC
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause,
+            resonance_clause,
+            category_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query_builder = db
+                .query(&sql)
+                .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("limit", limit));
+            if let Some(agent) = current_agent {
+                query_builder = query_builder.bind(("current_agent", agent));
+            }
+            query_builder
+                .await
+                .context("Failed to execute semantic search query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse semantic search results")?;
+
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     /// Helper: Convert SurrealDB query result to KnowledgeEntry
     async fn value_to_knowledge_entry(&self, obj: serde_json::Value) -> Result<KnowledgeEntry> {
         // Extract ID from string (queries use meta::id(id) AS id)
@@ -2472,6 +2537,16 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.search_knowledge(query, ctx, filter)
+    }
+
+    fn semantic_search(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.semantic_search_knowledge(query_embedding, ctx, filter, limit)
     }
 
     fn list_by_category(

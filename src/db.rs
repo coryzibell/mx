@@ -1091,6 +1091,16 @@ impl KnowledgeStore for Database {
         self.search(query)
     }
 
+    fn semantic_search(
+        &self,
+        _query_embedding: &[f32],
+        _ctx: &crate::store::AgentContext,
+        _filter: &crate::store::KnowledgeFilter,
+        _limit: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        anyhow::bail!("Semantic search requires SurrealDB backend")
+    }
+
     fn list_by_category(
         &self,
         category: &str,

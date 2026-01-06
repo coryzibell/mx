@@ -317,6 +317,10 @@ enum MemoryCommands {
         /// Limit number of results
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Use semantic (vector) search instead of keyword search
+        #[arg(long)]
+        semantic: bool,
     },
 
     /// List entries by category
@@ -1210,6 +1214,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             has_resonance_type,
             missing_resonance_type,
             limit,
+            semantic,
         } => {
             let db = store::create_store(&config.db_path)?;
             let ctx = resolve_agent_context(mine, include_private);
@@ -1222,7 +1227,17 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             };
 
             // Get results from database with resonance filtering
-            let mut entries = db.search(&query, &ctx, &filter)?;
+            let mut entries = if semantic {
+                use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+
+                eprintln!("Initializing semantic search...");
+                let mut provider = FastEmbedProvider::new()?;
+                let query_embedding = provider.embed(&query)?;
+
+                db.semantic_search(&query_embedding, &ctx, &filter, limit.unwrap_or(20))?
+            } else {
+                db.search(&query, &ctx, &filter)?
+            };
 
             // Apply in-memory field presence filters
             entries = entries
