@@ -164,18 +164,19 @@ DEFINE INDEX IF NOT EXISTS knowledge_last_activated ON knowledge FIELDS last_act
 -- FULL-TEXT SEARCH
 -- =============================================================================
 
--- Custom analyzer for knowledge search
-DEFINE ANALYZER IF NOT EXISTS memory_analyzer
-    TOKENIZERS class
-    FILTERS lowercase, snowball(english);
+-- Simple analyzer for knowledge search (blank + class tokenizers, lowercase filter)
+-- Note: Snowball stemming syntax not supported in SurrealDB 2.4.0, using simpler approach
+DEFINE ANALYZER IF NOT EXISTS simple
+    TOKENIZERS blank, class
+    FILTERS lowercase;
 
--- Search indexes
+-- Search indexes using simple analyzer
 DEFINE INDEX IF NOT EXISTS knowledge_title_fts ON knowledge
-    FIELDS title SEARCH ANALYZER memory_analyzer BM25;
+    FIELDS title SEARCH ANALYZER simple BM25;
 DEFINE INDEX IF NOT EXISTS knowledge_body_fts ON knowledge
-    FIELDS body SEARCH ANALYZER memory_analyzer BM25;
+    FIELDS body SEARCH ANALYZER simple BM25;
 DEFINE INDEX IF NOT EXISTS knowledge_summary_fts ON knowledge
-    FIELDS summary SEARCH ANALYZER memory_analyzer BM25;
+    FIELDS summary SEARCH ANALYZER simple BM25;
 
 -- =============================================================================
 -- GRAPH RELATIONS (Replace junction tables)

@@ -1,0 +1,4 @@
+#V2
+DELETE knowledge;
+quit;
+exit;

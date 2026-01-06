@@ -29,6 +29,10 @@ use crate::index::{
 #[command(about = "Matrix CLI - Knowledge indexing and task management")]
 #[command(version)]
 struct Cli {
+    /// Enable verbose output (show connection logs)
+    #[arg(short = 'v', long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -579,8 +583,13 @@ enum MemoryCommands {
 
     /// Generate embedding for a knowledge entry
     Embed {
-        /// Entry ID to embed
-        id: String,
+        /// Entry ID to embed (not used with --all)
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+
+        /// Embed all knowledge entries
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Apply database schema migrations
@@ -1072,7 +1081,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Memory { command } => handle_memory(command),
+        Commands::Memory { command } => handle_memory(command, cli.verbose),
         Commands::Commit {
             message,
             all,
@@ -1189,7 +1198,7 @@ fn resolve_agent_context(mine: bool, include_private: bool) -> store::AgentConte
     }
 }
 
-fn handle_memory(cmd: MemoryCommands) -> Result<()> {
+fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
     match cmd {
@@ -1216,7 +1225,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             limit,
             semantic,
         } => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let ctx = resolve_agent_context(mine, include_private);
 
             // Build filter for database query (resonance and category)
@@ -1291,7 +1300,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             missing_resonance_type,
             limit,
         } => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let ctx = resolve_agent_context(mine, include_private);
 
             // Validate category if provided
@@ -1363,7 +1372,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
         }
 
         MemoryCommands::Show { id, json } => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // For Show, we need to respect privacy but use current agent context
             // If the user has MX_CURRENT_AGENT set, they can see their own private entries
@@ -1388,7 +1397,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
         }
 
         MemoryCommands::Stats => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             println!("Memory Index Statistics\n");
             println!("Total entries: {}", db.count()?);
@@ -1409,7 +1418,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
         }
 
         MemoryCommands::Delete { id } => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             if db.delete(&id)? {
                 println!("Deleted entry '{}'", id);
@@ -1420,7 +1429,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
         }
 
         MemoryCommands::Import { path } => {
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let import_path = path
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| config.jsonl_path.clone());
@@ -1456,7 +1465,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             use anyhow::Context;
             use std::fs;
 
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Validate category against database
             if db.get_category(&category)?.is_none() {
@@ -1645,7 +1654,7 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             use anyhow::Context;
             use std::fs;
 
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // For Update, use current agent context to allow updating own private entries
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -1922,10 +1931,10 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
             }
         }
 
-        MemoryCommands::Embed { id } => {
+        MemoryCommands::Embed { id, all } => {
             use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
 
-            let db = store::create_store(&config.db_path)?;
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Use current agent context for private entry access
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -1933,47 +1942,94 @@ fn handle_memory(cmd: MemoryCommands) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            // Fetch entry
-            let mut entry = db
-                .get(&id, &ctx)?
-                .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
-
-            // Construct embedding text from title + summary/body + tags
-            let mut parts = vec![entry.title.clone()];
-
-            if let Some(summary) = &entry.summary {
-                parts.push(summary.clone());
-            } else if let Some(body) = &entry.body {
-                parts.push(body.chars().take(2000).collect());
-            }
-
-            if !entry.tags.is_empty() {
-                parts.push(format!("Tags: {}", entry.tags.join(", ")));
-            }
-
-            let embedding_text = parts.join("\n\n");
-
-            // Initialize embedding provider
+            // Initialize embedding provider once
             println!("Initializing FastEmbed model...");
             let mut provider = FastEmbedProvider::new()?;
 
-            // Generate embedding
-            println!("Generating embedding for '{}'...", entry.title);
-            let embedding = provider.embed(&embedding_text)?;
+            if all {
+                // Embed ALL entries
+                let entries = db.list_all(&ctx)?;
+                let total = entries.len();
 
-            // Update entry with embedding
-            entry.embedding = Some(embedding);
-            entry.embedding_model = Some(provider.model_id().to_string());
-            entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
-            entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+                println!("Found {} entries to embed", total);
 
-            // Save to database
-            db.upsert_knowledge(&entry)?;
+                for (idx, mut entry) in entries.into_iter().enumerate() {
+                    // Construct embedding text from title + summary/body + tags
+                    let mut parts = vec![entry.title.clone()];
 
-            println!("✓ Embedding generated and saved!");
-            println!("  Entry: {}", id);
-            println!("  Model: {}", provider.model_id());
-            println!("  Dimensions: {}", provider.dimensions());
+                    if let Some(summary) = &entry.summary {
+                        parts.push(summary.clone());
+                    } else if let Some(body) = &entry.body {
+                        parts.push(body.chars().take(2000).collect());
+                    }
+
+                    if !entry.tags.is_empty() {
+                        parts.push(format!("Tags: {}", entry.tags.join(", ")));
+                    }
+
+                    let embedding_text = parts.join("\n\n");
+
+                    // Generate embedding
+                    println!("Embedded {}/{}: {}", idx + 1, total, entry.title);
+                    let embedding = provider.embed(&embedding_text)?;
+
+                    // Update entry with embedding
+                    entry.embedding = Some(embedding);
+                    entry.embedding_model = Some(provider.model_id().to_string());
+                    entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+                    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+                    // Save to database
+                    db.upsert_knowledge(&entry)?;
+                }
+
+                println!("✓ All {} entries embedded successfully!", total);
+                println!("  Model: {}", provider.model_id());
+                println!("  Dimensions: {}", provider.dimensions());
+            } else {
+                // Embed single entry
+                let entry_id = id.ok_or_else(|| {
+                    anyhow::anyhow!("Entry ID required (use --all to embed all entries)")
+                })?;
+
+                // Fetch entry
+                let mut entry = db
+                    .get(&entry_id, &ctx)?
+                    .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", entry_id))?;
+
+                // Construct embedding text from title + summary/body + tags
+                let mut parts = vec![entry.title.clone()];
+
+                if let Some(summary) = &entry.summary {
+                    parts.push(summary.clone());
+                } else if let Some(body) = &entry.body {
+                    parts.push(body.chars().take(2000).collect());
+                }
+
+                if !entry.tags.is_empty() {
+                    parts.push(format!("Tags: {}", entry.tags.join(", ")));
+                }
+
+                let embedding_text = parts.join("\n\n");
+
+                // Generate embedding
+                println!("Generating embedding for '{}'...", entry.title);
+                let embedding = provider.embed(&embedding_text)?;
+
+                // Update entry with embedding
+                entry.embedding = Some(embedding);
+                entry.embedding_model = Some(provider.model_id().to_string());
+                entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+                entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+                // Save to database
+                db.upsert_knowledge(&entry)?;
+
+                println!("✓ Embedding generated and saved!");
+                println!("  Entry: {}", entry_id);
+                println!("  Model: {}", provider.model_id());
+                println!("  Dimensions: {}", provider.dimensions());
+            }
         }
 
         MemoryCommands::Migrate { status, from, to } => {

@@ -96,8 +96,11 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
         .with_context(|| format!("Failed to create directory {:?}", dir_path))?;
 
     // Export all categories dynamically
-    // Use public_only context to export all non-private entries
-    let ctx = crate::store::AgentContext::public_only();
+    // Respect MX_CURRENT_AGENT for private entry access
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => crate::store::AgentContext::for_agent(agent),
+        _ => crate::store::AgentContext::public_only(),
+    };
     let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
@@ -244,8 +247,11 @@ pub fn export_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     let mut writer = BufWriter::new(file);
 
     // Export all categories dynamically
-    // Use public_only context to export all non-private entries
-    let ctx = crate::store::AgentContext::public_only();
+    // Respect MX_CURRENT_AGENT for private entry access
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => crate::store::AgentContext::for_agent(agent),
+        _ => crate::store::AgentContext::public_only(),
+    };
     let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
@@ -271,8 +277,11 @@ pub fn export_csv(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     )?;
 
     // Export all categories dynamically
-    // Use public_only context to export all non-private entries
-    let ctx = crate::store::AgentContext::public_only();
+    // Respect MX_CURRENT_AGENT for private entry access
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => crate::store::AgentContext::for_agent(agent),
+        _ => crate::store::AgentContext::public_only(),
+    };
     let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {

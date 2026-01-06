@@ -246,6 +246,67 @@ impl Database {
         Ok(())
     }
 
+    pub fn list(&self) -> Result<Vec<KnowledgeEntry>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, category_id, title, body, summary,
+                   source_project_id, source_agent_id, file_path,
+                   created_at, updated_at, content_hash,
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
+            FROM knowledge
+            ORDER BY title ASC
+            "#,
+        )?;
+
+        let mut entries = stmt
+            .query_map([], |row| {
+                let id: String = row.get(0)?;
+                Ok(KnowledgeEntry {
+                    id: id.clone(),
+                    category_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    summary: row.get(4)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
+                    file_path: row.get(7)?,
+                    tags: vec![],
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
+                    session_id: row.get(13)?,
+                    ephemeral: row.get(14)?,
+                    content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Load tags and applicability for each entry
+        for entry in &mut entries {
+            entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
+        }
+
+        Ok(entries)
+    }
+
     pub fn search(&self, query: &str) -> Result<Vec<KnowledgeEntry>> {
         let pattern = format!("%{}%", query);
         let mut stmt = self.conn.prepare(
@@ -1109,6 +1170,11 @@ impl KnowledgeStore for Database {
     ) -> Result<Vec<KnowledgeEntry>> {
         // SQLite backend doesn't support privacy filtering or resonance filtering yet - return all results
         self.list_by_category(category)
+    }
+
+    fn list_all(&self, _ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend doesn't support privacy filtering - return all results
+        self.list()
     }
 
     fn count(&self) -> Result<usize> {

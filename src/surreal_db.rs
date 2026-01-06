@@ -402,7 +402,13 @@ impl SurrealDatabase {
     /// the path is ignored and a network connection is established instead.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = SurrealConfig::from_env();
-        Self::runtime().block_on(Self::open_with_config_async(path, &config))
+        Self::runtime().block_on(Self::open_with_config_async(path, &config, false))
+    }
+
+    /// Open database with verbose control
+    pub fn open_with_verbose<P: AsRef<Path>>(path: P, verbose: bool) -> Result<Self> {
+        let config = SurrealConfig::from_env();
+        Self::runtime().block_on(Self::open_with_config_async(path, &config, verbose))
     }
 
     /// Connect using explicit configuration
@@ -410,29 +416,36 @@ impl SurrealDatabase {
     /// For embedded mode, `path` specifies the database location.
     /// For network mode, `path` is ignored.
     pub fn connect<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
-        Self::runtime().block_on(Self::open_with_config_async(path, config))
+        Self::runtime().block_on(Self::open_with_config_async(path, config, false))
     }
 
     /// Internal: open with config, branching on mode
     async fn open_with_config_async<P: AsRef<Path>>(
         path: P,
         config: &SurrealConfig,
+        verbose: bool,
     ) -> Result<Self> {
         match config.mode {
-            SurrealMode::Embedded => Self::open_embedded_async(path, config).await,
-            SurrealMode::Network => Self::open_network_async(config).await,
+            SurrealMode::Embedded => Self::open_embedded_async(path, config, verbose).await,
+            SurrealMode::Network => Self::open_network_async(config, verbose).await,
         }
     }
 
     /// Open embedded SurrealKV database
-    async fn open_embedded_async<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
+    async fn open_embedded_async<P: AsRef<Path>>(
+        path: P,
+        config: &SurrealConfig,
+        verbose: bool,
+    ) -> Result<Self> {
         let path = path.as_ref();
 
-        // Diagnostic: Log connection mode
-        eprintln!(
-            "[mx] Connecting to SurrealDB in embedded mode: {}",
-            path.display()
-        );
+        // Diagnostic: Log connection mode (only if verbose)
+        if verbose {
+            eprintln!(
+                "[mx] Connecting to SurrealDB in embedded mode: {}",
+                path.display()
+            );
+        }
 
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -449,17 +462,21 @@ impl SurrealDatabase {
         })?;
 
         // Use namespace and database from config
-        eprintln!(
-            "[mx] Using namespace '{}' and database '{}'",
-            config.namespace, config.database
-        );
+        if verbose {
+            eprintln!(
+                "[mx] Using namespace '{}' and database '{}'",
+                config.namespace, config.database
+            );
+        }
         db.use_ns(&config.namespace)
             .use_db(&config.database)
             .await
             .context("Failed to set namespace and database")?;
 
         // Apply schema (idempotent)
-        eprintln!("[mx] Applying database schema");
+        if verbose {
+            eprintln!("[mx] Applying database schema");
+        }
         let mut response = db
             .query(SCHEMA)
             .await
@@ -471,7 +488,9 @@ impl SurrealDatabase {
             return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
         }
 
-        eprintln!("[mx] Embedded connection established successfully");
+        if verbose {
+            eprintln!("[mx] Embedded connection established successfully");
+        }
 
         Ok(Self {
             conn: SurrealConnection::Embedded(db),
@@ -497,14 +516,17 @@ impl SurrealDatabase {
     /// Open network connection via WebSocket
     ///
     /// Authenticates with the remote SurrealDB server using credentials from config.
-    async fn open_network_async(config: &SurrealConfig) -> Result<Self> {
+    async fn open_network_async(config: &SurrealConfig, verbose: bool) -> Result<Self> {
         // Diagnostic: Log connection attempt (to stderr, doesn't interfere with stdout)
-        eprintln!(
-            "[mx] Connecting to SurrealDB in network mode: {}",
-            config.url
-        );
+        if verbose {
+            eprintln!(
+                "[mx] Connecting to SurrealDB in network mode: {}",
+                config.url
+            );
+        }
 
         // Security warning: credentials over unencrypted WebSocket to non-localhost
+        // (Always show warnings, regardless of verbose flag)
         if config.pass.is_some()
             && config.url.starts_with("ws://")
             && !Self::is_localhost_url(&config.url)
@@ -532,7 +554,9 @@ impl SurrealDatabase {
         // Authenticate with the server
         // If no password is provided, attempt connection without auth (will fail if server requires it)
         if let Some(pass) = &config.pass {
-            eprintln!("[mx] Authenticating as user '{}'", config.user);
+            if verbose {
+                eprintln!("[mx] Authenticating as user '{}'", config.user);
+            }
             db.signin(Root {
                 username: &config.user,
                 password: pass,
@@ -544,15 +568,17 @@ impl SurrealDatabase {
                     config.url, config.user
                 )
             })?;
-        } else {
+        } else if verbose {
             eprintln!("[mx] No password provided, connecting without authentication");
         }
 
         // Use namespace and database from config
-        eprintln!(
-            "[mx] Using namespace '{}' and database '{}'",
-            config.namespace, config.database
-        );
+        if verbose {
+            eprintln!(
+                "[mx] Using namespace '{}' and database '{}'",
+                config.namespace, config.database
+            );
+        }
         db.use_ns(&config.namespace)
             .use_db(&config.database)
             .await
@@ -563,7 +589,9 @@ impl SurrealDatabase {
                 )
             })?;
 
-        eprintln!("[mx] Network connection established successfully");
+        if verbose {
+            eprintln!("[mx] Network connection established successfully");
+        }
 
         // Note: Schema is NOT applied for network mode
         // The remote server should already have the schema
@@ -577,7 +605,7 @@ impl SurrealDatabase {
     /// Legacy async open - kept for compatibility
     async fn open_async<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = SurrealConfig::from_env();
-        Self::open_with_config_async(path, &config).await
+        Self::open_with_config_async(path, &config, false).await
     }
 
     /// Test helper - open temporary database
@@ -2256,12 +2284,11 @@ impl SurrealDatabase {
                 .context("Failed to query database info")
         })?;
 
-        // SurrealDB INFO returns complex metadata - convert to JSON
-        let info: Option<Value> = response.take(0)?;
+        // SurrealDB INFO returns complex metadata - take as JSON directly
+        let info: Option<serde_json::Value> = response.take(0)?;
         let mut tables = Vec::new();
 
-        if let Some(info_value) = info {
-            let info_json = info_value.into_json();
+        if let Some(info_json) = info {
             if let Some(tables_obj) = info_json.get("tables").and_then(|v| v.as_object()) {
                 for table_name in tables_obj.keys() {
                     tables.push(table_name.clone());
@@ -2288,6 +2315,44 @@ impl SurrealDatabase {
         let results: Vec<serde_json::Value> = response.take(0)?;
         let count = results.first().and_then(|v| v["c"].as_i64()).unwrap_or(0) as usize;
         Ok(count)
+    }
+
+    /// List all knowledge entries
+    pub fn list_all(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.list_all_async(ctx))
+    }
+
+    async fn list_all_async(
+        &self,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            {}
+            ORDER BY title",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql);
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query.await.context("Failed to query all knowledge entries")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
     }
 
     /// List entries by category
@@ -2556,6 +2621,10 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.list_by_category(category, ctx, filter)
+    }
+
+    fn list_all(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
+        self.list_all(ctx)
     }
 
     fn count(&self) -> Result<usize> {
