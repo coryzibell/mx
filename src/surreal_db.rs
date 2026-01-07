@@ -2328,13 +2328,16 @@ impl SurrealDatabase {
     ) -> Result<Vec<KnowledgeEntry>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
+        // Convert AND to WHERE for list_all (no WHERE clause exists yet)
+        let where_clause = visibility_clause.replacen("AND", "WHERE", 1);
+
         let sql = format!(
             "SELECT {}
             FROM knowledge
             {}
             ORDER BY title",
             Self::knowledge_select_fields(),
-            visibility_clause
+            where_clause
         );
 
         let mut response = with_db!(self, db, {

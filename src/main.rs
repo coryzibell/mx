@@ -592,6 +592,28 @@ enum MemoryCommands {
         all: bool,
     },
 
+    /// Automatically add anchors based on embedding similarity
+    AutoAnchor {
+        /// Entry ID to process (omit to process all entries with embeddings)
+        id: Option<String>,
+
+        /// Minimum cosine similarity threshold (0.0-1.0)
+        #[arg(long, default_value = "0.75")]
+        threshold: f32,
+
+        /// Maximum anchors to add per entry
+        #[arg(long, default_value = "5")]
+        max_anchors: usize,
+
+        /// Preview changes without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Show similarity scores in output
+        #[arg(long)]
+        verbose: bool,
+    },
+
     /// Apply database schema migrations
     Migrate {
         /// Show migration status (list tables)
@@ -1198,6 +1220,25 @@ fn resolve_agent_context(mine: bool, include_private: bool) -> store::AgentConte
     }
 }
 
+/// Calculate cosine similarity between two vectors
+///
+/// Returns a value between -1.0 and 1.0 (typically 0.0 to 1.0 for normalized embeddings)
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return 0.0;
+    }
+
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let magnitude_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let magnitude_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+        return 0.0;
+    }
+
+    dot_product / (magnitude_a * magnitude_b)
+}
+
 /// Auto-embed a knowledge entry if in network SurrealDB mode
 ///
 /// This silently generates and updates the embedding for a single entry.
@@ -1259,6 +1300,122 @@ fn auto_embed_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
 
     // Save to database
     db.upsert_knowledge(&entry)?;
+
+    Ok(())
+}
+
+/// Auto-anchor a knowledge entry if in network SurrealDB mode
+///
+/// This silently finds similar entries and adds anchors for a single entry.
+/// Only runs when MX_MEMORY_BACKEND=surrealdb and MX_SURREAL_MODE=network.
+/// Uses defaults: threshold 0.75, max 5 anchors.
+fn auto_anchor_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    use crate::surreal_db::SurrealConfig;
+
+    // Only auto-anchor in network SurrealDB mode
+    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
+
+    if backend != "surrealdb" && backend != "surreal" {
+        return Ok(()); // Not SurrealDB, skip
+    }
+
+    let config = SurrealConfig::from_env();
+    if !config.is_network() {
+        return Ok(()); // Not network mode, skip
+    }
+
+    // Get agent context for fetching entries
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+        _ => store::AgentContext::public_only(),
+    };
+
+    // Fetch the entry
+    let entry = match db.get(entry_id, &ctx)? {
+        Some(e) => e,
+        None => return Ok(()), // Entry not found, skip silently
+    };
+
+    // Skip if no embedding
+    if entry.embedding.is_none() {
+        return Ok(());
+    }
+
+    let entry_embedding = entry.embedding.as_ref().unwrap();
+
+    // Get all entries with embeddings for similarity comparison
+    let all_candidates = db.list_all(&ctx)?;
+    let candidates: Vec<_> = all_candidates
+        .into_iter()
+        .filter(|e| e.embedding.is_some())
+        .collect();
+
+    // Calculate similarities
+    let threshold = 0.75;
+    let max_anchors = 5;
+    let mut similarities: Vec<(String, f32)> = Vec::new();
+
+    for candidate in &candidates {
+        // Skip self
+        if candidate.id == entry.id {
+            continue;
+        }
+
+        // Skip if already an anchor
+        if entry.anchors.contains(&candidate.id) {
+            continue;
+        }
+
+        // Privacy check
+        let can_anchor = if entry.visibility == "private" {
+            // Private can anchor to same-owner private OR public
+            candidate.visibility == "public"
+                || (candidate.visibility == "private" && candidate.owner == entry.owner)
+        } else {
+            // Public can only anchor to public
+            candidate.visibility == "public"
+        };
+
+        if !can_anchor {
+            continue;
+        }
+
+        // Calculate cosine similarity
+        let candidate_embedding = candidate.embedding.as_ref().unwrap();
+        let similarity = cosine_similarity(entry_embedding, candidate_embedding);
+
+        // Filter by threshold, skip near-duplicates
+        if similarity >= threshold && similarity <= 0.95 {
+            similarities.push((candidate.id.clone(), similarity));
+        }
+    }
+
+    // No similar entries found
+    if similarities.is_empty() {
+        return Ok(());
+    }
+
+    // Sort by similarity (descending) and take top N
+    similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_matches: Vec<String> = similarities
+        .into_iter()
+        .take(max_anchors)
+        .map(|(id, _)| id)
+        .collect();
+
+    // Update the entry with new anchors
+    let mut updated_anchors = entry.anchors.clone();
+    updated_anchors.extend(top_matches);
+    updated_anchors.sort();
+    updated_anchors.dedup();
+
+    // Create updated entry
+    let mut updated_entry = entry.clone();
+    updated_entry.anchors = updated_anchors;
+    updated_entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+    // Save to database
+    db.upsert_knowledge(&updated_entry)?;
 
     Ok(())
 }
@@ -1671,6 +1828,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed_if_network(&id, db.as_ref())?;
 
+            // Auto-generate anchors if in network SurrealDB mode
+            auto_anchor_if_network(&id, db.as_ref())?;
+
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
             println!("  Title: {}", title);
@@ -1992,6 +2152,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed_if_network(&id, db.as_ref())?;
 
+            // Auto-generate anchors if in network SurrealDB mode
+            auto_anchor_if_network(&id, db.as_ref())?;
+
             println!("Updated entry: {}", id);
             if changes.is_empty() {
                 println!("  No changes specified");
@@ -2100,6 +2263,153 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("  Entry: {}", entry_id);
                 println!("  Model: {}", provider.model_id());
                 println!("  Dimensions: {}", provider.dimensions());
+            }
+        }
+
+        MemoryCommands::AutoAnchor {
+            id,
+            threshold,
+            max_anchors,
+            dry_run,
+            verbose,
+        } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            // Get entries to process
+            let entries = if let Some(entry_id) = id {
+                // Process single entry
+                let entry = db
+                    .get(&entry_id, &ctx)?
+                    .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", entry_id))?;
+
+                if entry.embedding.is_none() {
+                    anyhow::bail!("Entry {} has no embedding. Run `mx memory embed {}` first.", entry_id, entry_id);
+                }
+
+                vec![entry]
+            } else {
+                // Get all entries with embeddings
+                let all_entries = db.list_all(&ctx)?;
+                all_entries
+                    .into_iter()
+                    .filter(|e| e.embedding.is_some())
+                    .collect()
+            };
+
+            if entries.is_empty() {
+                println!("No entries with embeddings found.");
+                return Ok(());
+            }
+
+            println!("Processing {} entries...", entries.len());
+
+            // Get ALL entries with embeddings for similarity comparison
+            let all_candidates = db.list_all(&ctx)?;
+            let candidates: Vec<_> = all_candidates
+                .into_iter()
+                .filter(|e| e.embedding.is_some())
+                .collect();
+
+            let mut total_added = 0;
+            let entries_count = entries.len();
+
+            for entry in entries {
+                let entry_embedding = entry.embedding.as_ref().unwrap();
+
+                // Calculate similarities
+                let mut similarities: Vec<(String, String, f32)> = Vec::new();
+
+                for candidate in &candidates {
+                    // Skip self
+                    if candidate.id == entry.id {
+                        continue;
+                    }
+
+                    // Skip if already an anchor
+                    if entry.anchors.contains(&candidate.id) {
+                        continue;
+                    }
+
+                    // Privacy check
+                    let can_anchor = if entry.visibility == "private" {
+                        // Private can anchor to same-owner private OR public
+                        candidate.visibility == "public"
+                            || (candidate.visibility == "private" && candidate.owner == entry.owner)
+                    } else {
+                        // Public can only anchor to public
+                        candidate.visibility == "public"
+                    };
+
+                    if !can_anchor {
+                        continue;
+                    }
+
+                    // Calculate cosine similarity
+                    let candidate_embedding = candidate.embedding.as_ref().unwrap();
+                    let similarity = cosine_similarity(entry_embedding, candidate_embedding);
+
+                    // Filter by threshold, skip near-duplicates
+                    if similarity >= threshold && similarity <= 0.95 {
+                        similarities.push((candidate.id.clone(), candidate.title.clone(), similarity));
+                    }
+                }
+
+                // Sort by similarity (descending) and take top N
+                similarities.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                let top_matches: Vec<_> = similarities.into_iter().take(max_anchors).collect();
+
+                if top_matches.is_empty() {
+                    if verbose {
+                        println!("  {} \"{}\" - No similar entries found", entry.id, entry.title);
+                    }
+                    continue;
+                }
+
+                println!("Processing {} \"{}\"...", entry.id, entry.title);
+
+                for (match_id, match_title, score) in &top_matches {
+                    if verbose {
+                        println!("  → {} \"{}\" ({:.2})", match_id, match_title, score);
+                    } else {
+                        println!("  → {} \"{}\"", match_id, match_title);
+                    }
+                }
+
+                if dry_run {
+                    println!("[DRY RUN] Would add {} anchors to {}", top_matches.len(), entry.id);
+                } else {
+                    // Update the entry with new anchors
+                    let new_anchor_ids: Vec<String> = top_matches.iter().map(|(id, _, _)| id.clone()).collect();
+
+                    // Merge with existing anchors
+                    let mut updated_anchors = entry.anchors.clone();
+                    updated_anchors.extend(new_anchor_ids);
+                    updated_anchors.sort();
+                    updated_anchors.dedup();
+
+                    // Create updated entry
+                    let mut updated_entry = entry.clone();
+                    updated_entry.anchors = updated_anchors;
+                    updated_entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+                    // Save to database
+                    db.upsert_knowledge(&updated_entry)?;
+
+                    println!("Added {} anchors", top_matches.len());
+                    total_added += top_matches.len();
+                }
+            }
+
+            if dry_run {
+                println!("\n[DRY RUN] Complete. No changes written.");
+            } else {
+                println!("\n✓ Added {} total anchors across {} entries", total_added, entries_count);
             }
         }
 
