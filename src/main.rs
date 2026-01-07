@@ -2289,7 +2289,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", entry_id))?;
 
                 if entry.embedding.is_none() {
-                    anyhow::bail!("Entry {} has no embedding. Run `mx memory embed {}` first.", entry_id, entry_id);
+                    anyhow::bail!(
+                        "Entry {} has no embedding. Run `mx memory embed {}` first.",
+                        entry_id,
+                        entry_id
+                    );
                 }
 
                 vec![entry]
@@ -2356,17 +2360,25 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                     // Filter by threshold, skip near-duplicates
                     if similarity >= threshold && similarity <= 0.95 {
-                        similarities.push((candidate.id.clone(), candidate.title.clone(), similarity));
+                        similarities.push((
+                            candidate.id.clone(),
+                            candidate.title.clone(),
+                            similarity,
+                        ));
                     }
                 }
 
                 // Sort by similarity (descending) and take top N
-                similarities.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+                similarities
+                    .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
                 let top_matches: Vec<_> = similarities.into_iter().take(max_anchors).collect();
 
                 if top_matches.is_empty() {
                     if verbose {
-                        println!("  {} \"{}\" - No similar entries found", entry.id, entry.title);
+                        println!(
+                            "  {} \"{}\" - No similar entries found",
+                            entry.id, entry.title
+                        );
                     }
                     continue;
                 }
@@ -2382,10 +2394,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
 
                 if dry_run {
-                    println!("[DRY RUN] Would add {} anchors to {}", top_matches.len(), entry.id);
+                    println!(
+                        "[DRY RUN] Would add {} anchors to {}",
+                        top_matches.len(),
+                        entry.id
+                    );
                 } else {
                     // Update the entry with new anchors
-                    let new_anchor_ids: Vec<String> = top_matches.iter().map(|(id, _, _)| id.clone()).collect();
+                    let new_anchor_ids: Vec<String> =
+                        top_matches.iter().map(|(id, _, _)| id.clone()).collect();
 
                     // Merge with existing anchors
                     let mut updated_anchors = entry.anchors.clone();
@@ -2409,7 +2426,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if dry_run {
                 println!("\n[DRY RUN] Complete. No changes written.");
             } else {
-                println!("\n✓ Added {} total anchors across {} entries", total_added, entries_count);
+                println!(
+                    "\n✓ Added {} total anchors across {} entries",
+                    total_added, entries_count
+                );
             }
         }
 
