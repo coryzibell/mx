@@ -477,7 +477,7 @@ fn print_human_readable(content: &str) -> Result<()> {
         let msg_type = msg["type"].as_str().unwrap_or("unknown");
 
         match msg_type {
-            "human" => {
+            "user" => {
                 if let Some(content) = msg["message"]["content"].as_str() {
                     println!("--- User ---");
                     println!("{}\n", content);

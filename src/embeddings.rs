@@ -69,8 +69,10 @@ impl EmbeddingProvider for FastEmbedProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_embed_single() -> Result<()> {
         let mut provider = FastEmbedProvider::new()?;
         let embedding = provider.embed("Hello, world!")?;
@@ -79,6 +81,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_embed_batch() -> Result<()> {
         let mut provider = FastEmbedProvider::new()?;
         let texts = vec!["First text".to_string(), "Second text".to_string()];
@@ -90,6 +93,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_dimensions() -> Result<()> {
         let provider = FastEmbedProvider::new()?;
         assert_eq!(provider.dimensions(), 768);

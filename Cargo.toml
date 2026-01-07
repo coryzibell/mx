@@ -73,6 +73,9 @@ version = "1"
 default-features = false
 features = ["user-hooks"]
 
+[dev-dependencies]
+serial_test = "3"
+
 [features]
 surrealdb = []
 
