@@ -82,3 +82,4 @@ surrealdb = []
 [[bin]]
 name = "mx"
 path = "src/main.rs"
+

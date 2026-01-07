@@ -14,5 +14,7 @@ permissions:
 jobs:
   ci:
     uses: coryzibell/nebuchadnezzar/.github/workflows/wake-up.yml@main
+    with:
+      needs-openssl: true
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
