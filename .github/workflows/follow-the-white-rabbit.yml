@@ -13,5 +13,7 @@ jobs:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@main
     with:
       needs-openssl: true
+      # ONNX Runtime doesn't provide prebuilt binaries for musl targets
+      exclude-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
