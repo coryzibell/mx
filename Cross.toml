@@ -1,0 +1,24 @@
+# Cross-compilation configuration for targets that need OpenSSL
+# ort-sys v2.0.0-rc.10 build-dependency uses ureq with native-tls (openssl)
+# openssl-sys is a BUILD dependency, so it needs HOST OpenSSL, not TARGET
+# The cross container (x86_64) needs libssl-dev for the host architecture
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes libssl-dev pkg-config"
+]
+
+[target.x86_64-unknown-linux-musl]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes libssl-dev pkg-config"
+]
+
+[target.aarch64-unknown-linux-musl]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes libssl-dev pkg-config"
+]
+
+[target.x86_64-unknown-freebsd]
+pre-build = [
+    "apt-get update && apt-get install --assume-yes libssl-dev pkg-config"
+]

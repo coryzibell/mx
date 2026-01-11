@@ -11,5 +11,7 @@ permissions:
 jobs:
   release:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@main
+    with:
+      needs-openssl: true
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
