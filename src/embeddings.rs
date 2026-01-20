@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::path::PathBuf;
 
 /// Trait for embedding providers
 pub trait EmbeddingProvider: Send + Sync {
@@ -25,8 +26,15 @@ pub struct FastEmbedProvider {
 
 impl FastEmbedProvider {
     pub fn new() -> Result<Self> {
+        // Use ~/.cache/fastembed instead of polluting working directories
+        let cache_dir = dirs::cache_dir()
+            .map(|d| d.join("fastembed"))
+            .unwrap_or_else(|| PathBuf::from(".fastembed_cache"));
+
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGEBaseENV15).with_show_download_progress(true),
+            InitOptions::new(EmbeddingModel::BGEBaseENV15)
+                .with_cache_dir(cache_dir)
+                .with_show_download_progress(true),
         )
         .context("Failed to initialize FastEmbed model")?;
 
