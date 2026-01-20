@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -257,7 +257,10 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
         let session_file = archive_dir.join("session.jsonl");
 
         if !session_file.exists() {
-            eprintln!("Warning: session.jsonl not found in {}, skipping", archive.dir_name);
+            eprintln!(
+                "Warning: session.jsonl not found in {}, skipping",
+                archive.dir_name
+            );
             continue;
         }
 
@@ -268,8 +271,7 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
         if !dry_run {
             // Create backup of original session.jsonl
             let backup_file = archive_dir.join("session.jsonl.bak");
-            fs::copy(&session_file, &backup_file)
-                .context("Failed to create backup")?;
+            fs::copy(&session_file, &backup_file).context("Failed to create backup")?;
 
             // Create images directory
             let images_dir = archive_dir.join("images");
@@ -292,7 +294,10 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
 
                     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                         if verbose {
-                            println!("  Processing agent file: {}", path.file_name().unwrap().to_string_lossy());
+                            println!(
+                                "  Processing agent file: {}",
+                                path.file_name().unwrap().to_string_lossy()
+                            );
                         }
 
                         // Backup agent file
@@ -366,8 +371,7 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
             if verbose || total_archive_images > 0 {
                 println!(
                     "  Would migrate {}: {} images found",
-                    archive.short_id,
-                    total_archive_images
+                    archive.short_id, total_archive_images
                 );
             }
         }
@@ -398,8 +402,7 @@ fn count_images_in_jsonl(content: &str) -> Result<usize> {
             continue;
         }
 
-        let msg: Value = serde_json::from_str(line)
-            .context("Failed to parse JSONL line")?;
+        let msg: Value = serde_json::from_str(line).context("Failed to parse JSONL line")?;
 
         count += count_images_in_value(&msg);
     }
@@ -424,9 +427,7 @@ fn count_images_in_value(value: &Value) -> usize {
                 map.values().map(count_images_in_value).sum()
             }
         }
-        Value::Array(arr) => {
-            arr.iter().map(count_images_in_value).sum()
-        }
+        Value::Array(arr) => arr.iter().map(count_images_in_value).sum(),
         _ => 0,
     }
 }
@@ -434,10 +435,7 @@ fn count_images_in_value(value: &Value) -> usize {
 // --- Image extraction helpers ---
 
 /// Extract and save images from a JSONL file, returning the modified content and image metadata
-fn extract_images_from_jsonl(
-    content: &str,
-    images_dir: &Path,
-) -> Result<(String, Vec<ImageInfo>)> {
+fn extract_images_from_jsonl(content: &str, images_dir: &Path) -> Result<(String, Vec<ImageInfo>)> {
     let mut images = Vec::new();
     let mut modified_lines = Vec::new();
 
@@ -447,8 +445,7 @@ fn extract_images_from_jsonl(
             continue;
         }
 
-        let mut msg: Value = serde_json::from_str(line)
-            .context("Failed to parse JSONL line")?;
+        let mut msg: Value = serde_json::from_str(line).context("Failed to parse JSONL line")?;
 
         // Process the message content
         extract_images_from_value(&mut msg, images_dir, &mut images)?;
@@ -477,7 +474,8 @@ fn extract_images_from_value(
                 && let Some(Value::String(data)) = source.get("data")
             {
                 // Extract all needed data before we mutate
-                let tool_use_id = map.get("tool_use_id")
+                let tool_use_id = map
+                    .get("tool_use_id")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
 
@@ -525,7 +523,8 @@ fn extract_images_from_value(
 
 /// Hash image data and return (hash, size_bytes)
 fn hash_image_data(base64_data: &str) -> Result<(String, u64)> {
-    let image_bytes = BASE64.decode(base64_data)
+    let image_bytes = BASE64
+        .decode(base64_data)
         .context("Failed to decode base64 image")?;
 
     let mut hasher = Sha256::new();
@@ -542,7 +541,8 @@ fn save_image(
     media_type: &str,
     images_dir: &Path,
 ) -> Result<String> {
-    let image_bytes = BASE64.decode(base64_data)
+    let image_bytes = BASE64
+        .decode(base64_data)
         .context("Failed to decode base64 image")?;
 
     // Determine file extension from media type
