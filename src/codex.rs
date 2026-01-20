@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,11 @@ pub struct Manifest {
     pub agents: Vec<AgentInfo>,
     pub size_bytes: u64,
     pub checksum: String,
+    // v2 fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageInfo>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +34,15 @@ pub struct AgentInfo {
     pub id: String,
     pub file: String,
     pub messages: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageInfo {
+    pub hash: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_tool_use_id: Option<String>,
 }
 
 /// Archive the current session to the codex
@@ -197,6 +213,139 @@ pub fn search_archives(pattern: String) -> Result<()> {
     Ok(())
 }
 
+// --- Image extraction helpers ---
+
+/// Extract and save images from a JSONL file, returning the modified content and image metadata
+fn extract_images_from_jsonl(
+    content: &str,
+    images_dir: &Path,
+) -> Result<(String, Vec<ImageInfo>)> {
+    let mut images = Vec::new();
+    let mut modified_lines = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            modified_lines.push(line.to_string());
+            continue;
+        }
+
+        let mut msg: Value = serde_json::from_str(line)
+            .context("Failed to parse JSONL line")?;
+
+        // Process the message content
+        extract_images_from_value(&mut msg, images_dir, &mut images)?;
+
+        modified_lines.push(serde_json::to_string(&msg)?);
+    }
+
+    Ok((modified_lines.join("\n") + "\n", images))
+}
+
+/// Recursively walk JSON value and extract images
+fn extract_images_from_value(
+    value: &mut Value,
+    images_dir: &Path,
+    images: &mut Vec<ImageInfo>,
+) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            // Check if this is an image block
+            if let Some(Value::String(type_val)) = map.get("type")
+                && type_val == "image"
+                && let Some(Value::Object(source)) = map.get("source")
+                && let Some(Value::String(source_type)) = source.get("type")
+                && source_type == "base64"
+                && let Some(Value::String(media_type)) = source.get("media_type")
+                && let Some(Value::String(data)) = source.get("data")
+            {
+                // Extract all needed data before we mutate
+                let tool_use_id = map.get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let media_type = media_type.clone();
+                let data = data.clone();
+
+                // Hash and save the image
+                let (hash, size_bytes) = hash_image_data(&data)?;
+                let file_ref = save_image(&data, &hash, &media_type, images_dir)?;
+
+                // Add to images list if not already present
+                if !images.iter().any(|img| img.hash == hash) {
+                    images.push(ImageInfo {
+                        hash: hash.clone(),
+                        media_type: media_type.clone(),
+                        size_bytes,
+                        original_tool_use_id: tool_use_id,
+                    });
+                }
+
+                // Now we can safely mutate the source
+                if let Some(Value::Object(source)) = map.get_mut("source") {
+                    source.clear();
+                    source.insert("type".to_string(), Value::String("file".to_string()));
+                    source.insert("file".to_string(), Value::String(file_ref));
+                }
+            } else {
+                // Recursively process all values in the object
+                for val in map.values_mut() {
+                    extract_images_from_value(val, images_dir, images)?;
+                }
+            }
+        }
+        Value::Array(arr) => {
+            // Recursively process all array elements
+            for item in arr.iter_mut() {
+                extract_images_from_value(item, images_dir, images)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Hash image data and return (hash, size_bytes)
+fn hash_image_data(base64_data: &str) -> Result<(String, u64)> {
+    let image_bytes = BASE64.decode(base64_data)
+        .context("Failed to decode base64 image")?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&image_bytes);
+    let hash = format!("{:x}", hasher.finalize());
+
+    Ok((hash, image_bytes.len() as u64))
+}
+
+/// Save image to disk and return the file reference path
+fn save_image(
+    base64_data: &str,
+    hash: &str,
+    media_type: &str,
+    images_dir: &Path,
+) -> Result<String> {
+    let image_bytes = BASE64.decode(base64_data)
+        .context("Failed to decode base64 image")?;
+
+    // Determine file extension from media type
+    let ext = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        _ => return Err(anyhow::anyhow!("Unsupported media type: {}", media_type)),
+    };
+
+    let filename = format!("{}.{}", hash, ext);
+    let file_path = images_dir.join(&filename);
+
+    // Only write if file doesn't exist (deduplication)
+    if !file_path.exists() {
+        fs::write(&file_path, image_bytes)
+            .with_context(|| format!("Failed to write image file: {}", filename))?;
+    }
+
+    Ok(format!("images/{}", filename))
+}
+
 // --- Internal helpers ---
 
 #[derive(Debug, Clone)]
@@ -273,11 +422,19 @@ fn archive_session(session_path: &Path) -> Result<()> {
 
     fs::create_dir_all(&archive_dir)?;
 
-    // Copy session file
-    let dest_session = archive_dir.join("session.jsonl");
-    fs::copy(session_path, &dest_session)?;
+    // Create images directory for extracted images
+    let images_dir = archive_dir.join("images");
+    fs::create_dir_all(&images_dir)?;
 
-    // Copy agent files if any
+    // Extract images from session file and save modified content
+    let session_content = fs::read_to_string(session_path)?;
+    let (modified_session_content, mut all_images) =
+        extract_images_from_jsonl(&session_content, &images_dir)?;
+
+    let dest_session = archive_dir.join("session.jsonl");
+    fs::write(&dest_session, modified_session_content)?;
+
+    // Copy agent files and extract images from them too
     if !agents.is_empty() {
         let agents_dir = archive_dir.join("agents");
         fs::create_dir_all(&agents_dir)?;
@@ -288,13 +445,27 @@ fn archive_session(session_path: &Path) -> Result<()> {
                 .file_name()
                 .context("Agent path has no filename")?;
             let dest_agent = agents_dir.join(agent_filename);
-            fs::copy(&source_path, &dest_agent)?;
+
+            // Extract images from agent file
+            let agent_content = fs::read_to_string(&source_path)?;
+            let (modified_agent_content, agent_images) =
+                extract_images_from_jsonl(&agent_content, &images_dir)?;
+
+            // Merge agent images with all_images (deduplication handled by hash check)
+            for img in agent_images {
+                if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                    all_images.push(img);
+                }
+            }
+
+            fs::write(&dest_agent, modified_agent_content)?;
         }
     }
 
-    // Create manifest
+    // Create manifest (v2 with image support)
+    let image_count = all_images.len();
     let manifest = Manifest {
-        version: 1,
+        version: 2,
         session_id: session_id.clone(),
         archived_at: Utc::now(),
         session_start,
@@ -305,6 +476,8 @@ fn archive_session(session_path: &Path) -> Result<()> {
         agents: agents.clone(),
         size_bytes,
         checksum,
+        image_count: Some(image_count),
+        images: Some(all_images),
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -313,6 +486,7 @@ fn archive_session(session_path: &Path) -> Result<()> {
     println!("Archived session to: {}", archive_dir.display());
     println!("  Messages: {}", message_count);
     println!("  Agents: {}", agents.len());
+    println!("  Images: {}", image_count);
     println!("  Size: {} KB", size_bytes / 1024);
 
     Ok(())
