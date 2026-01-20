@@ -883,6 +883,17 @@ enum CodexCommands {
         /// Pattern to search for
         pattern: String,
     },
+
+    /// Migrate v1 archives to v2 (extract images to files)
+    Migrate {
+        /// Show what would be migrated without doing it
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Show detailed progress
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3220,6 +3231,10 @@ fn handle_codex(cmd: CodexCommands) -> Result<()> {
         }
         CodexCommands::Search { pattern } => {
             codex::search_archives(pattern)?;
+            Ok(())
+        }
+        CodexCommands::Migrate { dry_run, verbose } => {
+            codex::migrate_archives(dry_run, verbose)?;
             Ok(())
         }
     }
