@@ -718,31 +718,41 @@ fn find_agent_sessions(
         .parent()
         .context("Session file has no parent directory")?;
 
+    let session_stem = session_path
+        .file_stem()
+        .context("Session file has no stem")?;
+
+    // Construct path to subagents directory: {project}/<session_id>/subagents/
+    let subagents_dir = parent_dir.join(session_stem).join("subagents");
+
     let mut agents = Vec::new();
 
-    for entry in fs::read_dir(parent_dir)? {
-        let entry = entry?;
-        let path = entry.path();
+    // Only search if subagents directory exists
+    if subagents_dir.exists() {
+        for entry in fs::read_dir(&subagents_dir)? {
+            let entry = entry?;
+            let path = entry.path();
 
-        // Check if it's an agent-*.jsonl file
-        if let Some(name) = path.file_name().and_then(|n| n.to_str())
-            && name.starts_with("agent-")
-            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-        {
-            // Check if modification time is within session window
-            if let Ok(meta) = entry.metadata()
-                && let Ok(_modified) = meta.modified()
+            // Check if it's an agent-*.jsonl file
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("agent-")
+                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
             {
-                // Simple heuristic: agent file modified around same time as session
-                // Could be improved with actual timestamp parsing from JSONL
-                let content = fs::read_to_string(&path)?;
-                let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
+                // Check if modification time is within session window
+                if let Ok(meta) = entry.metadata()
+                    && let Ok(_modified) = meta.modified()
+                {
+                    // Simple heuristic: agent file modified around same time as session
+                    // Could be improved with actual timestamp parsing from JSONL
+                    let content = fs::read_to_string(&path)?;
+                    let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
 
-                agents.push(AgentInfo {
-                    id: path.to_string_lossy().to_string(), // Store full path temporarily
-                    file: format!("agents/{}", name),
-                    messages,
-                });
+                    agents.push(AgentInfo {
+                        id: path.to_string_lossy().to_string(), // Store full path temporarily
+                        file: format!("agents/{}", name),
+                        messages,
+                    });
+                }
             }
         }
     }
