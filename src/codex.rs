@@ -575,6 +575,9 @@ struct ArchiveEntry {
 }
 
 fn get_codex_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("MX_CODEX_PATH") {
+        return Ok(PathBuf::from(path));
+    }
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join(".crewu-private/logs/codex"))
 }
