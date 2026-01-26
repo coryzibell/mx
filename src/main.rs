@@ -1542,12 +1542,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                         description,
                         ..
                     } => {
-                        println!(
-                            "  {} (enum: {}): {}",
-                            name,
-                            values.join("|"),
-                            description
-                        );
+                        println!("  {} (enum: {}): {}", name, values.join("|"), description);
                     }
                     state::Dimension::Nested {
                         description,

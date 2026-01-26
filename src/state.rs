@@ -106,7 +106,9 @@ pub struct TowardState {
 impl EmotionalState {
     /// Create from a discrete mode name using schema mappings
     pub fn from_mode(mode: &str, schema: &StateSchema) -> Result<Self> {
-        let mapping = schema.mode_mappings.get(mode)
+        let mapping = schema
+            .mode_mappings
+            .get(mode)
             .or_else(|| schema.mode_mappings.get("default"))
             .context("No mode mapping found and no default defined")?;
 
@@ -130,7 +132,11 @@ impl EmotionalState {
         let s = &schema.stele;
 
         // Get symbols
-        let sym_temp = s.symbols.get("temperature").map(|s| s.as_str()).unwrap_or("T");
+        let sym_temp = s
+            .symbols
+            .get("temperature")
+            .map(|s| s.as_str())
+            .unwrap_or("T");
         let sym_ent = s.symbols.get("entropy").map(|s| s.as_str()).unwrap_or("E");
         let sym_grav = s.symbols.get("gravity").map(|s| s.as_str()).unwrap_or("G");
         let sym_depth = s.symbols.get("depth").map(|s| s.as_str()).unwrap_or("D");
@@ -142,7 +148,9 @@ impl EmotionalState {
         let sym_mod = s.symbols.get("modality").map(|s| s.as_str()).unwrap_or("M");
 
         // Get modality symbol
-        let mod_sym = s.modality_values.get(&self.toward.modality)
+        let mod_sym = s
+            .modality_values
+            .get(&self.toward.modality)
             .map(|s| s.as_str())
             .unwrap_or(&self.toward.modality);
 
@@ -152,16 +160,42 @@ impl EmotionalState {
         // Format: @state|T0.7|E0.3|G0.6|D0.5|N0.8|>.A0.4|>.F0.6|>.I0.2|>.M{modality_symbol}
         format!(
             "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-            s.header, sep,                                          // 2
-            sym_temp, self.temperature, sep,                        // 5
-            sym_ent, self.entropy, sep,                             // 8
-            sym_grav, self.gravity, sep,                            // 11
-            sym_depth, self.depth, sep,                             // 14
-            sym_energy, self.energy, sep,                           // 17
-            sym_toward, nsep, sym_agency, self.toward.agency, sep,  // 22
-            sym_toward, nsep, sym_flow, self.toward.flow, sep,      // 27
-            sym_toward, nsep, sym_dist, self.toward.distance, sep,  // 32
-            sym_toward, nsep, sym_mod, mod_sym                      // 36
+            s.header,
+            sep, // 2
+            sym_temp,
+            self.temperature,
+            sep, // 5
+            sym_ent,
+            self.entropy,
+            sep, // 8
+            sym_grav,
+            self.gravity,
+            sep, // 11
+            sym_depth,
+            self.depth,
+            sep, // 14
+            sym_energy,
+            self.energy,
+            sep, // 17
+            sym_toward,
+            nsep,
+            sym_agency,
+            self.toward.agency,
+            sep, // 22
+            sym_toward,
+            nsep,
+            sym_flow,
+            self.toward.flow,
+            sep, // 27
+            sym_toward,
+            nsep,
+            sym_dist,
+            self.toward.distance,
+            sep, // 32
+            sym_toward,
+            nsep,
+            sym_mod,
+            mod_sym // 36
         )
     }
 
@@ -215,17 +249,24 @@ impl EmotionalState {
 
                         match *name {
                             "agency" => {
-                                if let Ok(v) = value_str.parse() { agency = v; }
+                                if let Ok(v) = value_str.parse() {
+                                    agency = v;
+                                }
                             }
                             "flow" => {
-                                if let Ok(v) = value_str.parse() { flow = v; }
+                                if let Ok(v) = value_str.parse() {
+                                    flow = v;
+                                }
                             }
                             "distance" => {
-                                if let Ok(v) = value_str.parse() { distance = v; }
+                                if let Ok(v) = value_str.parse() {
+                                    distance = v;
+                                }
                             }
                             "modality" => {
                                 // Check if it's a symbol or direct name
-                                modality = rev_modality.get(value_str)
+                                modality = rev_modality
+                                    .get(value_str)
                                     .map(|s| s.to_string())
                                     .unwrap_or_else(|| value_str.to_string());
                             }
@@ -325,14 +366,22 @@ impl EmotionalState {
         format!(
             "{} ({:.1}), {} ({:.1}), {} pull ({:.1}), {} depth ({:.1}), {} ({:.1}), \
              {} ({:.1}), {} ({:.1}), {} ({:.1}), {} modality",
-            temp_desc, self.temperature,
-            entropy_desc, self.entropy,
-            gravity_desc, self.gravity,
-            depth_desc, self.depth,
-            energy_desc, self.energy,
-            agency_desc, self.toward.agency,
-            flow_desc, self.toward.flow,
-            distance_desc, self.toward.distance,
+            temp_desc,
+            self.temperature,
+            entropy_desc,
+            self.entropy,
+            gravity_desc,
+            self.gravity,
+            depth_desc,
+            self.depth,
+            energy_desc,
+            self.energy,
+            agency_desc,
+            self.toward.agency,
+            flow_desc,
+            self.toward.flow,
+            distance_desc,
+            self.toward.distance,
             self.toward.modality
         )
     }
@@ -343,15 +392,14 @@ impl EmotionalState {
         let mut best_distance = f32::MAX;
 
         for (mode_name, mapping) in &schema.mode_mappings {
-            let distance =
-                (self.temperature - mapping.temperature).powi(2) +
-                (self.entropy - mapping.entropy).powi(2) +
-                (self.gravity - mapping.gravity).powi(2) +
-                (self.depth - mapping.depth).powi(2) +
-                (self.energy - mapping.energy).powi(2) +
-                (self.toward.agency - mapping.toward.agency).powi(2) +
-                (self.toward.flow - mapping.toward.flow).powi(2) +
-                (self.toward.distance - mapping.toward.distance).powi(2);
+            let distance = (self.temperature - mapping.temperature).powi(2)
+                + (self.entropy - mapping.entropy).powi(2)
+                + (self.gravity - mapping.gravity).powi(2)
+                + (self.depth - mapping.depth).powi(2)
+                + (self.energy - mapping.energy).powi(2)
+                + (self.toward.agency - mapping.toward.agency).powi(2)
+                + (self.toward.flow - mapping.toward.flow).powi(2)
+                + (self.toward.distance - mapping.toward.distance).powi(2);
 
             if distance < best_distance {
                 best_distance = distance;
@@ -368,8 +416,7 @@ pub fn load_schema(path: &Path) -> Result<StateSchema> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read schema file: {:?}", path))?;
 
-    serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse schema: {:?}", path))
+    serde_json::from_str(&content).with_context(|| format!("Failed to parse schema: {:?}", path))
 }
 
 /// Load the default emotional state schema
@@ -377,7 +424,9 @@ pub fn load_default_schema() -> Result<StateSchema> {
     // Try standard locations
     let locations = [
         dirs::home_dir().map(|h| h.join(".crewu/schemas/emotional-state.json")),
-        Some(std::path::PathBuf::from("/etc/mx/schemas/emotional-state.json")),
+        Some(std::path::PathBuf::from(
+            "/etc/mx/schemas/emotional-state.json",
+        )),
     ];
 
     for loc in locations.into_iter().flatten() {
@@ -386,7 +435,9 @@ pub fn load_default_schema() -> Result<StateSchema> {
         }
     }
 
-    bail!("Could not find emotional-state.json schema. Checked ~/.crewu/schemas/ and /etc/mx/schemas/")
+    bail!(
+        "Could not find emotional-state.json schema. Checked ~/.crewu/schemas/ and /etc/mx/schemas/"
+    )
 }
 
 /// Parse a wake preference line and convert to EmotionalState
@@ -417,7 +468,8 @@ pub fn interactive_capture(schema: &StateSchema) -> Result<EmotionalState> {
     use std::io::{self, Write};
 
     fn prompt_float(prompt: &str, hints: &HashMap<String, f32>) -> Result<f32> {
-        let hint_str: Vec<String> = hints.iter()
+        let hint_str: Vec<String> = hints
+            .iter()
             .map(|(k, v)| format!("{}={:.1}", k, v))
             .collect();
 
@@ -456,7 +508,8 @@ pub fn interactive_capture(schema: &StateSchema) -> Result<EmotionalState> {
     let dims = &schema.dimensions;
 
     // Temperature
-    let temperature = if let Some(Dimension::Float { prompt, hints, .. }) = dims.get("temperature") {
+    let temperature = if let Some(Dimension::Float { prompt, hints, .. }) = dims.get("temperature")
+    {
         prompt_float(prompt, hints)?
     } else {
         0.5
@@ -491,8 +544,11 @@ pub fn interactive_capture(schema: &StateSchema) -> Result<EmotionalState> {
     };
 
     // Toward sub-tensor
-    let (agency, flow, distance, modality) = if let Some(Dimension::Nested { dimensions, .. }) = dims.get("toward") {
-        let agency = if let Some(Dimension::Float { prompt, hints, .. }) = dimensions.get("agency") {
+    let (agency, flow, distance, modality) = if let Some(Dimension::Nested { dimensions, .. }) =
+        dims.get("toward")
+    {
+        let agency = if let Some(Dimension::Float { prompt, hints, .. }) = dimensions.get("agency")
+        {
             prompt_float(prompt, hints)?
         } else {
             0.5
@@ -504,17 +560,19 @@ pub fn interactive_capture(schema: &StateSchema) -> Result<EmotionalState> {
             0.5
         };
 
-        let distance = if let Some(Dimension::Float { prompt, hints, .. }) = dimensions.get("distance") {
-            prompt_float(prompt, hints)?
-        } else {
-            0.5
-        };
+        let distance =
+            if let Some(Dimension::Float { prompt, hints, .. }) = dimensions.get("distance") {
+                prompt_float(prompt, hints)?
+            } else {
+                0.5
+            };
 
-        let modality = if let Some(Dimension::Enum { prompt, values, .. }) = dimensions.get("modality") {
-            prompt_enum(prompt, values)?
-        } else {
-            String::from("blended")
-        };
+        let modality =
+            if let Some(Dimension::Enum { prompt, values, .. }) = dimensions.get("modality") {
+                prompt_enum(prompt, values)?
+            } else {
+                String::from("blended")
+            };
 
         (agency, flow, distance, modality)
     } else {
