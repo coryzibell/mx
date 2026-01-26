@@ -244,9 +244,7 @@ impl EmotionalState {
 
                 // Find which nested dimension this is
                 for (sym, name) in &sym_to_name {
-                    if after_prefix.starts_with(sym) {
-                        let value_str = &after_prefix[sym.len()..];
-
+                    if let Some(value_str) = after_prefix.strip_prefix(sym) {
                         match *name {
                             "agency" => {
                                 if let Ok(v) = value_str.parse() {
@@ -278,8 +276,7 @@ impl EmotionalState {
             } else {
                 // Simple dimension (format: ᚠ0.6)
                 for (sym, name) in &sym_to_name {
-                    if part.starts_with(sym) {
-                        let value_str = &part[sym.len()..];
+                    if let Some(value_str) = part.strip_prefix(sym) {
                         if let Ok(v) = value_str.parse() {
                             match *name {
                                 "temperature" => temperature = v,

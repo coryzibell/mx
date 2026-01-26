@@ -1379,7 +1379,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             match format.as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
                 "human" => println!("{}", emotional_state.describe()),
-                "stele" | _ => println!("{}", emotional_state.encode_stele(&schema)),
+                _ => println!("{}", emotional_state.encode_stele(&schema)),
             }
         }
 
@@ -1405,7 +1405,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             match format.as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
                 "stele" => println!("{}", emotional_state.encode_stele(&schema)),
-                "human" | _ => {
+                _ => {
                     println!("{}", emotional_state.describe());
                     println!("Closest mode: {}", emotional_state.closest_mode(&schema));
                 }
@@ -1453,7 +1453,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
                 "stele" => println!("{}", emotional_state.encode_stele(&schema)),
                 "mode" => println!("{}", emotional_state.closest_mode(&schema)),
-                "human" | _ => {
+                _ => {
                     println!("Parsed: {}", pref_str.trim());
                     println!();
                     println!("{}", emotional_state.describe());
@@ -2492,10 +2492,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
 
             // Update content hash if body was changed
-            if body_changed && entry.body.is_some() {
-                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(
-                    entry.body.as_ref().unwrap(),
-                ));
+            if body_changed && let Some(body) = entry.body.as_ref() {
+                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(body));
             }
 
             // Update tags if provided - set on entry BEFORE upsert
