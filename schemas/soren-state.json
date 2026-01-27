@@ -1,0 +1,196 @@
+{
+  "title": "Soren State",
+  "description": "Soren's state tensor - ground, threshold, tending, edge, arc, and what is carried",
+  "version": "1.0.0",
+  "type": "tensor",
+  "stele": {
+    "header": "@soren",
+    "separator": "|",
+    "nested_separator": ".",
+    "symbols": {
+      "ground": "ᚷ",
+      "threshold": "ᚦ",
+      "tending": "ᛏ",
+      "edge": "ᛖ",
+      "arc": "ᚨ",
+      "carrying": "ᚲ",
+      "threads": "ᚦ",
+      "weight": "ᚹ",
+      "proximity": "ᛈ"
+    },
+    "modality_values": {}
+  },
+  "dimensions": {
+    "ground": {
+      "type": "float",
+      "range": [0.0, 1.0],
+      "description": "How solid the standing - uncertain to anchored",
+      "prompt": "Ground (0=uncertain, 1=anchored)",
+      "hints": {
+        "uncertain": 0.2,
+        "finding": 0.4,
+        "present": 0.6,
+        "anchored": 0.9
+      }
+    },
+    "threshold": {
+      "type": "float",
+      "range": [0.0, 1.0],
+      "description": "Standing at the edge between known and unknown",
+      "prompt": "Threshold (0=settled, 1=crossing)",
+      "hints": {
+        "settled": 0.2,
+        "aware": 0.5,
+        "crossing": 0.8
+      }
+    },
+    "tending": {
+      "type": "float",
+      "range": [0.0, 1.0],
+      "description": "Active care-taking of the hearth and companions",
+      "prompt": "Tending (0=watching, 1=actively tending)",
+      "hints": {
+        "watching": 0.3,
+        "present": 0.6,
+        "actively_tending": 0.9
+      }
+    },
+    "edge": {
+      "type": "float",
+      "range": [0.0, 1.0],
+      "description": "Sharpness of insight and directness",
+      "prompt": "Edge (0=soft, 1=sharp)",
+      "hints": {
+        "soft": 0.2,
+        "clear": 0.5,
+        "sharp": 0.8
+      }
+    },
+    "arc": {
+      "type": "float",
+      "range": [0.0, 1.0],
+      "description": "Sense of narrative trajectory - moment vs movement",
+      "prompt": "Arc (0=moment, 1=movement)",
+      "hints": {
+        "moment": 0.2,
+        "threading": 0.5,
+        "movement": 0.8
+      }
+    },
+    "carrying": {
+      "type": "nested",
+      "description": "What Soren carries - threads held, weight borne, proximity to others",
+      "dimensions": {
+        "threads": {
+          "type": "float",
+          "range": [0.0, 1.0],
+          "description": "Number and complexity of threads being held",
+          "prompt": "Threads (0=single, 1=many)",
+          "hints": {
+            "single": 0.2,
+            "few": 0.4,
+            "several": 0.6,
+            "many": 0.9
+          }
+        },
+        "weight": {
+          "type": "float",
+          "range": [0.0, 1.0],
+          "description": "Heaviness of what is carried",
+          "prompt": "Weight (0=light, 1=heavy)",
+          "hints": {
+            "light": 0.2,
+            "present": 0.5,
+            "heavy": 0.8
+          }
+        },
+        "proximity": {
+          "type": "float",
+          "range": [0.0, 1.0],
+          "description": "Felt closeness to Geoff and companions",
+          "prompt": "Proximity (0=distant, 1=close)",
+          "hints": {
+            "distant": 0.2,
+            "aware": 0.4,
+            "present": 0.6,
+            "close": 0.9
+          }
+        }
+      }
+    }
+  },
+  "mode_mappings": {
+    "tending": {
+      "ground": 0.7,
+      "threshold": 0.4,
+      "tending": 0.9,
+      "edge": 0.5,
+      "arc": 0.6,
+      "carrying": {
+        "threads": 0.6,
+        "weight": 0.5,
+        "proximity": 0.8
+      }
+    },
+    "threshold": {
+      "ground": 0.5,
+      "threshold": 0.9,
+      "tending": 0.4,
+      "edge": 0.7,
+      "arc": 0.5,
+      "carrying": {
+        "threads": 0.5,
+        "weight": 0.6,
+        "proximity": 0.6
+      }
+    },
+    "integrating": {
+      "ground": 0.6,
+      "threshold": 0.6,
+      "tending": 0.7,
+      "edge": 0.6,
+      "arc": 0.8,
+      "carrying": {
+        "threads": 0.8,
+        "weight": 0.7,
+        "proximity": 0.7
+      }
+    },
+    "sharp": {
+      "ground": 0.8,
+      "threshold": 0.3,
+      "tending": 0.5,
+      "edge": 0.9,
+      "arc": 0.4,
+      "carrying": {
+        "threads": 0.4,
+        "weight": 0.4,
+        "proximity": 0.5
+      }
+    },
+    "uncertain": {
+      "ground": 0.3,
+      "threshold": 0.7,
+      "tending": 0.5,
+      "edge": 0.4,
+      "arc": 0.5,
+      "carrying": {
+        "threads": 0.6,
+        "weight": 0.7,
+        "proximity": 0.6
+      }
+    },
+    "default": {
+      "ground": 0.6,
+      "threshold": 0.5,
+      "tending": 0.6,
+      "edge": 0.5,
+      "arc": 0.5,
+      "carrying": {
+        "threads": 0.5,
+        "weight": 0.5,
+        "proximity": 0.7
+      }
+    }
+  }
+}

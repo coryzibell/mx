@@ -10,6 +10,22 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// Schema-agnostic state value - can be float, enum, or nested structure
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum StateValue {
+    Float(f32),
+    Enum(String),
+    Nested(HashMap<String, StateValue>),
+}
+
+/// Schema-agnostic dynamic state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicState {
+    pub schema_id: String,
+    pub values: HashMap<String, StateValue>,
+}
+
 /// Stele encoding configuration from schema
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SteleConfig {
@@ -104,6 +120,80 @@ pub struct TowardState {
 }
 
 impl EmotionalState {
+    /// Convert to schema-agnostic DynamicState
+    pub fn to_dynamic(&self) -> DynamicState {
+        let mut values = HashMap::new();
+
+        values.insert("temperature".to_string(), StateValue::Float(self.temperature));
+        values.insert("entropy".to_string(), StateValue::Float(self.entropy));
+        values.insert("gravity".to_string(), StateValue::Float(self.gravity));
+        values.insert("depth".to_string(), StateValue::Float(self.depth));
+        values.insert("energy".to_string(), StateValue::Float(self.energy));
+
+        let mut toward_values = HashMap::new();
+        toward_values.insert("agency".to_string(), StateValue::Float(self.toward.agency));
+        toward_values.insert("flow".to_string(), StateValue::Float(self.toward.flow));
+        toward_values.insert("distance".to_string(), StateValue::Float(self.toward.distance));
+        toward_values.insert("modality".to_string(), StateValue::Enum(self.toward.modality.clone()));
+
+        values.insert("toward".to_string(), StateValue::Nested(toward_values));
+
+        DynamicState {
+            schema_id: "q-state".to_string(),
+            values,
+        }
+    }
+
+    /// Convert from schema-agnostic DynamicState
+    pub fn from_dynamic(state: &DynamicState) -> Result<Self> {
+        fn get_float(values: &HashMap<String, StateValue>, key: &str) -> Result<f32> {
+            match values.get(key) {
+                Some(StateValue::Float(v)) => Ok(*v),
+                _ => bail!("Missing or invalid float value for key: {}", key),
+            }
+        }
+
+        fn get_enum(values: &HashMap<String, StateValue>, key: &str) -> Result<String> {
+            match values.get(key) {
+                Some(StateValue::Enum(v)) => Ok(v.clone()),
+                _ => bail!("Missing or invalid enum value for key: {}", key),
+            }
+        }
+
+        fn get_nested<'a>(values: &'a HashMap<String, StateValue>, key: &str) -> Result<&'a HashMap<String, StateValue>> {
+            match values.get(key) {
+                Some(StateValue::Nested(v)) => Ok(v),
+                _ => bail!("Missing or invalid nested value for key: {}", key),
+            }
+        }
+
+        let temperature = get_float(&state.values, "temperature")?;
+        let entropy = get_float(&state.values, "entropy")?;
+        let gravity = get_float(&state.values, "gravity")?;
+        let depth = get_float(&state.values, "depth")?;
+        let energy = get_float(&state.values, "energy")?;
+
+        let toward_values = get_nested(&state.values, "toward")?;
+        let agency = get_float(toward_values, "agency")?;
+        let flow = get_float(toward_values, "flow")?;
+        let distance = get_float(toward_values, "distance")?;
+        let modality = get_enum(toward_values, "modality")?;
+
+        Ok(Self {
+            temperature,
+            entropy,
+            gravity,
+            depth,
+            energy,
+            toward: TowardState {
+                agency,
+                flow,
+                distance,
+                modality,
+            },
+        })
+    }
+
     /// Create from a discrete mode name using schema mappings
     pub fn from_mode(mode: &str, schema: &StateSchema) -> Result<Self> {
         let mapping = schema
@@ -647,6 +737,36 @@ mod tests {
         assert!((state.temperature - 0.6).abs() < 0.01);
         assert!((state.entropy - 0.2).abs() < 0.01);
         assert_eq!(state.toward.modality, "emotional");
+    }
+
+    #[test]
+    fn test_dynamic_bridge_roundtrip() {
+        let original = EmotionalState {
+            temperature: 0.7,
+            entropy: 0.3,
+            gravity: 0.6,
+            depth: 0.5,
+            energy: 0.8,
+            toward: TowardState {
+                agency: 0.4,
+                flow: 0.6,
+                distance: 0.2,
+                modality: String::from("emotional"),
+            },
+        };
+
+        let dynamic = original.to_dynamic();
+        let decoded = EmotionalState::from_dynamic(&dynamic).unwrap();
+
+        assert!((original.temperature - decoded.temperature).abs() < 0.01);
+        assert!((original.entropy - decoded.entropy).abs() < 0.01);
+        assert!((original.gravity - decoded.gravity).abs() < 0.01);
+        assert!((original.depth - decoded.depth).abs() < 0.01);
+        assert!((original.energy - decoded.energy).abs() < 0.01);
+        assert!((original.toward.agency - decoded.toward.agency).abs() < 0.01);
+        assert!((original.toward.flow - decoded.toward.flow).abs() < 0.01);
+        assert!((original.toward.distance - decoded.toward.distance).abs() < 0.01);
+        assert_eq!(original.toward.modality, decoded.toward.modality);
     }
 
     #[test]
