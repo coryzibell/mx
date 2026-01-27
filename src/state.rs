@@ -539,12 +539,12 @@ pub fn load_default_schema() -> Result<StateSchema> {
     }
 
     // 2. Check MX_CURRENT_AGENT environment variable
-    if let Ok(agent) = std::env::var("MX_CURRENT_AGENT") {
-        if let Some(home) = dirs::home_dir() {
-            let agent_schema = home.join(format!(".{}/schemas/state.json", agent));
-            if agent_schema.exists() {
-                return load_schema(&agent_schema);
-            }
+    if let Ok(agent) = std::env::var("MX_CURRENT_AGENT")
+        && let Some(home) = dirs::home_dir()
+    {
+        let agent_schema = home.join(format!(".{}/schemas/state.json", agent));
+        if agent_schema.exists() {
+            return load_schema(&agent_schema);
         }
     }
 
