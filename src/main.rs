@@ -11,6 +11,7 @@ mod github;
 mod index;
 mod knowledge;
 mod session;
+mod state;
 mod store;
 mod surreal_db;
 mod sync;
@@ -155,6 +156,12 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+
+    /// Emotional state tensor operations
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -189,6 +196,85 @@ enum ConvertCommands {
         /// Dry run - show what would be created
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum StateCommands {
+    /// Encode emotional state to stele format
+    Encode {
+        /// Discrete mode name (soft, play, build, etc.) - maps to tensor values
+        #[arg(short, long)]
+        mode: Option<String>,
+
+        /// Individual dimension values (e.g., temp=0.7 entropy=0.3)
+        #[arg(short, long, value_delimiter = ' ')]
+        dimensions: Option<Vec<String>>,
+
+        /// Interactive mode - prompts for each dimension
+        #[arg(short, long)]
+        interactive: bool,
+
+        /// Output format: stele (default), json, human
+        #[arg(short, long, default_value = "stele")]
+        format: String,
+
+        /// Custom schema file path
+        #[arg(long)]
+        schema: Option<String>,
+    },
+
+    /// Decode stele-encoded state to human-readable format
+    Decode {
+        /// Stele-encoded state string (or reads from stdin if not provided)
+        input: Option<String>,
+
+        /// Output format: human (default), json, stele
+        #[arg(short, long, default_value = "human")]
+        format: String,
+
+        /// Custom schema file path
+        #[arg(long)]
+        schema: Option<String>,
+    },
+
+    /// Parse wake preference (old format or stele) from session-bootstrap
+    Parse {
+        /// Path to session-bootstrap.md file
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Raw preference string to parse
+        preference: Option<String>,
+
+        /// Output format: human (default), json, stele, mode
+        #[arg(short = 'F', long, default_value = "human")]
+        format: String,
+
+        /// Custom schema file path
+        #[arg(long)]
+        schema: Option<String>,
+    },
+
+    /// Show available modes and their tensor mappings
+    Modes {
+        /// Show specific mode details
+        mode: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Custom schema file path
+        #[arg(long)]
+        schema: Option<String>,
+    },
+
+    /// Show schema information
+    Schema {
+        /// Custom schema file path
+        #[arg(long)]
+        schema: Option<String>,
     },
 }
 
@@ -1159,6 +1245,7 @@ fn main() -> Result<()> {
         Commands::Doctor => doctor::run_checks(),
         Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
+        Commands::State { command } => handle_state(command),
     }
 }
 
@@ -1206,6 +1293,295 @@ fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
 
             println!("{} {} bpm", heart, bpm);
             println!("{}", message);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle emotional state tensor commands
+fn handle_state(cmd: StateCommands) -> Result<()> {
+    use std::io::{self, Read as IoRead};
+    use std::path::PathBuf;
+
+    // Helper to load schema
+    let load_schema = |custom_path: Option<String>| -> Result<state::StateSchema> {
+        match custom_path {
+            Some(p) => state::load_schema(&PathBuf::from(p)),
+            None => state::load_default_schema(),
+        }
+    };
+
+    match cmd {
+        StateCommands::Encode {
+            mode,
+            dimensions,
+            interactive,
+            format,
+            schema,
+        } => {
+            let schema = load_schema(schema)?;
+
+            let emotional_state = if interactive {
+                // Interactive mode - prompt for each dimension
+                state::interactive_capture(&schema)?
+            } else if let Some(mode_name) = mode {
+                // Mode-based - map discrete mode to tensor
+                state::EmotionalState::from_mode(&mode_name, &schema)?
+            } else if let Some(dims) = dimensions {
+                // Manual dimensions - parse key=value pairs
+                let mut temp = 0.5f32;
+                let mut entropy = 0.5f32;
+                let mut gravity = 0.5f32;
+                let mut depth = 0.5f32;
+                let mut energy = 0.5f32;
+                let mut agency = 0.5f32;
+                let mut flow = 0.5f32;
+                let mut distance = 0.5f32;
+                let mut modality = String::from("blended");
+
+                for dim in dims {
+                    if let Some((key, val)) = dim.split_once('=') {
+                        match key.to_lowercase().as_str() {
+                            "temp" | "temperature" => temp = val.parse()?,
+                            "entropy" | "ent" => entropy = val.parse()?,
+                            "gravity" | "grav" => gravity = val.parse()?,
+                            "depth" => depth = val.parse()?,
+                            "energy" | "nrg" => energy = val.parse()?,
+                            "agency" => agency = val.parse()?,
+                            "flow" => flow = val.parse()?,
+                            "distance" | "dist" => distance = val.parse()?,
+                            "modality" | "mod" => modality = val.to_string(),
+                            _ => eprintln!("Unknown dimension: {}", key),
+                        }
+                    }
+                }
+
+                state::EmotionalState {
+                    temperature: temp,
+                    entropy,
+                    gravity,
+                    depth,
+                    energy,
+                    toward: state::TowardState {
+                        agency,
+                        flow,
+                        distance,
+                        modality,
+                    },
+                }
+            } else {
+                // Default to... default mode
+                state::EmotionalState::from_mode("default", &schema)?
+            };
+
+            // Output in requested format
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
+                "human" => println!("{}", emotional_state.describe()),
+                _ => println!("{}", emotional_state.encode_stele(&schema)),
+            }
+        }
+
+        StateCommands::Decode {
+            input,
+            format,
+            schema,
+        } => {
+            let schema = load_schema(schema)?;
+
+            // Get input from arg or stdin
+            let stele = match input {
+                Some(s) => s,
+                None => {
+                    let mut buf = String::new();
+                    io::stdin().read_to_string(&mut buf)?;
+                    buf.trim().to_string()
+                }
+            };
+
+            let emotional_state = state::EmotionalState::decode_stele(&stele, &schema)?;
+
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
+                "stele" => println!("{}", emotional_state.encode_stele(&schema)),
+                _ => {
+                    println!("{}", emotional_state.describe());
+                    println!("Closest mode: {}", emotional_state.closest_mode(&schema));
+                }
+            }
+        }
+
+        StateCommands::Parse {
+            file,
+            preference,
+            format,
+            schema,
+        } => {
+            let schema = load_schema(schema)?;
+
+            // Get preference string from file or arg
+            let pref_str = if let Some(pref) = preference {
+                pref
+            } else {
+                // Read from file (default to session-bootstrap.md)
+                let path = file.unwrap_or_else(|| {
+                    dirs::home_dir()
+                        .map(|h| h.join(".crewu/swap/session-bootstrap.md"))
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default()
+                });
+
+                let content = std::fs::read_to_string(&path)
+                    .with_context(|| format!("Failed to read file: {}", path))?;
+
+                // Find Wake Preference or Wake State line
+                content
+                    .lines()
+                    .find(|line| {
+                        line.starts_with("Wake Preference:")
+                            || line.starts_with("Wake State:")
+                            || line.starts_with("@state")
+                    })
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| String::from("default"))
+            };
+
+            let emotional_state = state::parse_wake_preference(&pref_str, &schema)?;
+
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
+                "stele" => println!("{}", emotional_state.encode_stele(&schema)),
+                "mode" => println!("{}", emotional_state.closest_mode(&schema)),
+                _ => {
+                    println!("Parsed: {}", pref_str.trim());
+                    println!();
+                    println!("{}", emotional_state.describe());
+                    println!("Closest mode: {}", emotional_state.closest_mode(&schema));
+                }
+            }
+        }
+
+        StateCommands::Modes { mode, json, schema } => {
+            let schema = load_schema(schema)?;
+
+            if let Some(mode_name) = mode {
+                // Show specific mode
+                match schema.mode_mappings.get(&mode_name) {
+                    Some(mapping) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&mapping)?);
+                        } else {
+                            println!("Mode: {}", mode_name);
+                            println!();
+                            println!("  temperature: {:.1}", mapping.temperature);
+                            println!("  entropy:     {:.1}", mapping.entropy);
+                            println!("  gravity:     {:.1}", mapping.gravity);
+                            println!("  depth:       {:.1}", mapping.depth);
+                            println!("  energy:      {:.1}", mapping.energy);
+                            println!();
+                            println!("  toward:");
+                            println!("    agency:    {:.1}", mapping.toward.agency);
+                            println!("    flow:      {:.1}", mapping.toward.flow);
+                            println!("    distance:  {:.1}", mapping.toward.distance);
+                            println!("    modality:  {}", mapping.toward.modality);
+                        }
+                    }
+                    None => {
+                        eprintln!("Unknown mode: {}", mode_name);
+                        eprintln!(
+                            "Available modes: {}",
+                            schema
+                                .mode_mappings
+                                .keys()
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // List all modes
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&schema.mode_mappings)?);
+                } else {
+                    println!("Available modes:\n");
+                    for (name, mapping) in &schema.mode_mappings {
+                        let state = state::EmotionalState {
+                            temperature: mapping.temperature,
+                            entropy: mapping.entropy,
+                            gravity: mapping.gravity,
+                            depth: mapping.depth,
+                            energy: mapping.energy,
+                            toward: state::TowardState {
+                                agency: mapping.toward.agency,
+                                flow: mapping.toward.flow,
+                                distance: mapping.toward.distance,
+                                modality: mapping.toward.modality.clone(),
+                            },
+                        };
+                        println!("  {:10} - {}", name, state.describe());
+                    }
+                }
+            }
+        }
+
+        StateCommands::Schema { schema } => {
+            let schema = load_schema(schema)?;
+            println!("Schema: {} v{}", schema.title, schema.version);
+            println!();
+            println!("Dimensions:");
+            for (name, dim) in &schema.dimensions {
+                match dim {
+                    state::Dimension::Float { description, .. } => {
+                        println!("  {} (float): {}", name, description);
+                    }
+                    state::Dimension::Enum {
+                        values,
+                        description,
+                        ..
+                    } => {
+                        println!("  {} (enum: {}): {}", name, values.join("|"), description);
+                    }
+                    state::Dimension::Nested {
+                        description,
+                        dimensions: nested,
+                    } => {
+                        println!("  {} (nested): {}", name, description);
+                        for (nested_name, nested_dim) in nested {
+                            match nested_dim {
+                                state::Dimension::Float { description, .. } => {
+                                    println!("    {} (float): {}", nested_name, description);
+                                }
+                                state::Dimension::Enum {
+                                    values,
+                                    description,
+                                    ..
+                                } => {
+                                    println!(
+                                        "    {} (enum: {}): {}",
+                                        nested_name,
+                                        values.join("|"),
+                                        description
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            println!();
+            println!(
+                "Modes: {}",
+                schema
+                    .mode_mappings
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 
@@ -2116,10 +2492,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
 
             // Update content hash if body was changed
-            if body_changed && entry.body.is_some() {
-                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(
-                    entry.body.as_ref().unwrap(),
-                ));
+            if body_changed && let Some(body) = entry.body.as_ref() {
+                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(body));
             }
 
             // Update tags if provided - set on entry BEFORE upsert
