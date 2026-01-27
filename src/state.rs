@@ -124,7 +124,10 @@ impl EmotionalState {
     pub fn to_dynamic(&self) -> DynamicState {
         let mut values = HashMap::new();
 
-        values.insert("temperature".to_string(), StateValue::Float(self.temperature));
+        values.insert(
+            "temperature".to_string(),
+            StateValue::Float(self.temperature),
+        );
         values.insert("entropy".to_string(), StateValue::Float(self.entropy));
         values.insert("gravity".to_string(), StateValue::Float(self.gravity));
         values.insert("depth".to_string(), StateValue::Float(self.depth));
@@ -133,8 +136,14 @@ impl EmotionalState {
         let mut toward_values = HashMap::new();
         toward_values.insert("agency".to_string(), StateValue::Float(self.toward.agency));
         toward_values.insert("flow".to_string(), StateValue::Float(self.toward.flow));
-        toward_values.insert("distance".to_string(), StateValue::Float(self.toward.distance));
-        toward_values.insert("modality".to_string(), StateValue::Enum(self.toward.modality.clone()));
+        toward_values.insert(
+            "distance".to_string(),
+            StateValue::Float(self.toward.distance),
+        );
+        toward_values.insert(
+            "modality".to_string(),
+            StateValue::Enum(self.toward.modality.clone()),
+        );
 
         values.insert("toward".to_string(), StateValue::Nested(toward_values));
 
@@ -160,7 +169,10 @@ impl EmotionalState {
             }
         }
 
-        fn get_nested<'a>(values: &'a HashMap<String, StateValue>, key: &str) -> Result<&'a HashMap<String, StateValue>> {
+        fn get_nested<'a>(
+            values: &'a HashMap<String, StateValue>,
+            key: &str,
+        ) -> Result<&'a HashMap<String, StateValue>> {
             match values.get(key) {
                 Some(StateValue::Nested(v)) => Ok(v),
                 _ => bail!("Missing or invalid nested value for key: {}", key),
@@ -519,7 +531,10 @@ pub fn load_default_schema() -> Result<StateSchema> {
         if path.exists() {
             return load_schema(&path);
         } else {
-            bail!("MX_STATE_SCHEMA points to non-existent file: {}", schema_path);
+            bail!(
+                "MX_STATE_SCHEMA points to non-existent file: {}",
+                schema_path
+            );
         }
     }
 
