@@ -36,26 +36,28 @@ impl DynamicState {
         dim_names.sort();
 
         for dim_name in dim_names {
-            if let Some(dim_def) = schema.dimensions.get(dim_name.as_str()) {
-                if let Some(value) = self.values.get(dim_name.as_str()) {
-                    Self::encode_dimension(
-                        &mut parts,
-                        dim_name,
-                        dim_def,
-                        value,
-                        &s.symbols,
-                        &s.modality_values,
-                        &s.separator,
-                        &s.nested_separator,
-                        "",
-                    );
-                }
+            if let Some(dim_def) = schema.dimensions.get(dim_name.as_str())
+                && let Some(value) = self.values.get(dim_name.as_str())
+            {
+                Self::encode_dimension(
+                    &mut parts,
+                    dim_name,
+                    dim_def,
+                    value,
+                    &s.symbols,
+                    &s.modality_values,
+                    &s.separator,
+                    &s.nested_separator,
+                    "",
+                );
             }
         }
 
         parts.join(&s.separator)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::only_used_in_recursion)]
     fn encode_dimension(
         parts: &mut Vec<String>,
         name: &str,
@@ -91,20 +93,20 @@ impl DynamicState {
                 nested_names.sort();
 
                 for nested_name in nested_names {
-                    if let Some(nested_def) = dimensions.get(nested_name.as_str()) {
-                        if let Some(nested_value) = nested_values.get(nested_name.as_str()) {
-                            Self::encode_dimension(
-                                parts,
-                                nested_name,
-                                nested_def,
-                                nested_value,
-                                symbols,
-                                modality_values,
-                                separator,
-                                nested_separator,
-                                &new_prefix,
-                            );
-                        }
+                    if let Some(nested_def) = dimensions.get(nested_name.as_str())
+                        && let Some(nested_value) = nested_values.get(nested_name.as_str())
+                    {
+                        Self::encode_dimension(
+                            parts,
+                            nested_name,
+                            nested_def,
+                            nested_value,
+                            symbols,
+                            modality_values,
+                            separator,
+                            nested_separator,
+                            &new_prefix,
+                        );
                     }
                 }
             }
@@ -168,13 +170,13 @@ impl DynamicState {
                 let parent_part = &part[..parent_sym_len];
                 let child_part = &part[parent_sym_len + nsep.len()..];
 
-                if let Some(&parent_name) = top_level_sym_to_name.get(parent_part) {
-                    if let Some(Dimension::Nested { dimensions, .. }) =
+                if let Some(&parent_name) = top_level_sym_to_name.get(parent_part)
+                    && let Some(Dimension::Nested { dimensions, .. }) =
                         schema.dimensions.get(parent_name)
-                    {
-                        // Build child symbol map
-                        let mut child_sym_to_name: HashMap<&str, &str> = HashMap::new();
-                        for (child_name, _) in dimensions {
+                {
+                    // Build child symbol map
+                    let mut child_sym_to_name: HashMap<&str, &str> = HashMap::new();
+                    for child_name in dimensions.keys() {
                             if let Some(child_sym) = s.symbols.get(child_name.as_str()) {
                                 child_sym_to_name.insert(child_sym.as_str(), child_name.as_str());
                             }
@@ -188,36 +190,35 @@ impl DynamicState {
                                     .entry(parent_name.to_string())
                                     .or_insert_with(|| StateValue::Nested(HashMap::new()));
 
-                                if let StateValue::Nested(nested_map) = nested {
-                                    if let Some(child_dim) = dimensions.get(child_name) {
-                                        match child_dim {
-                                            Dimension::Float { .. } => {
-                                                if let Ok(v) = value_str.parse::<f32>() {
-                                                    nested_map.insert(
-                                                        child_name.to_string(),
-                                                        StateValue::Float(v),
-                                                    );
-                                                }
-                                            }
-                                            Dimension::Enum { .. } => {
-                                                let enum_val = rev_modality
-                                                    .get(value_str)
-                                                    .map(|s| s.to_string())
-                                                    .unwrap_or_else(|| value_str.to_string());
+                                if let StateValue::Nested(nested_map) = nested
+                                    && let Some(child_dim) = dimensions.get(child_name)
+                                {
+                                    match child_dim {
+                                        Dimension::Float { .. } => {
+                                            if let Ok(v) = value_str.parse::<f32>() {
                                                 nested_map.insert(
                                                     child_name.to_string(),
-                                                    StateValue::Enum(enum_val),
+                                                    StateValue::Float(v),
                                                 );
                                             }
-                                            _ => {}
                                         }
+                                        Dimension::Enum { .. } => {
+                                            let enum_val = rev_modality
+                                                .get(value_str)
+                                                .map(|s| s.to_string())
+                                                .unwrap_or_else(|| value_str.to_string());
+                                            nested_map.insert(
+                                                child_name.to_string(),
+                                                StateValue::Enum(enum_val),
+                                            );
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 break;
                             }
                         }
                     }
-                }
             } else {
                 // Simple dimension
                 for (sym, &name) in &top_level_sym_to_name {
@@ -278,12 +279,12 @@ impl DynamicState {
         dim_names.sort();
 
         for dim_name in dim_names {
-            if let Some(value) = self.values.get(dim_name.as_str()) {
-                if let Some(dim_def) = schema.dimensions.get(dim_name.as_str()) {
-                    let desc = Self::describe_value(dim_name, dim_def, value);
-                    if !desc.is_empty() {
-                        parts.push(desc);
-                    }
+            if let Some(value) = self.values.get(dim_name.as_str())
+                && let Some(dim_def) = schema.dimensions.get(dim_name.as_str())
+            {
+                let desc = Self::describe_value(dim_name, dim_def, value);
+                if !desc.is_empty() {
+                    parts.push(desc);
                 }
             }
         }
@@ -325,12 +326,12 @@ impl DynamicState {
                 nested_names.sort();
 
                 for nested_name in nested_names {
-                    if let Some(nested_value) = nested_values.get(nested_name.as_str()) {
-                        if let Some(nested_def) = dimensions.get(nested_name.as_str()) {
-                            let desc = Self::describe_value(nested_name, nested_def, nested_value);
-                            if !desc.is_empty() {
-                                nested_parts.push(desc);
-                            }
+                    if let Some(nested_value) = nested_values.get(nested_name.as_str())
+                        && let Some(nested_def) = dimensions.get(nested_name.as_str())
+                    {
+                        let desc = Self::describe_value(nested_name, nested_def, nested_value);
+                        if !desc.is_empty() {
+                            nested_parts.push(desc);
                         }
                     }
                 }
@@ -886,12 +887,11 @@ impl EmotionalState {
                         (StateValue::Nested(s), StateValue::Nested(m)) => {
                             let mut nested_dist = 0.0f32;
                             for (nk, nsv) in s {
-                                if let Some(nmv) = m.get(nk.as_str()) {
-                                    if let (StateValue::Float(ns), StateValue::Float(nm)) =
+                                if let Some(nmv) = m.get(nk.as_str())
+                                    && let (StateValue::Float(ns), StateValue::Float(nm)) =
                                         (nsv, nmv)
-                                    {
-                                        nested_dist += (ns - nm).powi(2);
-                                    }
+                                {
+                                    nested_dist += (ns - nm).powi(2);
                                 }
                             }
                             nested_dist
