@@ -507,8 +507,33 @@ pub fn load_schema(path: &Path) -> Result<StateSchema> {
 }
 
 /// Load the default emotional state schema
+///
+/// Schema lookup order:
+/// 1. MX_STATE_SCHEMA environment variable (explicit path)
+/// 2. MX_CURRENT_AGENT environment variable (looks for ~/.{agent}/schemas/state.json)
+/// 3. Standard fallback locations (~/.crewu/schemas/emotional-state.json, /etc/mx/schemas/emotional-state.json)
 pub fn load_default_schema() -> Result<StateSchema> {
-    // Try standard locations
+    // 1. Check MX_STATE_SCHEMA environment variable
+    if let Ok(schema_path) = std::env::var("MX_STATE_SCHEMA") {
+        let path = std::path::PathBuf::from(&schema_path);
+        if path.exists() {
+            return load_schema(&path);
+        } else {
+            bail!("MX_STATE_SCHEMA points to non-existent file: {}", schema_path);
+        }
+    }
+
+    // 2. Check MX_CURRENT_AGENT environment variable
+    if let Ok(agent) = std::env::var("MX_CURRENT_AGENT") {
+        if let Some(home) = dirs::home_dir() {
+            let agent_schema = home.join(format!(".{}/schemas/state.json", agent));
+            if agent_schema.exists() {
+                return load_schema(&agent_schema);
+            }
+        }
+    }
+
+    // 3. Try standard locations
     let locations = [
         dirs::home_dir().map(|h| h.join(".crewu/schemas/emotional-state.json")),
         Some(std::path::PathBuf::from(
@@ -523,7 +548,11 @@ pub fn load_default_schema() -> Result<StateSchema> {
     }
 
     bail!(
-        "Could not find emotional-state.json schema. Checked ~/.crewu/schemas/ and /etc/mx/schemas/"
+        "Could not find state schema. Tried:\n\
+         - MX_STATE_SCHEMA environment variable\n\
+         - MX_CURRENT_AGENT environment variable (looks for ~/.{{agent}}/schemas/state.json)\n\
+         - ~/.crewu/schemas/emotional-state.json\n\
+         - /etc/mx/schemas/emotional-state.json"
     )
 }
 

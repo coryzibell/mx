@@ -219,7 +219,7 @@ enum StateCommands {
         #[arg(short, long, default_value = "stele")]
         format: String,
 
-        /// Custom schema file path
+        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
         #[arg(long)]
         schema: Option<String>,
     },
@@ -233,7 +233,7 @@ enum StateCommands {
         #[arg(short, long, default_value = "human")]
         format: String,
 
-        /// Custom schema file path
+        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
         #[arg(long)]
         schema: Option<String>,
     },
@@ -251,7 +251,7 @@ enum StateCommands {
         #[arg(short = 'F', long, default_value = "human")]
         format: String,
 
-        /// Custom schema file path
+        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
         #[arg(long)]
         schema: Option<String>,
     },
@@ -265,14 +265,14 @@ enum StateCommands {
         #[arg(long)]
         json: bool,
 
-        /// Custom schema file path
+        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
         #[arg(long)]
         schema: Option<String>,
     },
 
     /// Show schema information
     Schema {
-        /// Custom schema file path
+        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
         #[arg(long)]
         schema: Option<String>,
     },
