@@ -251,8 +251,6 @@ impl DynamicState {
         })
     }
     /// Create DynamicState from a discrete mode name using schema mappings
-    /// Note: This currently only works for Q-style schemas with the specific mode mapping structure
-    /// TODO: Make mode mappings schema-agnostic
     pub fn from_mode(mode: &str, schema: &StateSchema) -> Result<Self> {
         let mapping = schema
             .mode_mappings
@@ -260,23 +258,8 @@ impl DynamicState {
             .or_else(|| schema.mode_mappings.get("default"))
             .context("No mode mapping found and no default defined")?;
 
-        let mut values = HashMap::new();
-
-        // Map the mode values to DynamicState
-        // This is Q-specific structure - needs generalization
-        values.insert("temperature".to_string(), StateValue::Float(mapping.temperature));
-        values.insert("entropy".to_string(), StateValue::Float(mapping.entropy));
-        values.insert("gravity".to_string(), StateValue::Float(mapping.gravity));
-        values.insert("depth".to_string(), StateValue::Float(mapping.depth));
-        values.insert("energy".to_string(), StateValue::Float(mapping.energy));
-
-        let mut toward_values = HashMap::new();
-        toward_values.insert("agency".to_string(), StateValue::Float(mapping.toward.agency));
-        toward_values.insert("flow".to_string(), StateValue::Float(mapping.toward.flow));
-        toward_values.insert("distance".to_string(), StateValue::Float(mapping.toward.distance));
-        toward_values.insert("modality".to_string(), StateValue::Enum(mapping.toward.modality.clone()));
-
-        values.insert("toward".to_string(), StateValue::Nested(toward_values));
+        // Clone the mapping values directly - they're already StateValue
+        let values = mapping.clone();
 
         Ok(DynamicState {
             schema_id: schema.title.clone(),
@@ -498,24 +481,8 @@ pub enum Dimension {
     },
 }
 
-/// Mode mapping - predefined tensor values for discrete modes
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ModeMapping {
-    pub temperature: f32,
-    pub entropy: f32,
-    pub gravity: f32,
-    pub depth: f32,
-    pub energy: f32,
-    pub toward: TowardMapping,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TowardMapping {
-    pub agency: f32,
-    pub flow: f32,
-    pub distance: f32,
-    pub modality: String,
-}
+/// Mode mapping - predefined tensor values for discrete modes (schema-agnostic)
+pub type ModeMapping = HashMap<String, StateValue>;
 
 /// The full schema definition
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -638,25 +605,9 @@ impl EmotionalState {
 
     /// Create from a discrete mode name using schema mappings
     pub fn from_mode(mode: &str, schema: &StateSchema) -> Result<Self> {
-        let mapping = schema
-            .mode_mappings
-            .get(mode)
-            .or_else(|| schema.mode_mappings.get("default"))
-            .context("No mode mapping found and no default defined")?;
-
-        Ok(Self {
-            temperature: mapping.temperature,
-            entropy: mapping.entropy,
-            gravity: mapping.gravity,
-            depth: mapping.depth,
-            energy: mapping.energy,
-            toward: TowardState {
-                agency: mapping.toward.agency,
-                flow: mapping.toward.flow,
-                distance: mapping.toward.distance,
-                modality: mapping.toward.modality.clone(),
-            },
-        })
+        // Convert to DynamicState first, then to EmotionalState
+        let dynamic = DynamicState::from_mode(mode, schema)?;
+        Self::from_dynamic(&dynamic)
     }
 
     /// Encode to stele format
@@ -920,15 +871,31 @@ impl EmotionalState {
         let mut best_mode = String::from("default");
         let mut best_distance = f32::MAX;
 
+        let self_dynamic = self.to_dynamic();
+
         for (mode_name, mapping) in &schema.mode_mappings {
-            let distance = (self.temperature - mapping.temperature).powi(2)
-                + (self.entropy - mapping.entropy).powi(2)
-                + (self.gravity - mapping.gravity).powi(2)
-                + (self.depth - mapping.depth).powi(2)
-                + (self.energy - mapping.energy).powi(2)
-                + (self.toward.agency - mapping.toward.agency).powi(2)
-                + (self.toward.flow - mapping.toward.flow).powi(2)
-                + (self.toward.distance - mapping.toward.distance).powi(2);
+            // Calculate distance by comparing StateValue entries
+            let mut distance = 0.0f32;
+
+            for (key, self_val) in &self_dynamic.values {
+                if let Some(map_val) = mapping.get(key) {
+                    distance += match (self_val, map_val) {
+                        (StateValue::Float(s), StateValue::Float(m)) => (s - m).powi(2),
+                        (StateValue::Nested(s), StateValue::Nested(m)) => {
+                            let mut nested_dist = 0.0f32;
+                            for (nk, nsv) in s {
+                                if let Some(nmv) = m.get(nk.as_str()) {
+                                    if let (StateValue::Float(ns), StateValue::Float(nm)) = (nsv, nmv) {
+                                        nested_dist += (ns - nm).powi(2);
+                                    }
+                                }
+                            }
+                            nested_dist
+                        }
+                        _ => 0.0,
+                    };
+                }
+            }
 
             if distance < best_distance {
                 best_distance = distance;
@@ -1362,7 +1329,7 @@ mod dynamic_state_tests {
                 }
                 (StateValue::Nested(o), StateValue::Nested(d)) => {
                     for (nested_key, nested_orig) in o {
-                        let nested_dec = d.get(nested_key)
+                        let nested_dec = d.get(nested_key.as_str())
                             .unwrap_or_else(|| panic!("Decoded state missing nested key: {}.{}", key, nested_key));
 
                         match (nested_orig, nested_dec) {
@@ -1412,5 +1379,100 @@ mod dynamic_state_tests {
         // Should contain dimension names
         assert!(description.contains("temperature"));
         assert!(description.contains("toward"));
+    }
+
+    #[test]
+    fn test_soren_encode_decode_roundtrip() {
+        let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
+            .expect("Failed to read Soren schema");
+        let schema: StateSchema = serde_json::from_str(&schema_json)
+            .expect("Failed to parse Soren schema");
+
+        // Create state from mode
+        let original = DynamicState::from_mode("tending", &schema)
+            .expect("Failed to create state from mode");
+
+        // Encode to stele
+        let stele = original.encode_stele(&schema);
+
+        println!("Soren stele: {}", stele);
+
+        // Decode from stele
+        let decoded = DynamicState::decode_stele(&stele, &schema)
+            .expect("Failed to decode stele");
+
+        // Verify all values match
+        assert_eq!(decoded.values.len(), original.values.len(), "Should have same number of dimensions");
+
+        for (key, orig_val) in &original.values {
+            let dec_val = decoded.values.get(key)
+                .unwrap_or_else(|| panic!("Decoded state missing key: {}", key));
+
+            match (orig_val, dec_val) {
+                (StateValue::Float(o), StateValue::Float(d)) => {
+                    assert!((o - d).abs() < 0.01, "Float mismatch for {}: {} vs {}", key, o, d);
+                }
+                (StateValue::Nested(o), StateValue::Nested(d)) => {
+                    for (nested_key, nested_orig) in o {
+                        let nested_dec = d.get(nested_key.as_str())
+                            .unwrap_or_else(|| panic!("Decoded state missing nested key: {}.{}", key, nested_key));
+
+                        match (nested_orig, nested_dec) {
+                            (StateValue::Float(no), StateValue::Float(nd)) => {
+                                assert!((no - nd).abs() < 0.01, "Nested float mismatch for {}.{}: {} vs {}",
+                                    key, nested_key, no, nd);
+                            }
+                            _ => panic!("Type mismatch for nested {}.{}", key, nested_key),
+                        }
+                    }
+                }
+                _ => panic!("Type mismatch for {}", key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_soren_from_mode() {
+        let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
+            .expect("Failed to read Soren schema");
+        let schema: StateSchema = serde_json::from_str(&schema_json)
+            .expect("Failed to parse Soren schema");
+
+        let state = DynamicState::from_mode("tending", &schema)
+            .expect("Failed to create state from mode");
+
+        // Verify it has the expected structure
+        assert!(state.values.contains_key("ground"));
+        assert!(state.values.contains_key("threshold"));
+        assert!(state.values.contains_key("tending"));
+        assert!(state.values.contains_key("carrying"));
+
+        if let Some(StateValue::Nested(carrying)) = state.values.get("carrying") {
+            assert!(carrying.contains_key("threads"));
+            assert!(carrying.contains_key("weight"));
+            assert!(carrying.contains_key("proximity"));
+        } else {
+            panic!("Carrying missing or wrong type");
+        }
+    }
+
+    #[test]
+    fn test_soren_describe() {
+        let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
+            .expect("Failed to read Soren schema");
+        let schema: StateSchema = serde_json::from_str(&schema_json)
+            .expect("Failed to parse Soren schema");
+
+        let state = DynamicState::from_mode("tending", &schema)
+            .expect("Failed to create state from mode");
+
+        let description = state.describe(&schema);
+        println!("Soren Description: {}", description);
+
+        // Should contain dimension names
+        assert!(description.contains("ground"));
+        assert!(description.contains("threshold"));
+        assert!(description.contains("tending"));
+        assert!(description.contains("carrying"));
     }
 }

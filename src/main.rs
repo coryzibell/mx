@@ -1474,17 +1474,22 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                         } else {
                             println!("Mode: {}", mode_name);
                             println!();
-                            println!("  temperature: {:.1}", mapping.temperature);
-                            println!("  entropy:     {:.1}", mapping.entropy);
-                            println!("  gravity:     {:.1}", mapping.gravity);
-                            println!("  depth:       {:.1}", mapping.depth);
-                            println!("  energy:      {:.1}", mapping.energy);
-                            println!();
-                            println!("  toward:");
-                            println!("    agency:    {:.1}", mapping.toward.agency);
-                            println!("    flow:      {:.1}", mapping.toward.flow);
-                            println!("    distance:  {:.1}", mapping.toward.distance);
-                            println!("    modality:  {}", mapping.toward.modality);
+                            for (key, value) in mapping {
+                                match value {
+                                    state::StateValue::Float(f) => println!("  {}: {:.1}", key, f),
+                                    state::StateValue::Enum(e) => println!("  {}: {}", key, e),
+                                    state::StateValue::Nested(n) => {
+                                        println!("  {}:", key);
+                                        for (nk, nv) in n {
+                                            match nv {
+                                                state::StateValue::Float(f) => println!("    {}: {:.1}", nk, f),
+                                                state::StateValue::Enum(e) => println!("    {}: {}", nk, e),
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     None => {
@@ -1508,20 +1513,11 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 } else {
                     println!("Available modes:\n");
                     for (name, mapping) in &schema.mode_mappings {
-                        let state = state::EmotionalState {
-                            temperature: mapping.temperature,
-                            entropy: mapping.entropy,
-                            gravity: mapping.gravity,
-                            depth: mapping.depth,
-                            energy: mapping.energy,
-                            toward: state::TowardState {
-                                agency: mapping.toward.agency,
-                                flow: mapping.toward.flow,
-                                distance: mapping.toward.distance,
-                                modality: mapping.toward.modality.clone(),
-                            },
+                        let dynamic_state = state::DynamicState {
+                            schema_id: schema.title.clone(),
+                            values: mapping.clone(),
                         };
-                        println!("  {:10} - {}", name, state.describe());
+                        println!("  {:10} - {}", name, dynamic_state.describe(&schema));
                     }
                 }
             }
