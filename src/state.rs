@@ -972,8 +972,32 @@ pub fn load_default_schema() -> Result<StateSchema> {
     )
 }
 
+/// Parse a wake preference line and convert to DynamicState
+/// Handles both old format (Wake Preference: soft) and new stele format
+pub fn parse_wake_preference_dynamic(line: &str, schema: &StateSchema) -> Result<DynamicState> {
+    let trimmed = line.trim();
+
+    // Check for stele format first (starts with @state or schema-specific header)
+    if trimmed.starts_with(&schema.stele.header) {
+        return DynamicState::decode_stele(trimmed, schema);
+    }
+
+    // Check for old format: "Wake Preference: mode" or just "mode"
+    let mode = if let Some(stripped) = trimmed.strip_prefix("Wake Preference:") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("Wake State:") {
+        stripped.trim()
+    } else {
+        trimmed
+    };
+
+    // Map mode to state
+    DynamicState::from_mode(mode, schema)
+}
+
 /// Parse a wake preference line and convert to EmotionalState
 /// Handles both old format (Wake Preference: soft) and new stele format
+/// DEPRECATED: Use parse_wake_preference_dynamic for schema-agnostic parsing
 pub fn parse_wake_preference(line: &str, schema: &StateSchema) -> Result<EmotionalState> {
     let trimmed = line.trim();
 

@@ -1322,64 +1322,26 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
         } => {
             let schema = load_schema(schema)?;
 
-            let emotional_state = if interactive {
+            let dynamic_state = if interactive {
                 // Interactive mode - prompt for each dimension
-                state::interactive_capture(&schema)?
+                state::DynamicState::interactive_capture(&schema)?
             } else if let Some(mode_name) = mode {
                 // Mode-based - map discrete mode to tensor
-                state::EmotionalState::from_mode(&mode_name, &schema)?
-            } else if let Some(dims) = dimensions {
-                // Manual dimensions - parse key=value pairs
-                let mut temp = 0.5f32;
-                let mut entropy = 0.5f32;
-                let mut gravity = 0.5f32;
-                let mut depth = 0.5f32;
-                let mut energy = 0.5f32;
-                let mut agency = 0.5f32;
-                let mut flow = 0.5f32;
-                let mut distance = 0.5f32;
-                let mut modality = String::from("blended");
-
-                for dim in dims {
-                    if let Some((key, val)) = dim.split_once('=') {
-                        match key.to_lowercase().as_str() {
-                            "temp" | "temperature" => temp = val.parse()?,
-                            "entropy" | "ent" => entropy = val.parse()?,
-                            "gravity" | "grav" => gravity = val.parse()?,
-                            "depth" => depth = val.parse()?,
-                            "energy" | "nrg" => energy = val.parse()?,
-                            "agency" => agency = val.parse()?,
-                            "flow" => flow = val.parse()?,
-                            "distance" | "dist" => distance = val.parse()?,
-                            "modality" | "mod" => modality = val.to_string(),
-                            _ => eprintln!("Unknown dimension: {}", key),
-                        }
-                    }
-                }
-
-                state::EmotionalState {
-                    temperature: temp,
-                    entropy,
-                    gravity,
-                    depth,
-                    energy,
-                    toward: state::TowardState {
-                        agency,
-                        flow,
-                        distance,
-                        modality,
-                    },
-                }
+                state::DynamicState::from_mode(&mode_name, &schema)?
+            } else if dimensions.is_some() {
+                // Manual dimensions not supported for schema-agnostic states
+                // Use interactive mode instead
+                bail!("Manual dimension specification is not supported. Use --mode or -i instead.");
             } else {
                 // Default to... default mode
-                state::EmotionalState::from_mode("default", &schema)?
+                state::DynamicState::from_mode("default", &schema)?
             };
 
             // Output in requested format
             match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
-                "human" => println!("{}", emotional_state.describe()),
-                _ => println!("{}", emotional_state.encode_stele(&schema)),
+                "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
+                "human" => println!("{}", dynamic_state.describe(&schema)),
+                _ => println!("{}", dynamic_state.encode_stele(&schema)),
             }
         }
 
@@ -1400,14 +1362,14 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 }
             };
 
-            let emotional_state = state::EmotionalState::decode_stele(&stele, &schema)?;
+            let dynamic_state = state::DynamicState::decode_stele(&stele, &schema)?;
 
             match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
-                "stele" => println!("{}", emotional_state.encode_stele(&schema)),
+                "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
+                "stele" => println!("{}", dynamic_state.encode_stele(&schema)),
                 _ => {
-                    println!("{}", emotional_state.describe());
-                    println!("Closest mode: {}", emotional_state.closest_mode(&schema));
+                    println!("{}", dynamic_state.describe(&schema));
+                    // Note: closest_mode calculation removed - would need to be implemented for DynamicState
                 }
             }
         }
@@ -1435,29 +1397,31 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read file: {}", path))?;
 
-                // Find Wake Preference or Wake State line
+                // Find Wake Preference or Wake State line (check for schema header dynamically)
                 content
                     .lines()
                     .find(|line| {
                         line.starts_with("Wake Preference:")
                             || line.starts_with("Wake State:")
-                            || line.starts_with("@state")
+                            || line.starts_with(&schema.stele.header)
                     })
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| String::from("default"))
             };
 
-            let emotional_state = state::parse_wake_preference(&pref_str, &schema)?;
+            let dynamic_state = state::parse_wake_preference_dynamic(&pref_str, &schema)?;
 
             match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&emotional_state)?),
-                "stele" => println!("{}", emotional_state.encode_stele(&schema)),
-                "mode" => println!("{}", emotional_state.closest_mode(&schema)),
+                "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
+                "stele" => println!("{}", dynamic_state.encode_stele(&schema)),
+                "mode" => {
+                    // Note: closest_mode calculation removed - would need to be implemented for DynamicState
+                    println!("Mode calculation not yet implemented for DynamicState");
+                }
                 _ => {
                     println!("Parsed: {}", pref_str.trim());
                     println!();
-                    println!("{}", emotional_state.describe());
-                    println!("Closest mode: {}", emotional_state.closest_mode(&schema));
+                    println!("{}", dynamic_state.describe(&schema));
                 }
             }
         }
