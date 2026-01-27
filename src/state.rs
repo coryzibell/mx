@@ -25,6 +25,436 @@ pub struct DynamicState {
     pub schema_id: String,
     pub values: HashMap<String, StateValue>,
 }
+impl DynamicState {
+    /// Encode to stele format using provided schema
+    pub fn encode_stele(&self, schema: &StateSchema) -> String {
+        let s = &schema.stele;
+        let mut parts = vec![s.header.clone()];
+
+        // Get dimension names in sorted order for deterministic output
+        let mut dim_names: Vec<_> = schema.dimensions.keys().collect();
+        dim_names.sort();
+
+        for dim_name in dim_names {
+            if let Some(dim_def) = schema.dimensions.get(dim_name.as_str()) {
+                if let Some(value) = self.values.get(dim_name.as_str()) {
+                    Self::encode_dimension(
+                        &mut parts,
+                        dim_name,
+                        dim_def,
+                        value,
+                        &s.symbols,
+                        &s.modality_values,
+                        &s.separator,
+                        &s.nested_separator,
+                        "",
+                    );
+                }
+            }
+        }
+
+        parts.join(&s.separator)
+    }
+
+    fn encode_dimension(
+        parts: &mut Vec<String>,
+        name: &str,
+        definition: &Dimension,
+        value: &StateValue,
+        symbols: &HashMap<String, String>,
+        modality_values: &HashMap<String, String>,
+        separator: &str,
+        nested_separator: &str,
+        prefix: &str,
+    ) {
+        let symbol = symbols.get(name).map(|s| s.as_str()).unwrap_or(name);
+
+        match (definition, value) {
+            (Dimension::Float { .. }, StateValue::Float(v)) => {
+                parts.push(format!("{}{}{}", prefix, symbol, v));
+            }
+            (Dimension::Enum { .. }, StateValue::Enum(v)) => {
+                // Check if there's a symbol mapping for this enum value
+                let value_sym = modality_values.get(v).map(|s| s.as_str()).unwrap_or(v);
+                parts.push(format!("{}{}{}", prefix, symbol, value_sym));
+            }
+            (Dimension::Nested { dimensions, .. }, StateValue::Nested(nested_values)) => {
+                // For nested dimensions, encode each sub-dimension with prefix
+                let new_prefix = if prefix.is_empty() {
+                    format!("{}{}", symbol, nested_separator)
+                } else {
+                    format!("{}{}{}", prefix, symbol, nested_separator)
+                };
+
+                // Get nested dimension names in sorted order
+                let mut nested_names: Vec<_> = dimensions.keys().collect();
+                nested_names.sort();
+
+                for nested_name in nested_names {
+                    if let Some(nested_def) = dimensions.get(nested_name.as_str()) {
+                        if let Some(nested_value) = nested_values.get(nested_name.as_str()) {
+                            Self::encode_dimension(
+                                parts,
+                                nested_name,
+                                nested_def,
+                                nested_value,
+                                symbols,
+                                modality_values,
+                                separator,
+                                nested_separator,
+                                &new_prefix,
+                            );
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Type mismatch - skip
+            }
+        }
+    }
+
+    /// Decode from stele format into DynamicState
+    pub fn decode_stele(stele: &str, schema: &StateSchema) -> Result<Self> {
+        let s = &schema.stele;
+        let sep = &s.separator;
+        let nsep = &s.nested_separator;
+
+        // Build symbol maps
+        let mut top_level_sym_to_name: HashMap<&str, &str> = HashMap::new();
+        let mut nested_parent_syms: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        
+        for (name, dim) in &schema.dimensions {
+            if let Some(sym) = s.symbols.get(name.as_str()) {
+                top_level_sym_to_name.insert(sym.as_str(), name.as_str());
+                // Track which symbols have nested dimensions
+                if matches!(dim, Dimension::Nested { .. }) {
+                    nested_parent_syms.insert(sym.as_str());
+                }
+            }
+        }
+
+        // Build reverse modality map
+        let mut rev_modality: HashMap<&str, &str> = HashMap::new();
+        for (name, sym) in &s.modality_values {
+            rev_modality.insert(sym.as_str(), name.as_str());
+        }
+
+        let parts: Vec<&str> = stele.split(sep).collect();
+        let mut values: HashMap<String, StateValue> = HashMap::new();
+
+        // Skip header, process rest
+        for part in parts.iter().skip(1) {
+            if part.is_empty() {
+                continue;
+            }
+
+            // Check if this starts with a nested parent symbol followed by the nested separator
+            let mut is_nested = false;
+            let mut parent_sym_len = 0;
+            
+            for parent_sym in &nested_parent_syms {
+                let pattern = format!("{}{}", parent_sym, nsep);
+                if part.starts_with(&pattern) {
+                    is_nested = true;
+                    parent_sym_len = parent_sym.len();
+                    break;
+                }
+            }
+
+            if is_nested {
+                // Nested dimension: {parent_sym}{nsep}{child_sym}{value}
+                let parent_part = &part[..parent_sym_len];
+                let child_part = &part[parent_sym_len + nsep.len()..];
+
+                if let Some(&parent_name) = top_level_sym_to_name.get(parent_part) {
+                    if let Some(Dimension::Nested { dimensions, .. }) = 
+                        schema.dimensions.get(parent_name)
+                    {
+                        // Build child symbol map
+                        let mut child_sym_to_name: HashMap<&str, &str> = HashMap::new();
+                        for (child_name, _) in dimensions {
+                            if let Some(child_sym) = s.symbols.get(child_name.as_str()) {
+                                child_sym_to_name.insert(child_sym.as_str(), child_name.as_str());
+                            }
+                        }
+
+                        // Find which child this is
+                        for (child_sym, &child_name) in &child_sym_to_name {
+                            if let Some(value_str) = child_part.strip_prefix(child_sym) {
+                                // Get or create nested HashMap
+                                let nested = values.entry(parent_name.to_string())
+                                    .or_insert_with(|| StateValue::Nested(HashMap::new()));
+
+                                if let StateValue::Nested(nested_map) = nested {
+                                    if let Some(child_dim) = dimensions.get(child_name) {
+                                        match child_dim {
+                                            Dimension::Float { .. } => {
+                                                if let Ok(v) = value_str.parse::<f32>() {
+                                                    nested_map.insert(
+                                                        child_name.to_string(),
+                                                        StateValue::Float(v)
+                                                    );
+                                                }
+                                            }
+                                            Dimension::Enum { .. } => {
+                                                let enum_val = rev_modality
+                                                    .get(value_str)
+                                                    .map(|s| s.to_string())
+                                                    .unwrap_or_else(|| value_str.to_string());
+                                                nested_map.insert(
+                                                    child_name.to_string(),
+                                                    StateValue::Enum(enum_val)
+                                                );
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Simple dimension
+                for (sym, &name) in &top_level_sym_to_name {
+                    if let Some(value_str) = part.strip_prefix(sym) {
+                        if let Some(dim) = schema.dimensions.get(name) {
+                            match dim {
+                                Dimension::Float { .. } => {
+                                    if let Ok(v) = value_str.parse::<f32>() {
+                                        values.insert(name.to_string(), StateValue::Float(v));
+                                    }
+                                }
+                                Dimension::Enum { .. } => {
+                                    let enum_val = rev_modality
+                                        .get(value_str)
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_else(|| value_str.to_string());
+                                    values.insert(name.to_string(), StateValue::Enum(enum_val));
+                                }
+                                Dimension::Nested { .. } => {
+                                    // Skip nested dimensions in simple branch
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(DynamicState {
+            schema_id: schema.title.clone(),
+            values,
+        })
+    }
+    /// Create DynamicState from a discrete mode name using schema mappings
+    /// Note: This currently only works for Q-style schemas with the specific mode mapping structure
+    /// TODO: Make mode mappings schema-agnostic
+    pub fn from_mode(mode: &str, schema: &StateSchema) -> Result<Self> {
+        let mapping = schema
+            .mode_mappings
+            .get(mode)
+            .or_else(|| schema.mode_mappings.get("default"))
+            .context("No mode mapping found and no default defined")?;
+
+        let mut values = HashMap::new();
+
+        // Map the mode values to DynamicState
+        // This is Q-specific structure - needs generalization
+        values.insert("temperature".to_string(), StateValue::Float(mapping.temperature));
+        values.insert("entropy".to_string(), StateValue::Float(mapping.entropy));
+        values.insert("gravity".to_string(), StateValue::Float(mapping.gravity));
+        values.insert("depth".to_string(), StateValue::Float(mapping.depth));
+        values.insert("energy".to_string(), StateValue::Float(mapping.energy));
+
+        let mut toward_values = HashMap::new();
+        toward_values.insert("agency".to_string(), StateValue::Float(mapping.toward.agency));
+        toward_values.insert("flow".to_string(), StateValue::Float(mapping.toward.flow));
+        toward_values.insert("distance".to_string(), StateValue::Float(mapping.toward.distance));
+        toward_values.insert("modality".to_string(), StateValue::Enum(mapping.toward.modality.clone()));
+
+        values.insert("toward".to_string(), StateValue::Nested(toward_values));
+
+        Ok(DynamicState {
+            schema_id: schema.title.clone(),
+            values,
+        })
+    }
+
+    /// Generate human-readable description from DynamicState
+    pub fn describe(&self, schema: &StateSchema) -> String {
+        let mut parts = Vec::new();
+
+        // Get dimension names in sorted order
+        let mut dim_names: Vec<_> = self.values.keys().collect();
+        dim_names.sort();
+
+        for dim_name in dim_names {
+            if let Some(value) = self.values.get(dim_name.as_str()) {
+                if let Some(dim_def) = schema.dimensions.get(dim_name.as_str()) {
+                    let desc = Self::describe_value(dim_name, dim_def, value);
+                    if !desc.is_empty() {
+                        parts.push(desc);
+                    }
+                }
+            }
+        }
+
+        parts.join(", ")
+    }
+
+    fn describe_value(name: &str, definition: &Dimension, value: &StateValue) -> String {
+        match (definition, value) {
+            (Dimension::Float { hints, .. }, StateValue::Float(v)) => {
+                // Find closest hint
+                let hint_name = if hints.is_empty() {
+                    String::new()
+                } else {
+                    let mut closest = ("", f32::MAX);
+                    for (hint_name, hint_val) in hints {
+                        let distance = (v - hint_val).abs();
+                        if distance < closest.1 {
+                            closest = (hint_name.as_str(), distance);
+                        }
+                    }
+                    closest.0.to_string()
+                };
+
+                if hint_name.is_empty() {
+                    format!("{}: {:.1}", name, v)
+                } else {
+                    format!("{}: {} ({:.1})", name, hint_name, v)
+                }
+            }
+            (Dimension::Enum { .. }, StateValue::Enum(v)) => {
+                format!("{}: {}", name, v)
+            }
+            (Dimension::Nested { dimensions, .. }, StateValue::Nested(nested_values)) => {
+                let mut nested_parts = Vec::new();
+
+                // Get nested dimension names in sorted order
+                let mut nested_names: Vec<_> = nested_values.keys().collect();
+                nested_names.sort();
+
+                for nested_name in nested_names {
+                    if let Some(nested_value) = nested_values.get(nested_name.as_str()) {
+                        if let Some(nested_def) = dimensions.get(nested_name.as_str()) {
+                            let desc = Self::describe_value(nested_name, nested_def, nested_value);
+                            if !desc.is_empty() {
+                                nested_parts.push(desc);
+                            }
+                        }
+                    }
+                }
+
+                if nested_parts.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}: [{}]", name, nested_parts.join(", "))
+                }
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Interactive state capture - prompts for each dimension based on schema
+    pub fn interactive_capture(schema: &StateSchema) -> Result<Self> {
+        use std::io::{self, Write};
+
+        fn prompt_float(prompt: &str, hints: &HashMap<String, f32>) -> Result<f32> {
+            let hint_str: Vec<String> = hints
+                .iter()
+                .map(|(k, v)| format!("{}={:.1}", k, v))
+                .collect();
+
+            print!("{} [{}]: ", prompt, hint_str.join(", "));
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+
+            // Check if it matches a hint
+            if let Some(&val) = hints.get(input) {
+                return Ok(val);
+            }
+
+            // Try to parse as float
+            input.parse().context("Expected number or hint word")
+        }
+
+        fn prompt_enum(prompt: &str, values: &[String]) -> Result<String> {
+            print!("{} [{}]: ", prompt, values.join("/"));
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_lowercase();
+
+            if values.iter().any(|v| v.to_lowercase() == input) {
+                Ok(input)
+            } else {
+                bail!("Expected one of: {}", values.join(", "))
+            }
+        }
+
+        fn capture_dimension(
+            _name: &str,
+            definition: &Dimension,
+        ) -> Result<StateValue> {
+            match definition {
+                Dimension::Float { prompt, hints, .. } => {
+                    let value = prompt_float(prompt, hints)?;
+                    Ok(StateValue::Float(value))
+                }
+                Dimension::Enum { prompt, values, .. } => {
+                    let value = prompt_enum(prompt, values)?;
+                    Ok(StateValue::Enum(value))
+                }
+                Dimension::Nested { description, dimensions } => {
+                    println!("\n{}", description);
+                    let mut nested_values = HashMap::new();
+
+                    // Get nested dimension names in sorted order
+                    let mut nested_names: Vec<_> = dimensions.keys().collect();
+                    nested_names.sort();
+
+                    for nested_name in nested_names {
+                        if let Some(nested_def) = dimensions.get(nested_name.as_str()) {
+                            let nested_value = capture_dimension(nested_name, nested_def)?;
+                            nested_values.insert(nested_name.to_string(), nested_value);
+                        }
+                    }
+
+                    Ok(StateValue::Nested(nested_values))
+                }
+            }
+        }
+
+        println!("\n{}: {}\n", schema.title, schema.description);
+
+        let mut values = HashMap::new();
+
+        // Get dimension names in sorted order
+        let mut dim_names: Vec<_> = schema.dimensions.keys().collect();
+        dim_names.sort();
+
+        for dim_name in dim_names {
+            if let Some(dim_def) = schema.dimensions.get(dim_name.as_str()) {
+                let value = capture_dimension(dim_name, dim_def)?;
+                values.insert(dim_name.to_string(), value);
+            }
+        }
+
+        Ok(DynamicState {
+            schema_id: schema.title.clone(),
+            values,
+        })
+    }
+}
 
 /// Stele encoding configuration from schema
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -869,5 +1299,118 @@ mod tests {
         assert!((original.temperature - decoded.temperature).abs() < 0.01);
         assert!((original.entropy - decoded.entropy).abs() < 0.01);
         assert_eq!(original.toward.modality, decoded.toward.modality);
+    }
+}
+
+#[cfg(test)]
+mod dynamic_state_tests {
+    use super::*;
+
+    fn get_q_schema() -> StateSchema {
+        let schema_json = include_str!("../schemas/example-q-state.json");
+        serde_json::from_str(schema_json).unwrap()
+    }
+
+    // Soren schema uses different mode_mapping structure - can't parse with current StateSchema
+    // This is expected limitation noted in from_mode TODO
+    // For now, just test encode/decode/describe operations
+
+    #[test]
+    fn test_q_encode_decode_roundtrip() {
+        let schema = get_q_schema();
+        
+        // Create a DynamicState for Q
+        let mut values = HashMap::new();
+        values.insert("temperature".to_string(), StateValue::Float(0.7));
+        values.insert("entropy".to_string(), StateValue::Float(0.3));
+        values.insert("gravity".to_string(), StateValue::Float(0.6));
+        values.insert("depth".to_string(), StateValue::Float(0.5));
+        values.insert("energy".to_string(), StateValue::Float(0.8));
+
+        let mut toward = HashMap::new();
+        toward.insert("agency".to_string(), StateValue::Float(0.4));
+        toward.insert("flow".to_string(), StateValue::Float(0.6));
+        toward.insert("distance".to_string(), StateValue::Float(0.2));
+        toward.insert("modality".to_string(), StateValue::Enum("emotional".to_string()));
+        values.insert("toward".to_string(), StateValue::Nested(toward));
+
+        let original = DynamicState {
+            schema_id: "q-state".to_string(),
+            values,
+        };
+
+        // Encode to stele
+        let stele = original.encode_stele(&schema);
+        println!("Q Stele: {}", stele);
+
+        // Decode back
+        let decoded = DynamicState::decode_stele(&stele, &schema).unwrap();
+
+        // Verify roundtrip - check each dimension
+        assert_eq!(decoded.values.len(), original.values.len(), "Should have same number of dimensions");
+
+        for (key, orig_val) in &original.values {
+            let dec_val = decoded.values.get(key)
+                .unwrap_or_else(|| panic!("Decoded state missing key: {}", key));
+
+            match (orig_val, dec_val) {
+                (StateValue::Float(o), StateValue::Float(d)) => {
+                    assert!((o - d).abs() < 0.01, "Float mismatch for {}: {} vs {}", key, o, d);
+                }
+                (StateValue::Enum(o), StateValue::Enum(d)) => {
+                    assert_eq!(o, d, "Enum mismatch for {}: {} vs {}", key, o, d);
+                }
+                (StateValue::Nested(o), StateValue::Nested(d)) => {
+                    for (nested_key, nested_orig) in o {
+                        let nested_dec = d.get(nested_key)
+                            .unwrap_or_else(|| panic!("Decoded state missing nested key: {}.{}", key, nested_key));
+
+                        match (nested_orig, nested_dec) {
+                            (StateValue::Float(no), StateValue::Float(nd)) => {
+                                assert!((no - nd).abs() < 0.01, "Nested float mismatch for {}.{}: {} vs {}", 
+                                    key, nested_key, no, nd);
+                            }
+                            (StateValue::Enum(no), StateValue::Enum(nd)) => {
+                                assert_eq!(no, nd, "Nested enum mismatch for {}.{}: {} vs {}", 
+                                    key, nested_key, no, nd);
+                            }
+                            _ => panic!("Type mismatch for nested {}.{}", key, nested_key),
+                        }
+                    }
+                }
+                _ => panic!("Type mismatch for {}", key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_q_from_mode() {
+        let schema = get_q_schema();
+        
+        // Load a mode mapping
+        let state = DynamicState::from_mode("soft", &schema).unwrap();
+
+        // Verify it has the expected structure
+        assert!(state.values.contains_key("temperature"));
+        assert!(state.values.contains_key("toward"));
+
+        if let Some(StateValue::Nested(toward)) = state.values.get("toward") {
+            assert!(toward.contains_key("modality"));
+        } else {
+            panic!("Toward missing or wrong type");
+        }
+    }
+
+    #[test]
+    fn test_q_describe() {
+        let schema = get_q_schema();
+        let state = DynamicState::from_mode("soft", &schema).unwrap();
+
+        let description = state.describe(&schema);
+        println!("Q Description: {}", description);
+
+        // Should contain dimension names
+        assert!(description.contains("temperature"));
+        assert!(description.contains("toward"));
     }
 }
