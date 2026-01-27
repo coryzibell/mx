@@ -177,48 +177,48 @@ impl DynamicState {
                     // Build child symbol map
                     let mut child_sym_to_name: HashMap<&str, &str> = HashMap::new();
                     for child_name in dimensions.keys() {
-                            if let Some(child_sym) = s.symbols.get(child_name.as_str()) {
-                                child_sym_to_name.insert(child_sym.as_str(), child_name.as_str());
-                            }
-                        }
-
-                        // Find which child this is
-                        for (child_sym, &child_name) in &child_sym_to_name {
-                            if let Some(value_str) = child_part.strip_prefix(child_sym) {
-                                // Get or create nested HashMap
-                                let nested = values
-                                    .entry(parent_name.to_string())
-                                    .or_insert_with(|| StateValue::Nested(HashMap::new()));
-
-                                if let StateValue::Nested(nested_map) = nested
-                                    && let Some(child_dim) = dimensions.get(child_name)
-                                {
-                                    match child_dim {
-                                        Dimension::Float { .. } => {
-                                            if let Ok(v) = value_str.parse::<f32>() {
-                                                nested_map.insert(
-                                                    child_name.to_string(),
-                                                    StateValue::Float(v),
-                                                );
-                                            }
-                                        }
-                                        Dimension::Enum { .. } => {
-                                            let enum_val = rev_modality
-                                                .get(value_str)
-                                                .map(|s| s.to_string())
-                                                .unwrap_or_else(|| value_str.to_string());
-                                            nested_map.insert(
-                                                child_name.to_string(),
-                                                StateValue::Enum(enum_val),
-                                            );
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                break;
-                            }
+                        if let Some(child_sym) = s.symbols.get(child_name.as_str()) {
+                            child_sym_to_name.insert(child_sym.as_str(), child_name.as_str());
                         }
                     }
+
+                    // Find which child this is
+                    for (child_sym, &child_name) in &child_sym_to_name {
+                        if let Some(value_str) = child_part.strip_prefix(child_sym) {
+                            // Get or create nested HashMap
+                            let nested = values
+                                .entry(parent_name.to_string())
+                                .or_insert_with(|| StateValue::Nested(HashMap::new()));
+
+                            if let StateValue::Nested(nested_map) = nested
+                                && let Some(child_dim) = dimensions.get(child_name)
+                            {
+                                match child_dim {
+                                    Dimension::Float { .. } => {
+                                        if let Ok(v) = value_str.parse::<f32>() {
+                                            nested_map.insert(
+                                                child_name.to_string(),
+                                                StateValue::Float(v),
+                                            );
+                                        }
+                                    }
+                                    Dimension::Enum { .. } => {
+                                        let enum_val = rev_modality
+                                            .get(value_str)
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_else(|| value_str.to_string());
+                                        nested_map.insert(
+                                            child_name.to_string(),
+                                            StateValue::Enum(enum_val),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             } else {
                 // Simple dimension
                 for (sym, &name) in &top_level_sym_to_name {
