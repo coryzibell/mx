@@ -1482,8 +1482,12 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                                         println!("  {}:", key);
                                         for (nk, nv) in n {
                                             match nv {
-                                                state::StateValue::Float(f) => println!("    {}: {:.1}", nk, f),
-                                                state::StateValue::Enum(e) => println!("    {}: {}", nk, e),
+                                                state::StateValue::Float(f) => {
+                                                    println!("    {}: {:.1}", nk, f)
+                                                }
+                                                state::StateValue::Enum(e) => {
+                                                    println!("    {}: {}", nk, e)
+                                                }
                                                 _ => {}
                                             }
                                         }

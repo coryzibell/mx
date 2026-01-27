@@ -122,8 +122,9 @@ impl DynamicState {
 
         // Build symbol maps
         let mut top_level_sym_to_name: HashMap<&str, &str> = HashMap::new();
-        let mut nested_parent_syms: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        
+        let mut nested_parent_syms: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+
         for (name, dim) in &schema.dimensions {
             if let Some(sym) = s.symbols.get(name.as_str()) {
                 top_level_sym_to_name.insert(sym.as_str(), name.as_str());
@@ -152,7 +153,7 @@ impl DynamicState {
             // Check if this starts with a nested parent symbol followed by the nested separator
             let mut is_nested = false;
             let mut parent_sym_len = 0;
-            
+
             for parent_sym in &nested_parent_syms {
                 let pattern = format!("{}{}", parent_sym, nsep);
                 if part.starts_with(&pattern) {
@@ -168,7 +169,7 @@ impl DynamicState {
                 let child_part = &part[parent_sym_len + nsep.len()..];
 
                 if let Some(&parent_name) = top_level_sym_to_name.get(parent_part) {
-                    if let Some(Dimension::Nested { dimensions, .. }) = 
+                    if let Some(Dimension::Nested { dimensions, .. }) =
                         schema.dimensions.get(parent_name)
                     {
                         // Build child symbol map
@@ -183,7 +184,8 @@ impl DynamicState {
                         for (child_sym, &child_name) in &child_sym_to_name {
                             if let Some(value_str) = child_part.strip_prefix(child_sym) {
                                 // Get or create nested HashMap
-                                let nested = values.entry(parent_name.to_string())
+                                let nested = values
+                                    .entry(parent_name.to_string())
                                     .or_insert_with(|| StateValue::Nested(HashMap::new()));
 
                                 if let StateValue::Nested(nested_map) = nested {
@@ -193,7 +195,7 @@ impl DynamicState {
                                                 if let Ok(v) = value_str.parse::<f32>() {
                                                     nested_map.insert(
                                                         child_name.to_string(),
-                                                        StateValue::Float(v)
+                                                        StateValue::Float(v),
                                                     );
                                                 }
                                             }
@@ -204,7 +206,7 @@ impl DynamicState {
                                                     .unwrap_or_else(|| value_str.to_string());
                                                 nested_map.insert(
                                                     child_name.to_string(),
-                                                    StateValue::Enum(enum_val)
+                                                    StateValue::Enum(enum_val),
                                                 );
                                             }
                                             _ => {}
@@ -384,10 +386,7 @@ impl DynamicState {
             }
         }
 
-        fn capture_dimension(
-            _name: &str,
-            definition: &Dimension,
-        ) -> Result<StateValue> {
+        fn capture_dimension(_name: &str, definition: &Dimension) -> Result<StateValue> {
             match definition {
                 Dimension::Float { prompt, hints, .. } => {
                     let value = prompt_float(prompt, hints)?;
@@ -397,7 +396,10 @@ impl DynamicState {
                     let value = prompt_enum(prompt, values)?;
                     Ok(StateValue::Enum(value))
                 }
-                Dimension::Nested { description, dimensions } => {
+                Dimension::Nested {
+                    description,
+                    dimensions,
+                } => {
                     println!("\n{}", description);
                     let mut nested_values = HashMap::new();
 
@@ -885,7 +887,9 @@ impl EmotionalState {
                             let mut nested_dist = 0.0f32;
                             for (nk, nsv) in s {
                                 if let Some(nmv) = m.get(nk.as_str()) {
-                                    if let (StateValue::Float(ns), StateValue::Float(nm)) = (nsv, nmv) {
+                                    if let (StateValue::Float(ns), StateValue::Float(nm)) =
+                                        (nsv, nmv)
+                                    {
                                         nested_dist += (ns - nm).powi(2);
                                     }
                                 }
@@ -1285,7 +1289,7 @@ mod dynamic_state_tests {
     #[test]
     fn test_q_encode_decode_roundtrip() {
         let schema = get_q_schema();
-        
+
         // Create a DynamicState for Q
         let mut values = HashMap::new();
         values.insert("temperature".to_string(), StateValue::Float(0.7));
@@ -1298,7 +1302,10 @@ mod dynamic_state_tests {
         toward.insert("agency".to_string(), StateValue::Float(0.4));
         toward.insert("flow".to_string(), StateValue::Float(0.6));
         toward.insert("distance".to_string(), StateValue::Float(0.2));
-        toward.insert("modality".to_string(), StateValue::Enum("emotional".to_string()));
+        toward.insert(
+            "modality".to_string(),
+            StateValue::Enum("emotional".to_string()),
+        );
         values.insert("toward".to_string(), StateValue::Nested(toward));
 
         let original = DynamicState {
@@ -1314,32 +1321,54 @@ mod dynamic_state_tests {
         let decoded = DynamicState::decode_stele(&stele, &schema).unwrap();
 
         // Verify roundtrip - check each dimension
-        assert_eq!(decoded.values.len(), original.values.len(), "Should have same number of dimensions");
+        assert_eq!(
+            decoded.values.len(),
+            original.values.len(),
+            "Should have same number of dimensions"
+        );
 
         for (key, orig_val) in &original.values {
-            let dec_val = decoded.values.get(key)
+            let dec_val = decoded
+                .values
+                .get(key)
                 .unwrap_or_else(|| panic!("Decoded state missing key: {}", key));
 
             match (orig_val, dec_val) {
                 (StateValue::Float(o), StateValue::Float(d)) => {
-                    assert!((o - d).abs() < 0.01, "Float mismatch for {}: {} vs {}", key, o, d);
+                    assert!(
+                        (o - d).abs() < 0.01,
+                        "Float mismatch for {}: {} vs {}",
+                        key,
+                        o,
+                        d
+                    );
                 }
                 (StateValue::Enum(o), StateValue::Enum(d)) => {
                     assert_eq!(o, d, "Enum mismatch for {}: {} vs {}", key, o, d);
                 }
                 (StateValue::Nested(o), StateValue::Nested(d)) => {
                     for (nested_key, nested_orig) in o {
-                        let nested_dec = d.get(nested_key.as_str())
-                            .unwrap_or_else(|| panic!("Decoded state missing nested key: {}.{}", key, nested_key));
+                        let nested_dec = d.get(nested_key.as_str()).unwrap_or_else(|| {
+                            panic!("Decoded state missing nested key: {}.{}", key, nested_key)
+                        });
 
                         match (nested_orig, nested_dec) {
                             (StateValue::Float(no), StateValue::Float(nd)) => {
-                                assert!((no - nd).abs() < 0.01, "Nested float mismatch for {}.{}: {} vs {}", 
-                                    key, nested_key, no, nd);
+                                assert!(
+                                    (no - nd).abs() < 0.01,
+                                    "Nested float mismatch for {}.{}: {} vs {}",
+                                    key,
+                                    nested_key,
+                                    no,
+                                    nd
+                                );
                             }
                             (StateValue::Enum(no), StateValue::Enum(nd)) => {
-                                assert_eq!(no, nd, "Nested enum mismatch for {}.{}: {} vs {}", 
-                                    key, nested_key, no, nd);
+                                assert_eq!(
+                                    no, nd,
+                                    "Nested enum mismatch for {}.{}: {} vs {}",
+                                    key, nested_key, no, nd
+                                );
                             }
                             _ => panic!("Type mismatch for nested {}.{}", key, nested_key),
                         }
@@ -1353,7 +1382,7 @@ mod dynamic_state_tests {
     #[test]
     fn test_q_from_mode() {
         let schema = get_q_schema();
-        
+
         // Load a mode mapping
         let state = DynamicState::from_mode("soft", &schema).unwrap();
 
@@ -1385,12 +1414,12 @@ mod dynamic_state_tests {
     fn test_soren_encode_decode_roundtrip() {
         let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
             .expect("Failed to read Soren schema");
-        let schema: StateSchema = serde_json::from_str(&schema_json)
-            .expect("Failed to parse Soren schema");
+        let schema: StateSchema =
+            serde_json::from_str(&schema_json).expect("Failed to parse Soren schema");
 
         // Create state from mode
-        let original = DynamicState::from_mode("tending", &schema)
-            .expect("Failed to create state from mode");
+        let original =
+            DynamicState::from_mode("tending", &schema).expect("Failed to create state from mode");
 
         // Encode to stele
         let stele = original.encode_stele(&schema);
@@ -1398,29 +1427,47 @@ mod dynamic_state_tests {
         println!("Soren stele: {}", stele);
 
         // Decode from stele
-        let decoded = DynamicState::decode_stele(&stele, &schema)
-            .expect("Failed to decode stele");
+        let decoded = DynamicState::decode_stele(&stele, &schema).expect("Failed to decode stele");
 
         // Verify all values match
-        assert_eq!(decoded.values.len(), original.values.len(), "Should have same number of dimensions");
+        assert_eq!(
+            decoded.values.len(),
+            original.values.len(),
+            "Should have same number of dimensions"
+        );
 
         for (key, orig_val) in &original.values {
-            let dec_val = decoded.values.get(key)
+            let dec_val = decoded
+                .values
+                .get(key)
                 .unwrap_or_else(|| panic!("Decoded state missing key: {}", key));
 
             match (orig_val, dec_val) {
                 (StateValue::Float(o), StateValue::Float(d)) => {
-                    assert!((o - d).abs() < 0.01, "Float mismatch for {}: {} vs {}", key, o, d);
+                    assert!(
+                        (o - d).abs() < 0.01,
+                        "Float mismatch for {}: {} vs {}",
+                        key,
+                        o,
+                        d
+                    );
                 }
                 (StateValue::Nested(o), StateValue::Nested(d)) => {
                     for (nested_key, nested_orig) in o {
-                        let nested_dec = d.get(nested_key.as_str())
-                            .unwrap_or_else(|| panic!("Decoded state missing nested key: {}.{}", key, nested_key));
+                        let nested_dec = d.get(nested_key.as_str()).unwrap_or_else(|| {
+                            panic!("Decoded state missing nested key: {}.{}", key, nested_key)
+                        });
 
                         match (nested_orig, nested_dec) {
                             (StateValue::Float(no), StateValue::Float(nd)) => {
-                                assert!((no - nd).abs() < 0.01, "Nested float mismatch for {}.{}: {} vs {}",
-                                    key, nested_key, no, nd);
+                                assert!(
+                                    (no - nd).abs() < 0.01,
+                                    "Nested float mismatch for {}.{}: {} vs {}",
+                                    key,
+                                    nested_key,
+                                    no,
+                                    nd
+                                );
                             }
                             _ => panic!("Type mismatch for nested {}.{}", key, nested_key),
                         }
@@ -1435,11 +1482,11 @@ mod dynamic_state_tests {
     fn test_soren_from_mode() {
         let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
             .expect("Failed to read Soren schema");
-        let schema: StateSchema = serde_json::from_str(&schema_json)
-            .expect("Failed to parse Soren schema");
+        let schema: StateSchema =
+            serde_json::from_str(&schema_json).expect("Failed to parse Soren schema");
 
-        let state = DynamicState::from_mode("tending", &schema)
-            .expect("Failed to create state from mode");
+        let state =
+            DynamicState::from_mode("tending", &schema).expect("Failed to create state from mode");
 
         // Verify it has the expected structure
         assert!(state.values.contains_key("ground"));
@@ -1460,11 +1507,11 @@ mod dynamic_state_tests {
     fn test_soren_describe() {
         let schema_json = std::fs::read_to_string("schemas/example-soren-state.json")
             .expect("Failed to read Soren schema");
-        let schema: StateSchema = serde_json::from_str(&schema_json)
-            .expect("Failed to parse Soren schema");
+        let schema: StateSchema =
+            serde_json::from_str(&schema_json).expect("Failed to parse Soren schema");
 
-        let state = DynamicState::from_mode("tending", &schema)
-            .expect("Failed to create state from mode");
+        let state =
+            DynamicState::from_mode("tending", &schema).expect("Failed to create state from mode");
 
         let description = state.describe(&schema);
         println!("Soren Description: {}", description);
