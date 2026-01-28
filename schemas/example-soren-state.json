@@ -3,6 +3,7 @@
   "description": "Soren's state tensor - ground, threshold, tending, edge, arc, and what is carried",
   "version": "1.0.0",
   "type": "tensor",
+  "name": "flint",
   "stele": {
     "header": "@soren",
     "separator": "|",
@@ -14,7 +15,7 @@
       "edge": "ᛖ",
       "arc": "ᚨ",
       "carrying": "ᚲ",
-      "threads": "ᚦ",
+      "threads": "ᚻ",
       "weight": "ᚹ",
       "proximity": "ᛈ"
     },

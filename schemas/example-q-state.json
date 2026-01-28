@@ -3,6 +3,7 @@
   "description": "Q's emotional tensor - temperature, entropy, gravity, depth, energy, and relational dynamics",
   "version": "1.0.0",
   "type": "tensor",
+  "name": "crewu",
   "stele": {
     "header": "@state",
     "separator": "|",
@@ -14,9 +15,9 @@
       "depth": "ᚨ",
       "energy": "ᚱ",
       "toward": "ᚥ",
-      "agency": "ᚦ",
-      "flow": "ᚨ",
-      "distance": "ᛁ",
+      "agency": "ᚷ",
+      "flow": "ᚹ",
+      "distance": "ᚺ",
       "modality": "ᛗ"
     },
     "modality_values": {

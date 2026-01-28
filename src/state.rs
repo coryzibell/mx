@@ -29,7 +29,7 @@ impl DynamicState {
     /// Encode to stele format using provided schema
     pub fn encode_stele(&self, schema: &StateSchema) -> String {
         let s = &schema.stele;
-        let mut parts = vec![s.header.clone()];
+        let mut parts = vec![format!("{}:{}", s.header, schema.name)];
 
         // Get dimension names in sorted order for deterministic output
         let mut dim_names: Vec<_> = schema.dimensions.keys().collect();
@@ -495,6 +495,7 @@ pub struct StateSchema {
     pub version: String,
     #[serde(rename = "type")]
     pub schema_type: String,
+    pub name: String,
     pub stele: SteleConfig,
     pub dimensions: HashMap<String, Dimension>,
     pub mode_mappings: HashMap<String, ModeMapping>,
@@ -643,10 +644,11 @@ impl EmotionalState {
         let sep = &s.separator;
         let nsep = &s.nested_separator;
 
-        // Format: @state|T0.7|E0.3|G0.6|D0.5|N0.8|>.A0.4|>.F0.6|>.I0.2|>.M{modality_symbol}
+        // Format: @state:crewu|T0.7|E0.3|G0.6|D0.5|N0.8|>.A0.4|>.F0.6|>.I0.2|>.M{modality_symbol}
         format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}:{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             s.header,
+            schema.name,
             sep, // 2
             sym_temp,
             self.temperature,
@@ -1162,6 +1164,7 @@ mod tests {
             "description": "Test schema",
             "version": "1.0.0",
             "type": "tensor",
+            "name": "test",
             "stele": {
                 "header": "@state",
                 "separator": "|",
@@ -1245,6 +1248,7 @@ mod tests {
             "description": "Test schema",
             "version": "1.0.0",
             "type": "tensor",
+            "name": "test",
             "stele": {
                 "header": "@state",
                 "separator": "|",
