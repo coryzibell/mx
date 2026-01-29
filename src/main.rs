@@ -1606,12 +1606,17 @@ struct FactRouting {
     tags: Vec<&'static str>,
 }
 
-/// Find an open thread by content match (fragile fallback)
+/// Find an open thread by content match
+///
+/// Uses normalized content comparison to handle whitespace/formatting differences.
+/// Properly parses JSON state instead of string matching.
 fn find_open_thread_by_content(
     db: &dyn store::KnowledgeStore,
     content: &str,
     agent_id: &str,
 ) -> Result<String> {
+    use crate::knowledge::KnowledgeEntry;
+
     let ctx = store::AgentContext::for_agent(agent_id);
     let filter = store::KnowledgeFilter {
         categories: Some(vec!["thread".to_string()]),
@@ -1619,20 +1624,24 @@ fn find_open_thread_by_content(
     };
 
     let threads = db.list_by_category("thread", &ctx, &filter)?;
+    let normalized_content = KnowledgeEntry::normalize_content(content);
 
     for thread in threads {
-        // Check if body matches and state is open
-        if let (Some(body), Some(summary)) = (&thread.body, &thread.summary)
-            && body == content
+        // Check if normalized body matches and state is open
+        if let Some(body) = &thread.body
+            && let Some(summary) = &thread.summary
             && let Ok(meta) = serde_json::from_str::<serde_json::Value>(summary)
             && let Some(state) = meta.get("state").and_then(|s| s.as_str())
             && state == "open"
         {
-            return Ok(thread.id);
+            let normalized_body = KnowledgeEntry::normalize_content(body);
+            if normalized_body == normalized_content {
+                return Ok(thread.id);
+            }
         }
     }
 
-    bail!("No open thread found matching content")
+    bail!("No open thread found matching content: '{}'", content)
 }
 
 fn route_fact_type(fact_type: &str) -> FactRouting {
@@ -1751,20 +1760,8 @@ fn auto_embed_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     // Initialize embedding provider
     let mut provider = FastEmbedProvider::new()?;
 
-    // Construct embedding text from title + summary/body + tags
-    let mut parts = vec![entry.title.clone()];
-
-    if let Some(summary) = &entry.summary {
-        parts.push(summary.clone());
-    } else if let Some(body) = &entry.body {
-        parts.push(body.chars().take(2000).collect());
-    }
-
-    if !entry.tags.is_empty() {
-        parts.push(format!("Tags: {}", entry.tags.join(", ")));
-    }
-
-    let embedding_text = parts.join("\n\n");
+    // Use the entry's embedding_text method (DRY - shared with other embedding paths)
+    let embedding_text = entry.embedding_text();
 
     // Generate embedding
     let embedding = provider.embed(&embedding_text)?;

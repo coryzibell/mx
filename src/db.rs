@@ -1237,9 +1237,71 @@ impl KnowledgeStore for Database {
         Ok(())
     }
 
-    fn query_recent_facts(&self, _days: i32) -> Result<Vec<KnowledgeEntry>> {
-        // SQLite backend doesn't support resonance decay queries - not implemented
-        anyhow::bail!("query_recent_facts requires SurrealDB backend")
+    fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend: graceful degradation - return recent ephemeral entries
+        // without decay computation (ordered by created_at instead of effective_resonance)
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, category_id, title, body, summary,
+                   source_project_id, source_agent_id, file_path,
+                   created_at, updated_at, content_hash,
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
+            FROM knowledge
+            WHERE ephemeral = 1
+            AND created_at > ?1
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let mut entries = stmt
+            .query_map(params![cutoff_str], |row| {
+                Ok(KnowledgeEntry {
+                    id: row.get(0)?,
+                    category_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    summary: row.get(4)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
+                    file_path: row.get(7)?,
+                    tags: vec![],
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
+                    session_id: row.get(13)?,
+                    ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Load tags for each entry
+        for entry in &mut entries {
+            entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
+        }
+
+        Ok(entries)
     }
 
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
