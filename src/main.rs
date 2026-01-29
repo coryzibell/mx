@@ -1687,6 +1687,20 @@ fn route_fact_type(fact_type: &str) -> FactRouting {
     }
 }
 
+/// Truncate a string to a maximum number of characters, adding "..." if truncated
+///
+/// This is UTF-8 safe - it counts characters, not bytes, avoiding panics on
+/// multi-byte characters like emoji.
+fn safe_truncate(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > max_chars {
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
 /// Resolve agent context from environment and flags
 fn resolve_agent_context(mine: bool, include_private: bool) -> store::AgentContext {
     match std::env::var("MX_CURRENT_AGENT") {
@@ -3351,13 +3365,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    let empty = String::new();
-                    let content = fact.body.as_ref().unwrap_or(&empty);
-                    let preview = if content.len() > 60 {
-                        format!("{}...", &content[..57])
-                    } else {
-                        content.clone()
-                    };
+                    let content = fact.body.as_deref().unwrap_or("");
+                    let preview = safe_truncate(content, 60);
 
                     if let Some(state) = state {
                         println!(
@@ -3446,13 +3455,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             .map(|dt| dt.format("%Y-%m-%d").to_string())
                             .unwrap_or_else(|| "unknown".to_string());
 
-                        let empty = String::new();
-                        let content = fact.body.as_ref().unwrap_or(&empty);
-                        let preview = if content.len() > 60 {
-                            format!("{}...", &content[..57])
-                        } else {
-                            content.clone()
-                        };
+                        let content = fact.body.as_deref().unwrap_or("");
+                        let preview = safe_truncate(content, 60);
 
                         println!(
                             "[{}] {}: {} ({}, resonance {})",
@@ -4800,4 +4804,58 @@ fn perform_migration(source_path: &str, config: &IndexConfig) -> Result<()> {
     println!("\nMigration complete!");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_safe_truncate_short_string() {
+        // String shorter than limit - no truncation
+        assert_eq!(safe_truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_safe_truncate_exact_length() {
+        // String exactly at limit - no truncation
+        assert_eq!(safe_truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_safe_truncate_long_string() {
+        // String longer than limit - truncated with "..."
+        assert_eq!(safe_truncate("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_safe_truncate_emoji() {
+        // Emoji (multi-byte UTF-8) - should not panic
+        let emoji_string = "Hello! A fox for you 5 times";
+        let result = safe_truncate(emoji_string, 15);
+        // Should truncate by character count, not bytes
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 15); // 12 chars + 3 for "..."
+    }
+
+    #[test]
+    fn test_safe_truncate_all_emoji() {
+        // All emoji string - should handle gracefully
+        let result = safe_truncate("aaaaaaaaaa", 5);
+        assert_eq!(result, "aa...");
+    }
+
+    #[test]
+    fn test_safe_truncate_empty() {
+        // Empty string
+        assert_eq!(safe_truncate("", 10), "");
+    }
+
+    #[test]
+    fn test_safe_truncate_very_small_limit() {
+        // Limit smaller than "..." length
+        let result = safe_truncate("hello world", 3);
+        // Should handle gracefully (saturating_sub prevents underflow)
+        assert_eq!(result, "...");
+    }
 }

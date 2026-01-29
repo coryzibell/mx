@@ -1626,54 +1626,6 @@ impl SurrealDatabase {
         Ok(())
     }
 
-    /// Find an open thread by content match
-    pub fn find_open_thread_by_content(
-        &self,
-        content: &str,
-        agent_id: &str,
-    ) -> Result<Option<String>> {
-        Self::runtime().block_on(self.find_open_thread_by_content_async(content, agent_id))
-    }
-
-    async fn find_open_thread_by_content_async(
-        &self,
-        content: &str,
-        _agent_id: &str,
-    ) -> Result<Option<String>> {
-        // Normalize content for comparison (lowercase, collapse whitespace)
-        let normalized = crate::knowledge::KnowledgeEntry::normalize_content(content);
-
-        // Query threads with open state
-        // Note: Using CONTAINS for JSON state check is acceptable since we control serialization.
-        // Using string::lowercase and CONTAINS for body to handle whitespace/case variations.
-        let sql = "SELECT meta::id(id) AS id, body
-             FROM knowledge
-             WHERE category = category:thread
-             AND summary CONTAINS '\"state\":\"open\"'
-             ORDER BY created_at DESC"
-            .to_string();
-
-        let mut response = with_db!(self, db, {
-            db.query(&sql).await.context("Failed to find open threads")
-        })?;
-
-        let results: Vec<serde_json::Value> = response.take(0)?;
-
-        // Check each thread's body with normalized comparison
-        for result in results {
-            if let Some(body) = result.get("body").and_then(|v| v.as_str())
-                && let Some(id_str) = result.get("id").and_then(|v| v.as_str())
-            {
-                let normalized_body = crate::knowledge::KnowledgeEntry::normalize_content(body);
-                if normalized_body == normalized {
-                    return Ok(Some(id_str.to_string()));
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Query recent ephemeral facts with decay computation
     pub fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         Self::runtime().block_on(self.query_recent_facts_async(days))
