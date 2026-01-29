@@ -241,6 +241,69 @@ impl StateTensor {
         })
     }
 
+    /// Parse named dimension values from a space-separated string
+    /// Format: "temp=0.8 entropy=0.75 agency=0.4 connection=0.9 weight=0.6"
+    /// Dimension names can be abbreviated (matches prefix of dimension ID)
+    pub fn parse_named_dimensions(schema: &TensorSchema, input: &str) -> Result<Self> {
+        use std::collections::HashMap;
+
+        // Parse the key=value pairs
+        let mut named_values: HashMap<String, f32> = HashMap::new();
+        for part in input.split_whitespace() {
+            let kv: Vec<&str> = part.split('=').collect();
+            if kv.len() != 2 {
+                bail!("Invalid dimension format '{}'. Expected 'name=value'", part);
+            }
+
+            let name = kv[0].trim().to_lowercase();
+            let value: f32 = kv[1]
+                .trim()
+                .parse()
+                .with_context(|| format!("Invalid value for dimension '{}': {}", name, kv[1]))?;
+
+            named_values.insert(name, value.clamp(0.0, 1.0));
+        }
+
+        // Match named values to schema dimensions (support abbreviations)
+        let mut values = Vec::with_capacity(schema.dimensions.len());
+        for dim in &schema.dimensions {
+            let dim_id_lower = dim.id.to_lowercase();
+
+            // Try exact match first
+            let value = if let Some(&v) = named_values.get(&dim_id_lower) {
+                v
+            } else {
+                // Try prefix match
+                let prefix_match = named_values
+                    .iter()
+                    .find(|(k, _)| dim_id_lower.starts_with(k.as_str()))
+                    .map(|(_, &v)| v);
+
+                match prefix_match {
+                    Some(v) => v,
+                    None => bail!(
+                        "No value provided for dimension '{}'. Available: {}",
+                        dim.id,
+                        schema
+                            .dimensions
+                            .iter()
+                            .map(|d| &d.id)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                }
+            };
+
+            values.push(value);
+        }
+
+        Ok(Self {
+            schema_id: schema.id.clone(),
+            values,
+        })
+    }
+
     /// Encode to the standard string format
     /// Format: @state:crewu|0.3|0.2|0.7|0.8|0.4
     pub fn encode(&self) -> String {
@@ -366,6 +429,86 @@ impl StateTensor {
         }
 
         parts.join(", ")
+    }
+
+    /// Format as self-documenting bootstrap output
+    /// Returns a multi-line string ready for session bootstrap:
+    /// - Line 1: Wake State with rune-encoded stele
+    /// - Line 2: Rune legend showing dimension mapping
+    /// - Line 3: Empty line
+    /// - Line 4: Human-readable description with interpolated anchors
+    pub fn format_bootstrap(&self, schema: &TensorSchema) -> Result<String> {
+        use std::fmt::Write;
+
+        let mut output = String::new();
+
+        // Line 1: Wake State with rune-encoded stele
+        writeln!(
+            &mut output,
+            "Wake State: {}",
+            self.encode_with_runes(schema)
+        )?;
+
+        // Line 2: Rune legend
+        let legend_parts: Vec<String> = schema
+            .dimensions
+            .iter()
+            .filter_map(|dim| dim.rune.as_ref().map(|rune| format!("{}={}", rune, dim.id)))
+            .collect();
+
+        if !legend_parts.is_empty() {
+            writeln!(&mut output, "({})", legend_parts.join(", "))?;
+        }
+
+        // Line 3: Empty line
+        writeln!(&mut output)?;
+
+        // Line 4: Human-readable description with interpolated anchors
+        let desc_parts: Vec<String> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(i, value)| {
+                schema.dimensions.get(i).map(|dim| {
+                    // Interpolate between low, mid, and high anchors
+                    let anchor_desc = self.interpolate_anchor_description(dim, *value);
+                    format!("{} ({:.1})", anchor_desc, value)
+                })
+            })
+            .collect();
+
+        write!(&mut output, "{}.", desc_parts.join(", "))?;
+
+        Ok(output)
+    }
+
+    /// Interpolate anchor description based on value
+    /// Returns a human-readable description interpolated from the schema's anchors
+    fn interpolate_anchor_description(&self, dim: &TensorDimension, value: f32) -> String {
+        // Get anchor descriptions
+        let low = &dim.anchors.low;
+        let high = &dim.anchors.high;
+
+        // For values < 0.33: use low anchor
+        // For values > 0.66: use high anchor
+        // For values 0.33-0.66: use mid anchor or "moderately {high}"
+        if value < 0.33 {
+            low.clone()
+        } else if value > 0.66 {
+            high.clone()
+        } else {
+            // Middle range - use mid anchor if available, otherwise blend
+            if let Some(mid) = &dim.anchors.mid {
+                mid.clone()
+            } else {
+                // Blend toward high if > 0.5, toward low if < 0.5
+                if value > 0.5 {
+                    format!("moderately {}", high)
+                } else {
+                    format!("moderately {}", low)
+                }
+            }
+        }
     }
 
     /// Get value for a dimension by ID
@@ -546,5 +689,109 @@ mod tests {
 
         // tensor1 should be closer because dim2 has lower weight (0.8 vs 1.0)
         assert!(dist1 < dist2);
+    }
+
+    #[test]
+    fn test_parse_named_dimensions() {
+        let schema = test_schema();
+
+        // Test full names
+        let tensor = StateTensor::parse_named_dimensions(&schema, "dim1=0.3 dim2=0.7").unwrap();
+        assert_eq!(tensor.schema_id, "test");
+        assert_eq!(tensor.values.len(), 2);
+        assert!((tensor.values[0] - 0.3).abs() < 0.01);
+        assert!((tensor.values[1] - 0.7).abs() < 0.01);
+
+        // Test case insensitivity
+        let tensor2 = StateTensor::parse_named_dimensions(&schema, "DIM1=0.4 DIM2=0.8").unwrap();
+        assert!((tensor2.values[0] - 0.4).abs() < 0.01);
+        assert!((tensor2.values[1] - 0.8).abs() < 0.01);
+
+        // Test abbreviations (prefix match)
+        let tensor3 = StateTensor::parse_named_dimensions(&schema, "d=0.5 dim2=0.6").unwrap();
+        assert!((tensor3.values[0] - 0.5).abs() < 0.01);
+        assert!((tensor3.values[1] - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_named_dimensions_missing() {
+        let schema = test_schema();
+
+        // Should error when dimension is missing
+        let result = StateTensor::parse_named_dimensions(&schema, "dim1=0.3");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No value provided for dimension 'dim2'")
+        );
+    }
+
+    #[test]
+    fn test_format_bootstrap() {
+        let schema = test_schema();
+        let tensor = StateTensor::new("test".to_string(), vec![0.8, 0.2]);
+
+        let output = tensor.format_bootstrap(&schema).unwrap();
+
+        // Should contain Wake State line
+        assert!(output.contains("Wake State:"));
+        // Should contain rune-encoded tensor
+        assert!(output.contains("@state:test"));
+        // Should contain legend
+        assert!(output.contains("A=dim1"));
+        assert!(output.contains("B=dim2"));
+        // Should contain human-readable descriptions
+        assert!(output.contains("high1"));
+        assert!(output.contains("low2"));
+    }
+
+    #[test]
+    fn test_interpolate_anchor_description() {
+        let dim = TensorDimension {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            rune: None,
+            anchors: DimensionAnchors {
+                low: "cold".to_string(),
+                mid: Some("balanced".to_string()),
+                high: "hot".to_string(),
+            },
+            default: 0.5,
+        };
+
+        let tensor = StateTensor::new("test".to_string(), vec![0.0]);
+
+        // Low value
+        assert_eq!(tensor.interpolate_anchor_description(&dim, 0.2), "cold");
+
+        // High value
+        assert_eq!(tensor.interpolate_anchor_description(&dim, 0.8), "hot");
+
+        // Mid value with mid anchor
+        assert_eq!(tensor.interpolate_anchor_description(&dim, 0.5), "balanced");
+
+        // Mid value without mid anchor
+        let dim_no_mid = TensorDimension {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            rune: None,
+            anchors: DimensionAnchors {
+                low: "cold".to_string(),
+                mid: None,
+                high: "hot".to_string(),
+            },
+            default: 0.5,
+        };
+
+        assert_eq!(
+            tensor.interpolate_anchor_description(&dim_no_mid, 0.6),
+            "moderately hot"
+        );
+        assert_eq!(
+            tensor.interpolate_anchor_description(&dim_no_mid, 0.4),
+            "moderately cold"
+        );
     }
 }

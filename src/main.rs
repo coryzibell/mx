@@ -207,6 +207,10 @@ enum StateCommands {
         /// Pipe-separated values (e.g., "0.3|0.2|0.7|0.8|0.4")
         values: Option<String>,
 
+        /// Named dimension values (e.g., "temp=0.8 entropy=0.75 agency=0.4")
+        #[arg(short = 'd', long, conflicts_with = "values", conflicts_with = "file")]
+        dimensions: Option<String>,
+
         /// Read values from file (one value per line or pipe-separated)
         #[arg(short, long, conflicts_with = "values")]
         file: Option<String>,
@@ -219,7 +223,7 @@ enum StateCommands {
         #[arg(short = 'g', long)]
         guided: bool,
 
-        /// Output format: tensor (default), json, human
+        /// Output format: tensor (default), json, human, bootstrap
         #[arg(short = 'o', long, default_value = "tensor")]
         format: String,
 
@@ -1361,6 +1365,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
         // === NEW TENSOR-BASED COMMANDS ===
         StateCommands::Encode {
             values,
+            dimensions,
             file,
             schema,
             guided,
@@ -1372,6 +1377,9 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             let tensor = if guided {
                 // Interactive guided mode
                 tensor::guided_capture(&schema)?
+            } else if let Some(dims_str) = dimensions {
+                // Parse named dimensions
+                tensor::StateTensor::parse_named_dimensions(&schema, &dims_str)?
             } else if let Some(file_path) = file {
                 // Read from file
                 let content = std::fs::read_to_string(&file_path)
@@ -1407,6 +1415,10 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                         println!("\nNearest mood: {} (distance: {:.3})", mood_name, distance);
                         println!("  {}", mood.description);
                     }
+                }
+                "bootstrap" => {
+                    // Self-documenting bootstrap format
+                    println!("{}", tensor.format_bootstrap(&schema)?);
                 }
                 _ => {
                     // tensor format
