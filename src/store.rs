@@ -130,6 +130,9 @@ pub trait KnowledgeStore {
     /// Update activation counts for loaded blooms
     fn update_activations(&self, ids: &[String]) -> Result<()>;
 
+    /// Query recent ephemeral facts with decay computation
+    fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
+
     // =========================================================================
     // TAG OPERATIONS
     // =========================================================================
@@ -222,6 +225,12 @@ pub trait KnowledgeStore {
 
     /// Delete relationship
     fn delete_relationship(&self, id: &str) -> Result<bool>;
+
+    /// Get facts extracted from a specific session
+    fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>>;
+
+    /// Get the session a fact was extracted from
+    fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>>;
 
     // =========================================================================
     // SESSION OPERATIONS

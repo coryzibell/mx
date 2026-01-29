@@ -1122,6 +1122,42 @@ impl Database {
             .execute("DELETE FROM relationships WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
+
+    /// Get facts extracted from a specific session
+    pub fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT from_entry_id
+            FROM relationships
+            WHERE to_entry_id = ?1 AND relationship_type = 'extracted_from'
+            "#,
+        )?;
+
+        let fact_ids = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(fact_ids)
+    }
+
+    /// Get the session a fact was extracted from
+    pub fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT to_entry_id
+            FROM relationships
+            WHERE from_entry_id = ?1 AND relationship_type = 'extracted_from'
+            LIMIT 1
+            "#,
+        )?;
+
+        let mut rows = stmt.query(params![fact_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 // ============================================================================
@@ -1199,6 +1235,11 @@ impl KnowledgeStore for Database {
     fn update_activations(&self, _ids: &[String]) -> Result<()> {
         // SQLite backend doesn't support activation tracking yet - no-op
         Ok(())
+    }
+
+    fn query_recent_facts(&self, _days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend doesn't support resonance decay queries - not implemented
+        anyhow::bail!("query_recent_facts requires SurrealDB backend")
     }
 
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
@@ -1291,6 +1332,14 @@ impl KnowledgeStore for Database {
 
     fn delete_relationship(&self, id: &str) -> Result<bool> {
         self.delete_relationship(id)
+    }
+
+    fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        self.get_facts_for_session(session_id)
+    }
+
+    fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        self.get_session_for_fact(fact_id)
     }
 
     fn list_tables(&self) -> Result<Vec<String>> {
