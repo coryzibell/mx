@@ -2203,8 +2203,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
                     {
                         if let Some(summary) = &thread_entry.summary {
-                            let mut meta: serde_json::Value =
-                                serde_json::from_str(summary).unwrap_or_else(|_| serde_json::json!({}));
+                            let mut meta: serde_json::Value = serde_json::from_str(summary)
+                                .unwrap_or_else(|_| serde_json::json!({}));
                             if let Some(obj) = meta.as_object_mut() {
                                 obj.insert(
                                     "state".to_string(),
@@ -2265,7 +2265,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let summary_json = serde_json::Value::Object(metadata).to_string();
 
                 // Merge routed tags with any user-provided tags
-                let mut tag_list: Vec<String> = routing.tags.iter().map(|s| s.to_string()).collect();
+                let mut tag_list: Vec<String> =
+                    routing.tags.iter().map(|s| s.to_string()).collect();
                 if let Some(t) = tags {
                     tag_list.extend(
                         t.split(',')
@@ -2354,8 +2355,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                                 let ctx = crate::store::AgentContext::public_only();
                                 if let Some(mut updated_entry) = db.get(&id, &ctx)? {
                                     updated_entry.embedding = Some(embedding);
-                                    updated_entry.embedding_model = Some(provider.model_id().to_string());
-                                    updated_entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+                                    updated_entry.embedding_model =
+                                        Some(provider.model_id().to_string());
+                                    updated_entry.embedded_at =
+                                        Some(chrono::Utc::now().to_rfc3339());
                                     db.upsert_knowledge(&updated_entry)?;
                                     println!("  Embedded: {}", provider.model_id());
                                 }
@@ -3338,13 +3341,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         })
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    let state = summary_json
-                        .as_ref()
-                        .and_then(|v: &serde_json::Value| {
-                            v.get("state")
-                                .and_then(|s| s.as_str())
-                                .map(String::from)
-                        });
+                    let state = summary_json.as_ref().and_then(|v: &serde_json::Value| {
+                        v.get("state").and_then(|s| s.as_str()).map(String::from)
+                    });
 
                     let date = fact
                         .created_at
@@ -4603,11 +4602,7 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
         .summary
         .as_ref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v: serde_json::Value| {
-            v.get("state")
-                .and_then(|s| s.as_str())
-                .map(String::from)
-        });
+        .and_then(|v: serde_json::Value| v.get("state").and_then(|s| s.as_str()).map(String::from));
 
     if let Some(state) = state {
         println!("Title:    {} ({})", entry.title, state);
