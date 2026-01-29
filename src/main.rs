@@ -15,6 +15,7 @@ mod state;
 mod store;
 mod surreal_db;
 mod sync;
+mod tensor;
 mod wake_ritual;
 mod wake_token;
 
@@ -201,15 +202,82 @@ enum ConvertCommands {
 
 #[derive(Subcommand)]
 enum StateCommands {
-    /// Encode emotional state to stele format
+    /// Encode state tensor from dimensional values (NEW - values-first)
     Encode {
-        /// Discrete mode name (soft, play, build, etc.) - maps to tensor values
+        /// Pipe-separated values (e.g., "0.3|0.2|0.7|0.8|0.4")
+        values: Option<String>,
+
+        /// Read values from file (one value per line or pipe-separated)
+        #[arg(short, long, conflicts_with = "values")]
+        file: Option<String>,
+
+        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        #[arg(short, long)]
+        schema: Option<String>,
+
+        /// Interactive guided mode - walks through dimensions with anchors
+        #[arg(short = 'g', long)]
+        guided: bool,
+
+        /// Output format: tensor (default), json, human
+        #[arg(short = 'o', long, default_value = "tensor")]
+        format: String,
+
+        /// Include runes in output
+        #[arg(long)]
+        runes: bool,
+    },
+
+    /// Decode state tensor to human-readable format
+    Decode {
+        /// Encoded tensor string (e.g., "@state:crewu|0.3|0.2|...")
+        input: Option<String>,
+
+        /// Schema ID (inferred from input if not specified)
+        #[arg(short, long)]
+        schema: Option<String>,
+
+        /// Output format: human (default), json, tensor, mood
+        #[arg(short = 'o', long, default_value = "human")]
+        format: String,
+    },
+
+    /// List available schemas
+    Schemas,
+
+    /// List moods for a schema
+    Moods {
+        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        #[arg(short, long)]
+        schema: Option<String>,
+
+        /// Show specific mood details
+        mood: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show schema information (dimensions, moods)
+    Info {
+        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        #[arg(short, long)]
+        schema: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    // === Legacy commands (backward compatibility) ===
+
+    /// [Legacy] Encode using mode-based mapping
+    #[command(hide = true)]
+    LegacyEncode {
+        /// Discrete mode name (soft, play, build, etc.)
         #[arg(short, long)]
         mode: Option<String>,
-
-        /// Individual dimension values (e.g., temp=0.7 entropy=0.3)
-        #[arg(short, long, value_delimiter = ' ')]
-        dimensions: Option<Vec<String>>,
 
         /// Interactive mode - prompts for each dimension
         #[arg(short, long)]
@@ -219,26 +287,13 @@ enum StateCommands {
         #[arg(short, long, default_value = "stele")]
         format: String,
 
-        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
+        /// Schema path
         #[arg(long)]
         schema: Option<String>,
     },
 
-    /// Decode stele-encoded state to human-readable format
-    Decode {
-        /// Stele-encoded state string (or reads from stdin if not provided)
-        input: Option<String>,
-
-        /// Output format: human (default), json, stele
-        #[arg(short, long, default_value = "human")]
-        format: String,
-
-        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
-        #[arg(long)]
-        schema: Option<String>,
-    },
-
-    /// Parse wake preference (old format or stele) from session-bootstrap
+    /// [Legacy] Parse wake preference from session-bootstrap
+    #[command(hide = true)]
     Parse {
         /// Path to session-bootstrap.md file
         #[arg(short, long)]
@@ -251,28 +306,7 @@ enum StateCommands {
         #[arg(short = 'F', long, default_value = "human")]
         format: String,
 
-        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
-        #[arg(long)]
-        schema: Option<String>,
-    },
-
-    /// Show available modes and their tensor mappings
-    Modes {
-        /// Show specific mode details
-        mode: Option<String>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
-        #[arg(long)]
-        schema: Option<String>,
-    },
-
-    /// Show schema information
-    Schema {
-        /// Schema path (defaults to: 1) MX_STATE_SCHEMA env var, 2) ~/.{MX_CURRENT_AGENT}/schemas/state.json, 3) ~/.crewu/schemas/emotional-state.json)
+        /// Schema path
         #[arg(long)]
         schema: Option<String>,
     },
@@ -1304,8 +1338,20 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
     use std::io::{self, Read as IoRead};
     use std::path::PathBuf;
 
-    // Helper to load schema
-    let load_schema = |custom_path: Option<String>| -> Result<state::StateSchema> {
+    // Helper to load tensor schema by ID or path
+    let load_tensor_schema = |schema_arg: Option<String>| -> Result<tensor::TensorSchema> {
+        match schema_arg {
+            Some(s) if s.contains('/') || s.contains('.') => {
+                // Looks like a path
+                tensor::TensorSchema::load(&PathBuf::from(s))
+            }
+            Some(id) => tensor::TensorSchema::load_by_id(&id),
+            None => tensor::TensorSchema::load_default(),
+        }
+    };
+
+    // Helper to load legacy state schema
+    let load_legacy_schema = |custom_path: Option<String>| -> Result<state::StateSchema> {
         match custom_path {
             Some(p) => state::load_schema(&PathBuf::from(p)),
             None => state::load_default_schema(),
@@ -1313,47 +1359,70 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
     };
 
     match cmd {
-        StateCommands::Encode {
-            mode,
-            dimensions,
-            interactive,
-            format,
-            schema,
-        } => {
-            let schema = load_schema(schema)?;
+        // === NEW TENSOR-BASED COMMANDS ===
 
-            let dynamic_state = if interactive {
-                // Interactive mode - prompt for each dimension
-                state::DynamicState::interactive_capture(&schema)?
-            } else if let Some(mode_name) = mode {
-                // Mode-based - map discrete mode to tensor
-                state::DynamicState::from_mode(&mode_name, &schema)?
-            } else if dimensions.is_some() {
-                // Manual dimensions not supported for schema-agnostic states
-                // Use interactive mode instead
-                bail!("Manual dimension specification is not supported. Use --mode or -i instead.");
+        StateCommands::Encode {
+            values,
+            file,
+            schema,
+            guided,
+            format,
+            runes,
+        } => {
+            let schema = load_tensor_schema(schema)?;
+
+            let tensor = if guided {
+                // Interactive guided mode
+                tensor::guided_capture(&schema)?
+            } else if let Some(file_path) = file {
+                // Read from file
+                let content = std::fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?;
+
+                // Try pipe-separated first, then newline-separated
+                let values_str = if content.contains('|') {
+                    content.trim().to_string()
+                } else {
+                    content.lines()
+                        .map(|l| l.trim())
+                        .filter(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("|")
+                };
+
+                tensor::StateTensor::parse_values(&schema, &values_str)?
+            } else if let Some(values_str) = values {
+                // Parse from argument
+                tensor::StateTensor::parse_values(&schema, &values_str)?
             } else {
-                // Default to... default mode
-                state::DynamicState::from_mode("default", &schema)?
+                // Default tensor
+                tensor::StateTensor::default_from_schema(&schema)
             };
 
             // Output in requested format
             match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
-                "human" => println!("{}", dynamic_state.describe(&schema)),
-                _ => println!("{}", dynamic_state.encode_stele(&schema)),
+                "json" => println!("{}", serde_json::to_string_pretty(&tensor)?),
+                "human" => {
+                    println!("{}", tensor.describe(&schema));
+                    if let Some((mood_name, mood, distance)) = tensor.nearest_mood(&schema) {
+                        println!("\nNearest mood: {} (distance: {:.3})", mood_name, distance);
+                        println!("  {}", mood.description);
+                    }
+                }
+                _ => {
+                    // tensor format
+                    if runes {
+                        println!("{}", tensor.encode_with_runes(&schema));
+                    } else {
+                        println!("{}", tensor.encode());
+                    }
+                }
             }
         }
 
-        StateCommands::Decode {
-            input,
-            format,
-            schema,
-        } => {
-            let schema = load_schema(schema)?;
-
+        StateCommands::Decode { input, schema, format } => {
             // Get input from arg or stdin
-            let stele = match input {
+            let input_str = match input {
                 Some(s) => s,
                 None => {
                     let mut buf = String::new();
@@ -1362,15 +1431,168 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 }
             };
 
-            let dynamic_state = state::DynamicState::decode_stele(&stele, &schema)?;
+            // Decode the tensor (schema ID is embedded in the string)
+            let tensor = tensor::StateTensor::decode(&input_str)?;
+
+            // Load schema (use argument if provided, otherwise use ID from tensor)
+            let schema = match schema {
+                Some(s) => load_tensor_schema(Some(s))?,
+                None => tensor::TensorSchema::load_by_id(&tensor.schema_id)?,
+            };
+
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&tensor)?),
+                "tensor" => println!("{}", tensor.encode()),
+                "mood" => {
+                    if let Some((mood_name, mood, distance)) = tensor.nearest_mood(&schema) {
+                        println!("{}", mood_name);
+                        println!("  Description: {}", mood.description);
+                        println!("  Distance: {:.3}", distance);
+                    } else {
+                        println!("(unnamed region)");
+                    }
+                }
+                _ => {
+                    // human format
+                    println!("{}", tensor.describe(&schema));
+                    if let Some((mood_name, mood, distance)) = tensor.nearest_mood(&schema) {
+                        println!("\nNearest mood: {} (distance: {:.3})", mood_name, distance);
+                        println!("  {}", mood.description);
+                    }
+                }
+            }
+        }
+
+        StateCommands::Schemas => {
+            let schemas = tensor::TensorSchema::list_available()?;
+
+            if schemas.is_empty() {
+                println!("No schemas found in ~/.crewu/schemas/");
+                println!("\nCreate a schema file (YAML or JSON) to get started.");
+            } else {
+                println!("Available schemas:\n");
+                for schema_id in schemas {
+                    match tensor::TensorSchema::load_by_id(&schema_id) {
+                        Ok(schema) => {
+                            println!("  {} - {} ({} dimensions, {} moods)",
+                                schema.id,
+                                schema.name,
+                                schema.dimensions.len(),
+                                schema.moods.len()
+                            );
+                        }
+                        Err(_) => {
+                            println!("  {} - (failed to load)", schema_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        StateCommands::Moods { schema, mood, json } => {
+            let schema = load_tensor_schema(schema)?;
+
+            if let Some(mood_name) = mood {
+                // Show specific mood
+                match schema.moods.get(&mood_name) {
+                    Some(mood_def) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&mood_def)?);
+                        } else {
+                            println!("Mood: {}", mood_name);
+                            println!("Description: {}", mood_def.description);
+                            println!("Tolerance: {:.2}", mood_def.tolerance);
+                            println!("\nTensor values:");
+                            for (i, value) in mood_def.tensor.iter().enumerate() {
+                                let dim_name = schema.dimensions.get(i)
+                                    .map(|d| d.name.as_str())
+                                    .unwrap_or("?");
+                                let weight = mood_def.weights.as_ref()
+                                    .and_then(|w| w.get(i))
+                                    .copied()
+                                    .unwrap_or(1.0);
+                                println!("  {}: {:.2} (weight: {:.2})", dim_name, value, weight);
+                            }
+                        }
+                    }
+                    None => {
+                        eprintln!("Unknown mood: {}", mood_name);
+                        eprintln!("Available moods: {}", schema.moods.keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "));
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // List all moods
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&schema.moods)?);
+                } else {
+                    println!("Moods for schema '{}' ({}):\n", schema.id, schema.name);
+                    for (name, mood_def) in &schema.moods {
+                        let tensor_str: Vec<String> = mood_def.tensor.iter()
+                            .map(|v| format!("{:.2}", v))
+                            .collect();
+                        println!("  {:12} [{}]", name, tensor_str.join("|"));
+                        println!("               {}", mood_def.description);
+                    }
+                }
+            }
+        }
+
+        StateCommands::Info { schema, json } => {
+            let schema = load_tensor_schema(schema)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&schema)?);
+            } else {
+                println!("Schema: {} ({})", schema.name, schema.id);
+                println!("Version: {}", schema.version);
+                println!();
+                println!("Dimensions ({}):", schema.dimensions.len());
+                for dim in &schema.dimensions {
+                    let rune = dim.rune.as_ref()
+                        .map(|r| format!(" {}", r))
+                        .unwrap_or_default();
+                    println!("  {}{}:", dim.name, rune);
+                    println!("    Low:  {}", dim.anchors.low);
+                    if let Some(mid) = &dim.anchors.mid {
+                        println!("    Mid:  {}", mid);
+                    }
+                    println!("    High: {}", dim.anchors.high);
+                    println!("    Default: {:.2}", dim.default);
+                }
+                println!();
+                println!("Moods ({}):", schema.moods.len());
+                for (name, mood) in &schema.moods {
+                    println!("  {:12} - {} (tol: {:.2})", name, mood.description, mood.tolerance);
+                }
+            }
+        }
+
+        // === LEGACY COMMANDS (backward compatibility) ===
+
+        StateCommands::LegacyEncode {
+            mode,
+            interactive,
+            format,
+            schema,
+        } => {
+            let schema = load_legacy_schema(schema)?;
+
+            let dynamic_state = if interactive {
+                state::DynamicState::interactive_capture(&schema)?
+            } else if let Some(mode_name) = mode {
+                state::DynamicState::from_mode(&mode_name, &schema)?
+            } else {
+                state::DynamicState::from_mode("default", &schema)?
+            };
 
             match format.as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
-                "stele" => println!("{}", dynamic_state.encode_stele(&schema)),
-                _ => {
-                    println!("{}", dynamic_state.describe(&schema));
-                    // Note: closest_mode calculation removed - would need to be implemented for DynamicState
-                }
+                "human" => println!("{}", dynamic_state.describe(&schema)),
+                _ => println!("{}", dynamic_state.encode_stele(&schema)),
             }
         }
 
@@ -1380,13 +1602,11 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             format,
             schema,
         } => {
-            let schema = load_schema(schema)?;
+            let schema = load_legacy_schema(schema)?;
 
-            // Get preference string from file or arg
             let pref_str = if let Some(pref) = preference {
                 pref
             } else {
-                // Read from file (default to session-bootstrap.md)
                 let path = file.unwrap_or_else(|| {
                     dirs::home_dir()
                         .map(|h| h.join(".crewu/swap/session-bootstrap.md"))
@@ -1397,7 +1617,6 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read file: {}", path))?;
 
-                // Find Wake Preference or Wake State line (check for schema header dynamically)
                 content
                     .lines()
                     .find(|line| {
@@ -1415,7 +1634,6 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
                 "stele" => println!("{}", dynamic_state.encode_stele(&schema)),
                 "mode" => {
-                    // Note: closest_mode calculation removed - would need to be implemented for DynamicState
                     println!("Mode calculation not yet implemented for DynamicState");
                 }
                 _ => {
@@ -1424,128 +1642,6 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                     println!("{}", dynamic_state.describe(&schema));
                 }
             }
-        }
-
-        StateCommands::Modes { mode, json, schema } => {
-            let schema = load_schema(schema)?;
-
-            if let Some(mode_name) = mode {
-                // Show specific mode
-                match schema.mode_mappings.get(&mode_name) {
-                    Some(mapping) => {
-                        if json {
-                            println!("{}", serde_json::to_string_pretty(&mapping)?);
-                        } else {
-                            println!("Mode: {}", mode_name);
-                            println!();
-                            for (key, value) in mapping {
-                                match value {
-                                    state::StateValue::Float(f) => println!("  {}: {:.1}", key, f),
-                                    state::StateValue::Enum(e) => println!("  {}: {}", key, e),
-                                    state::StateValue::Nested(n) => {
-                                        println!("  {}:", key);
-                                        for (nk, nv) in n {
-                                            match nv {
-                                                state::StateValue::Float(f) => {
-                                                    println!("    {}: {:.1}", nk, f)
-                                                }
-                                                state::StateValue::Enum(e) => {
-                                                    println!("    {}: {}", nk, e)
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        eprintln!("Unknown mode: {}", mode_name);
-                        eprintln!(
-                            "Available modes: {}",
-                            schema
-                                .mode_mappings
-                                .keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                // List all modes
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&schema.mode_mappings)?);
-                } else {
-                    println!("Available modes:\n");
-                    for (name, mapping) in &schema.mode_mappings {
-                        let dynamic_state = state::DynamicState {
-                            schema_id: schema.title.clone(),
-                            values: mapping.clone(),
-                        };
-                        println!("  {:10} - {}", name, dynamic_state.describe(&schema));
-                    }
-                }
-            }
-        }
-
-        StateCommands::Schema { schema } => {
-            let schema = load_schema(schema)?;
-            println!("Schema: {} v{}", schema.title, schema.version);
-            println!();
-            println!("Dimensions:");
-            for (name, dim) in &schema.dimensions {
-                match dim {
-                    state::Dimension::Float { description, .. } => {
-                        println!("  {} (float): {}", name, description);
-                    }
-                    state::Dimension::Enum {
-                        values,
-                        description,
-                        ..
-                    } => {
-                        println!("  {} (enum: {}): {}", name, values.join("|"), description);
-                    }
-                    state::Dimension::Nested {
-                        description,
-                        dimensions: nested,
-                    } => {
-                        println!("  {} (nested): {}", name, description);
-                        for (nested_name, nested_dim) in nested {
-                            match nested_dim {
-                                state::Dimension::Float { description, .. } => {
-                                    println!("    {} (float): {}", nested_name, description);
-                                }
-                                state::Dimension::Enum {
-                                    values,
-                                    description,
-                                    ..
-                                } => {
-                                    println!(
-                                        "    {} (enum: {}): {}",
-                                        nested_name,
-                                        values.join("|"),
-                                        description
-                                    );
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-            println!();
-            println!(
-                "Modes: {}",
-                schema
-                    .mode_mappings
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
         }
     }
 
