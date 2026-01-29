@@ -79,18 +79,6 @@ DEFINE INDEX IF NOT EXISTS tag_name ON tag FIELDS name UNIQUE;
 -- CORE TABLES
 -- =============================================================================
 
--- Atomic facts - lightweight layer over session summaries
-DEFINE TABLE IF NOT EXISTS fact SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS fact_type ON fact TYPE string;
-DEFINE FIELD IF NOT EXISTS content ON fact TYPE string;
-DEFINE FIELD IF NOT EXISTS agent ON fact TYPE string;
-DEFINE FIELD IF NOT EXISTS session_id ON fact TYPE string;  -- links to existing session summary (kn-xxx)
-DEFINE FIELD IF NOT EXISTS created_at ON fact TYPE datetime DEFAULT time::now();
-DEFINE FIELD IF NOT EXISTS date ON fact TYPE string;  -- YYYY-MM-DD for easy grouping
-DEFINE INDEX IF NOT EXISTS fact_agent ON fact FIELDS agent;
-DEFINE INDEX IF NOT EXISTS fact_date ON fact FIELDS date;
-DEFINE INDEX IF NOT EXISTS fact_session ON fact FIELDS session_id;
-
 -- Sessions
 DEFINE TABLE IF NOT EXISTS session SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS session_type ON session TYPE record<session_type>;
