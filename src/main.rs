@@ -289,17 +289,17 @@ enum FactCommands {
     /// Add a new atomic fact
     Add {
         #[arg(long)]
-        r#type: String,  // fact type
+        r#type: String, // fact type
         #[arg(long)]
         content: String,
         #[arg(long)]
-        session: String,  // session ID to link to
+        session: String, // session ID to link to
         #[arg(long, default_value = "3")]
         resonance: i32,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
-        thread_id: Option<String>,  // for thread_closed
+        thread_id: Option<String>, // for thread_closed
     },
     /// List recent facts with decay
     Recent {
@@ -309,13 +309,9 @@ enum FactCommands {
         format: String,
     },
     /// List facts for a session
-    ForSession {
-        session_id: String,
-    },
+    ForSession { session_id: String },
     /// Get the session a fact was extracted from
-    FactSession {
-        fact_id: String,
-    },
+    FactSession { fact_id: String },
     /// Update a fact
     Update {
         fact_id: String,
@@ -323,9 +319,7 @@ enum FactCommands {
         content: Option<String>,
     },
     /// Delete a fact
-    Delete {
-        fact_id: String,
-    },
+    Delete { fact_id: String },
 }
 
 #[derive(Subcommand)]
@@ -1610,7 +1604,11 @@ struct FactRouting {
 }
 
 /// Find an open thread by content match (fragile fallback)
-fn find_open_thread_by_content(db: &dyn store::KnowledgeStore, content: &str, agent_id: &str) -> Result<String> {
+fn find_open_thread_by_content(
+    db: &dyn store::KnowledgeStore,
+    content: &str,
+    agent_id: &str,
+) -> Result<String> {
     let ctx = store::AgentContext::for_agent(agent_id);
     let filter = store::KnowledgeFilter {
         categories: Some(vec!["thread".to_string()]),
@@ -1621,17 +1619,13 @@ fn find_open_thread_by_content(db: &dyn store::KnowledgeStore, content: &str, ag
 
     for thread in threads {
         // Check if body matches and state is open
-        if let (Some(body), Some(summary)) = (&thread.body, &thread.summary) {
-            if body == content {
-                // Check if state is open
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(summary) {
-                    if let Some(state) = meta.get("state").and_then(|s| s.as_str()) {
-                        if state == "open" {
-                            return Ok(thread.id);
-                        }
-                    }
-                }
-            }
+        if let (Some(body), Some(summary)) = (&thread.body, &thread.summary)
+            && body == content
+            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(summary)
+            && let Some(state) = meta.get("state").and_then(|s| s.as_str())
+            && state == "open"
+        {
+            return Ok(thread.id);
         }
     }
 
@@ -1642,37 +1636,40 @@ fn route_fact_type(fact_type: &str) -> FactRouting {
     match fact_type {
         "decision" => FactRouting {
             category: "decision",
-            tags: vec![]
+            tags: vec![],
         },
         "insight" => FactRouting {
             category: "insight",
-            tags: vec![]
+            tags: vec![],
         },
         "person" => FactRouting {
             category: "reference",
-            tags: vec!["person"]
+            tags: vec!["person"],
         },
         "quote" => FactRouting {
             category: "reference",
-            tags: vec!["quote"]
+            tags: vec!["quote"],
         },
         "thread_opened" => FactRouting {
             category: "thread",
-            tags: vec!["question"]
+            tags: vec!["question"],
         },
         "commitment" => FactRouting {
             category: "thread",
-            tags: vec!["commitment"]
+            tags: vec!["commitment"],
         },
         "thread_closed" => FactRouting {
             category: "thread",
-            tags: vec![]
+            tags: vec![],
         },
         unknown => {
-            eprintln!("Warning: unknown fact type '{}', defaulting to insight", unknown);
+            eprintln!(
+                "Warning: unknown fact type '{}', defaulting to insight",
+                unknown
+            );
             FactRouting {
                 category: "insight",
-                tags: vec![]
+                tags: vec![],
             }
         }
     }
@@ -1680,7 +1677,14 @@ fn route_fact_type(fact_type: &str) -> FactRouting {
 
 fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
     match cmd {
-        FactCommands::Add { r#type, content, session, resonance, agent, thread_id } => {
+        FactCommands::Add {
+            r#type,
+            content,
+            session,
+            resonance,
+            agent,
+            thread_id,
+        } => {
             use crate::knowledge::KnowledgeEntry;
 
             let config = IndexConfig::default();
@@ -1705,13 +1709,18 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
                 };
 
                 // Update existing thread to closed state
-                if let Some(mut thread_entry) = db.get(&tid, &store::AgentContext::for_agent(&agent_id))? {
+                if let Some(mut thread_entry) =
+                    db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
+                {
                     // Update the summary metadata to mark as closed
                     if let Some(summary) = &thread_entry.summary {
-                        let mut meta: serde_json::Value = serde_json::from_str(summary)
-                            .unwrap_or_else(|_| serde_json::json!({}));
+                        let mut meta: serde_json::Value =
+                            serde_json::from_str(summary).unwrap_or_else(|_| serde_json::json!({}));
                         if let Some(obj) = meta.as_object_mut() {
-                            obj.insert("state".to_string(), serde_json::Value::String("closed".to_string()));
+                            obj.insert(
+                                "state".to_string(),
+                                serde_json::Value::String("closed".to_string()),
+                            );
                         }
                         thread_entry.summary = Some(meta.to_string());
                         db.upsert_knowledge(&thread_entry)?;
@@ -1739,13 +1748,25 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
 
             // Build metadata JSON
             let mut metadata = serde_json::Map::new();
-            metadata.insert("fact_type".to_string(), serde_json::Value::String(r#type.clone()));
-            metadata.insert("agent".to_string(), serde_json::Value::String(agent_id.clone()));
-            metadata.insert("date".to_string(), serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()));
+            metadata.insert(
+                "fact_type".to_string(),
+                serde_json::Value::String(r#type.clone()),
+            );
+            metadata.insert(
+                "agent".to_string(),
+                serde_json::Value::String(agent_id.clone()),
+            );
+            metadata.insert(
+                "date".to_string(),
+                serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
+            );
 
             // Add state field for threads
             if routing.category == "thread" {
-                metadata.insert("state".to_string(), serde_json::Value::String("open".to_string()));
+                metadata.insert(
+                    "state".to_string(),
+                    serde_json::Value::String("open".to_string()),
+                );
             }
 
             let summary_json = serde_json::Value::Object(metadata).to_string();
@@ -1799,7 +1820,10 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             // Verify session exists before creating relationship
             let ctx = crate::store::AgentContext::public_only();
             if db.get(&session_ref, &ctx)?.is_none() {
-                eprintln!("Warning: Session {} not found - relationship not created", session_ref);
+                eprintln!(
+                    "Warning: Session {} not found - relationship not created",
+                    session_ref
+                );
             } else {
                 db.add_relationship(&id, &session_ref, "extracted_from")?;
             }
@@ -1823,9 +1847,15 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
                 let json_facts: Vec<serde_json::Value> = facts
                     .iter()
                     .map(|f| {
-                        let fact_type = f.summary.as_ref()
+                        let fact_type = f
+                            .summary
+                            .as_ref()
                             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                            .and_then(|v: serde_json::Value| v.get("fact_type").and_then(|t| t.as_str()).map(String::from));
+                            .and_then(|v: serde_json::Value| {
+                                v.get("fact_type")
+                                    .and_then(|t| t.as_str())
+                                    .map(String::from)
+                            });
 
                         serde_json::json!({
                             "id": f.id,
@@ -1841,16 +1871,24 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
                 // Text output
                 for fact in facts {
                     // Extract fact type from summary
-                    let fact_type = fact.summary
+                    let fact_type = fact
+                        .summary
                         .as_ref()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v: serde_json::Value| v.get("fact_type").and_then(|t| t.as_str()).map(String::from))
+                        .and_then(|v: serde_json::Value| {
+                            v.get("fact_type")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
                         .unwrap_or_else(|| "unknown".to_string());
 
                     // Format date
-                    let date = fact.created_at
+                    let date = fact
+                        .created_at
                         .as_ref()
-                        .and_then(|dt_str: &String| chrono::DateTime::parse_from_rfc3339(dt_str).ok())
+                        .and_then(|dt_str: &String| {
+                            chrono::DateTime::parse_from_rfc3339(dt_str).ok()
+                        })
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
@@ -1863,12 +1901,9 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
                         content.clone()
                     };
 
-                    println!("[{}] {}: {} ({}, resonance {})",
-                        date,
-                        fact_type,
-                        preview,
-                        fact.id,
-                        fact.resonance
+                    println!(
+                        "[{}] {}: {} ({}, resonance {})",
+                        date, fact_type, preview, fact.id, fact.resonance
                     );
                 }
             }
@@ -1904,16 +1939,24 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             for fact_id in fact_ids {
                 if let Some(fact) = db.get(&fact_id, &ctx)? {
                     // Extract fact type from summary metadata
-                    let fact_type = fact.summary
+                    let fact_type = fact
+                        .summary
                         .as_ref()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v: serde_json::Value| v.get("fact_type").and_then(|t| t.as_str()).map(String::from))
+                        .and_then(|v: serde_json::Value| {
+                            v.get("fact_type")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
                         .unwrap_or_else(|| "unknown".to_string());
 
                     // Format date
-                    let date = fact.created_at
+                    let date = fact
+                        .created_at
                         .as_ref()
-                        .and_then(|dt_str: &String| chrono::DateTime::parse_from_rfc3339(dt_str).ok())
+                        .and_then(|dt_str: &String| {
+                            chrono::DateTime::parse_from_rfc3339(dt_str).ok()
+                        })
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .unwrap_or_else(|| "unknown".to_string());
 
@@ -1926,12 +1969,9 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
                         content.clone()
                     };
 
-                    println!("[{}] {}: {} ({}, resonance {})",
-                        date,
-                        fact_type,
-                        preview,
-                        fact.id,
-                        fact.resonance
+                    println!(
+                        "[{}] {}: {} ({}, resonance {})",
+                        date, fact_type, preview, fact.id, fact.resonance
                     );
                 }
             }
@@ -1952,7 +1992,10 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             // Get session ID
             match db.get_session_for_fact(&fact_ref)? {
                 Some(session_id) => {
-                    println!("Fact {} was extracted from session: {}", fact_ref, session_id);
+                    println!(
+                        "Fact {} was extracted from session: {}",
+                        fact_ref, session_id
+                    );
                 }
                 None => {
                     println!("No session found for fact: {}", fact_ref);

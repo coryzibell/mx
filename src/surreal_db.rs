@@ -1627,21 +1627,28 @@ impl SurrealDatabase {
     }
 
     /// Find an open thread by content match
-    pub fn find_open_thread_by_content(&self, content: &str, agent_id: &str) -> Result<Option<String>> {
+    pub fn find_open_thread_by_content(
+        &self,
+        content: &str,
+        agent_id: &str,
+    ) -> Result<Option<String>> {
         Self::runtime().block_on(self.find_open_thread_by_content_async(content, agent_id))
     }
 
-    async fn find_open_thread_by_content_async(&self, content: &str, _agent_id: &str) -> Result<Option<String>> {
+    async fn find_open_thread_by_content_async(
+        &self,
+        content: &str,
+        _agent_id: &str,
+    ) -> Result<Option<String>> {
         let content_owned = content.to_string();
-        let sql = format!(
-            "SELECT meta::id(id) AS id
+        let sql = "SELECT meta::id(id) AS id
              FROM knowledge
              WHERE category = category:thread
              AND body = $content
              AND summary CONTAINS '\"state\":\"open\"'
              ORDER BY created_at DESC
              LIMIT 1"
-        );
+            .to_string();
 
         let mut response = with_db!(self, db, {
             db.query(&sql)
@@ -1652,10 +1659,10 @@ impl SurrealDatabase {
 
         let results: Vec<serde_json::Value> = response.take(0)?;
 
-        if let Some(first) = results.first() {
-            if let Some(id_str) = first.get("id").and_then(|v| v.as_str()) {
-                return Ok(Some(id_str.to_string()));
-            }
+        if let Some(first) = results.first()
+            && let Some(id_str) = first.get("id").and_then(|v| v.as_str())
+        {
+            return Ok(Some(id_str.to_string()));
         }
 
         Ok(None)
@@ -1685,8 +1692,9 @@ impl SurrealDatabase {
                 .context("Failed to execute recent facts query")
         })?;
 
-        let results: Vec<serde_json::Value> =
-            response.take(0).context("Failed to parse recent facts results")?;
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse recent facts results")?;
 
         let mut entries = Vec::new();
         for obj in results {
@@ -2020,7 +2028,7 @@ impl SurrealDatabase {
         let mut response = with_db!(self, db, {
             db.query(
                 "SELECT VALUE meta::id(in) FROM relates_to
-                 WHERE out = $session_id AND relationship_type = relationship_type:extracted_from"
+                 WHERE out = $session_id AND relationship_type = relationship_type:extracted_from",
             )
             .bind(("session_id", session_thing))
             .await
@@ -2048,7 +2056,7 @@ impl SurrealDatabase {
         let mut response = with_db!(self, db, {
             db.query(
                 "SELECT VALUE meta::id(out) FROM relates_to
-                 WHERE in = $fact AND relationship_type = relationship_type:extracted_from"
+                 WHERE in = $fact AND relationship_type = relationship_type:extracted_from",
             )
             .bind(("fact", fact_thing))
             .await
