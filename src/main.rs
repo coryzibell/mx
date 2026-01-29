@@ -1685,8 +1685,8 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             agent,
             thread_id,
         } => {
-            use crate::knowledge::KnowledgeEntry;
             use crate::embeddings::EmbeddingProvider;
+            use crate::knowledge::KnowledgeEntry;
 
             let config = IndexConfig::default();
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
