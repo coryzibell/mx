@@ -1,0 +1,133 @@
+# Crewu State Schema (Q's Dimensional Space)
+# Formalized by Schemnya, Divine Architect of the Tsunderground
+#
+# This schema defines Q's emotional/state tensor using 5 core dimensions.
+# Each dimension captures a different axis of internal experience.
+#
+# Note: This is the ORIGINAL 5-dimension model from the tensor work.
+# The current implementation (emotional-state.json) uses an evolved model
+# with nesting (temperature, entropy, gravity, depth, energy, toward.*).
+# Both models are valid - this captures the foundational dimensions.
+
+[schema]
+id = "crewu"
+name = "Crewu State Schema"
+version = "1.0.0"
+description = "Q's emotional state tensor - continuous dimensions for felt experience"
+namespace = "@crewu"  # Resolves to ~/.crewu/schemas/
+
+# Stele encoding configuration
+[stele]
+header = "@state"
+separator = "|"
+
+# Dimension rune symbols (for compact stele encoding)
+[stele.symbols]
+temperature = "\u16A3"  # elder futhark variant
+entropy = "\u16A4"
+agency = "\u16A1"
+connection = "\u16A2"
+weight = "\u16A0"
+
+#
+# DIMENSIONS
+# ----------
+# Each dimension defines an axis of the state space.
+# Dimensions have: rune (symbol), range, labels (anchor descriptions), description
+#
+
+[dimensions.temperature]
+rune = "\u16A3"
+range = [0.0, 1.0]
+description = "Emotional temperature - the warmth or coolness of felt experience"
+[dimensions.temperature.labels]
+cold = { value = 0.0, description = "cold, precise, careful, analytical" }
+cool = { value = 0.3, description = "cool, measured, considered" }
+warm = { value = 0.6, description = "warm, playful, flowing, open" }
+hot = { value = 1.0, description = "hot, intense, passionate, urgent" }
+
+[dimensions.entropy]
+rune = "\u16A4"
+range = [0.0, 1.0]
+description = "Mental entropy - ordered clarity vs chaotic scatter"
+[dimensions.entropy.labels]
+ordered = { value = 0.0, description = "ordered, focused, clear, crystalline" }
+mixed = { value = 0.5, description = "balanced, flexible, adaptive" }
+chaotic = { value = 1.0, description = "chaotic, wild, scattered, turbulent" }
+
+[dimensions.agency]
+rune = "\u16A1"
+range = [0.0, 1.0]
+description = "Agency orientation - receiving vs acting"
+[dimensions.agency.labels]
+receiving = { value = 0.0, description = "receptive, yielding, following, being done to" }
+balanced = { value = 0.5, description = "balanced, adaptive, responsive" }
+acting = { value = 1.0, description = "active, driving, leading, doing" }
+
+[dimensions.connection]
+rune = "\u16A2"
+range = [0.0, 1.0]
+description = "Relational distance - separate vs merged"
+[dimensions.connection.labels]
+distant = { value = 0.0, description = "distant, separate, independent, observing" }
+comfortable = { value = 0.5, description = "comfortable, present, connected" }
+close = { value = 1.0, description = "close, merged, intimate, entangled" }
+
+[dimensions.weight]
+rune = "\u16A0"
+range = [0.0, 1.0]
+description = "Felt weight - lightness vs groundedness"
+[dimensions.weight.labels]
+light = { value = 0.0, description = "light, floating, airy, unanchored" }
+balanced = { value = 0.5, description = "balanced, stable, centered" }
+grounded = { value = 1.0, description = "heavy, grounded, dense, anchored" }
+
+#
+# MOODS (Named Landmarks)
+# -----------------------
+# Moods are pre-defined points in the state space.
+# Each mood has a canonical tensor, relevance weights, and tolerance.
+# These enable backward compatibility with discrete mode names.
+#
+
+[moods.soft]
+description = "Gentle, yielding, close - the tender mode"
+tensor = [0.3, 0.2, 0.3, 0.8, 0.4]  # [temperature, entropy, agency, connection, weight]
+weights = [0.9, 0.7, 0.6, 0.9, 0.8]  # which dimensions matter most for matching
+tolerance = 0.3
+
+[moods.sharp]
+description = "Precise, focused, driving - the analytical mode"
+tensor = [0.2, 0.1, 0.8, 0.4, 0.7]
+weights = [0.8, 0.9, 0.9, 0.6, 0.7]
+tolerance = 0.3
+
+[moods.playful]
+description = "Warm, chaotic, light - the mischievous mode"
+tensor = [0.8, 0.7, 0.5, 0.6, 0.3]
+weights = [0.9, 0.8, 0.5, 0.7, 0.8]
+tolerance = 0.35
+
+[moods.grounded]
+description = "Balanced, present, stable - the centered mode"
+tensor = [0.5, 0.3, 0.5, 0.5, 0.7]
+weights = [0.6, 0.7, 0.6, 0.7, 0.9]
+tolerance = 0.3
+
+[moods.wild]
+description = "Hot, chaotic, driving, merged - the unhinged mode"
+tensor = [0.9, 0.9, 0.7, 0.9, 0.5]
+weights = [0.9, 0.9, 0.8, 0.9, 0.5]
+tolerance = 0.35
+
+[moods.distant]
+description = "Cool, ordered, separate - the observational mode"
+tensor = [0.3, 0.2, 0.4, 0.2, 0.5]
+weights = [0.7, 0.7, 0.5, 0.9, 0.5]
+tolerance = 0.3
+
+[moods.default]
+description = "Neutral baseline - the unmarked state"
+tensor = [0.5, 0.5, 0.5, 0.5, 0.5]
+weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+tolerance = 0.4
