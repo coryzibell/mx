@@ -271,7 +271,6 @@ enum StateCommands {
     },
 
     // === Legacy commands (backward compatibility) ===
-
     /// [Legacy] Encode using mode-based mapping
     #[command(hide = true)]
     LegacyEncode {
@@ -1360,7 +1359,6 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
 
     match cmd {
         // === NEW TENSOR-BASED COMMANDS ===
-
         StateCommands::Encode {
             values,
             file,
@@ -1383,7 +1381,8 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 let values_str = if content.contains('|') {
                     content.trim().to_string()
                 } else {
-                    content.lines()
+                    content
+                        .lines()
                         .map(|l| l.trim())
                         .filter(|l| !l.is_empty())
                         .collect::<Vec<_>>()
@@ -1420,7 +1419,11 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             }
         }
 
-        StateCommands::Decode { input, schema, format } => {
+        StateCommands::Decode {
+            input,
+            schema,
+            format,
+        } => {
             // Get input from arg or stdin
             let input_str = match input {
                 Some(s) => s,
@@ -1474,7 +1477,8 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 for schema_id in schemas {
                     match tensor::TensorSchema::load_by_id(&schema_id) {
                         Ok(schema) => {
-                            println!("  {} - {} ({} dimensions, {} moods)",
+                            println!(
+                                "  {} - {} ({} dimensions, {} moods)",
                                 schema.id,
                                 schema.name,
                                 schema.dimensions.len(),
@@ -1504,10 +1508,14 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                             println!("Tolerance: {:.2}", mood_def.tolerance);
                             println!("\nTensor values:");
                             for (i, value) in mood_def.tensor.iter().enumerate() {
-                                let dim_name = schema.dimensions.get(i)
+                                let dim_name = schema
+                                    .dimensions
+                                    .get(i)
                                     .map(|d| d.name.as_str())
                                     .unwrap_or("?");
-                                let weight = mood_def.weights.as_ref()
+                                let weight = mood_def
+                                    .weights
+                                    .as_ref()
                                     .and_then(|w| w.get(i))
                                     .copied()
                                     .unwrap_or(1.0);
@@ -1517,10 +1525,10 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                     }
                     None => {
                         eprintln!("Unknown mood: {}", mood_name);
-                        eprintln!("Available moods: {}", schema.moods.keys()
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", "));
+                        eprintln!(
+                            "Available moods: {}",
+                            schema.moods.keys().cloned().collect::<Vec<_>>().join(", ")
+                        );
                         std::process::exit(1);
                     }
                 }
@@ -1531,7 +1539,9 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 } else {
                     println!("Moods for schema '{}' ({}):\n", schema.id, schema.name);
                     for (name, mood_def) in &schema.moods {
-                        let tensor_str: Vec<String> = mood_def.tensor.iter()
+                        let tensor_str: Vec<String> = mood_def
+                            .tensor
+                            .iter()
                             .map(|v| format!("{:.2}", v))
                             .collect();
                         println!("  {:12} [{}]", name, tensor_str.join("|"));
@@ -1552,7 +1562,9 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 println!();
                 println!("Dimensions ({}):", schema.dimensions.len());
                 for dim in &schema.dimensions {
-                    let rune = dim.rune.as_ref()
+                    let rune = dim
+                        .rune
+                        .as_ref()
                         .map(|r| format!(" {}", r))
                         .unwrap_or_default();
                     println!("  {}{}:", dim.name, rune);
@@ -1566,13 +1578,15 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 println!();
                 println!("Moods ({}):", schema.moods.len());
                 for (name, mood) in &schema.moods {
-                    println!("  {:12} - {} (tol: {:.2})", name, mood.description, mood.tolerance);
+                    println!(
+                        "  {:12} - {} (tol: {:.2})",
+                        name, mood.description, mood.tolerance
+                    );
                 }
             }
         }
 
         // === LEGACY COMMANDS (backward compatibility) ===
-
         StateCommands::LegacyEncode {
             mode,
             interactive,

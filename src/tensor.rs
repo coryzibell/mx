@@ -203,9 +203,7 @@ impl StateTensor {
 
     /// Create a state tensor with default values from schema
     pub fn default_from_schema(schema: &TensorSchema) -> Self {
-        let values: Vec<f32> = schema.dimensions.iter()
-            .map(|d| d.default)
-            .collect();
+        let values: Vec<f32> = schema.dimensions.iter().map(|d| d.default).collect();
         Self {
             schema_id: schema.id.clone(),
             values,
@@ -229,7 +227,9 @@ impl StateTensor {
         let mut values = Vec::with_capacity(parts.len());
         for (i, part) in parts.iter().enumerate() {
             let dim = &schema.dimensions[i];
-            let value: f32 = part.trim().parse()
+            let value: f32 = part
+                .trim()
+                .parse()
                 .with_context(|| format!("Invalid value for dimension '{}': {}", dim.id, part))?;
 
             // Clamp to 0.0-1.0 range
@@ -245,18 +245,21 @@ impl StateTensor {
     /// Encode to the standard string format
     /// Format: @state:crewu|0.3|0.2|0.7|0.8|0.4
     pub fn encode(&self) -> String {
-        let values_str: Vec<String> = self.values.iter()
-            .map(|v| format!("{:.2}", v))
-            .collect();
+        let values_str: Vec<String> = self.values.iter().map(|v| format!("{:.2}", v)).collect();
         format!("@state:{}|{}", self.schema_id, values_str.join("|"))
     }
 
     /// Encode with optional rune decoration
     /// Format: @state:crewu|ᚣ0.30|ᚤ0.20|ᚡ0.70|ᚢ0.80|ᚠ0.40
     pub fn encode_with_runes(&self, schema: &TensorSchema) -> String {
-        let parts: Vec<String> = self.values.iter().enumerate()
+        let parts: Vec<String> = self
+            .values
+            .iter()
+            .enumerate()
             .map(|(i, v)| {
-                let rune = schema.dimensions.get(i)
+                let rune = schema
+                    .dimensions
+                    .get(i)
                     .and_then(|d| d.rune.as_ref())
                     .map(|r| r.as_str())
                     .unwrap_or("");
@@ -286,11 +289,13 @@ impl StateTensor {
         let mut values = Vec::with_capacity(parts.len() - 1);
         for part in parts.iter().skip(1) {
             // Strip any rune prefix (non-digit, non-dot characters)
-            let value_str: String = part.chars()
+            let value_str: String = part
+                .chars()
                 .skip_while(|c| !c.is_ascii_digit() && *c != '.' && *c != '-')
                 .collect();
 
-            let value: f32 = value_str.parse()
+            let value: f32 = value_str
+                .parse()
                 .with_context(|| format!("Invalid value: {}", part))?;
             values.push(value.clamp(0.0, 1.0));
         }
@@ -306,14 +311,13 @@ impl StateTensor {
 
         let weights = mood.weights.as_ref();
 
-        let sum: f32 = self.values.iter()
+        let sum: f32 = self
+            .values
+            .iter()
             .zip(mood.tensor.iter())
             .enumerate()
             .map(|(i, (v1, v2))| {
-                let weight = weights
-                    .and_then(|w| w.get(i))
-                    .copied()
-                    .unwrap_or(1.0);
+                let weight = weights.and_then(|w| w.get(i)).copied().unwrap_or(1.0);
                 weight * (v1 - v2).powi(2)
             })
             .sum();
@@ -322,7 +326,10 @@ impl StateTensor {
     }
 
     /// Find the nearest mood within tolerance
-    pub fn nearest_mood<'a>(&self, schema: &'a TensorSchema) -> Option<(&'a str, &'a TensorMood, f32)> {
+    pub fn nearest_mood<'a>(
+        &self,
+        schema: &'a TensorSchema,
+    ) -> Option<(&'a str, &'a TensorMood, f32)> {
         let mut nearest: Option<(&str, &TensorMood, f32)> = None;
 
         for (name, mood) in &schema.moods {
@@ -364,14 +371,16 @@ impl StateTensor {
 
     /// Get value for a dimension by ID
     pub fn get(&self, schema: &TensorSchema, dim_id: &str) -> Option<f32> {
-        schema.dimension_by_id(dim_id)
+        schema
+            .dimension_by_id(dim_id)
             .and_then(|(idx, _)| self.values.get(idx))
             .copied()
     }
 
     /// Set value for a dimension by ID
     pub fn set(&mut self, schema: &TensorSchema, dim_id: &str, value: f32) -> Result<()> {
-        let (idx, _) = schema.dimension_by_id(dim_id)
+        let (idx, _) = schema
+            .dimension_by_id(dim_id)
             .ok_or_else(|| anyhow::anyhow!("Unknown dimension: {}", dim_id))?;
 
         if idx < self.values.len() {
@@ -392,7 +401,9 @@ pub fn guided_capture(schema: &TensorSchema) -> Result<StateTensor> {
     let mut values = Vec::with_capacity(schema.dimensions.len());
 
     for dim in &schema.dimensions {
-        let rune = dim.rune.as_ref()
+        let rune = dim
+            .rune
+            .as_ref()
             .map(|r| format!("{} ", r))
             .unwrap_or_default();
 
@@ -414,7 +425,8 @@ pub fn guided_capture(schema: &TensorSchema) -> Result<StateTensor> {
         let value: f32 = if input.is_empty() {
             dim.default
         } else {
-            input.parse()
+            input
+                .parse()
                 .with_context(|| format!("Invalid number: {}", input))?
         };
 
@@ -462,18 +474,24 @@ mod tests {
                 },
             ],
             moods: HashMap::from([
-                ("calm".to_string(), TensorMood {
-                    description: "Calm state".to_string(),
-                    tensor: vec![0.2, 0.3],
-                    weights: Some(vec![1.0, 0.8]),
-                    tolerance: 0.3,
-                }),
-                ("excited".to_string(), TensorMood {
-                    description: "Excited state".to_string(),
-                    tensor: vec![0.8, 0.9],
-                    weights: Some(vec![0.9, 1.0]),
-                    tolerance: 0.3,
-                }),
+                (
+                    "calm".to_string(),
+                    TensorMood {
+                        description: "Calm state".to_string(),
+                        tensor: vec![0.2, 0.3],
+                        weights: Some(vec![1.0, 0.8]),
+                        tolerance: 0.3,
+                    },
+                ),
+                (
+                    "excited".to_string(),
+                    TensorMood {
+                        description: "Excited state".to_string(),
+                        tensor: vec![0.8, 0.9],
+                        weights: Some(vec![0.9, 1.0]),
+                        tolerance: 0.3,
+                    },
+                ),
             ]),
         }
     }
