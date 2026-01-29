@@ -877,6 +877,10 @@ enum MemoryCommands {
         /// Filter by resonance type (e.g., ephemeral)
         #[arg(long)]
         resonance_type: Option<String>,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// List facts extracted from a specific session
@@ -1644,45 +1648,52 @@ fn find_open_thread_by_content(
     bail!("No open thread found matching content: '{}'", content)
 }
 
-fn route_fact_type(fact_type: &str) -> FactRouting {
+fn route_fact_type(fact_type: &str) -> Result<FactRouting> {
+    const VALID_FACT_TYPES: &[&str] = &[
+        "decision",
+        "insight",
+        "person",
+        "quote",
+        "thread_opened",
+        "commitment",
+        "thread_closed",
+    ];
+
     match fact_type {
-        "decision" => FactRouting {
+        "decision" => Ok(FactRouting {
             category: "decision",
             tags: vec![],
-        },
-        "insight" => FactRouting {
+        }),
+        "insight" => Ok(FactRouting {
             category: "insight",
             tags: vec![],
-        },
-        "person" => FactRouting {
+        }),
+        "person" => Ok(FactRouting {
             category: "reference",
             tags: vec!["person"],
-        },
-        "quote" => FactRouting {
+        }),
+        "quote" => Ok(FactRouting {
             category: "reference",
             tags: vec!["quote"],
-        },
-        "thread_opened" => FactRouting {
+        }),
+        "thread_opened" => Ok(FactRouting {
             category: "thread",
             tags: vec!["question"],
-        },
-        "commitment" => FactRouting {
+        }),
+        "commitment" => Ok(FactRouting {
             category: "thread",
             tags: vec!["commitment"],
-        },
-        "thread_closed" => FactRouting {
+        }),
+        "thread_closed" => Ok(FactRouting {
             category: "thread",
             tags: vec![],
-        },
+        }),
         unknown => {
-            eprintln!(
-                "Warning: unknown fact type '{}', defaulting to insight",
-                unknown
-            );
-            FactRouting {
-                category: "insight",
-                tags: vec![],
-            }
+            bail!(
+                "Invalid fact type '{}'. Valid types: {}",
+                unknown,
+                VALID_FACT_TYPES.join(", ")
+            )
         }
     }
 }
@@ -2235,7 +2246,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
 
                 // Route fact type to category and tags
-                let routing = route_fact_type(fact_type);
+                let routing = route_fact_type(fact_type)?;
 
                 // Build fact entry
                 let now = chrono::Utc::now().to_rfc3339();
@@ -3301,6 +3312,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             days,
             format,
             resonance_type,
+            limit,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -3311,6 +3323,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if let Some(ref rtype) = resonance_type {
                 facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
             }
+
+            // Apply limit
+            facts.truncate(limit);
 
             if format == "json" {
                 let json_facts: Vec<serde_json::Value> = facts
