@@ -162,12 +162,6 @@ enum Commands {
         #[command(subcommand)]
         command: StateCommands,
     },
-
-    /// Atomic facts - ephemeral knowledge with decay
-    Fact {
-        #[command(subcommand)]
-        command: FactCommands,
-    },
 }
 
 #[derive(Subcommand)]
@@ -283,45 +277,6 @@ enum StateCommands {
         schema: Option<String>,
     },
 }
-
-#[derive(Subcommand)]
-enum FactCommands {
-    /// Add a new atomic fact
-    Add {
-        #[arg(long)]
-        r#type: String, // fact type
-        #[arg(long)]
-        content: String,
-        #[arg(long)]
-        session: String, // session ID to link to
-        #[arg(long, default_value = "3")]
-        resonance: i32,
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long)]
-        thread_id: Option<String>, // for thread_closed
-    },
-    /// List recent facts with decay
-    Recent {
-        #[arg(long, default_value = "10")]
-        days: i32,
-        #[arg(long, default_value = "text")]
-        format: String,
-    },
-    /// List facts for a session
-    ForSession { session_id: String },
-    /// Get the session a fact was extracted from
-    FactSession { fact_id: String },
-    /// Update a fact
-    Update {
-        fact_id: String,
-        #[arg(long)]
-        content: Option<String>,
-    },
-    /// Delete a fact
-    Delete { fact_id: String },
-}
-
 #[derive(Subcommand)]
 enum PrCommands {
     /// Merge a pull request with encoded commit message
@@ -540,12 +495,13 @@ enum MemoryCommands {
     /// Add a new entry directly to the database
     Add {
         /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future, session)
-        #[arg(long)]
-        category: String,
+        /// When --type is provided, category is auto-determined from fact type routing
+        #[arg(long, required_unless_present = "type")]
+        category: Option<String>,
 
-        /// Entry title
-        #[arg(short, long)]
-        title: String,
+        /// Entry title (auto-generated from content when --type is provided)
+        #[arg(short, long, required_unless_present = "type")]
+        title: Option<String>,
 
         /// Content inline
         #[arg(short = 'c', long, conflicts_with = "file")]
@@ -584,7 +540,7 @@ enum MemoryCommands {
         #[arg(long, default_value = "primary")]
         entry_type: String,
 
-        /// Session ID
+        /// Session ID (for regular entries)
         #[arg(long)]
         session_id: Option<String>,
 
@@ -631,6 +587,19 @@ enum MemoryCommands {
         /// Anchors (comma-separated bloom IDs this connects to)
         #[arg(long)]
         anchors: Option<String>,
+
+        /// Fact type for ephemeral knowledge (decision, insight, person, quote, thread_opened, commitment, thread_closed)
+        /// Routes to appropriate category and sets resonance_type=ephemeral
+        #[arg(long = "type")]
+        r#type: Option<String>,
+
+        /// Session to link fact to via EXTRACTED_FROM relationship (requires --type)
+        #[arg(long, requires = "type")]
+        session: Option<String>,
+
+        /// Thread ID for thread_closed operations (requires --type=thread_closed)
+        #[arg(long, requires = "type")]
+        thread_id: Option<String>,
     },
 
     /// Update an existing entry in the database
@@ -893,6 +862,41 @@ enum MemoryCommands {
         /// Session token for chained ritual (required with --respond or --skip)
         #[arg(long)]
         session: Option<String>,
+    },
+
+    /// List recent ephemeral facts with decay
+    Recent {
+        /// Number of days to look back
+        #[arg(long, default_value = "10")]
+        days: i32,
+
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// Filter by resonance type (e.g., ephemeral)
+        #[arg(long)]
+        resonance_type: Option<String>,
+    },
+
+    /// List facts extracted from a specific session
+    ForSession {
+        /// Session ID (with or without kn- prefix)
+        session_id: String,
+
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Get the session a fact was extracted from
+    FactSession {
+        /// Fact ID (with or without kn- prefix)
+        fact_id: String,
+
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 }
 
@@ -1290,7 +1294,6 @@ fn main() -> Result<()> {
         Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
         Commands::State { command } => handle_state(command),
-        Commands::Fact { command } => handle_fact(command, cli.verbose),
     }
 }
 
@@ -1671,468 +1674,6 @@ fn route_fact_type(fact_type: &str) -> FactRouting {
                 category: "insight",
                 tags: vec![],
             }
-        }
-    }
-}
-
-fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
-    match cmd {
-        FactCommands::Add {
-            r#type,
-            content,
-            session,
-            resonance,
-            agent,
-            thread_id,
-        } => {
-            use crate::embeddings::EmbeddingProvider;
-            use crate::knowledge::KnowledgeEntry;
-
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Route fact type to category and tags
-            let routing = route_fact_type(&r#type);
-
-            // Determine agent - use provided or env var
-            let agent_id = agent
-                .or_else(|| std::env::var("MX_CURRENT_AGENT").ok())
-                .unwrap_or_else(|| "soren".to_string());
-
-            // Handle thread_closed specially
-            if r#type == "thread_closed" {
-                let tid = if let Some(id) = thread_id {
-                    // Use provided thread ID
-                    id
-                } else {
-                    // Find by content match (fragile fallback)
-                    find_open_thread_by_content(&*db, &content, &agent_id)?
-                };
-
-                // Update existing thread to closed state
-                if let Some(mut thread_entry) =
-                    db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
-                {
-                    // Update the summary metadata to mark as closed
-                    if let Some(summary) = &thread_entry.summary {
-                        let mut meta: serde_json::Value =
-                            serde_json::from_str(summary).unwrap_or_else(|_| serde_json::json!({}));
-                        if let Some(obj) = meta.as_object_mut() {
-                            obj.insert(
-                                "state".to_string(),
-                                serde_json::Value::String("closed".to_string()),
-                            );
-                        }
-                        thread_entry.summary = Some(meta.to_string());
-                        db.upsert_knowledge(&thread_entry)?;
-                        println!("Closed thread: {}", tid);
-                        return Ok(());
-                    } else {
-                        bail!("Thread has no summary metadata: {}", tid);
-                    }
-                } else {
-                    bail!("Thread not found: {}", tid);
-                }
-            }
-
-            // Create the fact as a knowledge entry
-            let now = chrono::Utc::now().to_rfc3339();
-            let truncated_title = if content.len() > 60 {
-                format!("{}...", &content[..57])
-            } else {
-                content.clone()
-            };
-            let title = format!("{}: {}", r#type, truncated_title);
-
-            // Generate ID
-            let id = KnowledgeEntry::generate_id(&session, &title);
-
-            // Build metadata JSON
-            let mut metadata = serde_json::Map::new();
-            metadata.insert(
-                "fact_type".to_string(),
-                serde_json::Value::String(r#type.clone()),
-            );
-            metadata.insert(
-                "agent".to_string(),
-                serde_json::Value::String(agent_id.clone()),
-            );
-            metadata.insert(
-                "date".to_string(),
-                serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
-            );
-
-            // Add state field for threads
-            if routing.category == "thread" {
-                metadata.insert(
-                    "state".to_string(),
-                    serde_json::Value::String("open".to_string()),
-                );
-            }
-
-            let summary_json = serde_json::Value::Object(metadata).to_string();
-
-            // Build the knowledge entry
-            let entry = KnowledgeEntry {
-                id: id.clone(),
-                category_id: routing.category.to_string(),
-                title: title.clone(),
-                body: Some(content.clone()),
-                summary: Some(summary_json),
-                applicability: vec![],
-                source_project_id: None,
-                source_agent_id: Some(format!("agent:{}", agent_id)),
-                file_path: None,
-                tags: routing.tags.iter().map(|s| s.to_string()).collect(),
-                created_at: Some(now.clone()),
-                updated_at: Some(now),
-                content_hash: Some(KnowledgeEntry::compute_hash(&content)),
-                source_type_id: Some("source_type:agent_session".to_string()),
-                entry_type_id: Some("entry_type:primary".to_string()),
-                session_id: Some(session.clone()),
-                ephemeral: true, // Facts are ephemeral by default
-                content_type_id: Some("content_type:text".to_string()),
-                owner: Some(format!("agent:{}", agent_id)),
-                visibility: "public".to_string(),
-                resonance,
-                resonance_type: Some("ephemeral".to_string()),
-                last_activated: None,
-                activation_count: 0,
-                decay_rate: 0.0,
-                anchors: vec![],
-                wake_phrases: vec![],
-                wake_order: None,
-                wake_phrase: None,
-                embedding: None,
-                embedding_model: None,
-                embedded_at: None,
-            };
-
-            // Insert the fact
-            db.upsert_knowledge(&entry)?;
-
-            // Create EXTRACTED_FROM relationship to session
-            let session_ref = if session.starts_with("kn-") {
-                session.clone()
-            } else {
-                format!("kn-{}", session)
-            };
-
-            // Verify session exists before creating relationship
-            let ctx = crate::store::AgentContext::public_only();
-            if db.get(&session_ref, &ctx)?.is_none() {
-                eprintln!(
-                    "Warning: Session {} not found - relationship not created",
-                    session_ref
-                );
-            } else {
-                db.add_relationship(&id, &session_ref, "extracted_from")?;
-            }
-
-            println!("Added fact: {}", id);
-            println!("  Type: {}", r#type);
-            println!("  Category: {}", routing.category);
-            println!("  Content: {}", content);
-
-            // Auto-embed if embeddings are enabled
-            match crate::embeddings::FastEmbedProvider::new() {
-                Ok(mut provider) => {
-                    // Construct embedding text from title + body + tags
-                    let mut parts = vec![title.clone()];
-                    parts.push(content.clone());
-                    if !routing.tags.is_empty() {
-                        parts.push(format!("Tags: {}", routing.tags.join(", ")));
-                    }
-                    let embedding_text = parts.join("\n\n");
-
-                    // Generate and store embedding
-                    match provider.embed(&embedding_text) {
-                        Ok(embedding) => {
-                            // Fetch the entry we just created
-                            let mut updated_entry = db.get(&id, &ctx)?.expect("Entry should exist");
-
-                            // Update with embedding
-                            updated_entry.embedding = Some(embedding);
-                            updated_entry.embedding_model = Some(provider.model_id().to_string());
-                            updated_entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
-
-                            // Save back
-                            db.upsert_knowledge(&updated_entry)?;
-                            println!("  Embedded: {}", provider.model_id());
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: Failed to embed fact: {}", e);
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Embeddings not configured - silent skip
-                }
-            }
-
-            Ok(())
-        }
-        FactCommands::Recent { days, format } => {
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Query recent facts with decay
-            let facts = db.query_recent_facts(days)?;
-
-            if format == "json" {
-                // JSON output
-                let json_facts: Vec<serde_json::Value> = facts
-                    .iter()
-                    .map(|f| {
-                        let fact_type = f
-                            .summary
-                            .as_ref()
-                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                            .and_then(|v: serde_json::Value| {
-                                v.get("fact_type")
-                                    .and_then(|t| t.as_str())
-                                    .map(String::from)
-                            });
-
-                        serde_json::json!({
-                            "id": f.id,
-                            "type": fact_type,
-                            "content": f.body.as_ref().unwrap_or(&"".to_string()),
-                            "created_at": f.created_at.as_ref().unwrap_or(&"".to_string()),
-                            "resonance": f.resonance,
-                        })
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&json_facts)?);
-            } else {
-                // Text output
-                for fact in facts {
-                    // Extract fact type from summary
-                    let fact_type = fact
-                        .summary
-                        .as_ref()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v: serde_json::Value| {
-                            v.get("fact_type")
-                                .and_then(|t| t.as_str())
-                                .map(String::from)
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // Format date
-                    let date = fact
-                        .created_at
-                        .as_ref()
-                        .and_then(|dt_str: &String| {
-                            chrono::DateTime::parse_from_rfc3339(dt_str).ok()
-                        })
-                        .map(|dt| dt.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // Truncate content for preview
-                    let empty = String::new();
-                    let content = fact.body.as_ref().unwrap_or(&empty);
-                    let preview = if content.len() > 60 {
-                        format!("{}...", &content[..57])
-                    } else {
-                        content.clone()
-                    };
-
-                    println!(
-                        "[{}] {}: {} ({}, resonance {})",
-                        date, fact_type, preview, fact.id, fact.resonance
-                    );
-                }
-            }
-
-            Ok(())
-        }
-        FactCommands::ForSession { session_id } => {
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Normalize session ID
-            let session_ref = if session_id.starts_with("kn-") {
-                session_id.clone()
-            } else {
-                format!("kn-{}", session_id)
-            };
-
-            // Get fact IDs
-            let fact_ids = db.get_facts_for_session(&session_ref)?;
-
-            if fact_ids.is_empty() {
-                println!("No facts found for session: {}", session_ref);
-                return Ok(());
-            }
-
-            // Fetch full entries for each fact
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
-            };
-
-            println!("Facts for session {}:", session_ref);
-            for fact_id in fact_ids {
-                if let Some(fact) = db.get(&fact_id, &ctx)? {
-                    // Extract fact type from summary metadata
-                    let fact_type = fact
-                        .summary
-                        .as_ref()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v: serde_json::Value| {
-                            v.get("fact_type")
-                                .and_then(|t| t.as_str())
-                                .map(String::from)
-                        })
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // Format date
-                    let date = fact
-                        .created_at
-                        .as_ref()
-                        .and_then(|dt_str: &String| {
-                            chrono::DateTime::parse_from_rfc3339(dt_str).ok()
-                        })
-                        .map(|dt| dt.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    // Get content preview
-                    let empty = String::new();
-                    let content = fact.body.as_ref().unwrap_or(&empty);
-                    let preview = if content.len() > 60 {
-                        format!("{}...", &content[..57])
-                    } else {
-                        content.clone()
-                    };
-
-                    println!(
-                        "[{}] {}: {} ({}, resonance {})",
-                        date, fact_type, preview, fact.id, fact.resonance
-                    );
-                }
-            }
-
-            Ok(())
-        }
-        FactCommands::FactSession { fact_id } => {
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Normalize fact ID
-            let fact_ref = if fact_id.starts_with("kn-") {
-                fact_id.clone()
-            } else {
-                format!("kn-{}", fact_id)
-            };
-
-            // Get session ID
-            match db.get_session_for_fact(&fact_ref)? {
-                Some(session_id) => {
-                    println!(
-                        "Fact {} was extracted from session: {}",
-                        fact_ref, session_id
-                    );
-                }
-                None => {
-                    println!("No session found for fact: {}", fact_ref);
-                }
-            }
-
-            Ok(())
-        }
-        FactCommands::Update { fact_id, content } => {
-            use crate::knowledge::KnowledgeEntry;
-
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Normalize fact ID
-            let fact_ref = if fact_id.starts_with("kn-") {
-                fact_id.clone()
-            } else {
-                format!("kn-{}", fact_id)
-            };
-
-            // Get agent context
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
-            };
-
-            // Fetch existing fact
-            let mut fact = match db.get(&fact_ref, &ctx)? {
-                Some(f) => f,
-                None => {
-                    eprintln!("Fact not found: {}", fact_ref);
-                    std::process::exit(1);
-                }
-            };
-
-            // Verify it's ephemeral
-            if fact.resonance_type.as_deref() != Some("ephemeral") {
-                eprintln!("Fact {} is not an ephemeral fact", fact_ref);
-                std::process::exit(1);
-            }
-
-            // Update content if provided
-            if let Some(new_content) = content {
-                fact.body = Some(new_content.clone());
-                fact.content_hash = Some(KnowledgeEntry::compute_hash(&new_content));
-                fact.updated_at = Some(chrono::Utc::now().to_rfc3339());
-
-                // Update the fact
-                db.upsert_knowledge(&fact)?;
-
-                println!("Updated fact: {}", fact_ref);
-                println!("  New content: {}", new_content);
-            } else {
-                eprintln!("No content provided for update");
-                std::process::exit(1);
-            }
-
-            Ok(())
-        }
-        FactCommands::Delete { fact_id } => {
-            let config = IndexConfig::default();
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Normalize fact ID
-            let fact_ref = if fact_id.starts_with("kn-") {
-                fact_id.clone()
-            } else {
-                format!("kn-{}", fact_id)
-            };
-
-            // Get agent context
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
-            };
-
-            // Verify fact exists and is ephemeral
-            let fact = match db.get(&fact_ref, &ctx)? {
-                Some(f) => f,
-                None => {
-                    eprintln!("Fact not found: {}", fact_ref);
-                    std::process::exit(1);
-                }
-            };
-
-            if fact.resonance_type.as_deref() != Some("ephemeral") {
-                eprintln!("Fact {} is not an ephemeral fact", fact_ref);
-                std::process::exit(1);
-            }
-
-            // Delete the fact (relationships will be handled by database cascades)
-            if db.delete(&fact_ref)? {
-                println!("Deleted fact: {}", fact_ref);
-            } else {
-                eprintln!("Failed to delete fact: {}", fact_ref);
-                std::process::exit(1);
-            }
-
-            Ok(())
         }
     }
 }
@@ -2619,20 +2160,14 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             wake_phrases,
             wake_order,
             anchors,
+            r#type,
+            session,
+            thread_id,
         } => {
             use anyhow::Context;
             use std::fs;
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-
-            // Validate category against database
-            if db.get_category(&category)?.is_none() {
-                let categories = db.list_categories()?;
-                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
-                eprintln!("Error: Invalid category '{}'", category);
-                eprintln!("Valid categories: {}", valid_ids.join(", "));
-                std::process::exit(1);
-            }
 
             // Get content from either --content or --file
             let body = if let Some(text) = content {
@@ -2644,6 +2179,212 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 eprintln!("Error: Either --content or --file must be provided");
                 std::process::exit(1);
             };
+
+            // Determine agent - use source_agent or env var
+            let agent_id = if source_agent.is_empty() {
+                std::env::var("MX_CURRENT_AGENT").unwrap_or_else(|_| "soren".to_string())
+            } else {
+                source_agent.clone()
+            };
+
+            // Handle fact type routing mode (--type flag)
+            if let Some(ref fact_type) = r#type {
+                // Handle thread_closed specially - updates existing thread
+                if fact_type == "thread_closed" {
+                    let tid = if let Some(id) = thread_id {
+                        id
+                    } else {
+                        // Find by content match (fragile fallback)
+                        find_open_thread_by_content(&*db, &body, &agent_id)?
+                    };
+
+                    // Update existing thread to closed state
+                    if let Some(mut thread_entry) =
+                        db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
+                    {
+                        if let Some(summary) = &thread_entry.summary {
+                            let mut meta: serde_json::Value =
+                                serde_json::from_str(summary).unwrap_or_else(|_| serde_json::json!({}));
+                            if let Some(obj) = meta.as_object_mut() {
+                                obj.insert(
+                                    "state".to_string(),
+                                    serde_json::Value::String("closed".to_string()),
+                                );
+                            }
+                            thread_entry.summary = Some(meta.to_string());
+                            db.upsert_knowledge(&thread_entry)?;
+                            println!("Closed thread: {}", tid);
+                            return Ok(());
+                        } else {
+                            bail!("Thread has no summary metadata: {}", tid);
+                        }
+                    } else {
+                        bail!("Thread not found: {}", tid);
+                    }
+                }
+
+                // Route fact type to category and tags
+                let routing = route_fact_type(fact_type);
+
+                // Build fact entry
+                let now = chrono::Utc::now().to_rfc3339();
+                let truncated_title = if body.len() > 60 {
+                    format!("{}...", &body[..57])
+                } else {
+                    body.clone()
+                };
+                let fact_title = format!("{}: {}", fact_type, truncated_title);
+
+                // Generate ID using session if provided
+                let session_hint = session.as_deref().unwrap_or("fact");
+                let id = knowledge::KnowledgeEntry::generate_id(session_hint, &fact_title);
+
+                // Build metadata JSON
+                let mut metadata = serde_json::Map::new();
+                metadata.insert(
+                    "fact_type".to_string(),
+                    serde_json::Value::String(fact_type.clone()),
+                );
+                metadata.insert(
+                    "agent".to_string(),
+                    serde_json::Value::String(agent_id.clone()),
+                );
+                metadata.insert(
+                    "date".to_string(),
+                    serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
+                );
+
+                // Add state field for threads
+                if routing.category == "thread" {
+                    metadata.insert(
+                        "state".to_string(),
+                        serde_json::Value::String("open".to_string()),
+                    );
+                }
+
+                let summary_json = serde_json::Value::Object(metadata).to_string();
+
+                // Merge routed tags with any user-provided tags
+                let mut tag_list: Vec<String> = routing.tags.iter().map(|s| s.to_string()).collect();
+                if let Some(t) = tags {
+                    tag_list.extend(
+                        t.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    );
+                }
+
+                // Build the knowledge entry
+                let entry = knowledge::KnowledgeEntry {
+                    id: id.clone(),
+                    category_id: routing.category.to_string(),
+                    title: fact_title.clone(),
+                    body: Some(body.clone()),
+                    summary: Some(summary_json),
+                    applicability: vec![],
+                    source_project_id: project,
+                    source_agent_id: Some(format!("agent:{}", agent_id)),
+                    file_path: None,
+                    tags: tag_list.clone(),
+                    created_at: Some(now.clone()),
+                    updated_at: Some(now),
+                    content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&body)),
+                    source_type_id: Some("source_type:agent_session".to_string()),
+                    entry_type_id: Some("entry_type:primary".to_string()),
+                    session_id: session.clone(),
+                    ephemeral: true,
+                    content_type_id: Some("content_type:text".to_string()),
+                    owner: Some(format!("agent:{}", agent_id)),
+                    visibility: "public".to_string(),
+                    resonance: resonance.unwrap_or(3),
+                    resonance_type: Some("ephemeral".to_string()),
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                };
+
+                // Insert the fact
+                db.upsert_knowledge(&entry)?;
+
+                // Create EXTRACTED_FROM relationship to session if provided
+                if let Some(ref sess) = session {
+                    let session_ref = if sess.starts_with("kn-") {
+                        sess.clone()
+                    } else {
+                        format!("kn-{}", sess)
+                    };
+
+                    let ctx = crate::store::AgentContext::public_only();
+                    if db.get(&session_ref, &ctx)?.is_none() {
+                        eprintln!(
+                            "Warning: Session {} not found - relationship not created",
+                            session_ref
+                        );
+                    } else {
+                        db.add_relationship(&id, &session_ref, "extracted_from")?;
+                    }
+                }
+
+                println!("Added fact: {}", id);
+                println!("  Type: {}", fact_type);
+                println!("  Category: {}", routing.category);
+                println!("  Content: {}", body);
+
+                // Auto-embed
+                match crate::embeddings::FastEmbedProvider::new() {
+                    Ok(mut provider) => {
+                        use crate::embeddings::EmbeddingProvider;
+
+                        let mut parts = vec![fact_title.clone()];
+                        parts.push(body.clone());
+                        if !tag_list.is_empty() {
+                            parts.push(format!("Tags: {}", tag_list.join(", ")));
+                        }
+                        let embedding_text = parts.join("\n\n");
+
+                        match provider.embed(&embedding_text) {
+                            Ok(embedding) => {
+                                let ctx = crate::store::AgentContext::public_only();
+                                if let Some(mut updated_entry) = db.get(&id, &ctx)? {
+                                    updated_entry.embedding = Some(embedding);
+                                    updated_entry.embedding_model = Some(provider.model_id().to_string());
+                                    updated_entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+                                    db.upsert_knowledge(&updated_entry)?;
+                                    println!("  Embedded: {}", provider.model_id());
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to embed fact: {}", e);
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Embeddings not configured - silent skip
+                    }
+                }
+
+                return Ok(());
+            }
+
+            // Standard memory add mode (no --type flag)
+            let category = category.expect("category required when --type not provided");
+            let title = title.expect("title required when --type not provided");
+
+            // Validate category against database
+            if db.get_category(&category)?.is_none() {
+                let categories = db.list_categories()?;
+                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+                eprintln!("Error: Invalid category '{}'", category);
+                eprintln!("Valid categories: {}", valid_ids.join(", "));
+                std::process::exit(1);
+            }
 
             // Parse tags
             let tag_list: Vec<String> = tags
@@ -3539,6 +3280,234 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 print_wake_ritual(&cascade, &current_agent);
             } else {
                 print_wake_cascade(&cascade);
+            }
+        }
+
+        MemoryCommands::Recent {
+            days,
+            format,
+            resonance_type,
+        } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Query recent facts with decay
+            let mut facts = db.query_recent_facts(days)?;
+
+            // Filter by resonance_type if provided
+            if let Some(ref rtype) = resonance_type {
+                facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
+            }
+
+            if format == "json" {
+                let json_facts: Vec<serde_json::Value> = facts
+                    .iter()
+                    .map(|f| {
+                        let fact_type = f
+                            .summary
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                            .and_then(|v: serde_json::Value| {
+                                v.get("fact_type")
+                                    .and_then(|t| t.as_str())
+                                    .map(String::from)
+                            });
+
+                        serde_json::json!({
+                            "id": f.id,
+                            "type": fact_type,
+                            "content": f.body.as_ref().unwrap_or(&"".to_string()),
+                            "created_at": f.created_at.as_ref().unwrap_or(&"".to_string()),
+                            "resonance": f.resonance,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&json_facts)?);
+            } else {
+                for fact in facts {
+                    let summary_json = fact
+                        .summary
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+                    let fact_type = summary_json
+                        .as_ref()
+                        .and_then(|v: &serde_json::Value| {
+                            v.get("fact_type")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let state = summary_json
+                        .as_ref()
+                        .and_then(|v: &serde_json::Value| {
+                            v.get("state")
+                                .and_then(|s| s.as_str())
+                                .map(String::from)
+                        });
+
+                    let date = fact
+                        .created_at
+                        .as_ref()
+                        .and_then(|dt_str: &String| {
+                            chrono::DateTime::parse_from_rfc3339(dt_str).ok()
+                        })
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let empty = String::new();
+                    let content = fact.body.as_ref().unwrap_or(&empty);
+                    let preview = if content.len() > 60 {
+                        format!("{}...", &content[..57])
+                    } else {
+                        content.clone()
+                    };
+
+                    if let Some(state) = state {
+                        println!(
+                            "[{}] {} ({}): {} ({}, resonance {})",
+                            date, fact_type, state, preview, fact.id, fact.resonance
+                        );
+                    } else {
+                        println!(
+                            "[{}] {}: {} ({}, resonance {})",
+                            date, fact_type, preview, fact.id, fact.resonance
+                        );
+                    }
+                }
+            }
+        }
+
+        MemoryCommands::ForSession { session_id, format } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Normalize session ID
+            let session_ref = if session_id.starts_with("kn-") {
+                session_id.clone()
+            } else {
+                format!("kn-{}", session_id)
+            };
+
+            // Get fact IDs
+            let fact_ids = db.get_facts_for_session(&session_ref)?;
+
+            if fact_ids.is_empty() {
+                println!("No facts found for session: {}", session_ref);
+                return Ok(());
+            }
+
+            // Fetch full entries for each fact
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            if format == "json" {
+                let mut json_facts = Vec::new();
+                for fact_id in &fact_ids {
+                    if let Some(fact) = db.get(fact_id, &ctx)? {
+                        let fact_type = fact
+                            .summary
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                            .and_then(|v: serde_json::Value| {
+                                v.get("fact_type")
+                                    .and_then(|t| t.as_str())
+                                    .map(String::from)
+                            });
+
+                        json_facts.push(serde_json::json!({
+                            "id": fact.id,
+                            "type": fact_type,
+                            "content": fact.body.as_ref().unwrap_or(&"".to_string()),
+                            "created_at": fact.created_at.as_ref().unwrap_or(&"".to_string()),
+                            "resonance": fact.resonance,
+                        }));
+                    }
+                }
+                println!("{}", serde_json::to_string_pretty(&json_facts)?);
+            } else {
+                println!("Facts for session {}:", session_ref);
+                for fact_id in fact_ids {
+                    if let Some(fact) = db.get(&fact_id, &ctx)? {
+                        let fact_type = fact
+                            .summary
+                            .as_ref()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                            .and_then(|v: serde_json::Value| {
+                                v.get("fact_type")
+                                    .and_then(|t| t.as_str())
+                                    .map(String::from)
+                            })
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let date = fact
+                            .created_at
+                            .as_ref()
+                            .and_then(|dt_str: &String| {
+                                chrono::DateTime::parse_from_rfc3339(dt_str).ok()
+                            })
+                            .map(|dt| dt.format("%Y-%m-%d").to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        let empty = String::new();
+                        let content = fact.body.as_ref().unwrap_or(&empty);
+                        let preview = if content.len() > 60 {
+                            format!("{}...", &content[..57])
+                        } else {
+                            content.clone()
+                        };
+
+                        println!(
+                            "[{}] {}: {} ({}, resonance {})",
+                            date, fact_type, preview, fact.id, fact.resonance
+                        );
+                    }
+                }
+            }
+        }
+
+        MemoryCommands::FactSession { fact_id, format } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Normalize fact ID
+            let fact_ref = if fact_id.starts_with("kn-") {
+                fact_id.clone()
+            } else {
+                format!("kn-{}", fact_id)
+            };
+
+            // Get session ID
+            match db.get_session_for_fact(&fact_ref)? {
+                Some(session_id) => {
+                    if format == "json" {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "fact_id": fact_ref,
+                                "session_id": session_id,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Fact {} was extracted from session: {}",
+                            fact_ref, session_id
+                        );
+                    }
+                }
+                None => {
+                    if format == "json" {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "fact_id": fact_ref,
+                                "session_id": null,
+                            }))?
+                        );
+                    } else {
+                        println!("No session found for fact: {}", fact_ref);
+                    }
+                }
             }
         }
     }
@@ -4628,7 +4597,24 @@ fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
 fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     println!("ID:       {}", entry.id);
     println!("Category: {}", entry.category_id);
-    println!("Title:    {}", entry.title);
+
+    // Extract state from summary if present
+    let state = entry
+        .summary
+        .as_ref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v: serde_json::Value| {
+            v.get("state")
+                .and_then(|s| s.as_str())
+                .map(String::from)
+        });
+
+    if let Some(state) = state {
+        println!("Title:    {} ({})", entry.title, state);
+    } else {
+        println!("Title:    {}", entry.title);
+    }
+
     if entry.resonance > 0 {
         println!("Resonance: {}", entry.resonance);
     }
