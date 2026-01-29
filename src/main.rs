@@ -1686,6 +1686,7 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             thread_id,
         } => {
             use crate::knowledge::KnowledgeEntry;
+            use crate::embeddings::EmbeddingProvider;
 
             let config = IndexConfig::default();
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -1832,6 +1833,42 @@ fn handle_fact(cmd: FactCommands, verbose: bool) -> Result<()> {
             println!("  Type: {}", r#type);
             println!("  Category: {}", routing.category);
             println!("  Content: {}", content);
+
+            // Auto-embed if embeddings are enabled
+            match crate::embeddings::FastEmbedProvider::new() {
+                Ok(mut provider) => {
+                    // Construct embedding text from title + body + tags
+                    let mut parts = vec![title.clone()];
+                    parts.push(content.clone());
+                    if !routing.tags.is_empty() {
+                        parts.push(format!("Tags: {}", routing.tags.join(", ")));
+                    }
+                    let embedding_text = parts.join("\n\n");
+
+                    // Generate and store embedding
+                    match provider.embed(&embedding_text) {
+                        Ok(embedding) => {
+                            // Fetch the entry we just created
+                            let mut updated_entry = db.get(&id, &ctx)?.expect("Entry should exist");
+
+                            // Update with embedding
+                            updated_entry.embedding = Some(embedding);
+                            updated_entry.embedding_model = Some(provider.model_id().to_string());
+                            updated_entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+
+                            // Save back
+                            db.upsert_knowledge(&updated_entry)?;
+                            println!("  Embedded: {}", provider.model_id());
+                        }
+                        Err(e) => {
+                            eprintln!("Warning: Failed to embed fact: {}", e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Embeddings not configured - silent skip
+                }
+            }
 
             Ok(())
         }
