@@ -154,12 +154,11 @@ impl TensorSchema {
                 for entry in fs::read_dir(&schemas_dir)? {
                     let entry = entry?;
                     let path = entry.path();
-                    if let Some(ext) = path.extension() {
-                        if ext == "yaml" || ext == "yml" || ext == "json" {
-                            if let Some(stem) = path.file_stem() {
-                                schemas.push(stem.to_string_lossy().to_string());
-                            }
-                        }
+                    if let Some(ext) = path.extension()
+                        && (ext == "yaml" || ext == "yml" || ext == "json")
+                        && let Some(stem) = path.file_stem()
+                    {
+                        schemas.push(stem.to_string_lossy().to_string());
                     }
                 }
             }
