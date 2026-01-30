@@ -1635,7 +1635,7 @@ impl SurrealDatabase {
         // Query with computed effective_resonance for ordering
         let sql = format!(
             "SELECT {},
-                 (resonance * math::pow(0.95, duration::days(time::now() - created_at) / 7.0)) AS effective_resonance
+                 (resonance * math::pow(0.95, duration::days(time::now() - (last_activated ?? created_at)) / 7.0)) AS effective_resonance
              FROM knowledge
              WHERE resonance_type = 'ephemeral'
              AND created_at > time::now() - duration::from::days($days)

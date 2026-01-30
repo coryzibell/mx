@@ -1949,6 +1949,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let ctx = resolve_agent_context(mine, include_private);
 
+            // Note: Search doesn't activate facts - discovery != engagement
             // Build filter for database query (resonance and category)
             let filter = store::KnowledgeFilter {
                 min_resonance,
@@ -2104,6 +2105,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             match db.get(&id, &ctx)? {
                 Some(entry) => {
+                    // Activate fact when viewing details
+                    if entry.id.starts_with("kn-")
+                        && let Err(e) = db.update_activations(std::slice::from_ref(&entry.id)) {
+                            eprintln!("Warning: failed to update activation: {}", e);
+                        }
+
                     if json {
                         println!("{}", serde_json::to_string_pretty(&entry)?);
                     } else {
@@ -3316,6 +3323,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
+            // Note: Listing doesn't activate facts - bulk view != focused access
             // Query recent facts with decay
             let mut facts = db.query_recent_facts(days)?;
 
@@ -3491,6 +3499,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             } else {
                 format!("kn-{}", fact_id)
             };
+
+            // Activate fact when fetching its session (going deeper)
+            if let Err(e) = db.update_activations(std::slice::from_ref(&fact_ref)) {
+                eprintln!("Warning: failed to update activation: {}", e);
+            }
 
             // Get session ID
             match db.get_session_for_fact(&fact_ref)? {
