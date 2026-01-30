@@ -2107,9 +2107,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 Some(entry) => {
                     // Activate fact when viewing details
                     if entry.id.starts_with("kn-")
-                        && let Err(e) = db.update_activations(std::slice::from_ref(&entry.id)) {
-                            eprintln!("Warning: failed to update activation: {}", e);
-                        }
+                        && let Err(e) = db.update_activations(std::slice::from_ref(&entry.id))
+                    {
+                        eprintln!("Warning: failed to update activation: {}", e);
+                    }
 
                     if json {
                         println!("{}", serde_json::to_string_pretty(&entry)?);
