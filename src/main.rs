@@ -1918,21 +1918,15 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Auto-embed a knowledge entry if in network SurrealDB mode
 ///
 /// This silently generates and updates the embedding for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb and MX_SURREAL_MODE=network.
-fn auto_embed_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
+fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
     use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
-    use crate::surreal_db::SurrealConfig;
 
-    // Only auto-embed in network SurrealDB mode
+    // Only auto-embed in SurrealDB mode
     let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
 
     if backend != "surrealdb" && backend != "surreal" {
         return Ok(()); // Not SurrealDB, skip
-    }
-
-    let config = SurrealConfig::from_env();
-    if !config.is_network() {
-        return Ok(()); // Not network mode, skip
     }
 
     // Get agent context for fetching the entry
@@ -1968,24 +1962,17 @@ fn auto_embed_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     Ok(())
 }
 
-/// Auto-anchor a knowledge entry if in network SurrealDB mode
+/// Auto-anchor a knowledge entry if in SurrealDB mode
 ///
 /// This silently finds similar entries and adds anchors for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb and MX_SURREAL_MODE=network.
+/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 /// Uses defaults: threshold 0.75, max 5 anchors.
-fn auto_anchor_if_network(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
-    use crate::surreal_db::SurrealConfig;
-
-    // Only auto-anchor in network SurrealDB mode
+fn auto_anchor(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    // Only auto-anchor in SurrealDB mode
     let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
 
     if backend != "surrealdb" && backend != "surreal" {
         return Ok(()); // Not SurrealDB, skip
-    }
-
-    let config = SurrealConfig::from_env();
-    if !config.is_network() {
-        return Ok(()); // Not network mode, skip
     }
 
     // Get agent context for fetching entries
@@ -2530,7 +2517,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("  Content: {}", body);
 
                 // Auto-generate embedding if in network SurrealDB mode
-                auto_embed_if_network(&id, db.as_ref())?;
+                auto_embed(&id, db.as_ref())?;
 
                 return Ok(());
             }
@@ -2665,10 +2652,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             db.upsert_knowledge(&entry)?;
 
             // Auto-generate embedding if in network SurrealDB mode
-            auto_embed_if_network(&id, db.as_ref())?;
+            auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor_if_network(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref())?;
 
             println!("Added entry: {}", id);
             println!("  Category: {}", category);
@@ -2987,10 +2974,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Auto-generate embedding if in network SurrealDB mode
-            auto_embed_if_network(&id, db.as_ref())?;
+            auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor_if_network(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref())?;
 
             println!("Updated entry: {}", id);
             if changes.is_empty() {
@@ -3020,10 +3007,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let result = db.edit_content(&id, &ctx, &old, &new, replace_all, nth)?;
 
             // Auto-generate embedding if in network SurrealDB mode
-            auto_embed_if_network(&id, db.as_ref())?;
+            auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor_if_network(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref())?;
 
             println!("Edited entry: {}", id);
             println!(
@@ -3064,10 +3051,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             db.append_content(&id, &ctx, &text)?;
 
             // Auto-generate embedding if in network SurrealDB mode
-            auto_embed_if_network(&id, db.as_ref())?;
+            auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor_if_network(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref())?;
 
             println!("Appended to entry: {}", id);
             println!("  {} bytes added", text.len());
@@ -3104,10 +3091,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             db.prepend_content(&id, &ctx, &text)?;
 
             // Auto-generate embedding if in network SurrealDB mode
-            auto_embed_if_network(&id, db.as_ref())?;
+            auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor_if_network(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref())?;
 
             println!("Prepended to entry: {}", id);
             println!("  {} bytes added", text.len());
