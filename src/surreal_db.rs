@@ -2988,7 +2988,11 @@ mod tests {
     // - Session linkage
     // =========================================================================
 
-    fn make_test_entry(id: &str, resonance: i32, decay_rate: f64) -> crate::knowledge::KnowledgeEntry {
+    fn make_test_entry(
+        id: &str,
+        resonance: i32,
+        decay_rate: f64,
+    ) -> crate::knowledge::KnowledgeEntry {
         use chrono::Utc;
         let now = Utc::now().to_rfc3339();
 
@@ -3067,7 +3071,10 @@ mod tests {
         let result = db.get("KN-test456", &ctx).unwrap();
 
         // SurrealDB IDs are case-sensitive, so this should NOT match
-        assert!(result.is_none(), "Uppercase KN should not match lowercase kn");
+        assert!(
+            result.is_none(),
+            "Uppercase KN should not match lowercase kn"
+        );
     }
 
     #[test]
@@ -3156,7 +3163,10 @@ mod tests {
         let result = db.query_recent_facts(30);
 
         // Should not crash or overflow
-        assert!(result.is_ok(), "Extreme resonance should not break decay formula");
+        assert!(
+            result.is_ok(),
+            "Extreme resonance should not break decay formula"
+        );
 
         let facts = result.unwrap();
         assert!(!facts.is_empty(), "Should find transcendent fact");
@@ -3217,19 +3227,27 @@ mod tests {
         db.upsert_knowledge(&fact).unwrap();
 
         // Create relationship
-        db.add_relationship("kn-fact456", "kn-session123", "extracted_from").unwrap();
+        db.add_relationship("kn-fact456", "kn-session123", "extracted_from")
+            .unwrap();
 
         // Query facts for session
         let facts = db.get_facts_for_session("kn-session123").unwrap();
 
         // Should find the linked fact
         assert_eq!(facts.len(), 1, "Should find one fact for session");
-        assert_eq!(facts[0], "kn-fact456", "Should return full fact ID with prefix");
+        assert_eq!(
+            facts[0], "kn-fact456",
+            "Should return full fact ID with prefix"
+        );
 
         // Reverse lookup: get session for fact
         let session_id = db.get_session_for_fact("kn-fact456").unwrap();
         assert!(session_id.is_some(), "Should find session for fact");
-        assert_eq!(session_id.unwrap(), "kn-session123", "Should return full session ID with prefix");
+        assert_eq!(
+            session_id.unwrap(),
+            "kn-session123",
+            "Should return full session ID with prefix"
+        );
     }
 
     #[test]
@@ -3247,7 +3265,12 @@ mod tests {
             let mut fact = make_test_entry(&format!("kn-fact{}", i), 5, 0.5);
             fact.session_id = Some("kn-multisession".to_string());
             db.upsert_knowledge(&fact).unwrap();
-            db.add_relationship(&format!("kn-fact{}", i), "kn-multisession", "extracted_from").unwrap();
+            db.add_relationship(
+                &format!("kn-fact{}", i),
+                "kn-multisession",
+                "extracted_from",
+            )
+            .unwrap();
         }
 
         // Query facts for session
@@ -3272,7 +3295,11 @@ mod tests {
         let facts = db.get_facts_for_session("kn-ghost").unwrap();
 
         // Should return empty (relationship is what matters, not just session_id field)
-        assert_eq!(facts.len(), 0, "Orphaned fact should not appear without relationship");
+        assert_eq!(
+            facts.len(),
+            0,
+            "Orphaned fact should not appear without relationship"
+        );
 
         // Reverse lookup should also fail
         let session = db.get_session_for_fact("kn-orphan").unwrap();
@@ -3346,7 +3373,10 @@ mod tests {
         let result = db.wake_cascade(&ctx, 50, Some(7), 7);
 
         // Should handle circular references without infinite loop
-        assert!(result.is_ok(), "Circular anchors should not cause infinite loop");
+        assert!(
+            result.is_ok(),
+            "Circular anchors should not cause infinite loop"
+        );
     }
 
     #[test]
@@ -3369,10 +3399,16 @@ mod tests {
         let ctx = crate::store::AgentContext::public_only();
 
         // Should see public
-        assert!(db.get("kn-public", &ctx).unwrap().is_some(), "Should see public entry");
+        assert!(
+            db.get("kn-public", &ctx).unwrap().is_some(),
+            "Should see public entry"
+        );
 
         // Should NOT see private
-        assert!(db.get("kn-private", &ctx).unwrap().is_none(), "Should not see private entry");
+        assert!(
+            db.get("kn-private", &ctx).unwrap().is_none(),
+            "Should not see private entry"
+        );
     }
 
     #[test]
@@ -3397,9 +3433,15 @@ mod tests {
         let ctx = crate::store::AgentContext::for_agent("test_agent");
 
         // Should see own private entry
-        assert!(db.get("kn-my-private", &ctx).unwrap().is_some(), "Should see own private entry");
+        assert!(
+            db.get("kn-my-private", &ctx).unwrap().is_some(),
+            "Should see own private entry"
+        );
 
         // Should NOT see other agent's private entry
-        assert!(db.get("kn-other-private", &ctx).unwrap().is_none(), "Should not see other's private entry");
+        assert!(
+            db.get("kn-other-private", &ctx).unwrap().is_none(),
+            "Should not see other's private entry"
+        );
     }
 }
