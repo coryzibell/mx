@@ -642,16 +642,16 @@ impl SurrealDatabase {
         IF session THEN meta::id(session) ELSE null END AS session_id,
         <string>created_at AS created_at, <string>updated_at AS updated_at,
         IF resonance THEN resonance ELSE 0 END AS resonance,
-        resonance_type,
+        IF resonance_type THEN <string>resonance_type ELSE null END AS resonance_type,
         IF last_activated THEN <string>last_activated ELSE null END AS last_activated,
         IF activation_count THEN activation_count ELSE 0 END AS activation_count,
         IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
         IF anchors THEN anchors ELSE [] END AS anchors,
         IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
-        wake_order,
-        wake_phrase,
-        embedding,
-        embedding_model,
+        IF wake_order THEN wake_order ELSE null END AS wake_order,
+        IF wake_phrase THEN wake_phrase ELSE null END AS wake_phrase,
+        IF embedding THEN embedding ELSE null END AS embedding,
+        IF embedding_model THEN embedding_model ELSE null END AS embedding_model,
         IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at"
     }
 
@@ -1626,6 +1626,42 @@ impl SurrealDatabase {
         Ok(())
     }
 
+    /// Query recent ephemeral facts with decay computation
+    pub fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.query_recent_facts_async(days))
+    }
+
+    async fn query_recent_facts_async(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // Query with computed effective_resonance for ordering
+        let sql = format!(
+            "SELECT {},
+                 (resonance * math::pow(0.95, duration::days(time::now() - (last_activated ?? created_at)) / 7.0)) AS effective_resonance
+             FROM knowledge
+             WHERE resonance_type = 'ephemeral'
+             AND created_at > time::now() - duration::from::days($days)
+             ORDER BY effective_resonance DESC",
+            Self::knowledge_select_fields()
+        );
+
+        let mut response = with_db!(self, db, {
+            db.query(&sql)
+                .bind(("days", days))
+                .await
+                .context("Failed to execute recent facts query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse recent facts results")?;
+
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     // =========================================================================
     // LOOKUP OPERATIONS
     // =========================================================================
@@ -1936,6 +1972,58 @@ impl SurrealDatabase {
 
         let deleted: Vec<Value> = response.take(0)?;
         Ok(!deleted.is_empty())
+    }
+
+    /// Get facts extracted from a specific session
+    pub fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        Self::runtime().block_on(self.get_facts_for_session_async(session_id))
+    }
+
+    async fn get_facts_for_session_async(&self, session_id: &str) -> Result<Vec<String>> {
+        let session_id_normalized = session_id.strip_prefix("kn-").unwrap_or(session_id);
+        let session_thing = Thing::from(("knowledge", session_id_normalized));
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT VALUE meta::id(in) FROM relates_to
+                 WHERE out = $session_id AND relationship_type = relationship_type:extracted_from",
+            )
+            .bind(("session_id", session_thing))
+            .await
+            .context("Failed to query facts for session")
+        })?;
+
+        let fact_ids: Vec<String> = response.take(0).unwrap_or_default();
+        let facts_with_prefix: Vec<String> = fact_ids
+            .into_iter()
+            .map(|id| format!("kn-{}", id))
+            .collect();
+
+        Ok(facts_with_prefix)
+    }
+
+    /// Get the session a fact was extracted from
+    pub fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        Self::runtime().block_on(self.get_session_for_fact_async(fact_id))
+    }
+
+    async fn get_session_for_fact_async(&self, fact_id: &str) -> Result<Option<String>> {
+        let fact_id_normalized = fact_id.strip_prefix("kn-").unwrap_or(fact_id);
+        let fact_thing = Thing::from(("knowledge", fact_id_normalized));
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT VALUE meta::id(out) FROM relates_to
+                 WHERE in = $fact AND relationship_type = relationship_type:extracted_from",
+            )
+            .bind(("fact", fact_thing))
+            .await
+            .context("Failed to query session for fact")
+        })?;
+
+        let session_ids: Vec<String> = response.take(0).unwrap_or_default();
+
+        Ok(session_ids.first().map(|id| format!("kn-{}", id)))
     }
 
     // =========================================================================
@@ -2648,6 +2736,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.update_activations(ids)
     }
 
+    fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        self.query_recent_facts(days)
+    }
+
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_tags_for_entry(entry_id)
     }
@@ -2745,6 +2837,14 @@ impl KnowledgeStore for SurrealDatabase {
         // For now, return false - this method isn't used in current CLI
         let _ = id;
         Ok(false)
+    }
+
+    fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        self.get_facts_for_session(session_id)
+    }
+
+    fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        self.get_session_for_fact(fact_id)
     }
 
     fn list_tables(&self) -> Result<Vec<String>> {

@@ -1122,6 +1122,42 @@ impl Database {
             .execute("DELETE FROM relationships WHERE id = ?1", params![id])?;
         Ok(rows > 0)
     }
+
+    /// Get facts extracted from a specific session
+    pub fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT from_entry_id
+            FROM relationships
+            WHERE to_entry_id = ?1 AND relationship_type = 'extracted_from'
+            "#,
+        )?;
+
+        let fact_ids = stmt
+            .query_map(params![session_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+
+        Ok(fact_ids)
+    }
+
+    /// Get the session a fact was extracted from
+    pub fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT to_entry_id
+            FROM relationships
+            WHERE from_entry_id = ?1 AND relationship_type = 'extracted_from'
+            LIMIT 1
+            "#,
+        )?;
+
+        let mut rows = stmt.query(params![fact_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 // ============================================================================
@@ -1199,6 +1235,73 @@ impl KnowledgeStore for Database {
     fn update_activations(&self, _ids: &[String]) -> Result<()> {
         // SQLite backend doesn't support activation tracking yet - no-op
         Ok(())
+    }
+
+    fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend: graceful degradation - return recent ephemeral entries
+        // without decay computation (ordered by created_at instead of effective_resonance)
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, category_id, title, body, summary,
+                   source_project_id, source_agent_id, file_path,
+                   created_at, updated_at, content_hash,
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
+            FROM knowledge
+            WHERE ephemeral = 1
+            AND created_at > ?1
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let mut entries = stmt
+            .query_map(params![cutoff_str], |row| {
+                Ok(KnowledgeEntry {
+                    id: row.get(0)?,
+                    category_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    summary: row.get(4)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
+                    file_path: row.get(7)?,
+                    tags: vec![],
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
+                    session_id: row.get(13)?,
+                    ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Load tags for each entry
+        for entry in &mut entries {
+            entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
+        }
+
+        Ok(entries)
     }
 
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
@@ -1291,6 +1394,14 @@ impl KnowledgeStore for Database {
 
     fn delete_relationship(&self, id: &str) -> Result<bool> {
         self.delete_relationship(id)
+    }
+
+    fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+        self.get_facts_for_session(session_id)
+    }
+
+    fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+        self.get_session_for_fact(fact_id)
     }
 
     fn list_tables(&self) -> Result<Vec<String>> {

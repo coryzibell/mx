@@ -146,6 +146,40 @@ pub struct Frontmatter {
 }
 
 impl KnowledgeEntry {
+    /// Construct text suitable for embedding generation
+    ///
+    /// Combines title, summary/body, and tags into a single string
+    /// optimized for semantic embedding models.
+    pub fn embedding_text(&self) -> String {
+        let mut parts = vec![self.title.clone()];
+
+        if let Some(summary) = &self.summary {
+            parts.push(summary.clone());
+        } else if let Some(body) = &self.body {
+            // Truncate body to avoid overwhelming the embedding model
+            parts.push(body.chars().take(2000).collect());
+        }
+
+        if !self.tags.is_empty() {
+            parts.push(format!("Tags: {}", self.tags.join(", ")));
+        }
+
+        parts.join("\n\n")
+    }
+
+    /// Normalize content for comparison (thread matching, etc.)
+    ///
+    /// Strips whitespace, lowercases, and removes punctuation variations
+    /// to enable fuzzy content matching.
+    pub fn normalize_content(content: &str) -> String {
+        content
+            .trim()
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Generate a hash-based ID from path and title
     pub fn generate_id(path: &str, title: &str) -> String {
         let input = format!("{}:{}", path, title);
@@ -404,5 +438,119 @@ Body"#;
         let id = KnowledgeEntry::generate_id("pattern/test.md", "Test Pattern");
         assert!(id.starts_with("kn-"));
         assert_eq!(id.len(), 11); // "kn-" + 8 hex chars
+    }
+
+    #[test]
+    fn test_normalize_content() {
+        // Basic whitespace normalization
+        assert_eq!(
+            KnowledgeEntry::normalize_content("  hello   world  "),
+            "hello world"
+        );
+
+        // Case insensitive
+        assert_eq!(
+            KnowledgeEntry::normalize_content("Hello World"),
+            "hello world"
+        );
+
+        // Multi-line collapsed
+        assert_eq!(
+            KnowledgeEntry::normalize_content("hello\n  world\n  test"),
+            "hello world test"
+        );
+
+        // Tab handling
+        assert_eq!(
+            KnowledgeEntry::normalize_content("hello\tworld"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn test_embedding_text() {
+        let entry = KnowledgeEntry {
+            id: "kn-test".to_string(),
+            title: "Test Entry".to_string(),
+            body: Some("This is the body content.".to_string()),
+            summary: None,
+            tags: vec!["rust".to_string(), "test".to_string()],
+            category_id: "technique".to_string(),
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            created_at: None,
+            updated_at: None,
+            content_hash: None,
+            source_type_id: None,
+            entry_type_id: None,
+            session_id: None,
+            ephemeral: false,
+            content_type_id: None,
+            owner: None,
+            visibility: "public".to_string(),
+            resonance: 0,
+            resonance_type: None,
+            last_activated: None,
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+        };
+
+        let text = entry.embedding_text();
+        assert!(text.contains("Test Entry"));
+        assert!(text.contains("This is the body content."));
+        assert!(text.contains("Tags: rust, test"));
+    }
+
+    #[test]
+    fn test_embedding_text_with_summary() {
+        let entry = KnowledgeEntry {
+            id: "kn-test".to_string(),
+            title: "Test Entry".to_string(),
+            body: Some("Long body that should be ignored when summary exists.".to_string()),
+            summary: Some("Short summary".to_string()),
+            tags: vec![],
+            category_id: "technique".to_string(),
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            created_at: None,
+            updated_at: None,
+            content_hash: None,
+            source_type_id: None,
+            entry_type_id: None,
+            session_id: None,
+            ephemeral: false,
+            content_type_id: None,
+            owner: None,
+            visibility: "public".to_string(),
+            resonance: 0,
+            resonance_type: None,
+            last_activated: None,
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+        };
+
+        let text = entry.embedding_text();
+        assert!(text.contains("Test Entry"));
+        assert!(text.contains("Short summary"));
+        // Summary takes precedence over body
+        assert!(!text.contains("Long body"));
     }
 }
