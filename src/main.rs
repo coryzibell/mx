@@ -3510,10 +3510,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Activate all facts from this session (bulk activation for viewing)
-            if !fact_ids.is_empty() {
-                if let Err(e) = db.update_activations(&fact_ids) {
-                    eprintln!("Warning: failed to update activations: {}", e);
-                }
+            if !fact_ids.is_empty()
+                && let Err(e) = db.update_activations(&fact_ids)
+            {
+                eprintln!("Warning: failed to update activations: {}", e);
             }
 
             // Fetch full entries for each fact
