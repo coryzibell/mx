@@ -72,6 +72,15 @@ impl WakeCascade {
     }
 }
 
+/// Result of an edit_content operation
+#[derive(Debug, Clone)]
+pub struct EditResult {
+    /// Number of replacements made
+    pub replacements: usize,
+    /// The updated content (for display purposes)
+    pub new_content: String,
+}
+
 /// Abstract interface for knowledge storage backends (SQLite, SurrealDB, etc)
 pub trait KnowledgeStore {
     // =========================================================================
@@ -132,6 +141,47 @@ pub trait KnowledgeStore {
 
     /// Query recent ephemeral facts with decay computation
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
+
+    // =========================================================================
+    // CONTENT PATCH OPERATIONS
+    // =========================================================================
+
+    /// Edit content by finding and replacing text
+    ///
+    /// Returns an error if:
+    /// - Entry not found
+    /// - Entry has no body content
+    /// - `old_text` is not found in the content
+    /// - `old_text` appears multiple times and neither `replace_all` nor `nth` is specified
+    ///
+    /// # Arguments
+    /// * `id` - Entry ID to update
+    /// * `ctx` - Agent context for privacy filtering
+    /// * `old_text` - Text to find in the content
+    /// * `new_text` - Replacement text
+    /// * `replace_all` - If true, replace all occurrences
+    /// * `nth` - If Some(n), replace only the nth occurrence (1-indexed)
+    fn edit_content(
+        &self,
+        id: &str,
+        ctx: &AgentContext,
+        old_text: &str,
+        new_text: &str,
+        replace_all: bool,
+        nth: Option<usize>,
+    ) -> Result<EditResult>;
+
+    /// Append content to the end of an entry's body
+    ///
+    /// Adds the new content after the existing content, separated by a newline.
+    /// If the entry has no body, the new content becomes the body.
+    fn append_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()>;
+
+    /// Prepend content to the start of an entry's body
+    ///
+    /// Adds the new content before the existing content, separated by a newline.
+    /// If the entry has no body, the new content becomes the body.
+    fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()>;
 
     // =========================================================================
     // TAG OPERATIONS
