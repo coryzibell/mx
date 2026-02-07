@@ -1158,6 +1158,85 @@ impl Database {
             Ok(None)
         }
     }
+
+    // =========================================================================
+    // CONTENT PATCH OPERATIONS
+    // =========================================================================
+
+    /// Edit content by finding and replacing text
+    pub fn edit_content(
+        &self,
+        id: &str,
+        old_text: &str,
+        new_text: &str,
+        replace_all: bool,
+        nth: Option<usize>,
+    ) -> Result<crate::store::EditResult> {
+        // Fetch entry
+        let entry = self
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+        let body = entry
+            .body
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Entry has no body content"))?;
+
+        // Use shared content operation logic
+        let result = crate::content_ops::edit_content(body, old_text, new_text, replace_all, nth)?;
+
+        // Update the entry
+        let mut updated = entry;
+        let content_hash = KnowledgeEntry::compute_hash(&result.new_content);
+        updated.body = Some(result.new_content.clone());
+        updated.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        updated.content_hash = Some(content_hash);
+
+        self.upsert_knowledge(&updated)?;
+
+        Ok(crate::store::EditResult {
+            replacements: result.replacements,
+            new_content: result.new_content,
+        })
+    }
+
+    /// Append content to the end of an entry's body
+    pub fn append_content(&self, id: &str, content: &str) -> Result<()> {
+        let entry = self
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+        // Use shared content operation logic
+        let new_body = crate::content_ops::append_content(entry.body.as_deref(), content);
+
+        let mut updated = entry;
+        let content_hash = KnowledgeEntry::compute_hash(&new_body);
+        updated.body = Some(new_body);
+        updated.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        updated.content_hash = Some(content_hash);
+
+        self.upsert_knowledge(&updated)?;
+        Ok(())
+    }
+
+    /// Prepend content to the start of an entry's body
+    pub fn prepend_content(&self, id: &str, content: &str) -> Result<()> {
+        let entry = self
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
+
+        // Use shared content operation logic
+        let new_body = crate::content_ops::prepend_content(entry.body.as_deref(), content);
+
+        let mut updated = entry;
+        let content_hash = KnowledgeEntry::compute_hash(&new_body);
+        updated.body = Some(new_body);
+        updated.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        updated.content_hash = Some(content_hash);
+
+        self.upsert_knowledge(&updated)?;
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1438,6 +1517,39 @@ impl KnowledgeStore for Database {
 
     fn list_relationship_types(&self) -> Result<Vec<RelationshipType>> {
         self.list_relationship_types()
+    }
+
+    fn edit_content(
+        &self,
+        id: &str,
+        _ctx: &crate::store::AgentContext,
+        old_text: &str,
+        new_text: &str,
+        replace_all: bool,
+        nth: Option<usize>,
+    ) -> Result<crate::store::EditResult> {
+        // SQLite backend ignores ctx (no privacy filtering)
+        self.edit_content(id, old_text, new_text, replace_all, nth)
+    }
+
+    fn append_content(
+        &self,
+        id: &str,
+        _ctx: &crate::store::AgentContext,
+        content: &str,
+    ) -> Result<()> {
+        // SQLite backend ignores ctx (no privacy filtering)
+        self.append_content(id, content)
+    }
+
+    fn prepend_content(
+        &self,
+        id: &str,
+        _ctx: &crate::store::AgentContext,
+        content: &str,
+    ) -> Result<()> {
+        // SQLite backend ignores ctx (no privacy filtering)
+        self.prepend_content(id, content)
     }
 }
 

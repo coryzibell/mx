@@ -2,6 +2,7 @@
 
 mod codex;
 mod commit;
+mod content_ops;
 mod convert;
 mod db;
 mod doctor;
@@ -715,6 +716,48 @@ enum MemoryCommands {
         /// Force dangerous visibility changes (e.g., making blooms public)
         #[arg(long)]
         force: bool,
+    },
+
+    /// Edit content by finding and replacing text (patch semantics)
+    Edit {
+        /// Entry ID to edit
+        id: String,
+
+        /// Text to find in the content
+        #[arg(long)]
+        old: String,
+
+        /// Replacement text
+        #[arg(long)]
+        new: String,
+
+        /// Replace all occurrences (default: error if multiple matches)
+        #[arg(long)]
+        replace_all: bool,
+
+        /// Replace only the Nth occurrence (1-indexed)
+        #[arg(long, conflicts_with = "replace_all")]
+        nth: Option<usize>,
+    },
+
+    /// Append content to the end of an entry's body
+    Append {
+        /// Entry ID to append to
+        id: String,
+
+        /// Content to append (omit to read from stdin)
+        #[arg(short = 'c', long)]
+        content: Option<String>,
+    },
+
+    /// Prepend content to the start of an entry's body
+    Prepend {
+        /// Entry ID to prepend to
+        id: String,
+
+        /// Content to prepend (omit to read from stdin)
+        #[arg(short = 'c', long)]
+        content: Option<String>,
     },
 
     /// Generate embedding for a knowledge entry
@@ -2957,6 +3000,117 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     println!("  {}", change);
                 }
             }
+        }
+
+        MemoryCommands::Edit {
+            id,
+            old,
+            new,
+            replace_all,
+            nth,
+        } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            let result = db.edit_content(&id, &ctx, &old, &new, replace_all, nth)?;
+
+            // Auto-generate embedding if in network SurrealDB mode
+            auto_embed_if_network(&id, db.as_ref())?;
+
+            // Auto-generate anchors if in network SurrealDB mode
+            auto_anchor_if_network(&id, db.as_ref())?;
+
+            println!("Edited entry: {}", id);
+            println!(
+                "  {} replacement{}",
+                result.replacements,
+                if result.replacements == 1 { "" } else { "s" }
+            );
+        }
+
+        MemoryCommands::Append { id, content } => {
+            use std::io::{self, Read};
+
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            // Get content from argument or stdin
+            let text = match content {
+                Some(c) => c,
+                None => {
+                    let mut buffer = String::new();
+                    io::stdin()
+                        .read_to_string(&mut buffer)
+                        .context("Failed to read from stdin")?;
+                    buffer.trim_end().to_string()
+                }
+            };
+
+            if text.is_empty() {
+                eprintln!("Error: No content provided");
+                std::process::exit(1);
+            }
+
+            db.append_content(&id, &ctx, &text)?;
+
+            // Auto-generate embedding if in network SurrealDB mode
+            auto_embed_if_network(&id, db.as_ref())?;
+
+            // Auto-generate anchors if in network SurrealDB mode
+            auto_anchor_if_network(&id, db.as_ref())?;
+
+            println!("Appended to entry: {}", id);
+            println!("  {} bytes added", text.len());
+        }
+
+        MemoryCommands::Prepend { id, content } => {
+            use std::io::{self, Read};
+
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Use current agent context for private entry access
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            // Get content from argument or stdin
+            let text = match content {
+                Some(c) => c,
+                None => {
+                    let mut buffer = String::new();
+                    io::stdin()
+                        .read_to_string(&mut buffer)
+                        .context("Failed to read from stdin")?;
+                    buffer.trim_end().to_string()
+                }
+            };
+
+            if text.is_empty() {
+                eprintln!("Error: No content provided");
+                std::process::exit(1);
+            }
+
+            db.prepend_content(&id, &ctx, &text)?;
+
+            // Auto-generate embedding if in network SurrealDB mode
+            auto_embed_if_network(&id, db.as_ref())?;
+
+            // Auto-generate anchors if in network SurrealDB mode
+            auto_anchor_if_network(&id, db.as_ref())?;
+
+            println!("Prepended to entry: {}", id);
+            println!("  {} bytes added", text.len());
         }
 
         MemoryCommands::Embed { id, all } => {
