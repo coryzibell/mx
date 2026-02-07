@@ -2380,11 +2380,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 // Build fact entry
                 let now = chrono::Utc::now().to_rfc3339();
-                let truncated_title = if body.len() > 60 {
-                    format!("{}...", &body[..57])
-                } else {
-                    body.clone()
-                };
+                let truncated_title = safe_truncate(&body, 60);
                 let fact_title = format!("{}: {}", fact_type, truncated_title);
 
                 // Generate ID using session if provided
@@ -2490,40 +2486,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("  Category: {}", routing.category);
                 println!("  Content: {}", body);
 
-                // Auto-embed
-                match crate::embeddings::FastEmbedProvider::new() {
-                    Ok(mut provider) => {
-                        use crate::embeddings::EmbeddingProvider;
-
-                        let mut parts = vec![fact_title.clone()];
-                        parts.push(body.clone());
-                        if !tag_list.is_empty() {
-                            parts.push(format!("Tags: {}", tag_list.join(", ")));
-                        }
-                        let embedding_text = parts.join("\n\n");
-
-                        match provider.embed(&embedding_text) {
-                            Ok(embedding) => {
-                                let ctx = crate::store::AgentContext::public_only();
-                                if let Some(mut updated_entry) = db.get(&id, &ctx)? {
-                                    updated_entry.embedding = Some(embedding);
-                                    updated_entry.embedding_model =
-                                        Some(provider.model_id().to_string());
-                                    updated_entry.embedded_at =
-                                        Some(chrono::Utc::now().to_rfc3339());
-                                    db.upsert_knowledge(&updated_entry)?;
-                                    println!("  Embedded: {}", provider.model_id());
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Failed to embed fact: {}", e);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        // Embeddings not configured - silent skip
-                    }
-                }
+                // Auto-generate embedding if in network SurrealDB mode
+                auto_embed_if_network(&id, db.as_ref())?;
 
                 return Ok(());
             }
@@ -3498,9 +3462,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         })
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    let state = summary_json.as_ref().and_then(|v: &serde_json::Value| {
-                        v.get("state").and_then(|s| s.as_str()).map(String::from)
-                    });
+                    let state = fact.get_summary_state();
 
                     let date = fact
                         .created_at
@@ -3545,6 +3507,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if fact_ids.is_empty() {
                 println!("No facts found for session: {}", session_ref);
                 return Ok(());
+            }
+
+            // Activate all facts from this session (bulk activation for viewing)
+            if !fact_ids.is_empty() {
+                if let Err(e) = db.update_activations(&fact_ids) {
+                    eprintln!("Warning: failed to update activations: {}", e);
+                }
             }
 
             // Fetch full entries for each fact
@@ -4750,11 +4719,7 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     println!("Category: {}", entry.category_id);
 
     // Extract state from summary if present
-    let state = entry
-        .summary
-        .as_ref()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|v: serde_json::Value| v.get("state").and_then(|s| s.as_str()).map(String::from));
+    let state = entry.get_summary_state();
 
     if let Some(state) = state {
         println!("Title:    {} ({})", entry.title, state);

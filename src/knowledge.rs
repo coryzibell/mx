@@ -180,6 +180,17 @@ impl KnowledgeEntry {
             .join(" ")
     }
 
+    /// Extract the "state" field from the summary JSON if present
+    ///
+    /// Many fact types store state in their summary field as JSON.
+    /// This helper extracts it safely without duplicating the parsing logic.
+    pub fn get_summary_state(&self) -> Option<String> {
+        self.summary
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(String::from))
+    }
+
     /// Generate a hash-based ID from path and title
     pub fn generate_id(path: &str, title: &str) -> String {
         let input = format!("{}:{}", path, title);

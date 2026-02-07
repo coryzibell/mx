@@ -2976,4 +2976,430 @@ mod tests {
         // This was previously failing with: "Found '2025-11-29T...' for field `created_at`, but expected a datetime"
         db.upsert_agent(&agent).unwrap();
     }
+
+    // =========================================================================
+    // PR #118 EDGE CASE TESTS
+    // =========================================================================
+    // These tests cover edge cases identified during code review of the
+    // memory/fact unification. They ensure robustness of:
+    // - Decay formula computation
+    // - ID normalization
+    // - Thread duplicate detection
+    // - Session linkage
+    // =========================================================================
+
+    fn make_test_entry(id: &str, resonance: i32, decay_rate: f64) -> crate::knowledge::KnowledgeEntry {
+        use chrono::Utc;
+        let now = Utc::now().to_rfc3339();
+
+        crate::knowledge::KnowledgeEntry {
+            id: id.to_string(),
+            category_id: "test".to_string(),
+            title: format!("Test Entry {}", id),
+            body: Some("Test body".to_string()),
+            summary: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            tags: vec![],
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            content_hash: Some("test-hash".to_string()),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
+            content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
+            resonance,
+            resonance_type: Some("ephemeral".to_string()),
+            last_activated: Some(now),
+            activation_count: 0,
+            decay_rate,
+            anchors: vec![],
+            wake_phrases: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+        }
+    }
+
+    #[test]
+    fn test_id_normalization_double_prefix() {
+        // Edge case: IDs that already have "kn-" prefix get doubled during processing
+        // Example: "kn-123" -> strip_prefix -> "123" -> add prefix -> "kn-123"
+        // But what if someone passes "kn-kn-123"?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Insert with normal ID
+        let entry = make_test_entry("kn-test123", 5, 0.5);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Try to retrieve with double prefix
+        let ctx = crate::store::AgentContext::public_only();
+        let result = db.get("kn-kn-test123", &ctx).unwrap();
+
+        // Should NOT find it (this is expected behavior - double prefix is invalid)
+        assert!(result.is_none(), "Double prefix should not match");
+
+        // But normal retrieval should work
+        let result = db.get("kn-test123", &ctx).unwrap();
+        assert!(result.is_some(), "Normal prefix should match");
+    }
+
+    #[test]
+    fn test_id_normalization_case_sensitivity() {
+        // Edge case: Are IDs case-sensitive? "KN-123" vs "kn-123"
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Insert with lowercase
+        let entry = make_test_entry("kn-test456", 5, 0.5);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Try to retrieve with uppercase
+        let ctx = crate::store::AgentContext::public_only();
+        let result = db.get("KN-test456", &ctx).unwrap();
+
+        // SurrealDB IDs are case-sensitive, so this should NOT match
+        assert!(result.is_none(), "Uppercase KN should not match lowercase kn");
+    }
+
+    #[test]
+    fn test_id_normalization_empty_suffix() {
+        // Edge case: What happens with just "kn-" and no suffix?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Try to get an entry with empty suffix
+        let result = db.get("kn-", &ctx);
+
+        // Should handle gracefully (likely return None, not panic)
+        assert!(result.is_ok(), "Empty suffix should not panic");
+    }
+
+    #[test]
+    fn test_id_normalization_no_prefix() {
+        // Edge case: What if someone passes just "123" without "kn-"?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Insert with full ID
+        let entry = make_test_entry("kn-test789", 5, 0.5);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Try to retrieve without prefix
+        let ctx = crate::store::AgentContext::public_only();
+        let result = db.get("test789", &ctx).unwrap();
+
+        // This SHOULD work because strip_prefix returns the original if no prefix found
+        // and that gets stored as-is in SurrealDB
+        // Actually, the ID gets normalized during insert, so "test789" should find it
+        assert!(result.is_some(), "ID without prefix should still match");
+    }
+
+    #[test]
+    fn test_decay_formula_zero_days() {
+        // Edge case: What happens when last_activated is NOW (0 days ago)?
+        // Formula: resonance * 0.95^(days / 7)
+        // If days = 0: resonance * 0.95^0 = resonance * 1 = resonance
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create entry with ephemeral type and recent activation
+        let entry = make_test_entry("kn-fresh", 10, 0.5);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Query recent facts (should include entries from today)
+        let facts = db.query_recent_facts(1).unwrap();
+
+        // Should find the entry
+        assert!(!facts.is_empty(), "Should find fresh facts");
+
+        // The effective_resonance should be close to original resonance (no decay yet)
+        // We can't directly check the computed value here, but it shouldn't crash
+    }
+
+    #[test]
+    fn test_decay_formula_negative_days() {
+        // Edge case: What if duration::days() returns negative?
+        // This shouldn't happen with (now - last_activated), but let's test boundary
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Query with negative days parameter
+        let result = db.query_recent_facts(-1);
+
+        // Should handle gracefully (likely return empty or error)
+        assert!(result.is_ok(), "Negative days should not panic");
+    }
+
+    #[test]
+    fn test_decay_formula_extreme_resonance() {
+        // Edge case: Resonance can be > 10 for "transcendent" blooms
+        // Make sure formula doesn't overflow or break
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create entry with extreme resonance (like Ori at 13)
+        let mut entry = make_test_entry("kn-transcendent", 13, 0.0);
+        entry.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Query recent facts
+        let result = db.query_recent_facts(30);
+
+        // Should not crash or overflow
+        assert!(result.is_ok(), "Extreme resonance should not break decay formula");
+
+        let facts = result.unwrap();
+        assert!(!facts.is_empty(), "Should find transcendent fact");
+    }
+
+    #[test]
+    fn test_decay_formula_max_int_resonance() {
+        // Edge case: What if resonance is i32::MAX?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create entry with maximum resonance
+        let mut entry = make_test_entry("kn-maxres", i32::MAX, 0.0);
+        entry.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Query recent facts
+        let result = db.query_recent_facts(30);
+
+        // Should handle without overflow
+        assert!(result.is_ok(), "MAX resonance should not overflow");
+    }
+
+    #[test]
+    fn test_thread_duplicate_detection() {
+        // Edge case: How does duplicate detection work with normalized content?
+        // KnowledgeEntry::normalize_content() is used for fuzzy matching
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create two entries with similar content but different formatting
+        let entry1 = make_test_entry("kn-thread1", 5, 0.5);
+        let mut entry2 = make_test_entry("kn-thread2", 5, 0.5);
+        entry2.body = Some("  TEST   BODY  ".to_string()); // Different whitespace
+
+        db.upsert_knowledge(&entry1).unwrap();
+        db.upsert_knowledge(&entry2).unwrap();
+
+        // Both should be stored (deduplication happens at application level, not DB)
+        let ctx = crate::store::AgentContext::public_only();
+        assert!(db.get("kn-thread1", &ctx).unwrap().is_some());
+        assert!(db.get("kn-thread2", &ctx).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_session_linkage_round_trip() {
+        // Edge case: Can we link a fact to a session and retrieve it back?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create a session entry
+        let session = make_test_entry("kn-session123", 0, 0.0);
+        db.upsert_knowledge(&session).unwrap();
+
+        // Create a fact linked to that session
+        let mut fact = make_test_entry("kn-fact456", 5, 0.5);
+        fact.session_id = Some("kn-session123".to_string());
+        db.upsert_knowledge(&fact).unwrap();
+
+        // Create relationship
+        db.add_relationship("kn-fact456", "kn-session123", "extracted_from").unwrap();
+
+        // Query facts for session
+        let facts = db.get_facts_for_session("kn-session123").unwrap();
+
+        // Should find the linked fact
+        assert_eq!(facts.len(), 1, "Should find one fact for session");
+        assert_eq!(facts[0], "kn-fact456", "Should return full fact ID with prefix");
+
+        // Reverse lookup: get session for fact
+        let session_id = db.get_session_for_fact("kn-fact456").unwrap();
+        assert!(session_id.is_some(), "Should find session for fact");
+        assert_eq!(session_id.unwrap(), "kn-session123", "Should return full session ID with prefix");
+    }
+
+    #[test]
+    fn test_session_linkage_multiple_facts() {
+        // Edge case: Multiple facts from same session
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create session
+        let session = make_test_entry("kn-multisession", 0, 0.0);
+        db.upsert_knowledge(&session).unwrap();
+
+        // Create multiple facts
+        for i in 1..=5 {
+            let mut fact = make_test_entry(&format!("kn-fact{}", i), 5, 0.5);
+            fact.session_id = Some("kn-multisession".to_string());
+            db.upsert_knowledge(&fact).unwrap();
+            db.add_relationship(&format!("kn-fact{}", i), "kn-multisession", "extracted_from").unwrap();
+        }
+
+        // Query facts for session
+        let facts = db.get_facts_for_session("kn-multisession").unwrap();
+
+        // Should find all 5 facts
+        assert_eq!(facts.len(), 5, "Should find all 5 facts for session");
+    }
+
+    #[test]
+    fn test_session_linkage_orphaned_fact() {
+        // Edge case: Fact with session_id but no relationship
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create fact with session_id but don't create relationship
+        let mut fact = make_test_entry("kn-orphan", 5, 0.5);
+        fact.session_id = Some("kn-ghost".to_string());
+        db.upsert_knowledge(&fact).unwrap();
+
+        // Query for session that doesn't exist
+        let facts = db.get_facts_for_session("kn-ghost").unwrap();
+
+        // Should return empty (relationship is what matters, not just session_id field)
+        assert_eq!(facts.len(), 0, "Orphaned fact should not appear without relationship");
+
+        // Reverse lookup should also fail
+        let session = db.get_session_for_fact("kn-orphan").unwrap();
+        assert!(session.is_none(), "Orphaned fact should have no session");
+    }
+
+    #[test]
+    fn test_normalize_content_edge_cases() {
+        // Test the normalize_content function used for thread matching
+        use crate::knowledge::KnowledgeEntry;
+
+        // Empty string
+        assert_eq!(KnowledgeEntry::normalize_content(""), "");
+
+        // Only whitespace
+        assert_eq!(KnowledgeEntry::normalize_content("   \n\t  "), "");
+
+        // Unicode characters
+        let unicode = "Hello 世界! Привет мир!";
+        let normalized = KnowledgeEntry::normalize_content(unicode);
+        assert!(normalized.contains("hello"), "Should lowercase ASCII");
+        assert!(normalized.contains("世界"), "Should preserve unicode");
+
+        // Multiple spaces and newlines
+        let messy = "  hello\n\n  world\t\ttest  ";
+        assert_eq!(KnowledgeEntry::normalize_content(messy), "hello world test");
+    }
+
+    #[test]
+    fn test_wake_cascade_empty_anchors() {
+        // Edge case: What if a bloom has empty anchors array?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Create bloom with no anchors
+        let mut entry = make_test_entry("kn-solo", 9, 0.0);
+        entry.resonance_type = Some("foundational".to_string());
+        entry.anchors = vec![];
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Query wake cascade
+        let cascade = db.wake_cascade(&ctx, 50, Some(7), 7).unwrap();
+
+        // Should still include the entry in core (high resonance)
+        assert!(!cascade.core.is_empty(), "Should find core bloom");
+        // Bridges might be empty since no anchors
+        // This is expected behavior
+    }
+
+    #[test]
+    fn test_wake_cascade_circular_anchors() {
+        // Edge case: What if bloom A anchors to B, and B anchors to A?
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create two blooms that reference each other
+        let mut bloom_a = make_test_entry("kn-circular-a", 9, 0.0);
+        bloom_a.resonance_type = Some("foundational".to_string());
+        bloom_a.anchors = vec!["kn-circular-b".to_string()];
+
+        let mut bloom_b = make_test_entry("kn-circular-b", 9, 0.0);
+        bloom_b.resonance_type = Some("foundational".to_string());
+        bloom_b.anchors = vec!["kn-circular-a".to_string()];
+
+        db.upsert_knowledge(&bloom_a).unwrap();
+        db.upsert_knowledge(&bloom_b).unwrap();
+
+        // Query wake cascade
+        let ctx = crate::store::AgentContext::public_only();
+        let result = db.wake_cascade(&ctx, 50, Some(7), 7);
+
+        // Should handle circular references without infinite loop
+        assert!(result.is_ok(), "Circular anchors should not cause infinite loop");
+    }
+
+    #[test]
+    fn test_privacy_filtering_public_only() {
+        // Edge case: Public-only context should not see private entries
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create public entry
+        let public_entry = make_test_entry("kn-public", 5, 0.5);
+        db.upsert_knowledge(&public_entry).unwrap();
+
+        // Create private entry
+        let mut private_entry = make_test_entry("kn-private", 5, 0.5);
+        private_entry.visibility = "private".to_string();
+        private_entry.owner = Some("test_agent".to_string());
+        db.upsert_knowledge(&private_entry).unwrap();
+
+        // Query with public-only context
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Should see public
+        assert!(db.get("kn-public", &ctx).unwrap().is_some(), "Should see public entry");
+
+        // Should NOT see private
+        assert!(db.get("kn-private", &ctx).unwrap().is_none(), "Should not see private entry");
+    }
+
+    #[test]
+    fn test_privacy_filtering_agent_context() {
+        // Edge case: Agent should see their own private entries
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create private entry for test_agent
+        let mut private_entry = make_test_entry("kn-my-private", 5, 0.5);
+        private_entry.visibility = "private".to_string();
+        private_entry.owner = Some("test_agent".to_string());
+        db.upsert_knowledge(&private_entry).unwrap();
+
+        // Create private entry for other_agent
+        let mut other_entry = make_test_entry("kn-other-private", 5, 0.5);
+        other_entry.visibility = "private".to_string();
+        other_entry.owner = Some("other_agent".to_string());
+        db.upsert_knowledge(&other_entry).unwrap();
+
+        // Query as test_agent
+        let ctx = crate::store::AgentContext::for_agent("test_agent");
+
+        // Should see own private entry
+        assert!(db.get("kn-my-private", &ctx).unwrap().is_some(), "Should see own private entry");
+
+        // Should NOT see other agent's private entry
+        assert!(db.get("kn-other-private", &ctx).unwrap().is_none(), "Should not see other's private entry");
+    }
 }
