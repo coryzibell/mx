@@ -281,7 +281,12 @@ mod tests {
         // nth beyond available matches should error
         let result = edit_content("a b a", "a", "x", false, Some(10));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid occurrence number"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid occurrence number")
+        );
     }
 
     #[test]
@@ -289,7 +294,12 @@ mod tests {
         // nth=0 is invalid (1-indexed)
         let result = edit_content("a b a", "a", "x", false, Some(0));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid occurrence number"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid occurrence number")
+        );
     }
 
     #[test]
