@@ -81,6 +81,25 @@ pub struct EditResult {
     pub new_content: String,
 }
 
+/// Result of a reinforce operation
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReinforcementResult {
+    /// Entry ID that was reinforced
+    pub id: String,
+    /// Previous resonance value
+    pub old_resonance: i32,
+    /// New resonance value (after increment and cap)
+    pub new_resonance: i32,
+    /// Amount added (before cap)
+    pub amount_added: i32,
+    /// Whether the cap was hit
+    pub capped: bool,
+    /// New last_activated timestamp
+    pub last_activated: String,
+    /// New activation count
+    pub activation_count: i32,
+}
+
 /// Abstract interface for knowledge storage backends (SQLite, SurrealDB, etc)
 pub trait KnowledgeStore {
     // =========================================================================
@@ -141,6 +160,17 @@ pub trait KnowledgeStore {
 
     /// Query recent ephemeral facts with decay computation
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
+    ///
+    /// # Arguments
+    /// * `id` - Entry ID to reinforce
+    /// * `amount` - Amount to increase resonance by
+    /// * `cap` - Maximum resonance value (None = no cap)
+    ///
+    /// # Returns
+    /// Result containing the old/new values and whether cap was hit
+    fn reinforce(&self, id: &str, amount: i32, cap: Option<i32>) -> Result<ReinforcementResult>;
 
     // =========================================================================
     // CONTENT PATCH OPERATIONS

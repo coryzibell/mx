@@ -1662,6 +1662,106 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// Reinforce a knowledge entry
+    pub fn reinforce(
+        &self,
+        id: &str,
+        amount: i32,
+        cap: Option<i32>,
+    ) -> Result<crate::store::ReinforcementResult> {
+        Self::runtime().block_on(self.reinforce_async(id, amount, cap))
+    }
+
+    async fn reinforce_async(
+        &self,
+        id: &str,
+        amount: i32,
+        cap: Option<i32>,
+    ) -> Result<crate::store::ReinforcementResult> {
+        // Normalize ID
+        let normalized_id = if id.starts_with("kn-") {
+            id.to_string()
+        } else {
+            format!("kn-{}", id)
+        };
+
+        let id_part = normalized_id.strip_prefix("kn-").unwrap_or(&normalized_id);
+
+        // First, get the current entry to read old values
+        let mut response = with_db!(self, db, {
+            db.query("SELECT resonance, activation_count FROM knowledge WHERE meta::id(id) = $id")
+                .bind(("id", id_part.to_string()))
+                .await
+                .context("Failed to select entry for reinforce")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse entry for reinforce")?;
+
+        let current = results
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", normalized_id))?;
+
+        let old_resonance = current
+            .get("resonance")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+
+        let old_activation_count = current
+            .get("activation_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+
+        // Calculate new resonance
+        let mut new_resonance = old_resonance + amount;
+        let capped = if let Some(cap_value) = cap {
+            if new_resonance > cap_value {
+                new_resonance = cap_value;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let new_activation_count = old_activation_count + 1;
+
+        // Create a Thing for the update
+        let record_thing = Thing::from(("knowledge".to_string(), id_part.to_string()));
+
+        // Update the entry
+        let sql = "UPDATE knowledge SET
+            resonance = $new_resonance,
+            last_activated = time::now(),
+            activation_count = $new_count,
+            updated_at = time::now()
+            WHERE id = $id";
+
+        with_db!(self, db, {
+            db.query(sql)
+                .bind(("id", record_thing))
+                .bind(("new_resonance", new_resonance))
+                .bind(("new_count", new_activation_count))
+                .await
+                .context("Failed to update entry for reinforce")
+        })?;
+
+        // Get current timestamp for response
+        let now = Utc::now().to_rfc3339();
+
+        Ok(crate::store::ReinforcementResult {
+            id: normalized_id,
+            old_resonance,
+            new_resonance,
+            amount_added: amount,
+            capped,
+            last_activated: now,
+            activation_count: new_activation_count,
+        })
+    }
+
     // =========================================================================
     // LOOKUP OPERATIONS
     // =========================================================================
@@ -2830,6 +2930,15 @@ impl KnowledgeStore for SurrealDatabase {
         self.query_recent_facts(days)
     }
 
+    fn reinforce(
+        &self,
+        id: &str,
+        amount: i32,
+        cap: Option<i32>,
+    ) -> Result<crate::store::ReinforcementResult> {
+        self.reinforce(id, amount, cap)
+    }
+
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_tags_for_entry(entry_id)
     }
@@ -3563,5 +3672,108 @@ mod tests {
             db.get("kn-other-private", &ctx).unwrap().is_none(),
             "Should not see other's private entry"
         );
+    }
+
+    #[test]
+    fn test_reinforce_basic() {
+        // Test basic reinforcement functionality
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create an entry with resonance 5
+        let mut entry = make_test_entry("kn-test-reinforce", 5, 0.0);
+        entry.activation_count = 10;
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Reinforce by 2, with cap of 10
+        let result = db.reinforce("kn-test-reinforce", 2, Some(10)).unwrap();
+
+        // Verify results
+        assert_eq!(result.id, "kn-test-reinforce");
+        assert_eq!(result.old_resonance, 5);
+        assert_eq!(result.new_resonance, 7);
+        assert_eq!(result.amount_added, 2);
+        assert!(!result.capped);
+        assert_eq!(result.activation_count, 11);
+
+        // Verify the entry was actually updated
+        let ctx = crate::store::AgentContext::public_only();
+        let updated = db.get("kn-test-reinforce", &ctx).unwrap().unwrap();
+        assert_eq!(updated.resonance, 7);
+        assert_eq!(updated.activation_count, 11);
+        assert!(updated.last_activated.is_some());
+    }
+
+    #[test]
+    fn test_reinforce_with_cap() {
+        // Test that cap is enforced
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create an entry with resonance 9
+        let entry = make_test_entry("kn-test-cap", 9, 0.0);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Try to reinforce by 5, but cap at 10
+        let result = db.reinforce("kn-test-cap", 5, Some(10)).unwrap();
+
+        // Should be capped at 10
+        assert_eq!(result.old_resonance, 9);
+        assert_eq!(result.new_resonance, 10);
+        assert_eq!(result.amount_added, 5);
+        assert!(result.capped);
+
+        // Verify the entry was capped
+        let ctx = crate::store::AgentContext::public_only();
+        let updated = db.get("kn-test-cap", &ctx).unwrap().unwrap();
+        assert_eq!(updated.resonance, 10);
+    }
+
+    #[test]
+    fn test_reinforce_without_cap() {
+        // Test reinforcement without a cap (for transcendent blooms)
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create an entry with resonance 9
+        let entry = make_test_entry("kn-test-no-cap", 9, 0.0);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Reinforce by 5 with no cap
+        let result = db.reinforce("kn-test-no-cap", 5, None).unwrap();
+
+        // Should go above 10
+        assert_eq!(result.old_resonance, 9);
+        assert_eq!(result.new_resonance, 14);
+        assert!(!result.capped);
+
+        // Verify the entry was updated
+        let ctx = crate::store::AgentContext::public_only();
+        let updated = db.get("kn-test-no-cap", &ctx).unwrap().unwrap();
+        assert_eq!(updated.resonance, 14);
+    }
+
+    #[test]
+    fn test_reinforce_nonexistent() {
+        // Test that reinforcing a nonexistent entry returns error
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let result = db.reinforce("kn-nonexistent", 1, Some(10));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_reinforce_id_normalization() {
+        // Test that ID normalization works
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Create entry with full ID
+        let entry = make_test_entry("kn-test-norm", 5, 0.0);
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Reinforce with partial ID (no "kn-" prefix)
+        let result = db.reinforce("test-norm", 2, Some(10)).unwrap();
+
+        // Should normalize correctly
+        assert_eq!(result.id, "kn-test-norm");
+        assert_eq!(result.new_resonance, 7);
     }
 }
