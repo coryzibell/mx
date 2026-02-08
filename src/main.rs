@@ -982,6 +982,24 @@ enum MemoryCommands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+
+    /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
+    Reinforce {
+        /// Entry ID to reinforce
+        id: String,
+
+        /// Amount to increase resonance by (default: 1)
+        #[arg(long, default_value = "1")]
+        amount: i32,
+
+        /// Maximum resonance cap (default: 10)
+        #[arg(long, default_value = "10")]
+        cap: i32,
+
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3769,6 +3787,40 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         println!("No session found for fact: {}", fact_ref);
                     }
                 }
+            }
+        }
+
+        MemoryCommands::Reinforce {
+            id,
+            amount,
+            cap,
+            format,
+        } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            // Normalize ID
+            let normalized_id = if id.starts_with("kn-") {
+                id.clone()
+            } else {
+                format!("kn-{}", id)
+            };
+
+            // Call reinforce on the store
+            let result = db.reinforce(&normalized_id, amount, Some(cap))?;
+
+            // Output result
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Reinforced entry: {}", result.id);
+                println!("  Old resonance: {}", result.old_resonance);
+                println!("  New resonance: {}", result.new_resonance);
+                println!("  Amount added: {}", result.amount_added);
+                if result.capped {
+                    println!("  (Capped at {})", cap);
+                }
+                println!("  Last activated: {}", result.last_activated);
+                println!("  Activation count: {}", result.activation_count);
             }
         }
     }

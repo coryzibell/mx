@@ -1383,6 +1383,61 @@ impl KnowledgeStore for Database {
         Ok(entries)
     }
 
+    fn reinforce(
+        &self,
+        id: &str,
+        amount: i32,
+        cap: Option<i32>,
+    ) -> Result<crate::store::ReinforcementResult> {
+        // SQLite backend: graceful degradation - implement basic reinforce
+        // Normalize ID
+        let normalized_id = if id.starts_with("kn-") {
+            id.to_string()
+        } else {
+            format!("kn-{}", id)
+        };
+
+        // Get current entry to read old values
+        let entry = self
+            .get(&normalized_id)?
+            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", normalized_id))?;
+
+        let old_resonance = entry.resonance;
+        let old_activation_count = entry.activation_count;
+
+        // Calculate new resonance with cap
+        let mut new_resonance = old_resonance + amount;
+        let capped = if let Some(cap_value) = cap {
+            if new_resonance > cap_value {
+                new_resonance = cap_value;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let new_activation_count = old_activation_count + 1;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Update the entry
+        self.conn.execute(
+            "UPDATE knowledge SET resonance = ?1, last_activated = ?2, activation_count = ?3, updated_at = ?4 WHERE id = ?5",
+            params![new_resonance, now, new_activation_count, now, normalized_id],
+        )?;
+
+        Ok(crate::store::ReinforcementResult {
+            id: normalized_id,
+            old_resonance,
+            new_resonance,
+            amount_added: amount,
+            capped,
+            last_activated: now,
+            activation_count: new_activation_count,
+        })
+    }
+
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_tags_for_entry(entry_id)
     }
