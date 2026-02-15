@@ -1678,6 +1678,7 @@ mod tests {
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            format: "markdown".to_string(),
         }
     }
 
