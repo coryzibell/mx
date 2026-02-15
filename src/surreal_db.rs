@@ -1319,7 +1319,8 @@ impl SurrealDatabase {
             embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
             embedding_model: serde_json::from_value(obj["embedding_model"].clone()).ok(),
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
-            format: serde_json::from_value(obj["format"].clone()).unwrap_or_else(|_| "markdown".to_string()),
+            format: serde_json::from_value(obj["format"].clone())
+                .unwrap_or_else(|_| "markdown".to_string()),
         })
     }
 
