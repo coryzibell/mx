@@ -2505,6 +2505,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 };
 
                 // Insert the fact
@@ -2664,6 +2665,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 embedding: None,
                 embedding_model: None,
                 embedded_at: None,
+                format: "markdown".to_string(),
             };
 
             // Insert into database (applicability already set in struct)
@@ -4944,6 +4946,7 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     if let Some(updated) = &entry.updated_at {
         println!("Updated:  {}", updated);
     }
+    println!("Format:   {}", entry.format);
     println!();
     if let Some(body) = &entry.body {
         println!("{}", body);

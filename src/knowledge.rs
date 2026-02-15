@@ -92,6 +92,14 @@ pub struct KnowledgeEntry {
     pub embedding_model: Option<String>, // Model ID that generated the embedding
     #[serde(default)]
     pub embedded_at: Option<String>, // RFC3339 timestamp when embedded
+
+    // Stele encoding format (Issue #122)
+    #[serde(default = "default_format")]
+    pub format: String, // markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
+}
+
+fn default_format() -> String {
+    "markdown".to_string()
 }
 
 fn default_visibility() -> String {
@@ -286,6 +294,8 @@ impl KnowledgeEntry {
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            // Format - markdown files are markdown
+            format: "markdown".to_string(),
         })
     }
 }
@@ -513,6 +523,7 @@ Body"#;
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            format: "markdown".to_string(),
         };
 
         let text = entry.embedding_text();
@@ -556,6 +567,7 @@ Body"#;
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            format: "markdown".to_string(),
         };
 
         let text = entry.embedding_text();

@@ -142,6 +142,10 @@ DEFINE FIELD IF NOT EXISTS embedding ON knowledge TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON knowledge TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedded_at ON knowledge TYPE option<datetime>;
 
+-- Issue #122: Stele encoding format
+DEFINE FIELD IF NOT EXISTS format ON knowledge TYPE string DEFAULT 'markdown'
+  ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', 'stele:light', 'stele:full'];
+
 -- Indexes for common queries
 DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
 DEFINE INDEX IF NOT EXISTS knowledge_source_project ON knowledge FIELDS source_project;
@@ -283,10 +287,13 @@ UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'd
 UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 
 -- =============================================================================
--- DATA MIGRATION (Issues #72, #73)
+-- DATA MIGRATION (Issues #72, #73, #122)
 -- =============================================================================
 
 -- Migrate existing single wake_phrase to wake_phrases array
 -- Handle records where wake_phrases is NONE (not yet created)
 UPDATE knowledge SET wake_phrases = IF wake_phrase != NONE THEN [wake_phrase] ELSE [] END
 WHERE wake_phrases IS NONE;
+
+-- Issue #122: Backfill format field for existing entries
+UPDATE knowledge SET format = 'markdown' WHERE format IS NONE;

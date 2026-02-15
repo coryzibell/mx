@@ -294,6 +294,7 @@ impl Database {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -357,6 +358,7 @@ impl Database {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -418,6 +420,7 @@ impl Database {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -478,6 +481,7 @@ impl Database {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 })
             })
             .ok();
@@ -1370,6 +1374,7 @@ impl KnowledgeStore for Database {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    format: "markdown".to_string(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

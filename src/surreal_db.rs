@@ -262,10 +262,19 @@ pub struct SurrealKnowledgeRecord {
     /// Timestamp when embedded
     #[serde(default)]
     pub embedded_at: Option<String>,
+
+    // === Stele encoding (Issue #122) ===
+    /// Content format: markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
+    #[serde(default = "default_format")]
+    pub format: String,
 }
 
 fn default_visibility() -> String {
     "public".to_string()
+}
+
+fn default_format() -> String {
+    "markdown".to_string()
 }
 
 impl SurrealKnowledgeRecord {
@@ -308,6 +317,7 @@ impl SurrealKnowledgeRecord {
             embedding: self.embedding,
             embedding_model: self.embedding_model,
             embedded_at: self.embedded_at,
+            format: self.format,
         }
     }
 }
@@ -652,7 +662,8 @@ impl SurrealDatabase {
         IF wake_phrase THEN wake_phrase ELSE null END AS wake_phrase,
         IF embedding THEN embedding ELSE null END AS embedding,
         IF embedding_model THEN embedding_model ELSE null END AS embedding_model,
-        IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at"
+        IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at,
+        IF format THEN format ELSE 'markdown' END AS format"
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -770,7 +781,8 @@ impl SurrealDatabase {
             wake_order = $wake_order,
             wake_phrase = $wake_phrase,
             embedding = $embedding,
-            embedding_model = $embedding_model"
+            embedding_model = $embedding_model,
+            format = $format"
             .to_string();
 
         // Add optional fields
@@ -843,7 +855,8 @@ impl SurrealDatabase {
                 .bind(("wake_order", entry.wake_order))
                 .bind(("wake_phrase", entry.wake_phrase.clone()))
                 .bind(("embedding", entry.embedding.clone()))
-                .bind(("embedding_model", entry.embedding_model.clone()));
+                .bind(("embedding_model", entry.embedding_model.clone()))
+                .bind(("format", entry.format.clone()));
 
             // Bind optional parameters
             if let Some(ref proj) = entry.source_project_id {
@@ -1306,6 +1319,7 @@ impl SurrealDatabase {
             embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
             embedding_model: serde_json::from_value(obj["embedding_model"].clone()).ok(),
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
+            format: serde_json::from_value(obj["format"].clone()).unwrap_or_else(|_| "markdown".to_string()),
         })
     }
 
