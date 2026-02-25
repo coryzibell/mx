@@ -1,17 +1,15 @@
-use anyhow::{Result, bail};
-use base64::{Engine as _, engine::general_purpose};
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::WakeCascade;
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Session token for chained wake ritual
+/// Server-side wake ritual session state.
+///
+/// Previously stored in a signed client token (JWT-like). Now persisted in
+/// SurrealDB's `wake_session` table. The CLI passes only the UUID session_id
+/// between calls instead of the full signed blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WakeSessionToken {
+pub struct WakeSession {
     pub session_id: String,
     pub bloom_ids: Vec<String>,
     pub current_index: usize,
@@ -24,7 +22,7 @@ pub struct WakeSessionToken {
     pub selected_phrase_indices: Vec<Option<usize>>,
 }
 
-impl WakeSessionToken {
+impl WakeSession {
     /// Create new session from cascade
     pub fn new(cascade: &WakeCascade) -> Self {
         use rand::Rng;
@@ -117,57 +115,6 @@ impl WakeSessionToken {
     pub fn increment_attempt(&mut self) {
         self.attempts_on_current += 1;
     }
-
-    /// Sign the token
-    pub fn sign(&self) -> Result<String> {
-        let secret = get_wake_secret();
-        let payload = serde_json::to_string(self)?;
-        let payload_b64 = general_purpose::STANDARD.encode(payload.as_bytes());
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to create HMAC: {}", e))?;
-        mac.update(payload.as_bytes());
-        let signature = mac.finalize().into_bytes();
-        let signature_b64 = general_purpose::STANDARD.encode(signature);
-
-        Ok(format!("{}.{}", payload_b64, signature_b64))
-    }
-
-    /// Verify and decode a signed token
-    pub fn verify(token_str: &str) -> Result<Self> {
-        let secret = get_wake_secret();
-        let parts: Vec<&str> = token_str.split('.').collect();
-
-        if parts.len() != 2 {
-            bail!("Invalid token format");
-        }
-
-        let payload_b64 = parts[0];
-        let signature_b64 = parts[1];
-
-        let payload = general_purpose::STANDARD
-            .decode(payload_b64)
-            .map_err(|_| anyhow::anyhow!("Invalid base64 in payload"))?;
-        let provided_sig = general_purpose::STANDARD
-            .decode(signature_b64)
-            .map_err(|_| anyhow::anyhow!("Invalid base64 in signature"))?;
-
-        // Verify signature
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to create HMAC: {}", e))?;
-        mac.update(&payload);
-        mac.verify_slice(&provided_sig)
-            .map_err(|_| anyhow::anyhow!("Invalid token signature"))?;
-
-        // Deserialize
-        let token: WakeSessionToken = serde_json::from_slice(&payload)?;
-        Ok(token)
-    }
-}
-
-/// Get wake secret from environment or use default
-fn get_wake_secret() -> String {
-    std::env::var("MX_WAKE_SECRET").unwrap_or_else(|_| "tsunderground-wake-ritual-v1".to_string())
 }
 
 /// JSON output structures

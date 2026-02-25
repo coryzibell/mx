@@ -2871,6 +2871,207 @@ impl SurrealDatabase {
 
         Ok(types)
     }
+
+    // =========================================================================
+    // WAKE SESSION OPERATIONS
+    // =========================================================================
+
+    /// Create a wake session record, return the session_id
+    pub fn create_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+    ) -> Result<String> {
+        Self::runtime().block_on(self.create_wake_session_async(session))
+    }
+
+    async fn create_wake_session_async(
+        &self,
+        session: &crate::wake_token::WakeSession,
+    ) -> Result<String> {
+        // Serialize selected_phrase_indices as JSON array of nullable ints
+        let phrase_indices_json = serde_json::to_string(&session.selected_phrase_indices)?;
+        let created_at = chrono::DateTime::from_timestamp(session.created_at, 0)
+            .unwrap_or_else(chrono::Utc::now)
+            .to_rfc3339();
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "CREATE type::thing('wake_session', $session_id) SET
+                    bloom_ids = $bloom_ids,
+                    current_index = $current_index,
+                    attempts_on_current = $attempts_on_current,
+                    remembered_count = $remembered_count,
+                    needed_help_count = $needed_help_count,
+                    skipped_count = $skipped_count,
+                    created_at = <datetime>$created_at,
+                    selected_phrase_indices = $selected_phrase_indices
+                ",
+            )
+            .bind(("session_id", session.session_id.clone()))
+            .bind(("bloom_ids", session.bloom_ids.clone()))
+            .bind(("current_index", session.current_index as i64))
+            .bind(("attempts_on_current", session.attempts_on_current as i64))
+            .bind(("remembered_count", session.remembered_count as i64))
+            .bind(("needed_help_count", session.needed_help_count as i64))
+            .bind(("skipped_count", session.skipped_count as i64))
+            .bind(("created_at", normalize_datetime(&created_at)))
+            .bind(("selected_phrase_indices", serde_json::from_str::<serde_json::Value>(&phrase_indices_json)?))
+            .await
+            .context("Failed to create wake session")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("SurrealDB error creating wake session: {:?}", errors));
+        }
+
+        Ok(session.session_id.clone())
+    }
+
+    /// Get a wake session by ID
+    pub fn get_wake_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::wake_token::WakeSession>> {
+        Self::runtime().block_on(self.get_wake_session_async(session_id))
+    }
+
+    async fn get_wake_session_async(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::wake_token::WakeSession>> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT
+                    meta::id(id) AS session_id,
+                    bloom_ids,
+                    current_index,
+                    attempts_on_current,
+                    remembered_count,
+                    needed_help_count,
+                    skipped_count,
+                    <int>time::unix(<datetime>created_at) AS created_at,
+                    selected_phrase_indices
+                FROM type::thing('wake_session', $session_id)",
+            )
+            .bind(("session_id", session_id.to_string()))
+            .await
+            .context("Failed to get wake session")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+
+        if results.is_empty() {
+            return Ok(None);
+        }
+
+        let obj = &results[0];
+
+        let session_id_str = obj["session_id"].as_str().unwrap_or_default().to_string();
+        let bloom_ids: Vec<String> = obj["bloom_ids"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+        let current_index = obj["current_index"].as_u64().unwrap_or(0) as usize;
+        let attempts_on_current = obj["attempts_on_current"].as_u64().unwrap_or(0) as u8;
+        let remembered_count = obj["remembered_count"].as_u64().unwrap_or(0) as u32;
+        let needed_help_count = obj["needed_help_count"].as_u64().unwrap_or(0) as u32;
+        let skipped_count = obj["skipped_count"].as_u64().unwrap_or(0) as u32;
+        let created_at = obj["created_at"].as_i64().unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+        // Deserialize selected_phrase_indices: array of nullable ints
+        let selected_phrase_indices: Vec<Option<usize>> = obj["selected_phrase_indices"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|v| {
+                if v.is_null() {
+                    None
+                } else {
+                    v.as_u64().map(|n| n as usize)
+                }
+            })
+            .collect();
+
+        Ok(Some(crate::wake_token::WakeSession {
+            session_id: session_id_str,
+            bloom_ids,
+            current_index,
+            attempts_on_current,
+            remembered_count,
+            needed_help_count,
+            skipped_count,
+            created_at,
+            selected_phrase_indices,
+        }))
+    }
+
+    /// Update an existing wake session
+    pub fn update_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+    ) -> Result<()> {
+        Self::runtime().block_on(self.update_wake_session_async(session))
+    }
+
+    async fn update_wake_session_async(
+        &self,
+        session: &crate::wake_token::WakeSession,
+    ) -> Result<()> {
+        let phrase_indices_json = serde_json::to_string(&session.selected_phrase_indices)?;
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "UPDATE type::thing('wake_session', $session_id) SET
+                    current_index = $current_index,
+                    attempts_on_current = $attempts_on_current,
+                    remembered_count = $remembered_count,
+                    needed_help_count = $needed_help_count,
+                    skipped_count = $skipped_count,
+                    selected_phrase_indices = $selected_phrase_indices
+                ",
+            )
+            .bind(("session_id", session.session_id.clone()))
+            .bind(("current_index", session.current_index as i64))
+            .bind(("attempts_on_current", session.attempts_on_current as i64))
+            .bind(("remembered_count", session.remembered_count as i64))
+            .bind(("needed_help_count", session.needed_help_count as i64))
+            .bind(("skipped_count", session.skipped_count as i64))
+            .bind(("selected_phrase_indices", serde_json::from_str::<serde_json::Value>(&phrase_indices_json)?))
+            .await
+            .context("Failed to update wake session")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("SurrealDB error updating wake session: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
+    /// Delete a wake session
+    pub fn delete_wake_session(&self, session_id: &str) -> Result<()> {
+        Self::runtime().block_on(self.delete_wake_session_async(session_id))
+    }
+
+    async fn delete_wake_session_async(&self, session_id: &str) -> Result<()> {
+        let mut response = with_db!(self, db, {
+            db.query("DELETE type::thing('wake_session', $session_id)")
+                .bind(("session_id", session_id.to_string()))
+                .await
+                .context("Failed to delete wake session")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("SurrealDB error deleting wake session: {:?}", errors));
+        }
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -3125,6 +3326,28 @@ impl KnowledgeStore for SurrealDatabase {
         content: &str,
     ) -> Result<()> {
         self.prepend_content(id, ctx, content)
+    }
+
+    fn create_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+    ) -> Result<String> {
+        self.create_wake_session(session)
+    }
+
+    fn get_wake_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<crate::wake_token::WakeSession>> {
+        self.get_wake_session(session_id)
+    }
+
+    fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
+        self.update_wake_session(session)
+    }
+
+    fn delete_wake_session(&self, session_id: &str) -> Result<()> {
+        self.delete_wake_session(session_id)
     }
 }
 

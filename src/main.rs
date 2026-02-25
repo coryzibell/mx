@@ -3527,8 +3527,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Output
             if begin {
-                // Start token-based ritual
-                let output = wake_ritual::begin_ritual(&cascade)?;
+                // Start session-based ritual (state stored in DB)
+                let output = wake_ritual::begin_ritual(db.as_ref(), &cascade)?;
                 println!("{}", output);
             } else if let Some(phrase) = respond {
                 // Submit wake phrase response

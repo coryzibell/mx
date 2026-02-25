@@ -1611,6 +1611,29 @@ impl KnowledgeStore for Database {
         // SQLite backend ignores ctx (no privacy filtering)
         self.prepend_content(id, content)
     }
+
+    fn create_wake_session(
+        &self,
+        _session: &crate::wake_token::WakeSession,
+    ) -> Result<String> {
+        // SQLite backend does not support wake sessions - use SurrealDB backend
+        unimplemented!("wake sessions are not supported on the SQLite backend")
+    }
+
+    fn get_wake_session(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<crate::wake_token::WakeSession>> {
+        unimplemented!("wake sessions are not supported on the SQLite backend")
+    }
+
+    fn update_wake_session(&self, _session: &crate::wake_token::WakeSession) -> Result<()> {
+        unimplemented!("wake sessions are not supported on the SQLite backend")
+    }
+
+    fn delete_wake_session(&self, _session_id: &str) -> Result<()> {
+        unimplemented!("wake sessions are not supported on the SQLite backend")
+    }
 }
 
 #[cfg(test)]

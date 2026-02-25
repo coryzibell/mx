@@ -7,28 +7,31 @@ use crate::store::{AgentContext, KnowledgeStore, WakeCascade};
 use crate::wake_token::*;
 
 /// Start a new wake ritual session
-pub fn begin_ritual(cascade: &WakeCascade) -> Result<String> {
+pub fn begin_ritual(db: &dyn KnowledgeStore, cascade: &WakeCascade) -> Result<String> {
     if cascade.core.is_empty() && cascade.recent.is_empty() && cascade.bridges.is_empty() {
         bail!("No blooms to wake");
     }
 
-    let token = WakeSessionToken::new(cascade);
-    let total = token.total();
+    let session = WakeSession::new(cascade);
+    let total = session.total();
 
-    // Build lookup map
+    // Build lookup map from the cascade we already have
     let all_blooms = build_bloom_map(cascade);
 
     // Get first bloom
-    let first_id = token
+    let first_id = session
         .current_bloom_id()
         .ok_or_else(|| anyhow::anyhow!("No blooms in session"))?;
     let first_bloom = all_blooms
         .get(first_id)
         .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", first_id))?;
 
+    // Persist session to DB, get back the session_id
+    let session_id = db.create_wake_session(&session)?;
+
     let response = WakeBeginResponse {
         status: "ritual_started".to_string(),
-        session: token.sign()?,
+        session: session_id,
         prompt: BloomPrompt::from(*first_bloom),
         progress: Progress {
             current: 1,
@@ -48,15 +51,18 @@ pub fn respond_ritual(
     ctx: &AgentContext,
     bloom_id: &str,
     phrase: &str,
-    session_token: &str,
+    session_id: &str,
 ) -> Result<String> {
-    let mut token = WakeSessionToken::verify(session_token)?;
+    // Load session from DB
+    let mut session = db
+        .get_wake_session(session_id)?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    // Fetch blooms by ID from token (source of truth!)
-    let all_blooms = fetch_blooms_by_ids(db, ctx, &token.bloom_ids)?;
+    // Fetch blooms by ID from session (source of truth)
+    let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
 
     // Verify we're on the right bloom
-    let expected_id = token
+    let expected_id = session
         .current_bloom_id()
         .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?;
 
@@ -75,8 +81,8 @@ pub fn respond_ritual(
         .get(expected_id)
         .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", expected_id))?;
 
-    // Get the pre-selected wake phrase from token
-    let phrase_idx = token
+    // Get the pre-selected wake phrase from session
+    let phrase_idx = session
         .current_phrase_index()
         .ok_or_else(|| anyhow::anyhow!("This bloom has no wake phrase - use --skip instead"))?;
 
@@ -86,8 +92,8 @@ pub fn respond_ritual(
             .get(phrase_idx)
             .ok_or_else(|| anyhow::anyhow!("Invalid phrase index"))?
             .clone()
-    } else if let Some(ref phrase) = bloom.wake_phrase {
-        phrase.clone()
+    } else if let Some(ref p) = bloom.wake_phrase {
+        p.clone()
     } else {
         bail!("This bloom has no wake phrase - use --skip instead");
     };
@@ -98,7 +104,7 @@ pub fn respond_ritual(
     match match_result {
         MatchResult::Exact | MatchResult::Close => {
             // SUCCESS! Advance and return bloom
-            token.advance_remembered();
+            session.advance_remembered();
 
             let match_type = if matches!(match_result, MatchResult::Exact) {
                 "exact"
@@ -107,7 +113,14 @@ pub fn respond_ritual(
             };
 
             // Get next bloom if any
-            let (next, progress, summary) = get_next_and_progress(&token, &all_blooms)?;
+            let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
+
+            // Persist updated session (or delete if complete)
+            if session.is_complete() {
+                db.delete_wake_session(session_id)?;
+            } else {
+                db.update_wake_session(&session)?;
+            }
 
             // Create BloomFull with matched phrase
             let mut bloom_full = BloomFull::from(bloom);
@@ -120,7 +133,7 @@ pub fn respond_ritual(
                 attempt: None,
                 hint: None,
                 prompt: None,
-                session: token.sign()?,
+                session: session_id.to_string(),
                 next,
                 progress: Some(progress),
                 summary,
@@ -130,14 +143,21 @@ pub fn respond_ritual(
         }
         MatchResult::Partial | MatchResult::Wrong => {
             // Increment attempt
-            token.increment_attempt();
-            let attempt = token.attempts_on_current;
+            session.increment_attempt();
+            let attempt = session.attempts_on_current;
 
             if attempt >= 3 {
                 // Max attempts reached - reveal and advance
-                token.advance_helped();
+                session.advance_helped();
 
-                let (next, progress, summary) = get_next_and_progress(&token, &all_blooms)?;
+                let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
+
+                // Persist updated session (or delete if complete)
+                if session.is_complete() {
+                    db.delete_wake_session(session_id)?;
+                } else {
+                    db.update_wake_session(&session)?;
+                }
 
                 // Create BloomFull with revealed phrase
                 let mut bloom_full = BloomFull::from(bloom);
@@ -150,7 +170,7 @@ pub fn respond_ritual(
                     attempt: None,
                     hint: None,
                     prompt: None,
-                    session: token.sign()?,
+                    session: session_id.to_string(),
                     next,
                     progress: Some(progress),
                     summary,
@@ -158,7 +178,9 @@ pub fn respond_ritual(
 
                 Ok(serde_json::to_string(&response)?)
             } else {
-                // Give hint and ask for retry
+                // Give hint and ask for retry - save incremented attempt count
+                db.update_wake_session(&session)?;
+
                 let hint = generate_hint(&wake_phrase, attempt);
 
                 let response = WakeRespondResponse {
@@ -168,7 +190,7 @@ pub fn respond_ritual(
                     attempt: Some(attempt),
                     hint: Some(hint),
                     prompt: Some(BloomPrompt::from(bloom)),
-                    session: token.sign()?,
+                    session: session_id.to_string(),
                     next: None,
                     progress: None,
                     summary: None,
@@ -185,15 +207,18 @@ pub fn skip_ritual(
     db: &dyn KnowledgeStore,
     ctx: &AgentContext,
     bloom_id: &str,
-    session_token: &str,
+    session_id: &str,
 ) -> Result<String> {
-    let mut token = WakeSessionToken::verify(session_token)?;
+    // Load session from DB
+    let mut session = db
+        .get_wake_session(session_id)?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-    // Fetch blooms by ID from token (source of truth!)
-    let all_blooms = fetch_blooms_by_ids(db, ctx, &token.bloom_ids)?;
+    // Fetch blooms by ID from session (source of truth)
+    let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
 
     // Verify we're on the right bloom
-    let expected_id = token
+    let expected_id = session
         .current_bloom_id()
         .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?;
 
@@ -213,14 +238,21 @@ pub fn skip_ritual(
         .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", expected_id))?;
 
     // Advance as skipped
-    token.advance_skipped();
+    session.advance_skipped();
 
-    let (next, progress, summary) = get_next_and_progress(&token, &all_blooms)?;
+    let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
+
+    // Persist updated session (or delete if complete)
+    if session.is_complete() {
+        db.delete_wake_session(session_id)?;
+    } else {
+        db.update_wake_session(&session)?;
+    }
 
     let response = WakeSkipResponse {
         status: "skipped".to_string(),
         bloom: BloomFull::from(bloom),
-        session: token.sign()?,
+        session: session_id.to_string(),
         next,
         progress: Some(progress),
         summary,
@@ -248,7 +280,7 @@ fn fetch_blooms_by_ids(
     Ok(map)
 }
 
-/// Build lookup map of all blooms
+/// Build lookup map of all blooms from cascade
 fn build_bloom_map(cascade: &WakeCascade) -> HashMap<String, &KnowledgeEntry> {
     let mut map = HashMap::new();
 
@@ -267,32 +299,32 @@ fn build_bloom_map(cascade: &WakeCascade) -> HashMap<String, &KnowledgeEntry> {
 
 /// Get next bloom prompt and current progress
 fn get_next_and_progress(
-    token: &WakeSessionToken,
+    session: &WakeSession,
     all_blooms: &HashMap<String, KnowledgeEntry>,
 ) -> Result<(Option<BloomPrompt>, Progress, Option<Summary>)> {
-    let current = token.current_position();
-    let total = token.total();
+    let current = session.current_position();
+    let total = session.total();
 
     let progress = Progress {
         current,
         total,
-        remembered: Some(token.remembered_count),
-        needed_help: Some(token.needed_help_count),
-        skipped: Some(token.skipped_count),
+        remembered: Some(session.remembered_count),
+        needed_help: Some(session.needed_help_count),
+        skipped: Some(session.skipped_count),
     };
 
-    if token.is_complete() {
+    if session.is_complete() {
         // Ritual complete
         let summary = Summary {
             total,
-            remembered: token.remembered_count,
-            needed_help: token.needed_help_count,
-            skipped: token.skipped_count,
+            remembered: session.remembered_count,
+            needed_help: session.needed_help_count,
+            skipped: session.skipped_count,
         };
         Ok((None, progress, Some(summary)))
     } else {
         // Get next bloom
-        let next_id = token
+        let next_id = session
             .current_bloom_id()
             .ok_or_else(|| anyhow::anyhow!("Failed to get next bloom"))?;
         let next_bloom = all_blooms
