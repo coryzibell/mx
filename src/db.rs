@@ -1612,10 +1612,7 @@ impl KnowledgeStore for Database {
         self.prepend_content(id, content)
     }
 
-    fn create_wake_session(
-        &self,
-        _session: &crate::wake_token::WakeSession,
-    ) -> Result<String> {
+    fn create_wake_session(&self, _session: &crate::wake_token::WakeSession) -> Result<String> {
         // SQLite backend does not support wake sessions - use SurrealDB backend
         unimplemented!("wake sessions are not supported on the SQLite backend")
     }

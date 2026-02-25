@@ -352,10 +352,7 @@ pub trait KnowledgeStore {
     fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String>;
 
     /// Get a wake session by ID
-    fn get_wake_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<crate::wake_token::WakeSession>>;
+    fn get_wake_session(&self, session_id: &str) -> Result<Option<crate::wake_token::WakeSession>>;
 
     /// Update an existing wake session (save mutated state)
     fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()>;
