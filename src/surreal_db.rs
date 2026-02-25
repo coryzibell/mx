@@ -2885,8 +2885,15 @@ impl SurrealDatabase {
         &self,
         session: &crate::wake_token::WakeSession,
     ) -> Result<String> {
-        // Serialize selected_phrase_indices as JSON array of nullable ints
-        let phrase_indices_json = serde_json::to_string(&session.selected_phrase_indices)?;
+        // Convert selected_phrase_indices to Vec<i64> using -1 as sentinel for None.
+        // SurrealDB SCHEMAFULL with TYPE array<int> drops null/NONE values, so we
+        // use -1 to represent "this bloom has no phrase".
+        let phrase_indices: Vec<i64> = session
+            .selected_phrase_indices
+            .iter()
+            .map(|opt| opt.map(|n| n as i64).unwrap_or(-1))
+            .collect();
+        let phrase_indices_json = serde_json::to_string(&phrase_indices)?;
         let created_at = chrono::DateTime::from_timestamp(session.created_at, 0)
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339();
@@ -2986,16 +2993,17 @@ impl SurrealDatabase {
             .as_i64()
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-        // Deserialize selected_phrase_indices: array of nullable ints
+        // Deserialize selected_phrase_indices: array of ints where -1 is sentinel for None.
+        // SurrealDB TYPE array<int> cannot store null/NONE, so -1 represents "no phrase".
         let selected_phrase_indices: Vec<Option<usize>> = obj["selected_phrase_indices"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
             .map(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    v.as_u64().map(|n| n as usize)
+                match v.as_i64() {
+                    Some(-1) | None => None,
+                    Some(n) if n >= 0 => Some(n as usize),
+                    _ => None,
                 }
             })
             .collect();
@@ -3022,7 +3030,13 @@ impl SurrealDatabase {
         &self,
         session: &crate::wake_token::WakeSession,
     ) -> Result<()> {
-        let phrase_indices_json = serde_json::to_string(&session.selected_phrase_indices)?;
+        // Convert selected_phrase_indices to Vec<i64> using -1 as sentinel for None.
+        let phrase_indices: Vec<i64> = session
+            .selected_phrase_indices
+            .iter()
+            .map(|opt| opt.map(|n| n as i64).unwrap_or(-1))
+            .collect();
+        let phrase_indices_json = serde_json::to_string(&phrase_indices)?;
 
         let mut response = with_db!(self, db, {
             db.query(

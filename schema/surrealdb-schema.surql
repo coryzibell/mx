@@ -236,7 +236,9 @@ DEFINE FIELD IF NOT EXISTS remembered_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS needed_help_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS skipped_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS created_at ON wake_session TYPE datetime DEFAULT time::now();
-DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array;
+DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array<int>;
+-- Migration: fix existing DBs that defined this as bare TYPE array (SCHEMAFULL drops non-typed elements)
+DEFINE FIELD OVERWRITE selected_phrase_indices ON wake_session TYPE array<int>;
 DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
 
 -- =============================================================================
