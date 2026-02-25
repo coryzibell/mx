@@ -2999,12 +2999,10 @@ impl SurrealDatabase {
             .as_array()
             .unwrap_or(&vec![])
             .iter()
-            .map(|v| {
-                match v.as_i64() {
-                    Some(-1) | None => None,
-                    Some(n) if n >= 0 => Some(n as usize),
-                    _ => None,
-                }
+            .map(|v| match v.as_i64() {
+                Some(-1) | None => None,
+                Some(n) if n >= 0 => Some(n as usize),
+                _ => None,
             })
             .collect();
 
