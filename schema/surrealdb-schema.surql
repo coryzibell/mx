@@ -227,6 +227,20 @@ DEFINE INDEX IF NOT EXISTS relates_to_unique ON relates_to FIELDS in, out, relat
 DEFINE TABLE IF NOT EXISTS deletion SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS deleted_at ON deletion TYPE datetime DEFAULT time::now();
 
+-- Wake ritual sessions (server-side state, replaces signed client token)
+DEFINE TABLE IF NOT EXISTS wake_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS bloom_ids ON wake_session TYPE array<string>;
+DEFINE FIELD IF NOT EXISTS current_index ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS attempts_on_current ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS remembered_count ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS needed_help_count ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS skipped_count ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS created_at ON wake_session TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array<int>;
+-- Migration: fix existing DBs that defined this as bare TYPE array (SCHEMAFULL drops non-typed elements)
+DEFINE FIELD OVERWRITE selected_phrase_indices ON wake_session TYPE array<int>;
+DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
+
 -- =============================================================================
 -- SEED DATA
 -- =============================================================================

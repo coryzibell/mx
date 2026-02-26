@@ -345,6 +345,22 @@ pub trait KnowledgeStore {
     fn list_relationship_types(&self) -> Result<Vec<RelationshipType>>;
 
     // =========================================================================
+    // WAKE SESSION OPERATIONS (server-side ritual state)
+    // =========================================================================
+
+    /// Create a new wake session record, return the session_id
+    fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String>;
+
+    /// Get a wake session by ID
+    fn get_wake_session(&self, session_id: &str) -> Result<Option<crate::wake_token::WakeSession>>;
+
+    /// Update an existing wake session (save mutated state)
+    fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()>;
+
+    /// Delete a wake session (cleanup after ritual completes)
+    fn delete_wake_session(&self, session_id: &str) -> Result<()>;
+
+    // =========================================================================
     // MIGRATION & INTROSPECTION
     // =========================================================================
 

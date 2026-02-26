@@ -1,5 +1,4 @@
-use anyhow::{Result, bail};
-use base64::{Engine as _, engine::general_purpose};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -9,9 +8,62 @@ use crate::store::WakeCascade;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Session token for chained wake ritual
+/// Create a signed wake ritual token: `{session_id}.{current_index}.{truncated_hmac[..16]}`
+///
+/// State lives server-side in SurrealDB. The token is a compact signed reference
+/// that changes each step, providing integrity (HMAC), anti-replay (step must match),
+/// and progression visibility.
+pub fn create_token(session_id: &str, current_index: usize) -> String {
+    let payload = format!("{}.{}", session_id, current_index);
+
+    let key = format!("wake-{}-ritual", session_id);
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let signature = BASE64.encode(mac.finalize().into_bytes());
+
+    format!("{}.{}", payload, &signature[..16])
+}
+
+/// Verify a wake ritual token and extract (session_id, current_index).
+///
+/// Token format: `{session_id}.{current_index}.{truncated_hmac[..16]}`
+/// Since session_id is a UUID (contains hyphens but no dots), we split on '.'
+/// to get exactly 3 parts.
+pub fn verify_token(token: &str) -> Result<(String, usize), String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid token format".to_string());
+    }
+
+    let session_id = parts[0];
+    let current_index: usize = parts[1]
+        .parse()
+        .map_err(|_| "Invalid current index in token".to_string())?;
+    let provided_sig = parts[2];
+
+    // Verify HMAC signature
+    let payload = format!("{}.{}", session_id, current_index);
+    let key = format!("wake-{}-ritual", session_id);
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let expected_sig = BASE64.encode(mac.finalize().into_bytes());
+
+    if &expected_sig[..16] != provided_sig {
+        return Err("Invalid token signature".to_string());
+    }
+
+    Ok((session_id.to_string(), current_index))
+}
+
+/// Server-side wake ritual session state.
+///
+/// Persisted in SurrealDB's `wake_session` table. The CLI passes a compact
+/// signed token (`{session_id}.{step}.{hmac}`) between calls. State is
+/// server-side; the token is just a signed reference with anti-replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WakeSessionToken {
+pub struct WakeSession {
     pub session_id: String,
     pub bloom_ids: Vec<String>,
     pub current_index: usize,
@@ -24,7 +76,7 @@ pub struct WakeSessionToken {
     pub selected_phrase_indices: Vec<Option<usize>>,
 }
 
-impl WakeSessionToken {
+impl WakeSession {
     /// Create new session from cascade
     pub fn new(cascade: &WakeCascade) -> Self {
         use rand::Rng;
@@ -117,57 +169,6 @@ impl WakeSessionToken {
     pub fn increment_attempt(&mut self) {
         self.attempts_on_current += 1;
     }
-
-    /// Sign the token
-    pub fn sign(&self) -> Result<String> {
-        let secret = get_wake_secret();
-        let payload = serde_json::to_string(self)?;
-        let payload_b64 = general_purpose::STANDARD.encode(payload.as_bytes());
-
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to create HMAC: {}", e))?;
-        mac.update(payload.as_bytes());
-        let signature = mac.finalize().into_bytes();
-        let signature_b64 = general_purpose::STANDARD.encode(signature);
-
-        Ok(format!("{}.{}", payload_b64, signature_b64))
-    }
-
-    /// Verify and decode a signed token
-    pub fn verify(token_str: &str) -> Result<Self> {
-        let secret = get_wake_secret();
-        let parts: Vec<&str> = token_str.split('.').collect();
-
-        if parts.len() != 2 {
-            bail!("Invalid token format");
-        }
-
-        let payload_b64 = parts[0];
-        let signature_b64 = parts[1];
-
-        let payload = general_purpose::STANDARD
-            .decode(payload_b64)
-            .map_err(|_| anyhow::anyhow!("Invalid base64 in payload"))?;
-        let provided_sig = general_purpose::STANDARD
-            .decode(signature_b64)
-            .map_err(|_| anyhow::anyhow!("Invalid base64 in signature"))?;
-
-        // Verify signature
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to create HMAC: {}", e))?;
-        mac.update(&payload);
-        mac.verify_slice(&provided_sig)
-            .map_err(|_| anyhow::anyhow!("Invalid token signature"))?;
-
-        // Deserialize
-        let token: WakeSessionToken = serde_json::from_slice(&payload)?;
-        Ok(token)
-    }
-}
-
-/// Get wake secret from environment or use default
-fn get_wake_secret() -> String {
-    std::env::var("MX_WAKE_SECRET").unwrap_or_else(|_| "tsunderground-wake-ritual-v1".to_string())
 }
 
 /// JSON output structures
@@ -189,8 +190,6 @@ pub struct WakeRespondResponse {
     pub bloom: Option<BloomFull>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,20 +232,16 @@ pub struct BloomPrompt {
     pub resonance: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
-    pub has_wake_phrase: bool,
     pub wake_phrase_count: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct BloomFull {
-    pub id: String,
     pub title: String,
     pub content: String,
     pub resonance: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wake_phrase: Option<String>, // DEPRECATED: kept for backward compat
     pub all_phrases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_phrase: Option<String>, // Which phrase was matched/selected
@@ -275,7 +270,6 @@ pub struct Summary {
 /// Convert KnowledgeEntry to BloomPrompt
 impl From<&KnowledgeEntry> for BloomPrompt {
     fn from(entry: &KnowledgeEntry) -> Self {
-        let has_phrase = !entry.wake_phrases.is_empty() || entry.wake_phrase.is_some();
         let phrase_count = if !entry.wake_phrases.is_empty() {
             entry.wake_phrases.len()
         } else if entry.wake_phrase.is_some() {
@@ -289,7 +283,6 @@ impl From<&KnowledgeEntry> for BloomPrompt {
             title: entry.title.clone(),
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            has_wake_phrase: has_phrase,
             wake_phrase_count: phrase_count,
         }
     }
@@ -314,12 +307,10 @@ impl From<&KnowledgeEntry> for BloomFull {
         };
 
         Self {
-            id: entry.id.clone(),
             title: entry.title.clone(),
             content,
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            wake_phrase: entry.wake_phrase.clone(), // Deprecated, kept for backward compat
             all_phrases,
             matched_phrase: None, // Not set by default, populated during ritual
         }
