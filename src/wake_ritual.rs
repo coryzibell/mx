@@ -39,7 +39,7 @@ pub fn begin_ritual(cascade: &WakeCascade) -> Result<String> {
         },
     };
 
-    Ok(serde_json::to_string_pretty(&response)?)
+    Ok(serde_json::to_string(&response)?)
 }
 
 /// Process a wake phrase response
@@ -67,7 +67,7 @@ pub fn respond_ritual(
             message: format!("Expected bloom {}, got {}", expected_id, bloom_id),
             expected_id: Some(expected_id.to_string()),
         };
-        return Ok(serde_json::to_string_pretty(&response)?);
+        return Ok(serde_json::to_string(&response)?);
     }
 
     // Get the bloom
@@ -118,16 +118,14 @@ pub fn respond_ritual(
                 match_type: Some(match_type.to_string()),
                 bloom: Some(bloom_full),
                 attempt: None,
-                max_attempts: None,
                 hint: None,
                 prompt: None,
-                session: token.sign()?,
                 next,
                 progress: Some(progress),
                 summary,
             };
 
-            Ok(serde_json::to_string_pretty(&response)?)
+            Ok(serde_json::to_string(&response)?)
         }
         MatchResult::Partial | MatchResult::Wrong => {
             // Increment attempt
@@ -149,16 +147,14 @@ pub fn respond_ritual(
                     match_type: None,
                     bloom: Some(bloom_full),
                     attempt: None,
-                    max_attempts: None,
                     hint: None,
                     prompt: None,
-                    session: token.sign()?,
                     next,
                     progress: Some(progress),
                     summary,
                 };
 
-                Ok(serde_json::to_string_pretty(&response)?)
+                Ok(serde_json::to_string(&response)?)
             } else {
                 // Give hint and ask for retry
                 let hint = generate_hint(&wake_phrase, attempt);
@@ -168,16 +164,14 @@ pub fn respond_ritual(
                     match_type: None,
                     bloom: None,
                     attempt: Some(attempt),
-                    max_attempts: Some(3),
                     hint: Some(hint),
                     prompt: Some(BloomPrompt::from(bloom)),
-                    session: token.sign()?,
                     next: None,
                     progress: None,
                     summary: None,
                 };
 
-                Ok(serde_json::to_string_pretty(&response)?)
+                Ok(serde_json::to_string(&response)?)
             }
         }
     }
@@ -207,7 +201,7 @@ pub fn skip_ritual(
             message: format!("Expected bloom {}, got {}", expected_id, bloom_id),
             expected_id: Some(expected_id.to_string()),
         };
-        return Ok(serde_json::to_string_pretty(&response)?);
+        return Ok(serde_json::to_string(&response)?);
     }
 
     // Get the bloom
@@ -223,13 +217,12 @@ pub fn skip_ritual(
     let response = WakeSkipResponse {
         status: "skipped".to_string(),
         bloom: BloomFull::from(bloom),
-        session: token.sign()?,
         next,
         progress: Some(progress),
         summary,
     };
 
-    Ok(serde_json::to_string_pretty(&response)?)
+    Ok(serde_json::to_string(&response)?)
 }
 
 /// Fetch blooms by IDs and build lookup map

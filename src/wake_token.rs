@@ -190,12 +190,9 @@ pub struct WakeRespondResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempt: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_attempts: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<BloomPrompt>,
-    pub session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<BloomPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,7 +205,6 @@ pub struct WakeRespondResponse {
 pub struct WakeSkipResponse {
     pub status: String,
     pub bloom: BloomFull,
-    pub session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<BloomPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,20 +229,16 @@ pub struct BloomPrompt {
     pub resonance: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
-    pub has_wake_phrase: bool,
     pub wake_phrase_count: usize,
 }
 
 #[derive(Debug, Serialize)]
 pub struct BloomFull {
-    pub id: String,
     pub title: String,
     pub content: String,
     pub resonance: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wake_phrase: Option<String>, // DEPRECATED: kept for backward compat
     pub all_phrases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_phrase: Option<String>, // Which phrase was matched/selected
@@ -275,7 +267,6 @@ pub struct Summary {
 /// Convert KnowledgeEntry to BloomPrompt
 impl From<&KnowledgeEntry> for BloomPrompt {
     fn from(entry: &KnowledgeEntry) -> Self {
-        let has_phrase = !entry.wake_phrases.is_empty() || entry.wake_phrase.is_some();
         let phrase_count = if !entry.wake_phrases.is_empty() {
             entry.wake_phrases.len()
         } else if entry.wake_phrase.is_some() {
@@ -289,7 +280,6 @@ impl From<&KnowledgeEntry> for BloomPrompt {
             title: entry.title.clone(),
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            has_wake_phrase: has_phrase,
             wake_phrase_count: phrase_count,
         }
     }
@@ -314,12 +304,10 @@ impl From<&KnowledgeEntry> for BloomFull {
         };
 
         Self {
-            id: entry.id.clone(),
             title: entry.title.clone(),
             content,
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
-            wake_phrase: entry.wake_phrase.clone(), // Deprecated, kept for backward compat
             all_phrases,
             matched_phrase: None, // Not set by default, populated during ritual
         }
