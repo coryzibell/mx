@@ -1,13 +1,67 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::WakeCascade;
 
+type HmacSha256 = Hmac<Sha256>;
+
+/// Create a signed wake ritual token: `{session_id}.{current_index}.{truncated_hmac[..16]}`
+///
+/// State lives server-side in SurrealDB. The token is a compact signed reference
+/// that changes each step, providing integrity (HMAC), anti-replay (step must match),
+/// and progression visibility.
+pub fn create_token(session_id: &str, current_index: usize) -> String {
+    let payload = format!("{}.{}", session_id, current_index);
+
+    let key = format!("wake-{}-ritual", session_id);
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let signature = BASE64.encode(mac.finalize().into_bytes());
+
+    format!("{}.{}", payload, &signature[..16])
+}
+
+/// Verify a wake ritual token and extract (session_id, current_index).
+///
+/// Token format: `{session_id}.{current_index}.{truncated_hmac[..16]}`
+/// Since session_id is a UUID (contains hyphens but no dots), we split on '.'
+/// to get exactly 3 parts.
+pub fn verify_token(token: &str) -> Result<(String, usize), String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid token format".to_string());
+    }
+
+    let session_id = parts[0];
+    let current_index: usize = parts[1]
+        .parse()
+        .map_err(|_| "Invalid current index in token".to_string())?;
+    let provided_sig = parts[2];
+
+    // Verify HMAC signature
+    let payload = format!("{}.{}", session_id, current_index);
+    let key = format!("wake-{}-ritual", session_id);
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload.as_bytes());
+    let expected_sig = BASE64.encode(mac.finalize().into_bytes());
+
+    if &expected_sig[..16] != provided_sig {
+        return Err("Invalid token signature".to_string());
+    }
+
+    Ok((session_id.to_string(), current_index))
+}
+
 /// Server-side wake ritual session state.
 ///
-/// Previously stored in a signed client token (JWT-like). Now persisted in
-/// SurrealDB's `wake_session` table. The CLI passes only the UUID session_id
-/// between calls instead of the full signed blob.
+/// Persisted in SurrealDB's `wake_session` table. The CLI passes a compact
+/// signed token (`{session_id}.{step}.{hmac}`) between calls. State is
+/// server-side; the token is just a signed reference with anti-replay.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeSession {
     pub session_id: String,

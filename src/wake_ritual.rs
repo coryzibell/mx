@@ -29,9 +29,12 @@ pub fn begin_ritual(db: &dyn KnowledgeStore, cascade: &WakeCascade) -> Result<St
     // Persist session to DB, get back the session_id
     let session_id = db.create_wake_session(&session)?;
 
+    // Return signed token instead of bare session_id
+    let token = create_token(&session_id, 0);
+
     let response = WakeBeginResponse {
         status: "ritual_started".to_string(),
-        session: session_id,
+        session: token,
         prompt: BloomPrompt::from(*first_bloom),
         progress: Progress {
             current: 1,
@@ -51,12 +54,25 @@ pub fn respond_ritual(
     ctx: &AgentContext,
     bloom_id: &str,
     phrase: &str,
-    session_id: &str,
+    token_str: &str,
 ) -> Result<String> {
+    // Verify token and extract session_id + step
+    let (session_id, token_index) = verify_token(token_str)
+        .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
+
     // Load session from DB
     let mut session = db
-        .get_wake_session(session_id)?
+        .get_wake_session(&session_id)?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+
+    // Anti-replay: token step must match server-side state
+    if session.current_index != token_index {
+        bail!(
+            "Token out of sync: token step {} but session at step {}",
+            token_index,
+            session.current_index
+        );
+    }
 
     // Fetch blooms by ID from session (source of truth)
     let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
@@ -117,7 +133,7 @@ pub fn respond_ritual(
 
             // Persist updated session (or delete if complete)
             if session.is_complete() {
-                db.delete_wake_session(session_id)?;
+                db.delete_wake_session(&session_id)?;
             } else {
                 db.update_wake_session(&session)?;
             }
@@ -126,6 +142,9 @@ pub fn respond_ritual(
             let mut bloom_full = BloomFull::from(bloom);
             bloom_full.matched_phrase = Some(wake_phrase.clone());
 
+            // New token reflects updated step
+            let new_token = create_token(&session_id, session.current_index);
+
             let response = WakeRespondResponse {
                 status: "remembered".to_string(),
                 match_type: Some(match_type.to_string()),
@@ -133,7 +152,7 @@ pub fn respond_ritual(
                 attempt: None,
                 hint: None,
                 prompt: None,
-                session: session_id.to_string(),
+                session: new_token,
                 next,
                 progress: Some(progress),
                 summary,
@@ -154,7 +173,7 @@ pub fn respond_ritual(
 
                 // Persist updated session (or delete if complete)
                 if session.is_complete() {
-                    db.delete_wake_session(session_id)?;
+                    db.delete_wake_session(&session_id)?;
                 } else {
                     db.update_wake_session(&session)?;
                 }
@@ -163,6 +182,9 @@ pub fn respond_ritual(
                 let mut bloom_full = BloomFull::from(bloom);
                 bloom_full.matched_phrase = Some(wake_phrase.clone());
 
+                // New token reflects updated step
+                let new_token = create_token(&session_id, session.current_index);
+
                 let response = WakeRespondResponse {
                     status: "revealed".to_string(),
                     match_type: None,
@@ -170,7 +192,7 @@ pub fn respond_ritual(
                     attempt: None,
                     hint: None,
                     prompt: None,
-                    session: session_id.to_string(),
+                    session: new_token,
                     next,
                     progress: Some(progress),
                     summary,
@@ -183,6 +205,9 @@ pub fn respond_ritual(
 
                 let hint = generate_hint(&wake_phrase, attempt);
 
+                // Same step (retry), but fresh token
+                let new_token = create_token(&session_id, session.current_index);
+
                 let response = WakeRespondResponse {
                     status: "incorrect".to_string(),
                     match_type: None,
@@ -190,7 +215,7 @@ pub fn respond_ritual(
                     attempt: Some(attempt),
                     hint: Some(hint),
                     prompt: Some(BloomPrompt::from(bloom)),
-                    session: session_id.to_string(),
+                    session: new_token,
                     next: None,
                     progress: None,
                     summary: None,
@@ -207,12 +232,25 @@ pub fn skip_ritual(
     db: &dyn KnowledgeStore,
     ctx: &AgentContext,
     bloom_id: &str,
-    session_id: &str,
+    token_str: &str,
 ) -> Result<String> {
+    // Verify token and extract session_id + step
+    let (session_id, token_index) = verify_token(token_str)
+        .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
+
     // Load session from DB
     let mut session = db
-        .get_wake_session(session_id)?
+        .get_wake_session(&session_id)?
         .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
+
+    // Anti-replay: token step must match server-side state
+    if session.current_index != token_index {
+        bail!(
+            "Token out of sync: token step {} but session at step {}",
+            token_index,
+            session.current_index
+        );
+    }
 
     // Fetch blooms by ID from session (source of truth)
     let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
@@ -244,15 +282,18 @@ pub fn skip_ritual(
 
     // Persist updated session (or delete if complete)
     if session.is_complete() {
-        db.delete_wake_session(session_id)?;
+        db.delete_wake_session(&session_id)?;
     } else {
         db.update_wake_session(&session)?;
     }
 
+    // New token reflects updated step
+    let new_token = create_token(&session_id, session.current_index);
+
     let response = WakeSkipResponse {
         status: "skipped".to_string(),
         bloom: BloomFull::from(bloom),
-        session: session_id.to_string(),
+        session: new_token,
         next,
         progress: Some(progress),
         summary,
