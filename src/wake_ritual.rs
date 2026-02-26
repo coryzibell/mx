@@ -57,8 +57,8 @@ pub fn respond_ritual(
     token_str: &str,
 ) -> Result<String> {
     // Verify token and extract session_id + step
-    let (session_id, token_index) = verify_token(token_str)
-        .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
+    let (session_id, token_index) =
+        verify_token(token_str).map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
     // Load session from DB
     let mut session = db
@@ -235,8 +235,8 @@ pub fn skip_ritual(
     token_str: &str,
 ) -> Result<String> {
     // Verify token and extract session_id + step
-    let (session_id, token_index) = verify_token(token_str)
-        .map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
+    let (session_id, token_index) =
+        verify_token(token_str).map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
     // Load session from DB
     let mut session = db
