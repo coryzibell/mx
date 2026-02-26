@@ -193,6 +193,7 @@ pub struct WakeRespondResponse {
     pub hint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<BloomPrompt>,
+    pub session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<BloomPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,6 +206,7 @@ pub struct WakeRespondResponse {
 pub struct WakeSkipResponse {
     pub status: String,
     pub bloom: BloomFull,
+    pub session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<BloomPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
