@@ -455,12 +455,10 @@ fn apply_entry_filters(
         .filter(|e| !filter.has_anchors || !e.anchors.is_empty())
         .filter(|e| !filter.missing_anchors || e.anchors.is_empty())
         .filter(|e| {
-            !filter.has_resonance_type
-                || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+            !filter.has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
         })
         .filter(|e| {
-            !filter.missing_resonance_type
-                || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+            !filter.missing_resonance_type || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
         })
         .collect();
 
@@ -2215,7 +2213,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut provider = FastEmbedProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
-                db.semantic_search(&query_embedding, &ctx, &db_filter, filter.limit.unwrap_or(20))?
+                db.semantic_search(
+                    &query_embedding,
+                    &ctx,
+                    &db_filter,
+                    filter.limit.unwrap_or(20),
+                )?
             } else {
                 db.search(&query, &ctx, &db_filter)?
             };
@@ -2437,7 +2440,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => match std::env::var("MX_CURRENT_AGENT") {
                     Ok(agent) if !agent.is_empty() => agent,
                     _ => {
-                        eprintln!("Error: --source-agent not provided and MX_CURRENT_AGENT not set");
+                        eprintln!(
+                            "Error: --source-agent not provided and MX_CURRENT_AGENT not set"
+                        );
                         std::process::exit(1);
                     }
                 },
@@ -2446,7 +2451,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Resolve visibility: --private flag is sugar for --visibility private
             let is_private = private || visibility.as_deref() == Some("private");
             if let Some(ref vis) = visibility
-                && vis != "public" && vis != "private"
+                && vis != "public"
+                && vis != "private"
             {
                 eprintln!("Error: --visibility must be 'public' or 'private'");
                 std::process::exit(1);
@@ -2870,14 +2876,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 entry.body = Some(text);
                 body_changed = true;
             } else if let Some(ref append_text) = append_content {
-                let new_body =
-                    content_ops::append_content(entry.body.as_deref(), append_text);
+                let new_body = content_ops::append_content(entry.body.as_deref(), append_text);
                 changes.push(format!("content: appended {} bytes", append_text.len()));
                 entry.body = Some(new_body);
                 body_changed = true;
             } else if let Some(ref prepend_text) = prepend_content {
-                let new_body =
-                    content_ops::prepend_content(entry.body.as_deref(), prepend_text);
+                let new_body = content_ops::prepend_content(entry.body.as_deref(), prepend_text);
                 changes.push(format!("content: prepended {} bytes", prepend_text.len()));
                 entry.body = Some(new_body);
                 body_changed = true;
@@ -2887,8 +2891,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .body
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("Entry has no body content to edit"))?;
-                let result =
-                    content_ops::edit_content(body_text, find_text, replace_text, replace_all, nth)?;
+                let result = content_ops::edit_content(
+                    body_text,
+                    find_text,
+                    replace_text,
+                    replace_all,
+                    nth,
+                )?;
                 changes.push(format!(
                     "content: {} replacement{}",
                     result.replacements,
