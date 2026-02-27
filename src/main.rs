@@ -3179,7 +3179,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     });
 
                     if new_owner.is_none() {
-                        bail!("Cannot make entry private without an owner. Provide --owner or set MX_CURRENT_AGENT.");
+                        bail!(
+                            "Cannot make entry private without an owner. Provide --owner or set MX_CURRENT_AGENT."
+                        );
                     }
 
                     entry.owner = new_owner;
@@ -3201,7 +3203,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     visibility.as_deref() == Some("private") || entry.visibility == "private";
 
                 if !is_private {
-                    bail!("Cannot set owner on public entry. Use --visibility private to make entry private first.");
+                    bail!(
+                        "Cannot set owner on public entry. Use --visibility private to make entry private first."
+                    );
                 }
 
                 changes.push(format!("owner: {:?} -> {}", entry.owner, new_owner));
@@ -3804,10 +3808,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
                 _ => {
-                    bail!(
-                        "Invalid format '{}'. Valid formats: md, jsonl, csv",
-                        format
-                    );
+                    bail!("Invalid format '{}'. Valid formats: md, jsonl, csv", format);
                 }
             }
         }
