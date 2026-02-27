@@ -2075,7 +2075,11 @@ fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
 /// This silently finds similar entries and adds anchors for a single entry.
 /// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 /// Uses defaults: threshold 0.75, max 5 anchors.
-fn auto_anchor(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+fn auto_anchor(
+    entry_id: &str,
+    db: &dyn store::KnowledgeStore,
+    explicitly_removed: Option<&[String]>,
+) -> Result<()> {
     // Only auto-anchor in SurrealDB mode
     let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
 
@@ -2123,6 +2127,15 @@ fn auto_anchor(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
         // Skip if already an anchor
         if entry.anchors.contains(&candidate.id) {
             continue;
+        }
+
+        // Skip anchors that the user explicitly removed via --anchors replacement.
+        // auto_anchor is a safety net for missed connections, not an override of
+        // explicit user intent.
+        if let Some(removed) = explicitly_removed {
+            if removed.contains(&candidate.id) {
+                continue;
+            }
         }
 
         // Privacy check
@@ -2750,7 +2763,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref(), None)?;
 
             if json {
                 println!(
@@ -2962,12 +2975,20 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Update anchors if provided (replace all)
+            // Track explicitly removed anchors so auto_anchor won't re-add them
+            let mut explicitly_removed_anchors: Vec<String> = Vec::new();
             if let Some(ref new_anchors) = anchors {
                 let anchor_list: Vec<String> = new_anchors
                     .split(',')
                     .map(|s| normalize_id(s.trim()))
                     .filter(|s| !s.is_empty())
                     .collect();
+                // Anchors in old set but not in new set were explicitly removed
+                for old_anchor in &entry.anchors {
+                    if !anchor_list.contains(old_anchor) {
+                        explicitly_removed_anchors.push(old_anchor.clone());
+                    }
+                }
                 changes.push(format!("anchors: {:?} -> {:?}", entry.anchors, anchor_list));
                 entry.anchors = anchor_list;
             }
@@ -3182,7 +3203,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref())?;
+            // Pass explicitly removed anchors so auto_anchor respects user intent:
+            // if the user did --anchors (full replacement) and removed some anchors,
+            // auto_anchor should not re-add them.
+            let removed = if explicitly_removed_anchors.is_empty() {
+                None
+            } else {
+                Some(explicitly_removed_anchors.as_slice())
+            };
+            auto_anchor(&id, db.as_ref(), removed)?;
 
             if json {
                 println!(
@@ -3227,7 +3256,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref(), None)?;
 
             if json {
                 println!(
@@ -3282,7 +3311,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref(), None)?;
 
             if json {
                 println!(
@@ -3333,7 +3362,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref())?;
+            auto_anchor(&id, db.as_ref(), None)?;
 
             if json {
                 println!(
