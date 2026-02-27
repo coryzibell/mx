@@ -57,10 +57,8 @@ impl Check {
 }
 
 /// Run all environment checks
-pub fn run_checks() -> Result<()> {
+pub fn run_checks(json: bool) -> Result<()> {
     let use_color = std::io::stdout().is_terminal();
-
-    println!("Matrix Environment Check\n");
 
     let checks = vec![
         check_file_exists("~/.matrix/CLAUDE.md", &home_path(".matrix/CLAUDE.md")),
@@ -72,26 +70,53 @@ pub fn run_checks() -> Result<()> {
         check_github_token(),
     ];
 
-    // Print results
-    for check in &checks {
-        println!("{}", check.format_result(use_color));
-    }
-
-    // Summary
     let failed_count = checks.iter().filter(|c| !c.passed).count();
 
-    println!();
-    if failed_count == 0 {
-        println!("All checks passed!");
-        Ok(())
-    } else {
+    if json {
+        let json_checks: Vec<serde_json::Value> = checks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "passed": c.passed,
+                    "message": c.message,
+                })
+            })
+            .collect();
         println!(
-            "{} issue{} found",
-            failed_count,
-            if failed_count == 1 { "" } else { "s" }
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "checks": json_checks,
+                "passed": failed_count == 0,
+                "failed_count": failed_count,
+            }))?
         );
-        std::process::exit(1);
+    } else {
+        println!("Environment Health Check\n");
+
+        // Print results
+        for check in &checks {
+            println!("{}", check.format_result(use_color));
+        }
+
+        // Summary
+        println!();
+        if failed_count == 0 {
+            println!("All checks passed!");
+        } else {
+            println!(
+                "{} issue{} found",
+                failed_count,
+                if failed_count == 1 { "" } else { "s" }
+            );
+        }
     }
+
+    if failed_count > 0 {
+        anyhow::bail!("{} check(s) failed", failed_count);
+    }
+
+    Ok(())
 }
 
 /// Check if a file exists

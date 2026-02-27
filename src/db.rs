@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 #[allow(dead_code)]
 const SCHEMA_VERSION: i32 = 5;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: String,
     pub description: Option<String>,

@@ -57,18 +57,26 @@ pub fn save_session(session_path: Option<String>, all: bool) -> Result<()> {
 }
 
 /// List archived sessions
-pub fn list_sessions(all: bool) -> Result<()> {
+pub fn list_sessions(all: bool, json: bool) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
-        println!("No archives found (codex directory doesn't exist)");
+        if json {
+            println!("[]");
+        } else {
+            println!("No archives found (codex directory doesn't exist)");
+        }
         return Ok(());
     }
 
     let mut archives = collect_archives(&codex_dir)?;
 
     if archives.is_empty() {
-        println!("No archives found");
+        if json {
+            println!("[]");
+        } else {
+            println!("No archives found");
+        }
         return Ok(());
     }
 
@@ -98,29 +106,48 @@ pub fn list_sessions(all: bool) -> Result<()> {
         archives.sort_by(|a, b| b.manifest.archived_at.cmp(&a.manifest.archived_at));
     }
 
-    // Print table
-    println!(
-        "{:<25} {:<20} {:<8} {:<8} {:<10}",
-        "ARCHIVE", "ARCHIVED", "MESSAGES", "AGENTS", "SIZE"
-    );
-    println!("{}", "-".repeat(80));
-
-    for archive in archives {
-        let size_kb = archive.manifest.size_bytes / 1024;
-        let incremental_suffix = if archive.incremental > 0 {
-            format!(".{}", archive.incremental)
-        } else {
-            String::new()
-        };
-
+    if json {
+        let json_archives: Vec<serde_json::Value> = archives
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.short_id,
+                    "dir_name": a.dir_name,
+                    "incremental": a.incremental,
+                    "archived_at": a.manifest.archived_at.to_rfc3339(),
+                    "session_id": a.manifest.session_id,
+                    "message_count": a.manifest.message_count,
+                    "agent_count": a.manifest.agent_count,
+                    "size_bytes": a.manifest.size_bytes,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_archives)?);
+    } else {
+        // Print table
         println!(
             "{:<25} {:<20} {:<8} {:<8} {:<10}",
-            format!("{}{}", archive.short_id, incremental_suffix),
-            archive.manifest.archived_at.format("%Y-%m-%d %H:%M:%S"),
-            archive.manifest.message_count,
-            archive.manifest.agent_count,
-            format!("{}KB", size_kb)
+            "ARCHIVE", "ARCHIVED", "MESSAGES", "AGENTS", "SIZE"
         );
+        println!("{}", "-".repeat(80));
+
+        for archive in archives {
+            let size_kb = archive.manifest.size_bytes / 1024;
+            let incremental_suffix = if archive.incremental > 0 {
+                format!(".{}", archive.incremental)
+            } else {
+                String::new()
+            };
+
+            println!(
+                "{:<25} {:<20} {:<8} {:<8} {:<10}",
+                format!("{}{}", archive.short_id, incremental_suffix),
+                archive.manifest.archived_at.format("%Y-%m-%d %H:%M:%S"),
+                archive.manifest.message_count,
+                archive.manifest.agent_count,
+                format!("{}KB", size_kb)
+            );
+        }
     }
 
     Ok(())
@@ -132,9 +159,23 @@ pub fn read_session(
     human: bool,
     grep_pattern: Option<String>,
     include_agents: bool,
+    json: bool,
 ) -> Result<()> {
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
+
+    if json {
+        // Output manifest as JSON
+        let manifest_path = archive_dir.join("manifest.json");
+        if manifest_path.exists() {
+            let manifest_content = fs::read_to_string(&manifest_path)?;
+            let manifest: Manifest = serde_json::from_str(&manifest_content)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        } else {
+            anyhow::bail!("Manifest not found in archive");
+        }
+        return Ok(());
+    }
 
     let session_file = archive_dir.join("session.jsonl");
     if !session_file.exists() {
@@ -185,26 +226,58 @@ pub fn read_session(
 }
 
 /// Search all archives for a pattern
-pub fn search_archives(pattern: String) -> Result<()> {
+pub fn search_archives(pattern: String, json: bool) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
-        println!("No archives found");
+        if json {
+            println!("[]");
+        } else {
+            println!("No archives found");
+        }
         return Ok(());
     }
 
     let archives = collect_archives(&codex_dir)?;
 
-    for archive in archives {
-        let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
-        if let Ok(content) = fs::read_to_string(&session_file)
-            && content.contains(&pattern)
-        {
-            println!("Match in {}: {}", archive.short_id, session_file.display());
-            // Print matching lines
-            for (i, line) in content.lines().enumerate() {
-                if line.contains(&pattern) {
-                    println!("  Line {}: {}", i + 1, line);
+    if json {
+        let mut results = Vec::new();
+        for archive in archives {
+            let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
+            if let Ok(content) = fs::read_to_string(&session_file)
+                && content.contains(&pattern)
+            {
+                let matching_lines: Vec<serde_json::Value> = content
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| line.contains(&pattern))
+                    .map(|(i, line)| {
+                        serde_json::json!({
+                            "line": i + 1,
+                            "content": line,
+                        })
+                    })
+                    .collect();
+                results.push(serde_json::json!({
+                    "archive_id": archive.short_id,
+                    "file": session_file.display().to_string(),
+                    "matches": matching_lines,
+                }));
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        for archive in archives {
+            let session_file = codex_dir.join(&archive.dir_name).join("session.jsonl");
+            if let Ok(content) = fs::read_to_string(&session_file)
+                && content.contains(&pattern)
+            {
+                println!("Match in {}: {}", archive.short_id, session_file.display());
+                // Print matching lines
+                for (i, line) in content.lines().enumerate() {
+                    if line.contains(&pattern) {
+                        println!("  Line {}: {}", i + 1, line);
+                    }
                 }
             }
         }
