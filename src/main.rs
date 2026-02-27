@@ -2761,6 +2761,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         "title": title,
                         "visibility": entry_visibility,
                         "owner": entry_owner,
+                        "resonance": entry.resonance,
+                        "resonance_type": entry.resonance_type,
+                        "tags": entry.tags,
+                        "applicability": entry.applicability,
+                        "anchors": entry.anchors,
+                        "wake_phrase": entry.wake_phrase,
+                        "wake_phrases": entry.wake_phrases,
                     }))?
                 );
             } else {
@@ -2958,7 +2965,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if let Some(ref new_anchors) = anchors {
                 let anchor_list: Vec<String> = new_anchors
                     .split(',')
-                    .map(|s| s.trim().to_string())
+                    .map(|s| normalize_id(s.trim()))
                     .filter(|s| !s.is_empty())
                     .collect();
                 changes.push(format!("anchors: {:?} -> {:?}", entry.anchors, anchor_list));
