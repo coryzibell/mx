@@ -2132,10 +2132,10 @@ fn auto_anchor(
         // Skip anchors that the user explicitly removed via --anchors replacement.
         // auto_anchor is a safety net for missed connections, not an override of
         // explicit user intent.
-        if let Some(removed) = explicitly_removed {
-            if removed.contains(&candidate.id) {
-                continue;
-            }
+        if let Some(removed) = explicitly_removed
+            && removed.contains(&candidate.id)
+        {
+            continue;
         }
 
         // Privacy check
