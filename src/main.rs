@@ -29,7 +29,7 @@ use crate::index::{
 
 #[derive(Parser)]
 #[command(name = "mx")]
-#[command(about = "Matrix CLI - Knowledge indexing and task management")]
+#[command(about = "Tsunderground CLI - memory, workflow, and identity tooling")]
 #[command(version)]
 struct Cli {
     /// Enable verbose output (show connection logs)
@@ -43,13 +43,13 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Memory knowledge management
+    /// Knowledge base operations (CRUD, search, wake, facts)
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
     },
 
-    /// Encoded commit (upload pattern)
+    /// Create an encoded git commit
     Commit {
         /// Commit message (human-readable, will be encoded)
         #[arg(required_unless_present_any = ["title", "encode_only"])]
@@ -203,7 +203,7 @@ enum ConvertCommands {
 
 #[derive(Subcommand)]
 enum StateCommands {
-    /// Encode state tensor from dimensional values (NEW - values-first)
+    /// Encode state tensor from dimensional values
     Encode {
         /// Pipe-separated values (e.g., "0.3|0.2|0.7|0.8|0.4")
         values: Option<String>,
@@ -225,7 +225,7 @@ enum StateCommands {
         guided: bool,
 
         /// Output format: tensor (default), json, human, bootstrap
-        #[arg(short = 'o', long, default_value = "tensor")]
+        #[arg(short = 'F', long, default_value = "tensor")]
         format: String,
 
         /// Include runes in output
@@ -243,7 +243,7 @@ enum StateCommands {
         schema: Option<String>,
 
         /// Output format: human (default), json, tensor, mood
-        #[arg(short = 'o', long, default_value = "human")]
+        #[arg(short = 'F', long, default_value = "human")]
         format: String,
     },
 
@@ -322,12 +322,12 @@ enum PrCommands {
         /// PR number
         number: u32,
 
-        /// Use rebase merge
-        #[arg(long)]
+        /// Use rebase merge (mutually exclusive with --merge)
+        #[arg(long, conflicts_with = "merge")]
         rebase: bool,
 
-        /// Use standard merge commit (instead of squash)
-        #[arg(long, name = "merge")]
+        /// Use standard merge commit instead of squash (mutually exclusive with --rebase)
+        #[arg(long, name = "merge", conflicts_with = "rebase")]
         merge_commit: bool,
     },
 }
@@ -548,7 +548,7 @@ enum MemoryCommands {
         title: Option<String>,
 
         /// Content inline
-        #[arg(short = 'c', long, conflicts_with = "file")]
+        #[arg(long, conflicts_with = "file")]
         content: Option<String>,
 
         /// Content from file
@@ -664,7 +664,7 @@ enum MemoryCommands {
         title: Option<String>,
 
         /// Replace content inline (full replacement)
-        #[arg(short = 'c', long, conflicts_with_all = ["file", "append_content", "prepend_content", "find"])]
+        #[arg(long, conflicts_with_all = ["file", "append_content", "prepend_content", "find"])]
         content: Option<String>,
 
         /// Replace content from file (full replacement)
@@ -786,12 +786,12 @@ enum MemoryCommands {
         id: String,
 
         /// Text to find in the content
-        #[arg(long)]
-        old: String,
+        #[arg(long, visible_alias = "old")]
+        find: String,
 
         /// Replacement text
-        #[arg(long)]
-        new: String,
+        #[arg(long, visible_alias = "new")]
+        replace: String,
 
         /// Replace all occurrences (default: error if multiple matches)
         #[arg(long)]
@@ -812,7 +812,7 @@ enum MemoryCommands {
         id: String,
 
         /// Content to append (omit to read from stdin)
-        #[arg(short = 'c', long)]
+        #[arg(long)]
         content: Option<String>,
 
         /// Output as JSON
@@ -826,7 +826,7 @@ enum MemoryCommands {
         id: String,
 
         /// Content to prepend (omit to read from stdin)
-        #[arg(short = 'c', long)]
+        #[arg(long)]
         content: Option<String>,
 
         /// Output as JSON
@@ -1739,12 +1739,11 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                         }
                     }
                     None => {
-                        eprintln!("Unknown mood: {}", mood_name);
-                        eprintln!(
-                            "Available moods: {}",
+                        bail!(
+                            "Unknown mood '{}'. Available moods: {}",
+                            mood_name,
                             schema.moods.keys().cloned().collect::<Vec<_>>().join(", ")
                         );
-                        std::process::exit(1);
                     }
                 }
             } else {
@@ -2262,9 +2261,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         let categories = db.list_categories()?;
                         let valid_ids: Vec<&str> =
                             categories.iter().map(|c| c.id.as_str()).collect();
-                        eprintln!("Error: Unknown category '{}'", cat);
-                        eprintln!("Valid categories: {}", valid_ids.join(", "));
-                        std::process::exit(1);
+                        bail!(
+                            "Unknown category '{}'. Valid categories: {}",
+                            cat,
+                            valid_ids.join(", ")
+                        );
                     }
                 }
             }
@@ -2343,8 +2344,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
                 None => {
-                    eprintln!("Entry '{}' not found", id);
-                    std::process::exit(1);
+                    bail!("Entry '{}' not found", id);
                 }
             }
         }
@@ -2387,8 +2387,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     println!("Deleted entry '{}'", id);
                 }
             } else {
-                eprintln!("Entry '{}' not found", id);
-                std::process::exit(1);
+                bail!("Entry '{}' not found", id);
             }
         }
 
@@ -2443,8 +2442,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 fs::read_to_string(&file_path)
                     .with_context(|| format!("Failed to read file: {}", file_path))?
             } else {
-                eprintln!("Error: Either --content or --file must be provided");
-                std::process::exit(1);
+                bail!("Either --content or --file must be provided");
             };
 
             // Determine agent - use source_agent or env var (no longer required)
@@ -2453,10 +2451,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => match std::env::var("MX_CURRENT_AGENT") {
                     Ok(agent) if !agent.is_empty() => agent,
                     _ => {
-                        eprintln!(
-                            "Error: --source-agent not provided and MX_CURRENT_AGENT not set"
-                        );
-                        std::process::exit(1);
+                        bail!("--source-agent not provided and MX_CURRENT_AGENT not set");
                     }
                 },
             };
@@ -2467,8 +2462,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 && vis != "public"
                 && vis != "private"
             {
-                eprintln!("Error: --visibility must be 'public' or 'private'");
-                std::process::exit(1);
+                bail!("--visibility must be 'public' or 'private'");
             }
 
             // Handle fact type routing mode (--type flag)
@@ -2633,9 +2627,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if db.get_category(&category)?.is_none() {
                 let categories = db.list_categories()?;
                 let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
-                eprintln!("Error: Invalid category '{}'", category);
-                eprintln!("Valid categories: {}", valid_ids.join(", "));
-                std::process::exit(1);
+                bail!(
+                    "Invalid category '{}'. Valid categories: {}",
+                    category,
+                    valid_ids.join(", ")
+                );
             }
 
             // Parse tags
@@ -2708,9 +2704,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "ephemeral",
                 ];
                 if !valid_types.contains(&rtype.as_str()) {
-                    eprintln!("Error: Invalid resonance type '{}'", rtype);
-                    eprintln!("Valid types: {}", valid_types.join(", "));
-                    std::process::exit(1);
+                    bail!(
+                        "Invalid resonance type '{}'. Valid types: {}",
+                        rtype,
+                        valid_types.join(", ")
+                    );
                 }
             }
 
@@ -2933,9 +2931,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 if db.get_category(&new_category)?.is_none() {
                     let categories = db.list_categories()?;
                     let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
-                    eprintln!("Error: Invalid category '{}'", new_category);
-                    eprintln!("Valid categories: {}", valid_ids.join(", "));
-                    std::process::exit(1);
+                    bail!(
+                        "Invalid category '{}'. Valid categories: {}",
+                        new_category,
+                        valid_ids.join(", ")
+                    );
                 }
                 changes.push(format!(
                     "category: {} -> {}",
@@ -2963,9 +2963,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "ephemeral",
                 ];
                 if !valid_types.contains(&new_type.as_str()) {
-                    eprintln!("Error: Invalid resonance type '{}'", new_type);
-                    eprintln!("Valid types: {}", valid_types.join(", "));
-                    std::process::exit(1);
+                    bail!(
+                        "Invalid resonance type '{}'. Valid types: {}",
+                        new_type,
+                        valid_types.join(", ")
+                    );
                 }
                 changes.push(format!(
                     "resonance_type: {:?} -> {}",
@@ -3065,11 +3067,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     ));
                     entry.wake_order = Some(order_value);
                 } else {
-                    eprintln!(
-                        "Error: Invalid wake_order value '{}' (use number or '-' to clear)",
+                    bail!(
+                        "Invalid wake_order value '{}' (use number or '-' to clear)",
                         order_str
                     );
-                    std::process::exit(1);
                 }
             }
 
@@ -3077,20 +3078,17 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if let Some(ref new_vis) = visibility {
                 // Validate value
                 if new_vis != "public" && new_vis != "private" {
-                    eprintln!("Error: visibility must be 'public' or 'private'");
-                    std::process::exit(1);
+                    bail!("--visibility must be 'public' or 'private'");
                 }
 
                 let old_vis = entry.visibility.clone();
 
                 // Bloom protection: warn when making blooms public
                 if new_vis == "public" && entry.category_id == "bloom" && !force {
-                    eprintln!(
-                        "Warning: Making bloom '{}' public will expose identity data.",
+                    bail!(
+                        "Making bloom '{}' public will expose identity data. Use --force to confirm.",
                         entry.id
                     );
-                    eprintln!("Use --force to confirm this change.");
-                    std::process::exit(1);
                 }
 
                 // Handle public -> private: require owner
@@ -3102,9 +3100,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     });
 
                     if new_owner.is_none() {
-                        eprintln!("Error: Cannot make entry private without an owner.");
-                        eprintln!("Provide --owner or set MX_CURRENT_AGENT.");
-                        std::process::exit(1);
+                        bail!("Cannot make entry private without an owner. Provide --owner or set MX_CURRENT_AGENT.");
                     }
 
                     entry.owner = new_owner;
@@ -3126,9 +3122,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     visibility.as_deref() == Some("private") || entry.visibility == "private";
 
                 if !is_private {
-                    eprintln!("Error: Cannot set owner on public entry.");
-                    eprintln!("Use --visibility private to make entry private first.");
-                    std::process::exit(1);
+                    bail!("Cannot set owner on public entry. Use --visibility private to make entry private first.");
                 }
 
                 changes.push(format!("owner: {:?} -> {}", entry.owner, new_owner));
@@ -3235,8 +3229,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
         MemoryCommands::Edit {
             id,
-            old,
-            new,
+            find,
+            replace,
             replace_all,
             nth,
             json,
@@ -3250,7 +3244,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            let result = db.edit_content(&id, &ctx, &old, &new, replace_all, nth)?;
+            let result = db.edit_content(&id, &ctx, &find, &replace, replace_all, nth)?;
 
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
@@ -3301,8 +3295,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             if text.is_empty() {
-                eprintln!("Error: No content provided");
-                std::process::exit(1);
+                bail!("No content provided");
             }
 
             db.append_content(&id, &ctx, &text)?;
@@ -3352,8 +3345,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             if text.is_empty() {
-                eprintln!("Error: No content provided");
-                std::process::exit(1);
+                bail!("No content provided");
             }
 
             db.prepend_content(&id, &ctx, &text)?;
@@ -3650,8 +3642,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Handle migration from SQLite to SurrealDB
             if let (Some(source_path), Some(target_type)) = (from, to) {
                 if target_type != "surrealdb" {
-                    eprintln!("Error: Only 'surrealdb' is supported as --to value");
-                    std::process::exit(1);
+                    bail!("Only 'surrealdb' is supported as --to value");
                 }
 
                 // Perform migration
@@ -3734,11 +3725,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
                 _ => {
-                    eprintln!(
-                        "Error: Invalid format '{}'. Valid formats: md, jsonl, csv",
+                    bail!(
+                        "Invalid format '{}'. Valid formats: md, jsonl, csv",
                         format
                     );
-                    std::process::exit(1);
                 }
             }
         }
@@ -3765,8 +3755,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let current_agent = match std::env::var("MX_CURRENT_AGENT") {
                 Ok(agent) if !agent.is_empty() => agent,
                 _ => {
-                    eprintln!("Error: MX_CURRENT_AGENT not set. Cannot wake without identity.");
-                    std::process::exit(1);
+                    bail!("MX_CURRENT_AGENT not set. Cannot wake without identity.");
                 }
             };
 
@@ -4150,8 +4139,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 }
             }
             None => {
-                eprintln!("Agent '{}' not found", id);
-                std::process::exit(1);
+                bail!("Agent '{}' not found", id);
             }
         },
 
@@ -4170,8 +4158,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
             };
 
             if !agents_dir.exists() {
-                eprintln!("Agents directory does not exist: {:?}", agents_dir);
-                std::process::exit(1);
+                bail!("Agents directory does not exist: {:?}", agents_dir);
             }
 
             // Scan for .md files
@@ -4378,8 +4365,7 @@ fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
                 db.upsert_session(&session)?;
                 println!("Closed session: {}", id);
             } else {
-                eprintln!("Session '{}' not found", id);
-                std::process::exit(1);
+                bail!("Session '{}' not found", id);
             }
         }
     }
@@ -4407,8 +4393,7 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
         CategoriesCommands::Add { id, description } => {
             // Check if category already exists
             if db.get_category(&id)?.is_some() {
-                eprintln!("Error: Category '{}' already exists", id);
-                std::process::exit(1);
+                bail!("Category '{}' already exists", id);
             }
 
             let now = chrono::Utc::now().to_rfc3339();
@@ -4425,8 +4410,7 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
         CategoriesCommands::Remove { id } => {
             // Check if category exists
             if db.get_category(&id)?.is_none() {
-                eprintln!("Error: Category '{}' not found", id);
-                std::process::exit(1);
+                bail!("Category '{}' not found", id);
             }
 
             // delete_category will check if entries use it and error if so
@@ -4435,12 +4419,10 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
                     println!("Deleted category: {}", id);
                 }
                 Ok(false) => {
-                    eprintln!("Error: Category '{}' not found", id);
-                    std::process::exit(1);
+                    bail!("Category '{}' not found", id);
                 }
                 Err(e) => {
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
+                    return Err(e);
                 }
             }
         }
@@ -4578,8 +4560,7 @@ fn handle_relationships(cmd: RelationshipsCommands, config: &IndexConfig) -> Res
             if db.delete_relationship(&id)? {
                 println!("Deleted relationship: {}", id);
             } else {
-                eprintln!("Relationship '{}' not found", id);
-                std::process::exit(1);
+                bail!("Relationship '{}' not found", id);
             }
         }
     }
@@ -4726,8 +4707,7 @@ fn handle_convert(cmd: ConvertCommands) -> Result<()> {
             } else if input_path.is_dir() {
                 convert::convert_directory(&input_path, &output_dir, dry_run)?;
             } else {
-                eprintln!("Error: Input path does not exist: {:?}", input_path);
-                std::process::exit(1);
+                bail!("Input path does not exist: {:?}", input_path);
             }
 
             Ok(())
@@ -4754,8 +4734,7 @@ fn handle_convert(cmd: ConvertCommands) -> Result<()> {
                     dry_run,
                 )?;
             } else {
-                eprintln!("Error: Input path does not exist: {:?}", input_path);
-                std::process::exit(1);
+                bail!("Input path does not exist: {:?}", input_path);
             }
 
             Ok(())
