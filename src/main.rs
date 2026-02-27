@@ -383,6 +383,104 @@ pub enum SyncCommands {
     },
 }
 
+/// Shared filter flags for search/list commands (extracted from duplicated definitions)
+#[derive(Debug, Clone, clap::Args)]
+struct EntryFilter {
+    /// Filter by category (can specify multiple: bloom,technique)
+    #[arg(short, long, value_delimiter = ',')]
+    category: Option<Vec<String>>,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+
+    /// Show only your private entries
+    #[arg(long)]
+    mine: bool,
+
+    /// Include private entries (requires matching owner)
+    #[arg(long)]
+    include_private: bool,
+
+    /// Minimum resonance level
+    #[arg(long)]
+    min_resonance: Option<i32>,
+
+    /// Maximum resonance level
+    #[arg(long)]
+    max_resonance: Option<i32>,
+
+    /// Filter to entries WITH wake phrase
+    #[arg(long)]
+    has_wake_phrase: bool,
+
+    /// Filter to entries WITHOUT wake phrase
+    #[arg(long, conflicts_with = "has_wake_phrase")]
+    missing_wake_phrase: bool,
+
+    /// Filter to entries WITH anchors
+    #[arg(long)]
+    has_anchors: bool,
+
+    /// Filter to entries WITHOUT anchors
+    #[arg(long, conflicts_with = "has_anchors")]
+    missing_anchors: bool,
+
+    /// Filter to entries WITH resonance type
+    #[arg(long)]
+    has_resonance_type: bool,
+
+    /// Filter to entries WITHOUT resonance type
+    #[arg(long, conflicts_with = "has_resonance_type")]
+    missing_resonance_type: bool,
+
+    /// Limit number of results
+    #[arg(long)]
+    limit: Option<usize>,
+}
+
+/// Apply in-memory field presence filters to a list of entries
+fn apply_entry_filters(
+    entries: Vec<knowledge::KnowledgeEntry>,
+    filter: &EntryFilter,
+) -> Vec<knowledge::KnowledgeEntry> {
+    let mut entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| {
+            !filter.has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+        })
+        .filter(|e| {
+            !filter.missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+        })
+        .filter(|e| !filter.has_anchors || !e.anchors.is_empty())
+        .filter(|e| !filter.missing_anchors || e.anchors.is_empty())
+        .filter(|e| {
+            !filter.has_resonance_type
+                || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
+        })
+        .filter(|e| {
+            !filter.missing_resonance_type
+                || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+        })
+        .collect();
+
+    // Apply limit if specified
+    if let Some(n) = filter.limit {
+        entries.truncate(n);
+    }
+
+    entries
+}
+
+/// Normalize a knowledge entry ID (accept both "kn-abc" and "abc", normalize to "kn-abc")
+fn normalize_id(id: &str) -> String {
+    if id.starts_with("kn-") {
+        id.to_string()
+    } else {
+        format!("kn-{}", id)
+    }
+}
+
 #[derive(Subcommand)]
 enum MemoryCommands {
     /// Rebuild the knowledge index
@@ -393,57 +491,8 @@ enum MemoryCommands {
         /// Search query
         query: String,
 
-        /// Filter by category (can specify multiple: bloom,technique)
-        #[arg(short, long, value_delimiter = ',')]
-        category: Option<Vec<String>>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Show only your private entries
-        #[arg(long)]
-        mine: bool,
-
-        /// Include private entries (requires matching owner)
-        #[arg(long)]
-        include_private: bool,
-
-        /// Minimum resonance level
-        #[arg(long)]
-        min_resonance: Option<i32>,
-
-        /// Maximum resonance level
-        #[arg(long)]
-        max_resonance: Option<i32>,
-
-        /// Filter to entries WITH wake phrase
-        #[arg(long)]
-        has_wake_phrase: bool,
-
-        /// Filter to entries WITHOUT wake phrase
-        #[arg(long, conflicts_with = "has_wake_phrase")]
-        missing_wake_phrase: bool,
-
-        /// Filter to entries WITH anchors
-        #[arg(long)]
-        has_anchors: bool,
-
-        /// Filter to entries WITHOUT anchors
-        #[arg(long, conflicts_with = "has_anchors")]
-        missing_anchors: bool,
-
-        /// Filter to entries WITH resonance type
-        #[arg(long)]
-        has_resonance_type: bool,
-
-        /// Filter to entries WITHOUT resonance type
-        #[arg(long, conflicts_with = "has_resonance_type")]
-        missing_resonance_type: bool,
-
-        /// Limit number of results
-        #[arg(long)]
-        limit: Option<usize>,
+        #[command(flatten)]
+        filter: EntryFilter,
 
         /// Use semantic (vector) search instead of keyword search
         #[arg(long)]
@@ -452,57 +501,8 @@ enum MemoryCommands {
 
     /// List entries by category
     List {
-        /// Category to list (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future, session)
-        #[arg(short, long)]
-        category: Option<String>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Show only your private entries
-        #[arg(long)]
-        mine: bool,
-
-        /// Include private entries (requires matching owner)
-        #[arg(long)]
-        include_private: bool,
-
-        /// Minimum resonance level
-        #[arg(long)]
-        min_resonance: Option<i32>,
-
-        /// Maximum resonance level
-        #[arg(long)]
-        max_resonance: Option<i32>,
-
-        /// Filter to entries WITH wake phrase
-        #[arg(long)]
-        has_wake_phrase: bool,
-
-        /// Filter to entries WITHOUT wake phrase
-        #[arg(long, conflicts_with = "has_wake_phrase")]
-        missing_wake_phrase: bool,
-
-        /// Filter to entries WITH anchors
-        #[arg(long)]
-        has_anchors: bool,
-
-        /// Filter to entries WITHOUT anchors
-        #[arg(long, conflicts_with = "has_anchors")]
-        missing_anchors: bool,
-
-        /// Filter to entries WITH resonance type
-        #[arg(long)]
-        has_resonance_type: bool,
-
-        /// Filter to entries WITHOUT resonance type
-        #[arg(long, conflicts_with = "has_resonance_type")]
-        missing_resonance_type: bool,
-
-        /// Limit number of results
-        #[arg(long)]
-        limit: Option<usize>,
+        #[command(flatten)]
+        filter: EntryFilter,
     },
 
     /// Show a specific entry
@@ -513,6 +513,10 @@ enum MemoryCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Output only the body content (for piping)
+        #[arg(long)]
+        content_only: bool,
     },
 
     /// Show index statistics
@@ -522,6 +526,10 @@ enum MemoryCommands {
     Delete {
         /// Entry ID to delete
         id: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Import entries from JSONL file
@@ -566,9 +574,9 @@ enum MemoryCommands {
         #[arg(short, long)]
         project: Option<String>,
 
-        /// Source agent ID (required - where did this knowledge originate?)
-        #[arg(long, required = true)]
-        source_agent: String,
+        /// Source agent ID (defaults to MX_CURRENT_AGENT env var)
+        #[arg(long)]
+        source_agent: Option<String>,
 
         /// Source type (manual, ram, cache, agent_session)
         #[arg(long, default_value = "manual")]
@@ -594,13 +602,21 @@ enum MemoryCommands {
         #[arg(long, default_value = "text")]
         content_type: String,
 
-        /// Mark as private (only visible to owner)
-        #[arg(long)]
+        /// Mark as private (only visible to owner) - shorthand for --visibility private
+        #[arg(long, conflicts_with = "visibility")]
         private: bool,
 
-        /// Explicit owner (defaults to source_agent if private)
+        /// Set visibility (public or private)
+        #[arg(long, conflicts_with = "private")]
+        visibility: Option<String>,
+
+        /// Explicit owner (defaults to source_agent or MX_CURRENT_AGENT if private)
         #[arg(long)]
         owner: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
 
         /// Resonance level (1-10, or higher for transcendent)
         #[arg(long)]
@@ -649,21 +665,53 @@ enum MemoryCommands {
         #[arg(short, long)]
         title: Option<String>,
 
-        /// Update content inline
-        #[arg(short = 'c', long, conflicts_with = "file")]
+        /// Replace content inline (full replacement)
+        #[arg(short = 'c', long, conflicts_with_all = ["file", "append_content", "prepend_content", "find"])]
         content: Option<String>,
 
-        /// Update content from file
-        #[arg(short, long, conflicts_with = "content")]
+        /// Replace content from file (full replacement)
+        #[arg(short, long, conflicts_with_all = ["content", "append_content", "prepend_content", "find"])]
         file: Option<String>,
+
+        /// Append text to end of existing content
+        #[arg(long, conflicts_with_all = ["content", "file", "prepend_content", "find"])]
+        append_content: Option<String>,
+
+        /// Prepend text to start of existing content
+        #[arg(long, conflicts_with_all = ["content", "file", "append_content", "find"])]
+        prepend_content: Option<String>,
+
+        /// Find text in content (requires --replace)
+        #[arg(long, requires = "replace", conflicts_with_all = ["content", "file", "append_content", "prepend_content"])]
+        find: Option<String>,
+
+        /// Replace text found by --find
+        #[arg(long, requires = "find")]
+        replace: Option<String>,
+
+        /// Replace all occurrences (with --find/--replace)
+        #[arg(long, requires = "find")]
+        replace_all: bool,
+
+        /// Replace only the Nth occurrence (1-indexed, with --find/--replace)
+        #[arg(long, requires = "find", conflicts_with = "replace_all")]
+        nth: Option<usize>,
 
         /// Update category
         #[arg(long)]
         category: Option<String>,
 
         /// Update tags (comma-separated, replaces all)
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["add_tag", "remove_tag"])]
         tags: Option<String>,
+
+        /// Add a single tag to existing tags
+        #[arg(long, conflicts_with = "tags")]
+        add_tag: Option<String>,
+
+        /// Remove a specific tag
+        #[arg(long, conflicts_with = "tags")]
+        remove_tag: Option<String>,
 
         /// Update applicability (comma-separated, replaces all)
         #[arg(short = 'a', long)]
@@ -681,9 +729,17 @@ enum MemoryCommands {
         #[arg(long)]
         resonance_type: Option<String>,
 
-        /// Update anchors (comma-separated bloom IDs this connects to)
-        #[arg(long)]
+        /// Update anchors (comma-separated bloom IDs, replaces all)
+        #[arg(long, conflicts_with_all = ["add_anchor", "remove_anchor"])]
         anchors: Option<String>,
+
+        /// Add a single anchor to existing anchors
+        #[arg(long, conflicts_with = "anchors")]
+        add_anchor: Option<String>,
+
+        /// Remove a specific anchor
+        #[arg(long, conflicts_with = "anchors")]
+        remove_anchor: Option<String>,
 
         /// Update wake phrase for memory ritual verification
         #[arg(long)]
@@ -705,8 +761,12 @@ enum MemoryCommands {
         #[arg(long)]
         wake_order: Option<String>,
 
+        /// Mark as private (shorthand for --visibility private)
+        #[arg(long, conflicts_with = "visibility")]
+        private: bool,
+
         /// Change visibility (public or private)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "private")]
         visibility: Option<String>,
 
         /// Update owner (only valid when visibility is private)
@@ -716,9 +776,13 @@ enum MemoryCommands {
         /// Force dangerous visibility changes (e.g., making blooms public)
         #[arg(long)]
         force: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
-    /// Edit content by finding and replacing text (patch semantics)
+    /// Edit content by finding and replacing text (shortcut for: update <id> --find ... --replace ...)
     Edit {
         /// Entry ID to edit
         id: String,
@@ -738,9 +802,13 @@ enum MemoryCommands {
         /// Replace only the Nth occurrence (1-indexed)
         #[arg(long, conflicts_with = "replace_all")]
         nth: Option<usize>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
-    /// Append content to the end of an entry's body
+    /// Append content to the end of an entry's body (shortcut for: update <id> --append-content ...)
     Append {
         /// Entry ID to append to
         id: String,
@@ -748,9 +816,13 @@ enum MemoryCommands {
         /// Content to append (omit to read from stdin)
         #[arg(short = 'c', long)]
         content: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
-    /// Prepend content to the start of an entry's body
+    /// Prepend content to the start of an entry's body (shortcut for: update <id> --prepend-content ...)
     Prepend {
         /// Entry ID to prepend to
         id: String,
@@ -758,6 +830,10 @@ enum MemoryCommands {
         /// Content to prepend (omit to read from stdin)
         #[arg(short = 'c', long)]
         content: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Generate embedding for a knowledge entry
@@ -950,8 +1026,12 @@ enum MemoryCommands {
         #[arg(long, default_value = "10")]
         days: i32,
 
-        /// Output format (text, json)
-        #[arg(long, default_value = "text")]
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output format (text, json) [deprecated: use --json]
+        #[arg(long, default_value = "text", hide = true)]
         format: String,
 
         /// Filter by resonance type (e.g., ephemeral)
@@ -968,8 +1048,12 @@ enum MemoryCommands {
         /// Session ID (with or without kn- prefix)
         session_id: String,
 
-        /// Output format (text, json)
-        #[arg(long, default_value = "text")]
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output format (text, json) [deprecated: use --json]
+        #[arg(long, default_value = "text", hide = true)]
         format: String,
     },
 
@@ -978,8 +1062,12 @@ enum MemoryCommands {
         /// Fact ID (with or without kn- prefix)
         fact_id: String,
 
-        /// Output format (text, json)
-        #[arg(long, default_value = "text")]
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output format (text, json) [deprecated: use --json]
+        #[arg(long, default_value = "text", hide = true)]
         format: String,
     },
 
@@ -996,8 +1084,12 @@ enum MemoryCommands {
         #[arg(long, default_value = "10")]
         cap: i32,
 
-        /// Output format (text, json)
-        #[arg(long, default_value = "text")]
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Output format (text, json) [deprecated: use --json]
+        #[arg(long, default_value = "text", hide = true)]
         format: String,
     },
 }
@@ -2101,71 +2193,37 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
         MemoryCommands::Search {
             query,
-            category,
-            json,
-            mine,
-            include_private,
-            min_resonance,
-            max_resonance,
-            has_wake_phrase,
-            missing_wake_phrase,
-            has_anchors,
-            missing_anchors,
-            has_resonance_type,
-            missing_resonance_type,
-            limit,
+            filter,
             semantic,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-            let ctx = resolve_agent_context(mine, include_private);
+            let ctx = resolve_agent_context(filter.mine, filter.include_private);
 
             // Note: Search doesn't activate facts - discovery != engagement
             // Build filter for database query (resonance and category)
-            let filter = store::KnowledgeFilter {
-                min_resonance,
-                max_resonance,
-                categories: category,
+            let db_filter = store::KnowledgeFilter {
+                min_resonance: filter.min_resonance,
+                max_resonance: filter.max_resonance,
+                categories: filter.category.clone(),
             };
 
             // Get results from database with resonance filtering
-            let mut entries = if semantic {
+            let entries = if semantic {
                 use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
 
                 eprintln!("Initializing semantic search...");
                 let mut provider = FastEmbedProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
-                db.semantic_search(&query_embedding, &ctx, &filter, limit.unwrap_or(20))?
+                db.semantic_search(&query_embedding, &ctx, &db_filter, filter.limit.unwrap_or(20))?
             } else {
-                db.search(&query, &ctx, &filter)?
+                db.search(&query, &ctx, &db_filter)?
             };
 
             // Apply in-memory field presence filters
-            entries = entries
-                .into_iter()
-                .filter(|e| {
-                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
-                })
-                .filter(|e| {
-                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
-                })
-                .filter(|e| !has_anchors || !e.anchors.is_empty())
-                .filter(|e| !missing_anchors || e.anchors.is_empty())
-                .filter(|e| {
-                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
-                })
-                .filter(|e| {
-                    !missing_resonance_type
-                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
-                })
-                .collect::<Vec<_>>();
+            let entries = apply_entry_filters(entries, &filter);
 
-            // Apply limit if specified
-            if let Some(n) = limit {
-                entries.truncate(n);
-            }
-
-            if json {
+            if filter.json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else if entries.is_empty() {
                 println!("No results for '{}'", query);
@@ -2177,81 +2235,52 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::List {
-            category,
-            json,
-            mine,
-            include_private,
-            min_resonance,
-            max_resonance,
-            has_wake_phrase,
-            missing_wake_phrase,
-            has_anchors,
-            missing_anchors,
-            has_resonance_type,
-            missing_resonance_type,
-            limit,
-        } => {
+        MemoryCommands::List { filter } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-            let ctx = resolve_agent_context(mine, include_private);
+            let ctx = resolve_agent_context(filter.mine, filter.include_private);
 
-            // Validate category if provided
-            if let Some(ref cat) = category
-                && db.get_category(cat)?.is_none()
-            {
-                let categories = db.list_categories()?;
-                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
-                eprintln!("Error: Unknown category '{}'", cat);
-                eprintln!("Valid categories: {}", valid_ids.join(", "));
-                std::process::exit(1);
+            // Validate categories if provided
+            if let Some(ref cats) = filter.category {
+                for cat in cats {
+                    if db.get_category(cat)?.is_none() {
+                        let categories = db.list_categories()?;
+                        let valid_ids: Vec<&str> =
+                            categories.iter().map(|c| c.id.as_str()).collect();
+                        eprintln!("Error: Unknown category '{}'", cat);
+                        eprintln!("Valid categories: {}", valid_ids.join(", "));
+                        std::process::exit(1);
+                    }
+                }
             }
 
-            // Build filter for database query (resonance only)
-            let filter = store::KnowledgeFilter {
-                min_resonance,
-                max_resonance,
+            // Build filter for database query (resonance only - category handled below)
+            let db_filter = store::KnowledgeFilter {
+                min_resonance: filter.min_resonance,
+                max_resonance: filter.max_resonance,
                 categories: None,
             };
 
             // Get results from database with resonance filtering
-            let mut entries = if let Some(cat) = &category {
-                db.list_by_category(cat, &ctx, &filter)?
+            let entries = if let Some(ref cats) = filter.category {
+                let mut all = Vec::new();
+                for cat in cats {
+                    all.extend(db.list_by_category(cat, &ctx, &db_filter)?);
+                }
+                all
             } else {
                 // List all categories from database
                 let mut all = Vec::new();
                 let categories = db.list_categories()?;
                 for cat in categories {
-                    all.extend(db.list_by_category(&cat.id, &ctx, &filter)?);
+                    all.extend(db.list_by_category(&cat.id, &ctx, &db_filter)?);
                 }
                 all
             };
 
             // Apply in-memory field presence filters
-            entries = entries
-                .into_iter()
-                .filter(|e| {
-                    !has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
-                })
-                .filter(|e| {
-                    !missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
-                })
-                .filter(|e| !has_anchors || !e.anchors.is_empty())
-                .filter(|e| !missing_anchors || e.anchors.is_empty())
-                .filter(|e| {
-                    !has_resonance_type || e.resonance_type.as_ref().is_some_and(|s| !s.is_empty())
-                })
-                .filter(|e| {
-                    !missing_resonance_type
-                        || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
-                })
-                .collect::<Vec<_>>();
+            let entries = apply_entry_filters(entries, &filter);
 
-            // Apply limit if specified
-            if let Some(n) = limit {
-                entries.truncate(n);
-            }
-
-            if json {
+            if filter.json {
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else if entries.is_empty() {
                 println!("No entries found");
@@ -2263,8 +2292,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Show { id, json } => {
+        MemoryCommands::Show {
+            id,
+            json,
+            content_only,
+        } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             // For Show, we need to respect privacy but use current agent context
             // If the user has MX_CURRENT_AGENT set, they can see their own private entries
@@ -2282,7 +2316,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         eprintln!("Warning: failed to update activation: {}", e);
                     }
 
-                    if json {
+                    if content_only {
+                        if let Some(body) = &entry.body {
+                            print!("{}", body);
+                        }
+                    } else if json {
                         println!("{}", serde_json::to_string_pretty(&entry)?);
                     } else {
                         print_entry_full(&entry);
@@ -2316,11 +2354,22 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Delete { id } => {
+        MemoryCommands::Delete { id, json } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             if db.delete(&id)? {
-                println!("Deleted entry '{}'", id);
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "deleted": true,
+                            "id": id,
+                        }))?
+                    );
+                } else {
+                    println!("Deleted entry '{}'", id);
+                }
             } else {
                 eprintln!("Entry '{}' not found", id);
                 std::process::exit(1);
@@ -2353,7 +2402,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             domain,
             content_type,
             private,
+            visibility,
             owner,
+            json,
             resonance,
             resonance_type,
             wake_phrase,
@@ -2380,12 +2431,26 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 std::process::exit(1);
             };
 
-            // Determine agent - use source_agent or env var
-            let agent_id = if source_agent.is_empty() {
-                std::env::var("MX_CURRENT_AGENT").unwrap_or_else(|_| "soren".to_string())
-            } else {
-                source_agent.clone()
+            // Determine agent - use source_agent or env var (no longer required)
+            let agent_id = match source_agent {
+                Some(ref sa) if !sa.is_empty() => sa.clone(),
+                _ => match std::env::var("MX_CURRENT_AGENT") {
+                    Ok(agent) if !agent.is_empty() => agent,
+                    _ => {
+                        eprintln!("Error: --source-agent not provided and MX_CURRENT_AGENT not set");
+                        std::process::exit(1);
+                    }
+                },
             };
+
+            // Resolve visibility: --private flag is sugar for --visibility private
+            let is_private = private || visibility.as_deref() == Some("private");
+            if let Some(ref vis) = visibility
+                && vis != "public" && vis != "private"
+            {
+                eprintln!("Error: --visibility must be 'public' or 'private'");
+                std::process::exit(1);
+            }
 
             // Handle fact type routing mode (--type flag)
             if let Some(ref fact_type) = r#type {
@@ -2598,16 +2663,20 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // Determine visibility and owner
-            let visibility = if private {
+            // FIX #123: Ensure owner matches the format expected by visibility filter.
+            // The visibility filter compares `owner = $current_agent` where $current_agent
+            // comes from MX_CURRENT_AGENT. Owner must be stored in the same format.
+            let entry_visibility = if is_private {
                 "private".to_string()
             } else {
                 "public".to_string()
             };
 
-            let entry_owner = if private {
-                Some(owner.unwrap_or_else(|| source_agent.clone()))
+            let entry_owner = if is_private {
+                // Owner defaults to agent_id (already resolved from --source-agent or MX_CURRENT_AGENT)
+                Some(owner.unwrap_or_else(|| agent_id.clone()))
             } else {
-                None
+                owner
             };
 
             // Validate resonance_type if provided
@@ -2640,7 +2709,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 summary: None,
                 applicability: applicability_list.clone(),
                 source_project_id: project,
-                source_agent_id: Some(source_agent),
+                source_agent_id: Some(agent_id.clone()),
                 file_path: None,
                 tags: tag_list,
                 created_at: Some(now.clone()),
@@ -2652,7 +2721,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 ephemeral,
                 content_type_id: Some(content_type),
                 owner: entry_owner.clone(),
-                visibility: visibility.clone(),
+                visibility: entry_visibility.clone(),
                 resonance: resonance.unwrap_or(0),
                 resonance_type,
                 last_activated: None,
@@ -2677,30 +2746,43 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate anchors if in network SurrealDB mode
             auto_anchor(&id, db.as_ref())?;
 
-            println!("Added entry: {}", id);
-            println!("  Category: {}", category);
-            println!("  Title: {}", title);
-            println!("  Visibility: {}", visibility);
-            if let Some(ref o) = entry_owner {
-                println!("  Owner: {}", o);
-            }
-            if entry.resonance > 0 {
-                println!("  Resonance: {}", entry.resonance);
-            }
-            if let Some(ref rtype) = entry.resonance_type {
-                println!("  Resonance Type: {}", rtype);
-            }
-            if !entry.tags.is_empty() {
-                println!("  Tags: {}", entry.tags.join(", "));
-            }
-            if !entry.applicability.is_empty() {
-                println!("  Applicability: {}", entry.applicability.join(", "));
-            }
-            if !entry.anchors.is_empty() {
-                println!("  Anchors: {}", entry.anchors.join(", "));
-            }
-            if let Some(ref phrase) = entry.wake_phrase {
-                println!("  Wake Phrase: {}", phrase);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "category": category,
+                        "title": title,
+                        "visibility": entry_visibility,
+                        "owner": entry_owner,
+                    }))?
+                );
+            } else {
+                println!("Added entry: {}", id);
+                println!("  Category: {}", category);
+                println!("  Title: {}", title);
+                println!("  Visibility: {}", entry_visibility);
+                if let Some(ref o) = entry_owner {
+                    println!("  Owner: {}", o);
+                }
+                if entry.resonance > 0 {
+                    println!("  Resonance: {}", entry.resonance);
+                }
+                if let Some(ref rtype) = entry.resonance_type {
+                    println!("  Resonance Type: {}", rtype);
+                }
+                if !entry.tags.is_empty() {
+                    println!("  Tags: {}", entry.tags.join(", "));
+                }
+                if !entry.applicability.is_empty() {
+                    println!("  Applicability: {}", entry.applicability.join(", "));
+                }
+                if !entry.anchors.is_empty() {
+                    println!("  Anchors: {}", entry.anchors.join(", "));
+                }
+                if let Some(ref phrase) = entry.wake_phrase {
+                    println!("  Wake Phrase: {}", phrase);
+                }
             }
         }
 
@@ -2709,26 +2791,39 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             title,
             content,
             file,
+            append_content,
+            prepend_content,
+            find,
+            replace,
+            replace_all,
+            nth,
             category,
             tags,
+            add_tag,
+            remove_tag,
             applicability,
             content_type,
             resonance,
             resonance_type,
             anchors,
+            add_anchor,
+            remove_anchor,
             wake_phrase,
             wake_phrases,
             add_wake_phrase,
             remove_wake_phrase,
             wake_order,
+            private,
             visibility,
             owner,
             force,
+            json,
         } => {
             use anyhow::Context;
             use std::fs;
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             // For Update, use current agent context to allow updating own private entries
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -2741,6 +2836,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 .get(&id, &ctx)?
                 .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
 
+            // Resolve --private as sugar for --visibility private
+            let visibility = if private && visibility.is_none() {
+                Some("private".to_string())
+            } else {
+                visibility
+            };
+
             let mut changes = Vec::new();
 
             // Update title if provided
@@ -2752,7 +2854,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Track if body was changed for hash update
             let mut body_changed = false;
 
-            // Update content if provided
+            // Update content - supports multiple modes:
+            // 1. Full replacement via --content or --file
+            // 2. Append via --append-content
+            // 3. Prepend via --prepend-content
+            // 4. Find/replace via --find/--replace
             if let Some(text) = content {
                 changes.push("content: updated (inline)".to_string());
                 entry.body = Some(text);
@@ -2762,6 +2868,33 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .with_context(|| format!("Failed to read file: {}", file_path))?;
                 changes.push(format!("content: updated from {}", file_path));
                 entry.body = Some(text);
+                body_changed = true;
+            } else if let Some(ref append_text) = append_content {
+                let new_body =
+                    content_ops::append_content(entry.body.as_deref(), append_text);
+                changes.push(format!("content: appended {} bytes", append_text.len()));
+                entry.body = Some(new_body);
+                body_changed = true;
+            } else if let Some(ref prepend_text) = prepend_content {
+                let new_body =
+                    content_ops::prepend_content(entry.body.as_deref(), prepend_text);
+                changes.push(format!("content: prepended {} bytes", prepend_text.len()));
+                entry.body = Some(new_body);
+                body_changed = true;
+            } else if let Some(ref find_text) = find {
+                let replace_text = replace.as_deref().unwrap_or("");
+                let body_text = entry
+                    .body
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("Entry has no body content to edit"))?;
+                let result =
+                    content_ops::edit_content(body_text, find_text, replace_text, replace_all, nth)?;
+                changes.push(format!(
+                    "content: {} replacement{}",
+                    result.replacements,
+                    if result.replacements == 1 { "" } else { "s" }
+                ));
+                entry.body = Some(result.new_content);
                 body_changed = true;
             }
 
@@ -2812,7 +2945,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 entry.resonance_type = Some(new_type.clone());
             }
 
-            // Update anchors if provided
+            // Update anchors if provided (replace all)
             if let Some(ref new_anchors) = anchors {
                 let anchor_list: Vec<String> = new_anchors
                     .split(',')
@@ -2821,6 +2954,24 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .collect();
                 changes.push(format!("anchors: {:?} -> {:?}", entry.anchors, anchor_list));
                 entry.anchors = anchor_list;
+            }
+
+            // Add a single anchor
+            if let Some(ref new_anchor) = add_anchor {
+                let normalized = normalize_id(new_anchor);
+                if !entry.anchors.contains(&normalized) {
+                    entry.anchors.push(normalized.clone());
+                    changes.push(format!("anchors: added '{}'", normalized));
+                }
+            }
+
+            // Remove a specific anchor
+            if let Some(ref anchor_to_remove) = remove_anchor {
+                let normalized = normalize_id(anchor_to_remove);
+                if let Some(pos) = entry.anchors.iter().position(|a| *a == normalized) {
+                    entry.anchors.remove(pos);
+                    changes.push(format!("anchors: removed '{}'", normalized));
+                }
             }
 
             // Update wake phrase if provided
@@ -2966,6 +3117,24 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 entry.tags = tag_list;
             }
 
+            // Add a single tag
+            if let Some(ref new_tag) = add_tag {
+                let tag = new_tag.trim().to_string();
+                if !tag.is_empty() && !entry.tags.contains(&tag) {
+                    entry.tags.push(tag.clone());
+                    changes.push(format!("tags: added '{}'", tag));
+                }
+            }
+
+            // Remove a specific tag
+            if let Some(ref tag_to_remove) = remove_tag {
+                let tag = tag_to_remove.trim().to_string();
+                if let Some(pos) = entry.tags.iter().position(|t| *t == tag) {
+                    entry.tags.remove(pos);
+                    changes.push(format!("tags: removed '{}'", tag));
+                }
+            }
+
             // Upsert entry (now includes updated tags)
             db.upsert_knowledge(&entry)?;
 
@@ -2999,12 +3168,22 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate anchors if in network SurrealDB mode
             auto_anchor(&id, db.as_ref())?;
 
-            println!("Updated entry: {}", id);
-            if changes.is_empty() {
-                println!("  No changes specified");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "changes": changes,
+                    }))?
+                );
             } else {
-                for change in changes {
-                    println!("  {}", change);
+                println!("Updated entry: {}", id);
+                if changes.is_empty() {
+                    println!("  No changes specified");
+                } else {
+                    for change in &changes {
+                        println!("  {}", change);
+                    }
                 }
             }
         }
@@ -3015,8 +3194,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             new,
             replace_all,
             nth,
+            json,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             // Use current agent context for private entry access
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -3032,18 +3213,29 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate anchors if in network SurrealDB mode
             auto_anchor(&id, db.as_ref())?;
 
-            println!("Edited entry: {}", id);
-            println!(
-                "  {} replacement{}",
-                result.replacements,
-                if result.replacements == 1 { "" } else { "s" }
-            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "replacements": result.replacements,
+                    }))?
+                );
+            } else {
+                println!("Edited entry: {}", id);
+                println!(
+                    "  {} replacement{}",
+                    result.replacements,
+                    if result.replacements == 1 { "" } else { "s" }
+                );
+            }
         }
 
-        MemoryCommands::Append { id, content } => {
+        MemoryCommands::Append { id, content, json } => {
             use std::io::{self, Read};
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             // Use current agent context for private entry access
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -3076,14 +3268,25 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate anchors if in network SurrealDB mode
             auto_anchor(&id, db.as_ref())?;
 
-            println!("Appended to entry: {}", id);
-            println!("  {} bytes added", text.len());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "bytes_added": text.len(),
+                    }))?
+                );
+            } else {
+                println!("Appended to entry: {}", id);
+                println!("  {} bytes added", text.len());
+            }
         }
 
-        MemoryCommands::Prepend { id, content } => {
+        MemoryCommands::Prepend { id, content, json } => {
             use std::io::{self, Read};
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
 
             // Use current agent context for private entry access
             let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -3116,8 +3319,18 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate anchors if in network SurrealDB mode
             auto_anchor(&id, db.as_ref())?;
 
-            println!("Prepended to entry: {}", id);
-            println!("  {} bytes added", text.len());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id,
+                        "bytes_added": text.len(),
+                    }))?
+                );
+            } else {
+                println!("Prepended to entry: {}", id);
+                println!("  {} bytes added", text.len());
+            }
         }
 
         MemoryCommands::Embed { id, all } => {
@@ -3565,6 +3778,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
         MemoryCommands::Recent {
             days,
+            json,
             format,
             resonance_type,
             limit,
@@ -3583,7 +3797,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Apply limit
             facts.truncate(limit);
 
-            if format == "json" {
+            // Support both --json flag and legacy --format json
+            if json || format == "json" {
                 let json_facts: Vec<serde_json::Value> = facts
                     .iter()
                     .map(|f| {
@@ -3652,15 +3867,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::ForSession { session_id, format } => {
+        MemoryCommands::ForSession {
+            session_id,
+            json,
+            format,
+        } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Normalize session ID
-            let session_ref = if session_id.starts_with("kn-") {
-                session_id.clone()
-            } else {
-                format!("kn-{}", session_id)
-            };
+            let session_ref = normalize_id(&session_id);
 
             // Get fact IDs
             let fact_ids = db.get_facts_for_session(&session_ref)?;
@@ -3683,7 +3898,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            if format == "json" {
+            // Support both --json flag and legacy --format json
+            if json || format == "json" {
                 let mut json_facts = Vec::new();
                 for fact_id in &fact_ids {
                     if let Some(fact) = db.get(fact_id, &ctx)? {
@@ -3743,15 +3959,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::FactSession { fact_id, format } => {
+        MemoryCommands::FactSession {
+            fact_id,
+            json,
+            format,
+        } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Normalize fact ID
-            let fact_ref = if fact_id.starts_with("kn-") {
-                fact_id.clone()
-            } else {
-                format!("kn-{}", fact_id)
-            };
+            let fact_ref = normalize_id(&fact_id);
 
             // Activate fact when fetching its session (going deeper)
             if let Err(e) = db.update_activations(std::slice::from_ref(&fact_ref)) {
@@ -3759,9 +3975,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Get session ID
+            // Support both --json flag and legacy --format json
+            let use_json = json || format == "json";
             match db.get_session_for_fact(&fact_ref)? {
                 Some(session_id) => {
-                    if format == "json" {
+                    if use_json {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
@@ -3777,7 +3995,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
                 None => {
-                    if format == "json" {
+                    if use_json {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
@@ -3796,22 +4014,19 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             id,
             amount,
             cap,
+            json,
             format,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Normalize ID
-            let normalized_id = if id.starts_with("kn-") {
-                id.clone()
-            } else {
-                format!("kn-{}", id)
-            };
+            let normalized_id = normalize_id(&id);
 
             // Call reinforce on the store
             let result = db.reinforce(&normalized_id, amount, Some(cap))?;
 
-            // Output result
-            if format == "json" {
+            // Output result - support both --json flag and legacy --format json
+            if json || format == "json" {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             } else {
                 println!("Reinforced entry: {}", result.id);
@@ -4931,6 +5146,9 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     if let Some(ref phrase) = entry.wake_phrase {
         println!("Wake Phrase: {}", phrase);
     }
+    if !entry.wake_phrases.is_empty() {
+        println!("Wake Phrases: {}", entry.wake_phrases.join(", "));
+    }
     if let Some(path) = &entry.file_path {
         println!("File:     {}", path);
     }
@@ -4939,6 +5157,16 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     }
     if !entry.applicability.is_empty() {
         println!("Applicability: {}", entry.applicability.join(", "));
+    }
+    if !entry.anchors.is_empty() {
+        println!("Anchors:  {}", entry.anchors.join(", "));
+    }
+    // Always show visibility for private entries (public is the default)
+    if entry.visibility == "private" {
+        println!("Visibility: {}", entry.visibility);
+        if let Some(ref o) = entry.owner {
+            println!("Owner:    {}", o);
+        }
     }
     if let Some(created) = &entry.created_at {
         println!("Created:  {}", created);
