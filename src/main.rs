@@ -676,23 +676,31 @@ enum MemoryCommands {
         title: Option<String>,
 
         /// Replace content inline (full replacement)
-        #[arg(long, conflicts_with_all = ["file", "append_content", "prepend_content", "find"])]
+        #[arg(long, conflicts_with_all = ["file", "append_content", "append_file", "prepend_content", "prepend_file", "find"])]
         content: Option<String>,
 
         /// Replace content from file (full replacement)
-        #[arg(short, long, conflicts_with_all = ["content", "append_content", "prepend_content", "find"])]
+        #[arg(short, long, conflicts_with_all = ["content", "append_content", "append_file", "prepend_content", "prepend_file", "find"])]
         file: Option<String>,
 
         /// Append text to end of existing content
-        #[arg(long, conflicts_with_all = ["content", "file", "prepend_content", "find"])]
+        #[arg(long, conflicts_with_all = ["content", "file", "append_file", "prepend_content", "prepend_file", "find"])]
         append_content: Option<String>,
 
+        /// Append content from file to end of existing content
+        #[arg(long, conflicts_with_all = ["content", "file", "append_content", "prepend_content", "prepend_file", "find"])]
+        append_file: Option<String>,
+
         /// Prepend text to start of existing content
-        #[arg(long, conflicts_with_all = ["content", "file", "append_content", "find"])]
+        #[arg(long, conflicts_with_all = ["content", "file", "append_content", "append_file", "prepend_file", "find"])]
         prepend_content: Option<String>,
 
+        /// Prepend content from file to start of existing content
+        #[arg(long, conflicts_with_all = ["content", "file", "append_content", "append_file", "prepend_content", "find"])]
+        prepend_file: Option<String>,
+
         /// Find text in content (requires --replace)
-        #[arg(long, requires = "replace", conflicts_with_all = ["content", "file", "append_content", "prepend_content"])]
+        #[arg(long, requires = "replace", conflicts_with_all = ["content", "file", "append_content", "append_file", "prepend_content", "prepend_file"])]
         find: Option<String>,
 
         /// Replace text found by --find
@@ -824,8 +832,12 @@ enum MemoryCommands {
         id: String,
 
         /// Content to append (omit to read from stdin)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "file")]
         content: Option<String>,
+
+        /// Read content to append from file
+        #[arg(short, long, visible_alias = "content-file", conflicts_with = "content")]
+        file: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
@@ -838,8 +850,12 @@ enum MemoryCommands {
         id: String,
 
         /// Content to prepend (omit to read from stdin)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "file")]
         content: Option<String>,
+
+        /// Read content to prepend from file
+        #[arg(short, long, visible_alias = "content-file", conflicts_with = "content")]
+        file: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
@@ -2895,7 +2911,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             content,
             file,
             append_content,
+            append_file,
             prepend_content,
+            prepend_file,
             find,
             replace,
             replace_all,
@@ -2959,8 +2977,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Update content - supports multiple modes:
             // 1. Full replacement via --content or --file
-            // 2. Append via --append-content
-            // 3. Prepend via --prepend-content
+            // 2. Append via --append-content or --append-file
+            // 3. Prepend via --prepend-content or --prepend-file
             // 4. Find/replace via --find/--replace
             if let Some(text) = content {
                 changes.push("content: updated (inline)".to_string());
@@ -2977,9 +2995,31 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 changes.push(format!("content: appended {} bytes", append_text.len()));
                 entry.body = Some(new_body);
                 body_changed = true;
+            } else if let Some(ref file_path) = append_file {
+                let append_text = fs::read_to_string(file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?;
+                let new_body = content_ops::append_content(entry.body.as_deref(), &append_text);
+                changes.push(format!(
+                    "content: appended {} bytes from {}",
+                    append_text.len(),
+                    file_path
+                ));
+                entry.body = Some(new_body);
+                body_changed = true;
             } else if let Some(ref prepend_text) = prepend_content {
                 let new_body = content_ops::prepend_content(entry.body.as_deref(), prepend_text);
                 changes.push(format!("content: prepended {} bytes", prepend_text.len()));
+                entry.body = Some(new_body);
+                body_changed = true;
+            } else if let Some(ref file_path) = prepend_file {
+                let prepend_text = fs::read_to_string(file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?;
+                let new_body = content_ops::prepend_content(entry.body.as_deref(), &prepend_text);
+                changes.push(format!(
+                    "content: prepended {} bytes from {}",
+                    prepend_text.len(),
+                    file_path
+                ));
                 entry.body = Some(new_body);
                 body_changed = true;
             } else if let Some(ref find_text) = find {
@@ -3353,7 +3393,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Append { id, content, json } => {
+        MemoryCommands::Append {
+            id,
+            content,
+            file,
+            json,
+        } => {
             use std::io::{self, Read};
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -3365,16 +3410,18 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            // Get content from argument or stdin
-            let text = match content {
-                Some(c) => c,
-                None => {
-                    let mut buffer = String::new();
-                    io::stdin()
-                        .read_to_string(&mut buffer)
-                        .context("Failed to read from stdin")?;
-                    buffer.trim_end().to_string()
-                }
+            // Get content from argument, file, or stdin
+            let text = if let Some(c) = content {
+                c
+            } else if let Some(file_path) = file {
+                std::fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?
+            } else {
+                let mut buffer = String::new();
+                io::stdin()
+                    .read_to_string(&mut buffer)
+                    .context("Failed to read from stdin")?;
+                buffer.trim_end().to_string()
             };
 
             if text.is_empty() {
@@ -3403,7 +3450,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Prepend { id, content, json } => {
+        MemoryCommands::Prepend {
+            id,
+            content,
+            file,
+            json,
+        } => {
             use std::io::{self, Read};
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -3415,16 +3467,18 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            // Get content from argument or stdin
-            let text = match content {
-                Some(c) => c,
-                None => {
-                    let mut buffer = String::new();
-                    io::stdin()
-                        .read_to_string(&mut buffer)
-                        .context("Failed to read from stdin")?;
-                    buffer.trim_end().to_string()
-                }
+            // Get content from argument, file, or stdin
+            let text = if let Some(c) = content {
+                c
+            } else if let Some(file_path) = file {
+                std::fs::read_to_string(&file_path)
+                    .with_context(|| format!("Failed to read file: {}", file_path))?
+            } else {
+                let mut buffer = String::new();
+                io::stdin()
+                    .read_to_string(&mut buffer)
+                    .context("Failed to read from stdin")?;
+                buffer.trim_end().to_string()
             };
 
             if text.is_empty() {
