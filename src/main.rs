@@ -836,7 +836,12 @@ enum MemoryCommands {
         content: Option<String>,
 
         /// Read content to append from file
-        #[arg(short, long, visible_alias = "content-file", conflicts_with = "content")]
+        #[arg(
+            short,
+            long,
+            visible_alias = "content-file",
+            conflicts_with = "content"
+        )]
         file: Option<String>,
 
         /// Output as JSON
@@ -854,7 +859,12 @@ enum MemoryCommands {
         content: Option<String>,
 
         /// Read content to prepend from file
-        #[arg(short, long, visible_alias = "content-file", conflicts_with = "content")]
+        #[arg(
+            short,
+            long,
+            visible_alias = "content-file",
+            conflicts_with = "content"
+        )]
         file: Option<String>,
 
         /// Output as JSON
