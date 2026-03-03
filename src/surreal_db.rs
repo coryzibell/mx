@@ -1641,6 +1641,32 @@ impl SurrealDatabase {
         Ok(())
     }
 
+    /// Update only the summary field of a knowledge entry
+    pub fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
+        Self::runtime().block_on(self.update_summary_async(id, summary))
+    }
+
+    async fn update_summary_async(&self, id: &str, summary: &str) -> Result<()> {
+        let record_thing = Thing::from(("knowledge".to_string(), id.to_string()));
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "UPDATE knowledge SET summary = $summary WHERE id = $id",
+            )
+            .bind(("id", record_thing))
+            .bind(("summary", summary.to_string()))
+            .await
+            .context("Failed to update summary")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Failed to update summary: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
     /// Query recent ephemeral facts with decay computation
     pub fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         Self::runtime().block_on(self.query_recent_facts_async(days))
@@ -3163,6 +3189,10 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn update_activations(&self, ids: &[String]) -> Result<()> {
         self.update_activations(ids)
+    }
+
+    fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
+        self.update_summary(id, summary)
     }
 
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
