@@ -1650,13 +1650,11 @@ impl SurrealDatabase {
         let record_thing = Thing::from(("knowledge".to_string(), id.to_string()));
 
         let mut response = with_db!(self, db, {
-            db.query(
-                "UPDATE knowledge SET summary = $summary WHERE id = $id",
-            )
-            .bind(("id", record_thing))
-            .bind(("summary", summary.to_string()))
-            .await
-            .context("Failed to update summary")
+            db.query("UPDATE knowledge SET summary = $summary WHERE id = $id")
+                .bind(("id", record_thing))
+                .bind(("summary", summary.to_string()))
+                .await
+                .context("Failed to update summary")
         })?;
 
         let errors = response.take_errors();
