@@ -2044,10 +2044,16 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
-        // Query both outgoing and incoming relationships
+        // Query both outgoing and incoming relationships.
+        // Use meta::id() to extract plain string IDs from Thing-typed fields to
+        // avoid serde round-trip failures when deserializing Thing enum variants.
         let mut response = with_db!(self, db, {
             db.query(
-                "SELECT id, in AS from_entry_id, out AS to_entry_id, relationship_type, <string>created_at AS created_at
+                "SELECT meta::id(id) AS id,
+                        meta::id(in) AS from_entry_id,
+                        meta::id(out) AS to_entry_id,
+                        meta::id(relationship_type) AS relationship_type,
+                        <string>created_at AS created_at
                  FROM relates_to
                  WHERE in = $entry OR out = $entry
                  ORDER BY created_at DESC"
@@ -2061,17 +2067,18 @@ impl SurrealDatabase {
         let mut relationships = Vec::new();
 
         for obj in results {
-            let from_thing: Thing = serde_json::from_value(obj["from_entry_id"].clone())?;
-            let to_thing: Thing = serde_json::from_value(obj["to_entry_id"].clone())?;
-            let rel_type_thing: Thing = serde_json::from_value(obj["relationship_type"].clone())?;
-            let id_thing: Thing = serde_json::from_value(obj["id"].clone())?;
+            let id = obj["id"].as_str().unwrap_or_default().to_string();
+            let from_id = obj["from_entry_id"].as_str().unwrap_or_default().to_string();
+            let to_id = obj["to_entry_id"].as_str().unwrap_or_default().to_string();
+            let rel_type = obj["relationship_type"].as_str().unwrap_or_default().to_string();
+            let created_at = obj["created_at"].as_str().unwrap_or_default().to_string();
 
             relationships.push(Relationship {
-                id: id_thing.id.to_string(),
-                from_entry_id: format!("kn-{}", from_thing.id),
-                to_entry_id: format!("kn-{}", to_thing.id),
-                relationship_type: rel_type_thing.id.to_string(),
-                created_at: obj["created_at"].as_str().unwrap_or_default().to_string(),
+                id,
+                from_entry_id: format!("kn-{}", from_id),
+                to_entry_id: format!("kn-{}", to_id),
+                relationship_type: rel_type,
+                created_at,
             });
         }
 
