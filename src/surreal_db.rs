@@ -691,8 +691,7 @@ impl SurrealDatabase {
     fn build_resonance_filter(filter: &crate::store::KnowledgeFilter) -> String {
         // Inline effective_resonance expression for use in filter comparisons.
         // SurrealDB doesn't support LET in WHERE, so we expand it directly.
-        let effective_resonance_expr =
-            "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
+        let effective_resonance_expr = "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
              ELSE resonance * math::pow(\
                  IF resonance <= 3 THEN 0.90 \
                  ELSE IF resonance <= 5 THEN 0.95 \
@@ -2146,7 +2145,7 @@ impl SurrealDatabase {
                         <string>created_at AS created_at
                  FROM relates_to
                  WHERE in = $entry OR out = $entry
-                 ORDER BY created_at DESC"
+                 ORDER BY created_at DESC",
             )
             .bind(("entry", entry_thing))
             .await
@@ -2158,9 +2157,15 @@ impl SurrealDatabase {
 
         for obj in results {
             let id = obj["id"].as_str().unwrap_or_default().to_string();
-            let from_id = obj["from_entry_id"].as_str().unwrap_or_default().to_string();
+            let from_id = obj["from_entry_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let to_id = obj["to_entry_id"].as_str().unwrap_or_default().to_string();
-            let rel_type = obj["relationship_type"].as_str().unwrap_or_default().to_string();
+            let rel_type = obj["relationship_type"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let created_at = obj["created_at"].as_str().unwrap_or_default().to_string();
 
             relationships.push(Relationship {
@@ -3901,7 +3906,9 @@ mod tests {
 
         // Should NOT appear in ephemeral query
         let ephemeral_results = db.query_recent_facts(30).unwrap();
-        let found_in_ephemeral = ephemeral_results.iter().any(|e| e.id == "kn-transformative");
+        let found_in_ephemeral = ephemeral_results
+            .iter()
+            .any(|e| e.id == "kn-transformative");
         assert!(
             !found_in_ephemeral,
             "Transformative entry should not appear in ephemeral fact query"
