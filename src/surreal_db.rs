@@ -1720,13 +1720,35 @@ impl SurrealDatabase {
     }
 
     async fn query_recent_facts_async(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
-        // Query with computed effective_resonance for ordering
+        // Query with computed effective_resonance for ordering and filtering.
+        // Tiered decay rates by resonance:
+        //   resonance <= 3  -> 10%/week (base 0.90)
+        //   resonance 4-5   -> 5%/week  (base 0.95)
+        //   resonance 6+    -> 2.5%/week (base 0.975)
+        // foundational/transformative entries are exempt (effective_resonance = resonance).
         let sql = format!(
             "SELECT {},
-                 (resonance * math::pow(0.95, duration::days(time::now() - (last_activated ?? created_at)) / 7.0)) AS effective_resonance
+                 (IF resonance_type IN ['foundational', 'transformative'] THEN resonance
+                  ELSE resonance * math::pow(
+                      IF resonance <= 3 THEN 0.90
+                      ELSE IF resonance <= 5 THEN 0.95
+                      ELSE 0.975
+                      END,
+                      duration::days(time::now() - (last_activated ?? created_at)) / 7.0
+                  )
+                  END) AS effective_resonance
              FROM knowledge
              WHERE resonance_type = 'ephemeral'
              AND created_at > time::now() - duration::from::days($days)
+             AND (IF resonance_type IN ['foundational', 'transformative'] THEN resonance
+                  ELSE resonance * math::pow(
+                      IF resonance <= 3 THEN 0.90
+                      ELSE IF resonance <= 5 THEN 0.95
+                      ELSE 0.975
+                      END,
+                      duration::days(time::now() - (last_activated ?? created_at)) / 7.0
+                  )
+                  END) > 0
              ORDER BY effective_resonance DESC",
             Self::knowledge_select_fields()
         );
@@ -3754,6 +3776,154 @@ mod tests {
 
         // Should handle without overflow
         assert!(result.is_ok(), "MAX resonance should not overflow");
+    }
+
+    // =========================================================================
+    // TIERED DECAY & BLOOM EXEMPTION TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_tiered_decay_low_resonance_ephemeral() {
+        // Ephemeral entries with resonance <= 3 use 0.90^(weeks) decay rate (10%/week).
+        // At 0 days, effective_resonance == resonance. Entry should be returned.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut entry = make_test_entry("kn-low-res", 2, 0.0);
+        entry.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        let result = db.query_recent_facts(7).unwrap();
+        assert!(
+            !result.is_empty(),
+            "Low-resonance ephemeral entry should be returned when freshly created"
+        );
+    }
+
+    #[test]
+    fn test_tiered_decay_mid_resonance_ephemeral() {
+        // Ephemeral entries with resonance 4-5 use 0.95^(weeks) decay rate (5%/week).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut entry = make_test_entry("kn-mid-res", 5, 0.0);
+        entry.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        let result = db.query_recent_facts(7).unwrap();
+        assert!(
+            !result.is_empty(),
+            "Mid-resonance ephemeral entry should be returned when freshly created"
+        );
+    }
+
+    #[test]
+    fn test_tiered_decay_high_resonance_ephemeral() {
+        // Ephemeral entries with resonance >= 6 use 0.975^(weeks) decay rate (2.5%/week).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut entry = make_test_entry("kn-high-res", 7, 0.0);
+        entry.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        let result = db.query_recent_facts(7).unwrap();
+        assert!(
+            !result.is_empty(),
+            "High-resonance ephemeral entry should be returned when freshly created"
+        );
+    }
+
+    #[test]
+    fn test_bloom_exemption_foundational() {
+        // Foundational entries are exempt from decay: effective_resonance == resonance.
+        // They should NOT appear in query_recent_facts (which filters resonance_type = 'ephemeral'),
+        // but should be directly retrievable.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut entry = make_test_entry("kn-foundational", 9, 0.0);
+        entry.resonance_type = Some("foundational".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // query_recent_facts only returns ephemeral — foundational should NOT appear here
+        let ephemeral_results = db.query_recent_facts(30).unwrap();
+        let found_in_ephemeral = ephemeral_results.iter().any(|e| e.id == "kn-foundational");
+        assert!(
+            !found_in_ephemeral,
+            "Foundational entry should not appear in ephemeral fact query"
+        );
+
+        // Should still be accessible via direct get
+        let ctx = crate::store::AgentContext::public_only();
+        let direct = db.get("kn-foundational", &ctx).unwrap();
+        assert!(
+            direct.is_some(),
+            "Foundational entry should be directly retrievable"
+        );
+    }
+
+    #[test]
+    fn test_bloom_exemption_transformative() {
+        // Transformative entries are exempt from decay, same as foundational.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut entry = make_test_entry("kn-transformative", 8, 0.0);
+        entry.resonance_type = Some("transformative".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Should NOT appear in ephemeral query
+        let ephemeral_results = db.query_recent_facts(30).unwrap();
+        let found_in_ephemeral = ephemeral_results
+            .iter()
+            .any(|e| e.id == "kn-transformative");
+        assert!(
+            !found_in_ephemeral,
+            "Transformative entry should not appear in ephemeral fact query"
+        );
+
+        let ctx = crate::store::AgentContext::public_only();
+        let direct = db.get("kn-transformative", &ctx).unwrap();
+        assert!(
+            direct.is_some(),
+            "Transformative entry should be directly retrievable"
+        );
+    }
+
+    #[test]
+    fn test_increment_activation_count_no_timestamp_reset() {
+        // increment_activation_count should bump activation_count but leave
+        // last_activated unchanged.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry = make_test_entry("kn-incr-test", 5, 0.0);
+        db.upsert_knowledge(&entry).unwrap();
+
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Record initial state
+        let before = db.get("kn-incr-test", &ctx).unwrap().unwrap();
+        let initial_count = before.activation_count;
+        let initial_last_activated = before.last_activated.clone();
+
+        // Increment count only
+        db.increment_activation_count(&["kn-incr-test".to_string()])
+            .unwrap();
+
+        let after = db.get("kn-incr-test", &ctx).unwrap().unwrap();
+
+        assert_eq!(
+            after.activation_count,
+            initial_count + 1,
+            "activation_count should increment by 1"
+        );
+
+        assert_eq!(
+            after.last_activated, initial_last_activated,
+            "last_activated should not be reset by increment_activation_count"
+        );
     }
 
     #[test]
