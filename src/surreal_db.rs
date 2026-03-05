@@ -1596,7 +1596,8 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Update activation counts for loaded blooms
+    /// Update activation counts for loaded blooms, resetting last_activated timestamp.
+    /// Use this for intentional single-entry access (e.g. `show`, `fact-session`).
     pub fn update_activations(&self, ids: &[String]) -> Result<()> {
         Self::runtime().block_on(self.update_activations_async(ids))
     }
@@ -1661,6 +1662,53 @@ impl SurrealDatabase {
         let errors = response.take_errors();
         if !errors.is_empty() {
             return Err(anyhow::anyhow!("Failed to update summary: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
+    /// Increment activation_count only — does NOT reset last_activated.
+    /// Use this for passive bulk surfacing (wake cascade, for-session view) where
+    /// the entries were not intentionally accessed and should continue decaying
+    /// at their normal rate.
+    pub fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+        Self::runtime().block_on(self.increment_activation_count_async(ids))
+    }
+
+    async fn increment_activation_count_async(&self, ids: &[String]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        // Strip "kn-" prefix from IDs if present
+        let clean_ids: Vec<String> = ids
+            .iter()
+            .map(|id| id.strip_prefix("kn-").unwrap_or(id).to_string())
+            .collect();
+
+        // Build array of Thing references
+        let things: Vec<Thing> = clean_ids
+            .iter()
+            .map(|id| Thing::from(("knowledge", id.as_str())))
+            .collect();
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "UPDATE knowledge SET
+                activation_count += 1
+                WHERE id IN $ids",
+            )
+            .bind(("ids", things))
+            .await
+            .context("Failed to increment activation counts")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to increment activation counts: {:?}",
+                errors
+            ));
         }
 
         Ok(())
@@ -3192,6 +3240,10 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
         self.update_summary(id, summary)
+    }
+
+    fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+        self.increment_activation_count(ids)
     }
 
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
