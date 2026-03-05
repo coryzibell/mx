@@ -682,16 +682,33 @@ impl SurrealDatabase {
         }
     }
 
-    /// Build resonance filter clauses
+    /// Build resonance filter clauses using computed effective_resonance.
+    /// Tiered decay rates:
+    ///   resonance <= 3  -> 10%/week (base 0.90)
+    ///   resonance 4-5   -> 5%/week  (base 0.95)
+    ///   resonance 6+    -> 2.5%/week (base 0.975)
+    /// foundational/transformative entries are exempt from decay.
     fn build_resonance_filter(filter: &crate::store::KnowledgeFilter) -> String {
+        // Inline effective_resonance expression for use in filter comparisons.
+        // SurrealDB doesn't support LET in WHERE, so we expand it directly.
+        let effective_resonance_expr = "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
+             ELSE resonance * math::pow(\
+                 IF resonance <= 3 THEN 0.90 \
+                 ELSE IF resonance <= 5 THEN 0.95 \
+                 ELSE 0.975 \
+                 END, \
+                 duration::days(time::now() - (last_activated ?? created_at)) / 7.0\
+             ) \
+             END";
+
         let mut clauses = Vec::new();
 
         if let Some(min) = filter.min_resonance {
-            clauses.push(format!("resonance >= {}", min));
+            clauses.push(format!("({}) >= {}", effective_resonance_expr, min));
         }
 
         if let Some(max) = filter.max_resonance {
-            clauses.push(format!("resonance <= {}", max));
+            clauses.push(format!("({}) <= {}", effective_resonance_expr, max));
         }
 
         if clauses.is_empty() {
@@ -1425,6 +1442,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE resonance >= $threshold
+            AND resonance_type IN ['foundational', 'transformative']
             {}
             ORDER BY resonance DESC",
             Self::knowledge_select_fields(),
@@ -1514,6 +1532,7 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE last_activated > <datetime>$cutoff
+                AND resonance_type IN ['foundational', 'transformative']
                 {}
             )
             ORDER BY
