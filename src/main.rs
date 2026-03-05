@@ -3909,11 +3909,14 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Run cascade
             let cascade = db.wake_cascade(&ctx, limit, min_resonance, days)?;
 
-            // Update activations unless disabled
+            // Increment activation counts for wake cascade entries.
+            // We do NOT reset last_activated here — wake surfacing is passive, not
+            // intentional access, and resetting the decay clock would create a feedback
+            // loop where frequently-surfaced entries never decay.
             if !no_activate {
                 let ids = cascade.all_ids();
                 if !ids.is_empty() {
-                    db.update_activations(&ids)?;
+                    db.increment_activation_count(&ids)?;
                 }
             }
 
@@ -4064,11 +4067,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 return Ok(());
             }
 
-            // Activate all facts from this session (bulk activation for viewing)
+            // Increment activation counts for session facts — viewing a session is
+            // passive bulk access, not intentional recall of any single entry.
+            // Do NOT reset last_activated so decay continues normally.
             if !fact_ids.is_empty()
-                && let Err(e) = db.update_activations(&fact_ids)
+                && let Err(e) = db.increment_activation_count(&fact_ids)
             {
-                eprintln!("Warning: failed to update activations: {}", e);
+                eprintln!("Warning: failed to update activation counts: {}", e);
             }
 
             // Fetch full entries for each fact

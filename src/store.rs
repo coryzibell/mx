@@ -155,8 +155,14 @@ pub trait KnowledgeStore {
         days: i64,
     ) -> Result<WakeCascade>;
 
-    /// Update activation counts for loaded blooms
+    /// Update activation counts for loaded blooms, resetting last_activated timestamp.
+    /// Use for intentional single-entry access (e.g. `show`, `fact-session`).
     fn update_activations(&self, ids: &[String]) -> Result<()>;
+
+    /// Increment activation_count only — does NOT reset last_activated.
+    /// Use for passive bulk surfacing (wake cascade, for-session view) so entries
+    /// continue decaying at their normal rate.
+    fn increment_activation_count(&self, ids: &[String]) -> Result<()>;
 
     /// Update only the summary field of a knowledge entry (targeted update, bypasses SCHEMAFULL UPSERT)
     ///

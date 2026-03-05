@@ -1320,6 +1320,11 @@ impl KnowledgeStore for Database {
         Ok(())
     }
 
+    fn increment_activation_count(&self, _ids: &[String]) -> Result<()> {
+        // SQLite backend doesn't support activation tracking yet - no-op
+        Ok(())
+    }
+
     fn update_summary(&self, _id: &str, _summary: &str) -> Result<()> {
         // SQLite backend doesn't support targeted summary updates - no-op
         Ok(())
