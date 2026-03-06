@@ -2594,7 +2594,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         let mut meta: serde_json::Value = thread_entry
                             .summary
                             .as_deref()
-                            .map(|s| serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})))
+                            .map(|s| {
+                                serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({}))
+                            })
                             .unwrap_or_else(|| serde_json::json!({}));
                         if let Some(obj) = meta.as_object_mut() {
                             obj.insert(
