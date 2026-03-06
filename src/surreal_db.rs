@@ -1641,6 +1641,31 @@ impl SurrealDatabase {
         Ok(())
     }
 
+    /// Update only the summary field of a knowledge entry
+    pub fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
+        Self::runtime().block_on(self.update_summary_async(id, summary))
+    }
+
+    async fn update_summary_async(&self, id: &str, summary: &str) -> Result<()> {
+        let id_part = id.strip_prefix("kn-").unwrap_or(id);
+        let record_thing = Thing::from(("knowledge".to_string(), id_part.to_string()));
+
+        let mut response = with_db!(self, db, {
+            db.query("UPDATE knowledge SET summary = $summary WHERE id = $id")
+                .bind(("id", record_thing))
+                .bind(("summary", summary.to_string()))
+                .await
+                .context("Failed to update summary")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Failed to update summary: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
     /// Query recent ephemeral facts with decay computation
     pub fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         Self::runtime().block_on(self.query_recent_facts_async(days))
@@ -3165,6 +3190,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.update_activations(ids)
     }
 
+    fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
+        self.update_summary(id, summary)
+    }
+
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         self.query_recent_facts(days)
     }
@@ -4031,5 +4060,60 @@ mod tests {
         // Should normalize correctly
         assert_eq!(result.id, "kn-test-norm");
         assert_eq!(result.new_resonance, 7);
+    }
+
+    #[test]
+    fn test_update_summary_persists() {
+        // Regression: thread_closed handler modified summary in memory but
+        // upsert_knowledge() silently failed on SCHEMAFULL tables. The new
+        // update_summary() path must actually persist the change.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Create entry with initial summary (simulating an open thread)
+        let mut entry = make_test_entry("kn-summary-test", 5, 0.0);
+        entry.summary = Some(r#"{"state":"open","topic":"test thread"}"#.to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Update summary to closed state (mirrors thread_closed handler)
+        let new_summary = r#"{"state":"closed","topic":"test thread"}"#;
+        db.update_summary("kn-summary-test", new_summary).unwrap();
+
+        // Read it back and verify the change persisted
+        let updated = db.get("kn-summary-test", &ctx).unwrap().unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(summary["state"], "closed");
+        assert_eq!(summary["topic"], "test thread");
+    }
+
+    #[test]
+    fn test_update_summary_id_normalization() {
+        // update_summary should accept IDs with or without "kn-" prefix,
+        // consistent with get(), delete(), reinforce(), etc.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        let mut entry = make_test_entry("kn-summary-norm", 5, 0.0);
+        entry.summary = Some(r#"{"state":"open"}"#.to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Update using raw ID (no prefix) - should still work
+        db.update_summary("summary-norm", r#"{"state":"closed"}"#)
+            .unwrap();
+
+        let updated = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(summary["state"], "closed");
+
+        // Update using prefixed ID - should also work
+        db.update_summary("kn-summary-norm", r#"{"state":"reopened"}"#)
+            .unwrap();
+
+        let updated2 = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
+        let summary2: serde_json::Value =
+            serde_json::from_str(updated2.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(summary2["state"], "reopened");
     }
 }

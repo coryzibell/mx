@@ -158,6 +158,13 @@ pub trait KnowledgeStore {
     /// Update activation counts for loaded blooms
     fn update_activations(&self, ids: &[String]) -> Result<()>;
 
+    /// Update only the summary field of a knowledge entry (targeted update, bypasses SCHEMAFULL UPSERT)
+    ///
+    /// # Arguments
+    /// * `id` - Entry ID, with or without "kn-" prefix (normalized internally)
+    /// * `summary` - New summary value to set
+    fn update_summary(&self, id: &str, summary: &str) -> Result<()>;
+
     /// Query recent ephemeral facts with decay computation
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
 

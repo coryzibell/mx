@@ -1320,6 +1320,11 @@ impl KnowledgeStore for Database {
         Ok(())
     }
 
+    fn update_summary(&self, _id: &str, _summary: &str) -> Result<()> {
+        // SQLite backend doesn't support targeted summary updates - no-op
+        Ok(())
+    }
+
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         // SQLite backend: graceful degradation - return recent ephemeral entries
         // without decay computation (ordered by created_at instead of effective_resonance)

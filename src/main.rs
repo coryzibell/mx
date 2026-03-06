@@ -2582,7 +2582,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     };
 
                     // Update existing thread to closed state
-                    if let Some(mut thread_entry) =
+                    if let Some(thread_entry) =
                         db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
                     {
                         if let Some(summary) = &thread_entry.summary {
@@ -2594,8 +2594,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                                     serde_json::Value::String("closed".to_string()),
                                 );
                             }
-                            thread_entry.summary = Some(meta.to_string());
-                            db.upsert_knowledge(&thread_entry)?;
+                            let new_summary = meta.to_string();
+                            db.update_summary(&tid, &new_summary)?;
                             println!("Closed thread: {}", tid);
                             return Ok(());
                         } else {
