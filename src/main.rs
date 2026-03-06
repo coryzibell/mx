@@ -2595,8 +2595,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                                 );
                             }
                             let new_summary = meta.to_string();
-                            let raw_id = tid.trim_start_matches("kn-");
-                            db.update_summary(raw_id, &new_summary)?;
+                            db.update_summary(&tid, &new_summary)?;
                             println!("Closed thread: {}", tid);
                             return Ok(());
                         } else {

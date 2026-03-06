@@ -161,7 +161,7 @@ pub trait KnowledgeStore {
     /// Update only the summary field of a knowledge entry (targeted update, bypasses SCHEMAFULL UPSERT)
     ///
     /// # Arguments
-    /// * `id` - Raw record ID (e.g., "c4e6471c"), without the "kn-" prefix
+    /// * `id` - Entry ID, with or without "kn-" prefix (normalized internally)
     /// * `summary` - New summary value to set
     fn update_summary(&self, id: &str, summary: &str) -> Result<()>;
 
