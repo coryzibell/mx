@@ -173,13 +173,21 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
                 writeln!(writer, "resonance_type: {}", resonance_type)?;
             }
 
-            if let Some(ref wake_phrase) = entry.wake_phrase {
+            let active_phrases = entry.active_wake_phrases();
+            if !active_phrases.is_empty() {
                 // Quote it because wake phrases may contain special YAML characters
-                writeln!(
-                    writer,
-                    "wake_phrase: \"{}\"",
-                    wake_phrase.replace("\"", "\\\"")
-                )?;
+                if active_phrases.len() == 1 {
+                    writeln!(
+                        writer,
+                        "wake_phrase: \"{}\"",
+                        active_phrases[0].replace("\"", "\\\"")
+                    )?;
+                } else {
+                    writeln!(writer, "wake_phrases:")?;
+                    for phrase in active_phrases {
+                        writeln!(writer, "  - \"{}\"", phrase.replace("\"", "\\\""))?;
+                    }
+                }
             }
 
             writeln!(writer, "---\n")?;

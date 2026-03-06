@@ -372,8 +372,8 @@ fn update_wake_phrase(db: &dyn KnowledgeStore, id: &str, phrase: &str) -> Result
         .get(id, &ctx)?
         .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", id))?;
 
-    // Update wake phrase
-    entry.wake_phrase = Some(phrase.to_string());
+    // Write to wake_phrases (canonical field), not deprecated wake_phrase
+    entry.wake_phrases = vec![phrase.to_string()];
     entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
 
     // Save back
