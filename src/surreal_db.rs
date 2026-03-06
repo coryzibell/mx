@@ -682,6 +682,26 @@ impl SurrealDatabase {
         }
     }
 
+    /// Returns the SurrealQL expression for computing effective_resonance with tiered decay.
+    /// Single source of truth for the decay formula.
+    ///
+    /// Tiered decay rates:
+    ///   resonance <= 3  -> 10%/week (base 0.90)
+    ///   resonance 4-5   -> 5%/week  (base 0.95)
+    ///   resonance 6+    -> 2.5%/week (base 0.975)
+    /// foundational/transformative entries are exempt from decay (effective_resonance = resonance).
+    fn effective_resonance_expr() -> &'static str {
+        "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
+         ELSE resonance * math::pow(\
+             IF resonance <= 3 THEN 0.90 \
+             ELSE IF resonance <= 5 THEN 0.95 \
+             ELSE 0.975 \
+             END, \
+             duration::days(time::now() - (last_activated ?? created_at)) / 7.0\
+         ) \
+         END"
+    }
+
     /// Build resonance filter clauses using computed effective_resonance.
     /// Tiered decay rates:
     ///   resonance <= 3  -> 10%/week (base 0.90)
@@ -689,17 +709,8 @@ impl SurrealDatabase {
     ///   resonance 6+    -> 2.5%/week (base 0.975)
     /// foundational/transformative entries are exempt from decay.
     fn build_resonance_filter(filter: &crate::store::KnowledgeFilter) -> String {
-        // Inline effective_resonance expression for use in filter comparisons.
-        // SurrealDB doesn't support LET in WHERE, so we expand it directly.
-        let effective_resonance_expr = "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
-             ELSE resonance * math::pow(\
-                 IF resonance <= 3 THEN 0.90 \
-                 ELSE IF resonance <= 5 THEN 0.95 \
-                 ELSE 0.975 \
-                 END, \
-                 duration::days(time::now() - (last_activated ?? created_at)) / 7.0\
-             ) \
-             END";
+        // SurrealDB doesn't support LET in WHERE, so we expand the expression directly.
+        let effective_resonance_expr = Self::effective_resonance_expr();
 
         let mut clauses = Vec::new();
 
@@ -1442,6 +1453,8 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE resonance >= $threshold
+            -- Wake cascade surfaces identity-level entries only (foundational/transformative).
+            -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
             AND resonance_type IN ['foundational', 'transformative']
             {}
             ORDER BY resonance DESC",
@@ -1482,6 +1495,8 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE resonance >= 8
+                -- Wake cascade surfaces identity-level entries only (foundational/transformative).
+                -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
                 AND resonance_type IN ['foundational', 'transformative']
                 {}
             )
@@ -1532,6 +1547,8 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE last_activated > <datetime>$cutoff
+                -- Wake cascade surfaces identity-level entries only (foundational/transformative).
+                -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
                 AND resonance_type IN ['foundational', 'transformative']
                 {}
             )
@@ -1740,36 +1757,20 @@ impl SurrealDatabase {
 
     async fn query_recent_facts_async(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         // Query with computed effective_resonance for ordering and filtering.
-        // Tiered decay rates by resonance:
-        //   resonance <= 3  -> 10%/week (base 0.90)
-        //   resonance 4-5   -> 5%/week  (base 0.95)
-        //   resonance 6+    -> 2.5%/week (base 0.975)
-        // foundational/transformative entries are exempt (effective_resonance = resonance).
+        // Uses the shared decay formula from effective_resonance_expr().
+        // This query only surfaces ephemeral entries (resonance_type = 'ephemeral');
+        // foundational/transformative entries are excluded and never reach this path.
+        let expr = Self::effective_resonance_expr();
         let sql = format!(
             "SELECT {},
-                 (IF resonance_type IN ['foundational', 'transformative'] THEN resonance
-                  ELSE resonance * math::pow(
-                      IF resonance <= 3 THEN 0.90
-                      ELSE IF resonance <= 5 THEN 0.95
-                      ELSE 0.975
-                      END,
-                      duration::days(time::now() - (last_activated ?? created_at)) / 7.0
-                  )
-                  END) AS effective_resonance
+                 ({expr}) AS effective_resonance
              FROM knowledge
              WHERE resonance_type = 'ephemeral'
              AND created_at > time::now() - duration::from::days($days)
-             AND (IF resonance_type IN ['foundational', 'transformative'] THEN resonance
-                  ELSE resonance * math::pow(
-                      IF resonance <= 3 THEN 0.90
-                      ELSE IF resonance <= 5 THEN 0.95
-                      ELSE 0.975
-                      END,
-                      duration::days(time::now() - (last_activated ?? created_at)) / 7.0
-                  )
-                  END) > 0
+             AND ({expr}) > 0.5
              ORDER BY effective_resonance DESC",
-            Self::knowledge_select_fields()
+            Self::knowledge_select_fields(),
+            expr = expr
         );
 
         let mut response = with_db!(self, db, {
@@ -3850,6 +3851,60 @@ mod tests {
         assert!(
             !result.is_empty(),
             "High-resonance ephemeral entry should be returned when freshly created"
+        );
+    }
+
+    #[test]
+    fn test_tiered_decay_ordering_over_time() {
+        // Verify that tiered decay produces different effective_resonance values over time.
+        // A low-resonance entry (3, 10%/week) should decay faster than a high-resonance
+        // entry (7, 2.5%/week) when both have the same last_activated 30 days ago.
+        //
+        // After 30 days (~4.3 weeks):
+        //   low  (res=3): 3 * 0.90^(30/7) ≈ 3 * 0.64 ≈ 1.9 — below 0.5? No. Well above.
+        //   high (res=7): 7 * 0.975^(30/7) ≈ 7 * 0.87 ≈ 6.1
+        // High should rank higher. Both should pass the > 0.5 filter.
+        use chrono::Utc;
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Backdate last_activated by 30 days so decay has measurably occurred
+        let thirty_days_ago = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+
+        let mut low = make_test_entry("kn-decay-low", 3, 0.0);
+        low.resonance_type = Some("ephemeral".to_string());
+        low.last_activated = Some(thirty_days_ago.clone());
+        db.upsert_knowledge(&low).unwrap();
+
+        let mut high = make_test_entry("kn-decay-high", 7, 0.0);
+        high.resonance_type = Some("ephemeral".to_string());
+        high.last_activated = Some(thirty_days_ago);
+        db.upsert_knowledge(&high).unwrap();
+
+        // Query over 60 days so both entries fall within the window
+        let results = db.query_recent_facts(60).unwrap();
+
+        // Both entries should survive the > 0.5 filter
+        let low_found = results.iter().any(|e| e.id == "kn-decay-low");
+        let high_found = results.iter().any(|e| e.id == "kn-decay-high");
+        assert!(
+            low_found,
+            "Low-resonance entry should still pass > 0.5 filter after 30 days"
+        );
+        assert!(
+            high_found,
+            "High-resonance entry should pass > 0.5 filter after 30 days"
+        );
+
+        // Results are ordered by effective_resonance DESC — high-res should appear first
+        let low_pos = results.iter().position(|e| e.id == "kn-decay-low").unwrap();
+        let high_pos = results
+            .iter()
+            .position(|e| e.id == "kn-decay-high")
+            .unwrap();
+        assert!(
+            high_pos < low_pos,
+            "High-resonance entry (slower decay) should rank above low-resonance entry after 30 days"
         );
     }
 
