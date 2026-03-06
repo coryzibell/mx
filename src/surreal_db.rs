@@ -4412,4 +4412,47 @@ mod tests {
             serde_json::from_str(updated2.summary.as_deref().unwrap()).unwrap();
         assert_eq!(summary2["state"], "reopened");
     }
+
+    #[test]
+    fn test_close_thread_with_no_summary() {
+        // A thread entry with no summary (pre-convention) should accept a
+        // closed-state summary written by the thread_closed handler.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        // Create a thread entry with no summary (pre-convention style)
+        let mut entry = make_test_entry("kn-no-summary-thread", 5, 0.0);
+        entry.summary = None;
+        db.upsert_knowledge(&entry).unwrap();
+
+        // The thread_closed handler writes the closed state via update_summary
+        let closed_summary = r#"{"state":"closed","topic":"pre-convention thread"}"#;
+        db.update_summary("kn-no-summary-thread", closed_summary)
+            .unwrap();
+
+        // Verify the state persisted correctly
+        let updated = db.get("kn-no-summary-thread", &ctx).unwrap().unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(summary["state"], "closed");
+        assert_eq!(summary["topic"], "pre-convention thread");
+    }
+
+    #[test]
+    fn test_get_summary_state_returns_none_for_no_summary() {
+        // Confirms the get_summary_state() helper returns None for entries
+        // with no summary — the condition that find_open_thread_by_content
+        // treats as "potentially open" (pre-convention threads).
+        let entry = make_test_entry("kn-state-none", 5, 0.0);
+        // make_test_entry sets summary: None by default
+        assert!(
+            entry.summary.is_none(),
+            "make_test_entry should produce summary: None"
+        );
+        assert_eq!(
+            entry.get_summary_state(),
+            None,
+            "get_summary_state() must return None when summary is absent"
+        );
+    }
 }
