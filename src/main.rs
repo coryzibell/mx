@@ -2002,12 +2002,10 @@ fn find_open_thread_by_content(
             }
         };
 
-        if is_open {
-            if let Some(body) = &thread.body {
-                let normalized_body = KnowledgeEntry::normalize_content(body);
-                if normalized_body == normalized_content {
-                    return Ok(thread.id);
-                }
+        if is_open && let Some(body) = &thread.body {
+            let normalized_body = KnowledgeEntry::normalize_content(body);
+            if normalized_body == normalized_content {
+                return Ok(thread.id);
             }
         }
     }
