@@ -1974,7 +1974,8 @@ struct FactRouting {
 /// Find an open thread by content match
 ///
 /// Uses normalized content comparison to handle whitespace/formatting differences.
-/// Properly parses JSON state instead of string matching.
+/// Threads without summary metadata are treated as potentially open: the close
+/// handler always writes state, so absence implies never-closed (pre-convention threads).
 fn find_open_thread_by_content(
     db: &dyn store::KnowledgeStore,
     content: &str,
@@ -1993,13 +1994,11 @@ fn find_open_thread_by_content(
 
     for thread in threads {
         // Check if normalized body matches and state is open (or absent — pre-convention threads)
-        let is_open = match &thread.summary {
-            None => true, // No summary metadata: treat as potentially open
-            Some(summary) => {
-                let meta = serde_json::from_str::<serde_json::Value>(summary)
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                meta.get("state").and_then(|s| s.as_str()) == Some("open")
-            }
+        let is_open = match thread.get_summary_state().as_deref() {
+            None => true, // Pre-convention threads lack summary metadata. Since the close
+            // handler always writes state, absence implies never-closed.
+            Some("open") => true,
+            _ => false,
         };
 
         if is_open && let Some(body) = &thread.body {
