@@ -1992,16 +1992,22 @@ fn find_open_thread_by_content(
     let normalized_content = KnowledgeEntry::normalize_content(content);
 
     for thread in threads {
-        // Check if normalized body matches and state is open
-        if let Some(body) = &thread.body
-            && let Some(summary) = &thread.summary
-            && let Ok(meta) = serde_json::from_str::<serde_json::Value>(summary)
-            && let Some(state) = meta.get("state").and_then(|s| s.as_str())
-            && state == "open"
-        {
-            let normalized_body = KnowledgeEntry::normalize_content(body);
-            if normalized_body == normalized_content {
-                return Ok(thread.id);
+        // Check if normalized body matches and state is open (or absent — pre-convention threads)
+        let is_open = match &thread.summary {
+            None => true, // No summary metadata: treat as potentially open
+            Some(summary) => {
+                let meta = serde_json::from_str::<serde_json::Value>(summary)
+                    .unwrap_or_else(|_| serde_json::json!({}));
+                meta.get("state").and_then(|s| s.as_str()) == Some("open")
+            }
+        };
+
+        if is_open {
+            if let Some(body) = &thread.body {
+                let normalized_body = KnowledgeEntry::normalize_content(body);
+                if normalized_body == normalized_content {
+                    return Ok(thread.id);
+                }
             }
         }
     }
@@ -2585,22 +2591,21 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     if let Some(thread_entry) =
                         db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
                     {
-                        if let Some(summary) = &thread_entry.summary {
-                            let mut meta: serde_json::Value = serde_json::from_str(summary)
-                                .unwrap_or_else(|_| serde_json::json!({}));
-                            if let Some(obj) = meta.as_object_mut() {
-                                obj.insert(
-                                    "state".to_string(),
-                                    serde_json::Value::String("closed".to_string()),
-                                );
-                            }
-                            let new_summary = meta.to_string();
-                            db.update_summary(&tid, &new_summary)?;
-                            println!("Closed thread: {}", tid);
-                            return Ok(());
-                        } else {
-                            bail!("Thread has no summary metadata: {}", tid);
+                        let mut meta: serde_json::Value = thread_entry
+                            .summary
+                            .as_deref()
+                            .map(|s| serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({})))
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        if let Some(obj) = meta.as_object_mut() {
+                            obj.insert(
+                                "state".to_string(),
+                                serde_json::Value::String("closed".to_string()),
+                            );
                         }
+                        let new_summary = meta.to_string();
+                        db.update_summary(&tid, &new_summary)?;
+                        println!("Closed thread: {}", tid);
+                        return Ok(());
                     } else {
                         bail!("Thread not found: {}", tid);
                     }
