@@ -455,10 +455,14 @@ fn apply_entry_filters(
     let mut entries: Vec<_> = entries
         .into_iter()
         .filter(|e| {
-            !filter.has_wake_phrase || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+            !filter.has_wake_phrase
+                || !e.wake_phrases.is_empty()
+                || e.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
         })
         .filter(|e| {
-            !filter.missing_wake_phrase || e.wake_phrase.as_ref().is_none_or(|s| s.is_empty())
+            !filter.missing_wake_phrase
+                || (e.wake_phrases.is_empty()
+                    && e.wake_phrase.as_ref().is_none_or(|s| s.is_empty()))
         })
         .filter(|e| !filter.has_anchors || !e.anchors.is_empty())
         .filter(|e| !filter.missing_anchors || e.anchors.is_empty())
@@ -5138,7 +5142,11 @@ fn print_wake_index(cascade: &store::WakeCascade) {
         println!("| ID | Title | R | Wake Cue |");
         println!("|----|-------|---|----------|");
         for entry in anchors {
-            let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
+            let wake_cue = if !entry.wake_phrases.is_empty() {
+                entry.wake_phrases.join(" / ")
+            } else {
+                entry.wake_phrase.clone().unwrap_or_default()
+            };
             println!(
                 "| {} | {} | {} | {} |",
                 entry.id, entry.title, entry.resonance, wake_cue
@@ -5181,7 +5189,11 @@ fn print_wake_index(cascade: &store::WakeCascade) {
             println!("| ID | Title | R | Wake Cue |");
             println!("|----|-------|---|----------|");
             for entry in entries {
-                let wake_cue = entry.wake_phrase.as_deref().unwrap_or("");
+                let wake_cue = if !entry.wake_phrases.is_empty() {
+                    entry.wake_phrases.join(" / ")
+                } else {
+                    entry.wake_phrase.clone().unwrap_or_default()
+                };
                 println!(
                     "| {} | {} | {} | {} |",
                     entry.id, entry.title, entry.resonance, wake_cue
@@ -5226,7 +5238,11 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
-            if let Some(ref phrase) = entry.wake_phrase {
+            if !entry.wake_phrases.is_empty() {
+                for phrase in &entry.wake_phrases {
+                    println!("# Wake phrase: \"{}\"", phrase);
+                }
+            } else if let Some(ref phrase) = entry.wake_phrase {
                 println!("# Wake phrase: \"{}\"", phrase);
             }
             println!("echo \"\"");
@@ -5247,7 +5263,11 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
-            if let Some(ref phrase) = entry.wake_phrase {
+            if !entry.wake_phrases.is_empty() {
+                for phrase in &entry.wake_phrases {
+                    println!("# Wake phrase: \"{}\"", phrase);
+                }
+            } else if let Some(ref phrase) = entry.wake_phrase {
                 println!("# Wake phrase: \"{}\"", phrase);
             }
             println!("echo \"\"");
@@ -5268,7 +5288,11 @@ fn print_wake_ritual(cascade: &store::WakeCascade, agent: &str) {
                 shell_escape(&entry.title)
             );
             println!("mx memory show {}", entry.id);
-            if let Some(ref phrase) = entry.wake_phrase {
+            if !entry.wake_phrases.is_empty() {
+                for phrase in &entry.wake_phrases {
+                    println!("# Wake phrase: \"{}\"", phrase);
+                }
+            } else if let Some(ref phrase) = entry.wake_phrase {
                 println!("# Wake phrase: \"{}\"", phrase);
             }
             println!("echo \"\"");

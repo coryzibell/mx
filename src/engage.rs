@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use colored::Colorize;
+use rand::Rng;
 use std::io::{self, IsTerminal, Write};
 
 use crate::knowledge::KnowledgeEntry;
@@ -41,11 +42,19 @@ pub fn run_engage_ritual(
         // Show progress and bloom info
         print_bloom_header(num, total, layer, bloom);
 
-        // Check if bloom has wake phrase
-        match &bloom.wake_phrase {
+        // Check if bloom has wake phrase(s) — wake_phrases takes priority over wake_phrase
+        let active_phrase: Option<String> = if !bloom.wake_phrases.is_empty() {
+            // Pick a random phrase from the list
+            let idx = rand::rng().random_range(0..bloom.wake_phrases.len());
+            Some(bloom.wake_phrases[idx].clone())
+        } else {
+            bloom.wake_phrase.clone()
+        };
+
+        match active_phrase {
             Some(phrase) => {
                 // Run the verification ritual
-                let remembered = verify_wake_phrase(bloom, phrase)?;
+                let remembered = verify_wake_phrase(bloom, &phrase)?;
 
                 if remembered {
                     stats.remembered += 1;
