@@ -154,6 +154,20 @@ pub struct Frontmatter {
 }
 
 impl KnowledgeEntry {
+    /// Returns active wake phrases, preferring wake_phrases over deprecated wake_phrase.
+    pub fn active_wake_phrases(&self) -> Vec<&str> {
+        if !self.wake_phrases.is_empty() {
+            self.wake_phrases.iter().map(|s| s.as_str()).collect()
+        } else {
+            self.wake_phrase.as_deref().into_iter().collect()
+        }
+    }
+
+    /// Returns whether this entry has any wake phrase set.
+    pub fn has_any_wake_phrase(&self) -> bool {
+        !self.wake_phrases.is_empty() || self.wake_phrase.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
     /// Construct text suitable for embedding generation
     ///
     /// Combines title, summary/body, and tags into a single string
