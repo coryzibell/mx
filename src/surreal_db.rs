@@ -1479,7 +1479,7 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Layer 1: Query core blooms (resonance 8+, foundational/transformative)
+    /// Layer 1: Query core blooms (resonance 8+, excludes ephemeral)
     async fn query_core_blooms(
         &self,
         ctx: &crate::store::AgentContext,
@@ -1495,9 +1495,7 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE resonance >= 8
-                -- Wake cascade surfaces identity-level entries only (foundational/transformative).
-                -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
-                AND resonance_type IN ['foundational', 'transformative']
+                AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
                 {}
             )
             ORDER BY
