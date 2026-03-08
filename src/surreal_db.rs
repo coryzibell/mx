@@ -1448,7 +1448,7 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Layer 1: Query core blooms (resonance 8+, foundational/transformative)
+    /// Layer 1: Query core blooms (resonance 8+, excludes ephemeral)
     async fn query_core_blooms(
         &self,
         ctx: &crate::store::AgentContext,
@@ -1464,7 +1464,7 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE resonance >= 8
-                AND resonance_type IN ['foundational', 'transformative']
+                AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
                 {}
             )
             ORDER BY
