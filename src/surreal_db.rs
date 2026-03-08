@@ -1453,9 +1453,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE resonance >= $threshold
-            -- Wake cascade surfaces identity-level entries only (foundational/transformative).
-            -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
-            AND resonance_type IN ['foundational', 'transformative']
+            AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
             {}
             ORDER BY resonance DESC",
             Self::knowledge_select_fields(),
@@ -1545,9 +1543,7 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE last_activated > <datetime>$cutoff
-                -- Wake cascade surfaces identity-level entries only (foundational/transformative).
-                -- Ephemeral facts are excluded — they surface via `recent` and `for-session`, not wake.
-                AND resonance_type IN ['foundational', 'transformative']
+                AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
                 {}
             )
             ORDER BY
