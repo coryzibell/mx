@@ -1325,6 +1325,11 @@ impl KnowledgeStore for Database {
         Ok(())
     }
 
+    fn increment_activation_count(&self, _ids: &[String]) -> Result<()> {
+        // SQLite backend doesn't support activation tracking yet - no-op
+        Ok(())
+    }
+
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         // SQLite backend: graceful degradation - return recent ephemeral entries
         // without decay computation (ordered by created_at instead of effective_resonance)
