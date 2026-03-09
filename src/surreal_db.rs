@@ -108,8 +108,9 @@ impl SurrealConfig {
 
         let database = std::env::var("MX_SURREAL_DB").unwrap_or_else(|_| "knowledge".to_string());
 
-        let auth_level =
-            std::env::var("MX_SURREAL_AUTH_LEVEL").unwrap_or_else(|_| "root".to_string());
+        let auth_level = std::env::var("MX_SURREAL_AUTH_LEVEL")
+            .unwrap_or_else(|_| "root".to_string())
+            .to_lowercase();
 
         Self {
             mode,
@@ -578,7 +579,7 @@ impl SurrealDatabase {
                     config.user, config.auth_level
                 );
             }
-            match config.auth_level.to_lowercase().as_str() {
+            match config.auth_level.as_str() {
                 "namespace" | "ns" => {
                     db.signin(Namespace {
                         namespace: &config.namespace,
@@ -608,7 +609,7 @@ impl SurrealDatabase {
                         )
                     })?;
                 }
-                _ => {
+                "root" => {
                     db.signin(Root {
                         username: &config.user,
                         password: pass,
@@ -620,6 +621,12 @@ impl SurrealDatabase {
                             config.url, config.user
                         )
                     })?;
+                }
+                other => {
+                    anyhow::bail!(
+                        "Unknown MX_SURREAL_AUTH_LEVEL '{}'. Valid values: root, namespace (ns), database (db)",
+                        other
+                    );
                 }
             }
         } else if verbose {
