@@ -7,7 +7,7 @@ use surrealdb::RecordId as SurrealRecordId;
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
 use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
-use surrealdb::opt::auth::Root;
+use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
@@ -40,6 +40,7 @@ pub enum SurrealMode {
 /// - `MX_SURREAL_USER`: Username for network auth (default: root)
 /// - `MX_SURREAL_PASS`: Password for network auth (direct value)
 /// - `MX_SURREAL_PASS_FILE`: Path to file containing password (e.g., agenix secret)
+/// - `MX_SURREAL_AUTH_LEVEL`: Auth level for signin: "root" (default), "namespace"/"ns", or "database"/"db"
 /// - `MX_SURREAL_NS`: Namespace (default: memory)
 /// - `MX_SURREAL_DB`: Database name (default: knowledge)
 #[derive(Debug, Clone)]
@@ -56,6 +57,8 @@ pub struct SurrealConfig {
     pub namespace: String,
     /// SurrealDB database name
     pub database: String,
+    /// Auth level for signin (root, namespace, or database)
+    pub auth_level: String,
 }
 
 impl Default for SurrealConfig {
@@ -67,6 +70,7 @@ impl Default for SurrealConfig {
             pass: None,
             namespace: "memory".to_string(),
             database: "knowledge".to_string(),
+            auth_level: "root".to_string(),
         }
     }
 }
@@ -104,6 +108,9 @@ impl SurrealConfig {
 
         let database = std::env::var("MX_SURREAL_DB").unwrap_or_else(|_| "knowledge".to_string());
 
+        let auth_level =
+            std::env::var("MX_SURREAL_AUTH_LEVEL").unwrap_or_else(|_| "root".to_string());
+
         Self {
             mode,
             url,
@@ -111,6 +118,7 @@ impl SurrealConfig {
             pass,
             namespace,
             database,
+            auth_level,
         }
     }
 
@@ -565,19 +573,55 @@ impl SurrealDatabase {
         // If no password is provided, attempt connection without auth (will fail if server requires it)
         if let Some(pass) = &config.pass {
             if verbose {
-                eprintln!("[mx] Authenticating as user '{}'", config.user);
+                eprintln!(
+                    "[mx] Authenticating as user '{}' (auth level: {})",
+                    config.user, config.auth_level
+                );
             }
-            db.signin(Root {
-                username: &config.user,
-                password: pass,
-            })
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to authenticate to SurrealDB at {} as user '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
-                    config.url, config.user
-                )
-            })?;
+            match config.auth_level.to_lowercase().as_str() {
+                "namespace" | "ns" => {
+                    db.signin(Namespace {
+                        namespace: &config.namespace,
+                        username: &config.user,
+                        password: pass,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to authenticate to SurrealDB at {} as namespace-level user '{}' in namespace '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
+                            config.url, config.user, config.namespace
+                        )
+                    })?;
+                }
+                "database" | "db" => {
+                    db.signin(Database {
+                        namespace: &config.namespace,
+                        database: &config.database,
+                        username: &config.user,
+                        password: pass,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to authenticate to SurrealDB at {} as database-level user '{}' in namespace '{}' database '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
+                            config.url, config.user, config.namespace, config.database
+                        )
+                    })?;
+                }
+                _ => {
+                    db.signin(Root {
+                        username: &config.user,
+                        password: pass,
+                    })
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Failed to authenticate to SurrealDB at {} as user '{}' (check credentials in MX_SURREAL_USER and MX_SURREAL_PASS)",
+                            config.url, config.user
+                        )
+                    })?;
+                }
+            }
         } else if verbose {
             eprintln!("[mx] No password provided, connecting without authentication");
         }
