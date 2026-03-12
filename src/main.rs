@@ -2353,12 +2353,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     requested_limit
                 };
 
-                db.semantic_search(
-                    &query_embedding,
-                    &ctx,
-                    &db_filter,
-                    db_limit,
-                )?
+                db.semantic_search(&query_embedding, &ctx, &db_filter, db_limit)?
             } else {
                 db.search(&query, &ctx, &db_filter)?
             };
@@ -4637,8 +4632,7 @@ fn handle_tags(cmd: TagsCommands, config: &IndexConfig) -> Result<()> {
             if let Some(ref cat) = category {
                 if db.get_category(cat)?.is_none() {
                     let categories = db.list_categories()?;
-                    let valid_ids: Vec<&str> =
-                        categories.iter().map(|c| c.id.as_str()).collect();
+                    let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
                     bail!(
                         "Unknown category '{}'. Valid categories: {}",
                         cat,
