@@ -2064,12 +2064,15 @@ impl SurrealDatabase {
     }
 
     async fn list_all_tags_async(&self, category: Option<String>) -> Result<Vec<String>> {
-        let tags = if let Some(cat) = category {
+        let mut tags = if let Some(cat) = category {
+            // Traverse from tag side: find tags whose knowledge entries belong to the category.
+            // Filtering via `WHERE in.category = ...` on a graph edge table does not work in
+            // SurrealDB 2.x — the predicate matches nothing even though the field is present.
+            // Reverse traversal through the tag record works correctly.
             let mut response = with_db!(self, db, {
                 db.query(
-                    "SELECT VALUE array::distinct(out.name) FROM tagged_with \
-                     WHERE in.category = type::thing('category', $cat) \
-                     ORDER BY out.name",
+                    "SELECT VALUE name FROM tag \
+                     WHERE <-tagged_with<-knowledge.category CONTAINS type::thing('category', $cat)",
                 )
                 .bind(("cat", cat))
                 .await
@@ -2078,10 +2081,12 @@ impl SurrealDatabase {
             let tags: Vec<String> = response.take(0).unwrap_or_default();
             tags
         } else {
-            // Query via edges so we only return tags actually in use (no orphans)
+            // Only return tags that are actually in use (have at least one incoming edge).
+            // The previous query used `array::distinct(out.name)` on the edge table, but
+            // `out.name` is a scalar string per row — array::distinct expects an array and errors.
             let mut response = with_db!(self, db, {
                 db.query(
-                    "SELECT VALUE array::distinct(out.name) FROM tagged_with ORDER BY out.name",
+                    "SELECT VALUE name FROM tag WHERE <-tagged_with",
                 )
                 .await
                 .context("Failed to list all tags")
@@ -2090,6 +2095,7 @@ impl SurrealDatabase {
             tags
         };
 
+        tags.sort();
         Ok(tags)
     }
 
