@@ -2064,10 +2064,10 @@ impl SurrealDatabase {
     }
 
     async fn list_all_tags_async(&self, category: Option<String>) -> Result<Vec<String>> {
-        let query = if let Some(cat) = category {
+        let tags = if let Some(cat) = category {
             let mut response = with_db!(self, db, {
                 db.query(
-                    "SELECT VALUE out.name FROM tagged_with \
+                    "SELECT VALUE array::distinct(out.name) FROM tagged_with \
                      WHERE in.category = type::thing('category', $cat) \
                      ORDER BY out.name",
                 )
@@ -2078,23 +2078,19 @@ impl SurrealDatabase {
             let tags: Vec<String> = response.take(0).unwrap_or_default();
             tags
         } else {
+            // Query via edges so we only return tags actually in use (no orphans)
             let mut response = with_db!(self, db, {
-                db.query("SELECT VALUE name FROM tag ORDER BY name")
-                    .await
-                    .context("Failed to list all tags")
+                db.query(
+                    "SELECT VALUE array::distinct(out.name) FROM tagged_with ORDER BY out.name",
+                )
+                .await
+                .context("Failed to list all tags")
             })?;
             let tags: Vec<String> = response.take(0).unwrap_or_default();
             tags
         };
 
-        // Deduplicate (category query may return duplicates across entries)
-        let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<String> = query
-            .into_iter()
-            .filter(|t| seen.insert(t.clone()))
-            .collect();
-
-        Ok(deduped)
+        Ok(tags)
     }
 
     /// List all applicability types

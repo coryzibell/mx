@@ -446,7 +446,7 @@ struct EntryFilter {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Filter by tags (can specify multiple: soren,kade)
+    /// Filter by tags (can specify multiple: soren,kade) (matches any)
     #[arg(long, value_delimiter = ',')]
     tags: Option<Vec<String>>,
 }
@@ -2343,11 +2343,21 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut provider = FastEmbedProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
+                // When --tags is present the in-memory filter will thin the DB results.
+                // Over-fetch (5x) so the tag filter has enough candidates to return the
+                // requested number of entries.
+                let requested_limit = filter.limit.unwrap_or(20);
+                let db_limit = if filter.tags.is_some() {
+                    requested_limit * 5
+                } else {
+                    requested_limit
+                };
+
                 db.semantic_search(
                     &query_embedding,
                     &ctx,
                     &db_filter,
-                    filter.limit.unwrap_or(20),
+                    db_limit,
                 )?
             } else {
                 db.search(&query, &ctx, &db_filter)?
@@ -4623,6 +4633,20 @@ fn handle_tags(cmd: TagsCommands, config: &IndexConfig) -> Result<()> {
 
     match cmd {
         TagsCommands::List { category, json } => {
+            // Validate category if provided
+            if let Some(ref cat) = category {
+                if db.get_category(cat)?.is_none() {
+                    let categories = db.list_categories()?;
+                    let valid_ids: Vec<&str> =
+                        categories.iter().map(|c| c.id.as_str()).collect();
+                    bail!(
+                        "Unknown category '{}'. Valid categories: {}",
+                        cat,
+                        valid_ids.join(", ")
+                    );
+                }
+            }
+
             let tags = db.list_all_tags(category.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&tags)?);
