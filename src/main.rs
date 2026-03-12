@@ -445,6 +445,10 @@ struct EntryFilter {
     /// Limit number of results
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Filter by tags (can specify multiple: soren,kade)
+    #[arg(long, value_delimiter = ',')]
+    tags: Option<Vec<String>>,
 }
 
 /// Apply in-memory field presence filters to a list of entries
@@ -463,6 +467,11 @@ fn apply_entry_filters(
         })
         .filter(|e| {
             !filter.missing_resonance_type || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+        })
+        .filter(|e| {
+            filter.tags.as_ref().map_or(true, |filter_tags| {
+                filter_tags.iter().any(|t| e.tags.contains(t))
+            })
         })
         .collect();
 
@@ -957,6 +966,12 @@ enum MemoryCommands {
         command: CategoriesCommands,
     },
 
+    /// Query tags used in memory entries
+    Tags {
+        #[command(subcommand)]
+        command: TagsCommands,
+    },
+
     /// Manage source types
     SourceTypes {
         #[command(subcommand)]
@@ -1399,6 +1414,20 @@ enum CategoriesCommands {
     Remove {
         /// Category ID to remove
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TagsCommands {
+    /// List all tags (optionally filter by category)
+    List {
+        /// Filter to tags used in a specific category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -3827,6 +3856,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
         MemoryCommands::Categories { command } => handle_categories(command, &config)?,
 
+        MemoryCommands::Tags { command } => handle_tags(command, &config)?,
+
         MemoryCommands::SourceTypes { command } => handle_source_types(command, &config)?,
 
         MemoryCommands::EntryTypes { command } => handle_entry_types(command, &config)?,
@@ -4578,6 +4609,36 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
                 }
                 Err(e) => {
                     return Err(e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_tags(cmd: TagsCommands, config: &IndexConfig) -> Result<()> {
+    let db = store::create_store(&config.db_path)?;
+
+    match cmd {
+        TagsCommands::List { category, json } => {
+            let tags = db.list_all_tags(category.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tags)?);
+            } else if tags.is_empty() {
+                if let Some(cat) = &category {
+                    println!("No tags found in category '{}'", cat);
+                } else {
+                    println!("No tags found");
+                }
+            } else {
+                if let Some(cat) = &category {
+                    println!("Tags in category '{}':\n", cat);
+                } else {
+                    println!("All tags:\n");
+                }
+                for tag in tags {
+                    println!("  {}", tag);
                 }
             }
         }

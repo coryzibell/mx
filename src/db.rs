@@ -966,6 +966,27 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        let tags = if let Some(cat) = category {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT t.tag FROM tags t \
+                 JOIN knowledge k ON k.id = t.entry_id \
+                 WHERE k.category_id = ?1 \
+                 ORDER BY t.tag",
+            )?;
+            stmt.query_map(params![cat], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT tag FROM tags ORDER BY tag")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        };
+
+        Ok(tags)
+    }
+
     // Junction table helpers - Applicability for Knowledge
     pub fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -1459,6 +1480,10 @@ impl KnowledgeStore for Database {
 
     fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
         self.set_tags_for_entry(entry_id, tags)
+    }
+
+    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        self.list_all_tags(category)
     }
 
     fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {

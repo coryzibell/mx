@@ -2058,6 +2058,45 @@ impl SurrealDatabase {
         Ok(tags)
     }
 
+    /// List all distinct tag names, optionally filtered by category
+    pub fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        Self::runtime().block_on(self.list_all_tags_async(category.map(|s| s.to_string())))
+    }
+
+    async fn list_all_tags_async(&self, category: Option<String>) -> Result<Vec<String>> {
+        let query = if let Some(cat) = category {
+            let mut response = with_db!(self, db, {
+                db.query(
+                    "SELECT VALUE out.name FROM tagged_with \
+                     WHERE in.category = type::thing('category', $cat) \
+                     ORDER BY out.name",
+                )
+                .bind(("cat", cat))
+                .await
+                .context("Failed to list tags by category")
+            })?;
+            let tags: Vec<String> = response.take(0).unwrap_or_default();
+            tags
+        } else {
+            let mut response = with_db!(self, db, {
+                db.query("SELECT VALUE name FROM tag ORDER BY name")
+                    .await
+                    .context("Failed to list all tags")
+            })?;
+            let tags: Vec<String> = response.take(0).unwrap_or_default();
+            tags
+        };
+
+        // Deduplicate (category query may return duplicates across entries)
+        let mut seen = std::collections::HashSet::new();
+        let deduped: Vec<String> = query
+            .into_iter()
+            .filter(|t| seen.insert(t.clone()))
+            .collect();
+
+        Ok(deduped)
+    }
+
     /// List all applicability types
     pub fn list_applicability_types(&self) -> Result<Vec<ApplicabilityType>> {
         Self::runtime().block_on(self.list_applicability_types_async())
@@ -3352,6 +3391,10 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
         self.set_tags_for_entry(entry_id, tags)
+    }
+
+    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        self.list_all_tags(category)
     }
 
     fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
