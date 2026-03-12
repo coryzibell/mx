@@ -469,7 +469,7 @@ fn apply_entry_filters(
             !filter.missing_resonance_type || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
         })
         .filter(|e| {
-            filter.tags.as_ref().map_or(true, |filter_tags| {
+            filter.tags.as_ref().is_none_or(|filter_tags| {
                 filter_tags.iter().any(|t| e.tags.contains(t))
             })
         })
