@@ -4629,16 +4629,16 @@ fn handle_tags(cmd: TagsCommands, config: &IndexConfig) -> Result<()> {
     match cmd {
         TagsCommands::List { category, json } => {
             // Validate category if provided
-            if let Some(ref cat) = category {
-                if db.get_category(cat)?.is_none() {
-                    let categories = db.list_categories()?;
-                    let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
-                    bail!(
-                        "Unknown category '{}'. Valid categories: {}",
-                        cat,
-                        valid_ids.join(", ")
-                    );
-                }
+            if let Some(ref cat) = category
+                && db.get_category(cat)?.is_none()
+            {
+                let categories = db.list_categories()?;
+                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+                bail!(
+                    "Unknown category '{}'. Valid categories: {}",
+                    cat,
+                    valid_ids.join(", ")
+                );
             }
 
             let tags = db.list_all_tags(category.as_deref())?;
