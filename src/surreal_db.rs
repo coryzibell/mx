@@ -2085,11 +2085,9 @@ impl SurrealDatabase {
             // The previous query used `array::distinct(out.name)` on the edge table, but
             // `out.name` is a scalar string per row — array::distinct expects an array and errors.
             let mut response = with_db!(self, db, {
-                db.query(
-                    "SELECT VALUE name FROM tag WHERE <-tagged_with",
-                )
-                .await
-                .context("Failed to list all tags")
+                db.query("SELECT VALUE name FROM tag WHERE <-tagged_with")
+                    .await
+                    .context("Failed to list all tags")
             })?;
             let tags: Vec<String> = response.take(0).unwrap_or_default();
             tags
