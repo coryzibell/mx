@@ -1810,4 +1810,53 @@ mod tests {
         let insights = db.list_by_category("insight").unwrap();
         assert_eq!(insights.len(), 0);
     }
+
+    #[test]
+    fn test_list_all_tags_unfiltered() {
+        let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
+
+        // No tags yet — should return empty list
+        let tags = db.list_all_tags(None).unwrap();
+        assert!(tags.is_empty());
+
+        // Insert entries with tags
+        let mut e1 = make_entry("kn-1", "pattern", "Pattern 1");
+        e1.tags = vec!["rust".to_string(), "async".to_string()];
+        db.upsert_knowledge(&e1).unwrap();
+
+        let mut e2 = make_entry("kn-2", "technique", "Technique 1");
+        e2.tags = vec!["rust".to_string(), "cli".to_string()];
+        db.upsert_knowledge(&e2).unwrap();
+
+        // Unfiltered: should return all distinct tags, sorted
+        let tags = db.list_all_tags(None).unwrap();
+        assert_eq!(tags, vec!["async", "cli", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_category_filtered() {
+        let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
+
+        let mut e1 = make_entry("kn-1", "pattern", "Pattern 1");
+        e1.tags = vec!["rust".to_string(), "async".to_string()];
+        db.upsert_knowledge(&e1).unwrap();
+
+        let mut e2 = make_entry("kn-2", "technique", "Technique 1");
+        e2.tags = vec!["cli".to_string()];
+        db.upsert_knowledge(&e2).unwrap();
+
+        // Filtered to pattern category: should only see tags from e1
+        let tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert_eq!(tags, vec!["async", "rust"]);
+
+        // Filtered to technique category: should only see tags from e2
+        let tags = db.list_all_tags(Some("technique")).unwrap();
+        assert_eq!(tags, vec!["cli"]);
+
+        // Filtered to a category with no entries: empty
+        let tags = db.list_all_tags(Some("insight")).unwrap();
+        assert!(tags.is_empty());
+    }
 }

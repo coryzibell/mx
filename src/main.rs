@@ -446,7 +446,7 @@ struct EntryFilter {
     #[arg(long)]
     limit: Option<usize>,
 
-    /// Filter by tags (can specify multiple: soren,kade) (matches any)
+    /// Filter by tags (can specify multiple: focus,rust) (matches any)
     #[arg(long, value_delimiter = ',')]
     tags: Option<Vec<String>>,
 }
@@ -2343,12 +2343,14 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut provider = FastEmbedProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
-                // When --tags is present the in-memory filter will thin the DB results.
-                // Over-fetch (5x) so the tag filter has enough candidates to return the
-                // requested number of entries.
+                // When --tags is present the in-memory filter will thin the DB results,
+                // so we over-fetch to ensure enough candidates survive the tag filter.
+                // Tradeoff: 5x multiplier works well at typical limits (10-50) but does
+                // not scale for very large limits. The cap (limit + 200) prevents runaway
+                // fetches when the caller requests hundreds of entries.
                 let requested_limit = filter.limit.unwrap_or(20);
                 let db_limit = if filter.tags.is_some() {
-                    requested_limit * 5
+                    (requested_limit * 5).min(requested_limit + 200)
                 } else {
                     requested_limit
                 };
