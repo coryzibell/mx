@@ -1066,9 +1066,18 @@ enum MemoryCommands {
         #[arg(long, default_value = "text", hide = true)]
         format: String,
 
-        /// Filter by resonance type (e.g., ephemeral)
+        /// Filter by resonance type (e.g., ephemeral). When omitted without --all-types, defaults to ephemeral only.
         #[arg(long)]
         resonance_type: Option<String>,
+
+        /// Surface all resonance types (blooms, patterns, insights, decisions, ephemeral, etc.)
+        /// instead of ephemeral-only. Ignored if --resonance-type is set.
+        #[arg(long)]
+        all_types: bool,
+
+        /// Sort order: "chronological" (default) or "resonance" (highest first)
+        #[arg(long, default_value = "chronological")]
+        sort: String,
 
         /// Maximum number of results
         #[arg(long, default_value = "100")]
@@ -3962,17 +3971,42 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             json,
             format,
             resonance_type,
+            all_types,
+            sort,
             limit,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Note: Listing doesn't activate facts - bulk view != focused access
-            // Query recent facts with decay
-            let mut facts = db.query_recent_facts(days)?;
+            // Decide which query to use:
+            //   --resonance-type <x>  => use ephemeral query then filter to <x>
+            //   --all-types           => query all resonance types
+            //   (default)             => ephemeral only (backwards compatible)
+            let mut facts = if all_types && resonance_type.is_none() {
+                db.query_recent_facts_all_types(days)?
+            } else {
+                db.query_recent_facts(days)?
+            };
 
-            // Filter by resonance_type if provided
+            // Filter by resonance_type if provided (works with both code paths)
             if let Some(ref rtype) = resonance_type {
                 facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
+            }
+
+            // Apply sort: "resonance" sorts highest-first; default is chronological
+            // (query_recent_facts already returns decay-ordered; query_recent_facts_all_types
+            // also returns decay-ordered. Chronological sort re-orders by created_at desc.)
+            if sort == "resonance" {
+                facts.sort_by(|a, b| {
+                    b.resonance
+                        .partial_cmp(&a.resonance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                // Chronological: most recent first
+                facts.sort_by(|a, b| {
+                    b.created_at.cmp(&a.created_at)
+                });
             }
 
             // Apply limit

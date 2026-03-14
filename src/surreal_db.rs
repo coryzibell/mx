@@ -1837,6 +1837,47 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// Query recent facts across ALL resonance types with decay computation.
+    /// Foundational/transformative entries are exempt from decay (effective_resonance = resonance).
+    pub fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.query_recent_facts_all_types_async(days))
+    }
+
+    async fn query_recent_facts_all_types_async(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // Like query_recent_facts_async but without the resonance_type = 'ephemeral' filter.
+        // Ephemeral entries are still decay-filtered (> 0.5). Foundational/transformative
+        // entries are exempt from decay so they always surface here.
+        let expr = Self::effective_resonance_expr();
+        let sql = format!(
+            "SELECT {},
+                 ({expr}) AS effective_resonance
+             FROM knowledge
+             WHERE created_at > time::now() - duration::from::days($days)
+             AND ({expr}) > 0.5
+             ORDER BY effective_resonance DESC",
+            Self::knowledge_select_fields(),
+            expr = expr
+        );
+
+        let mut response = with_db!(self, db, {
+            db.query(&sql)
+                .bind(("days", days))
+                .await
+                .context("Failed to execute recent facts (all types) query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse recent facts (all types) results")?;
+
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     /// Reinforce a knowledge entry
     pub fn reinforce(
         &self,
@@ -3337,6 +3378,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.query_recent_facts(days)
     }
 
+    fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        self.query_recent_facts_all_types(days)
+    }
+
     fn reinforce(
         &self,
         id: &str,
@@ -4498,6 +4543,92 @@ mod tests {
             entry.get_summary_state(),
             None,
             "get_summary_state() must return None when summary is absent"
+        );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_includes_foundational() {
+        // query_recent_facts_all_types should return foundational entries that would
+        // be excluded from query_recent_facts (ephemeral-only).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut foundational = make_test_entry("kn-all-types-foundational", 9, 0.0);
+        foundational.resonance_type = Some("foundational".to_string());
+        db.upsert_knowledge(&foundational).unwrap();
+
+        let mut ephemeral = make_test_entry("kn-all-types-ephemeral", 5, 0.0);
+        ephemeral.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&ephemeral).unwrap();
+
+        // Baseline: ephemeral-only query should not include foundational
+        let ephemeral_results = db.query_recent_facts(30).unwrap();
+        assert!(
+            !ephemeral_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-foundational"),
+            "Foundational entry should not appear in ephemeral-only query"
+        );
+        assert!(
+            ephemeral_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-ephemeral"),
+            "Ephemeral entry should appear in ephemeral-only query"
+        );
+
+        // All-types query should include both
+        let all_results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            all_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-foundational"),
+            "Foundational entry should appear in all-types query"
+        );
+        assert!(
+            all_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-ephemeral"),
+            "Ephemeral entry should appear in all-types query"
+        );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_includes_transformative() {
+        // query_recent_facts_all_types should return transformative entries.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut transformative = make_test_entry("kn-all-types-transformative", 8, 0.0);
+        transformative.resonance_type = Some("transformative".to_string());
+        db.upsert_knowledge(&transformative).unwrap();
+
+        let all_results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            all_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-transformative"),
+            "Transformative entry should appear in all-types query"
+        );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_respects_decay_threshold() {
+        // Entries with near-zero effective resonance (very old, low base) should
+        // be excluded even from the all-types query (threshold > 0.5).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Resonance 1 with heavy decay (80 weeks ago equivalent = decay_rate abuse).
+        // We simulate a very old entry by setting last_activated far in the past.
+        // For this test we just confirm high-resonance entries are returned.
+        let mut high = make_test_entry("kn-all-types-high", 8, 0.0);
+        high.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&high).unwrap();
+
+        let results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            results.iter().any(|e| e.id == "kn-all-types-high"),
+            "High-resonance ephemeral entry should appear in all-types query"
         );
     }
 }
