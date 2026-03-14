@@ -4585,9 +4585,7 @@ mod tests {
             "Foundational entry should appear in all-types query"
         );
         assert!(
-            all_results
-                .iter()
-                .any(|e| e.id == "kn-all-types-ephemeral"),
+            all_results.iter().any(|e| e.id == "kn-all-types-ephemeral"),
             "Ephemeral entry should appear in all-types query"
         );
     }

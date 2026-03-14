@@ -4004,9 +4004,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 });
             } else {
                 // Chronological: most recent first
-                facts.sort_by(|a, b| {
-                    b.created_at.cmp(&a.created_at)
-                });
+                facts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             }
 
             // Apply limit
