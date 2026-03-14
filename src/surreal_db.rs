@@ -2058,6 +2058,45 @@ impl SurrealDatabase {
         Ok(tags)
     }
 
+    /// List all distinct tag names, optionally filtered by category
+    pub fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        Self::runtime().block_on(self.list_all_tags_async(category.map(|s| s.to_string())))
+    }
+
+    async fn list_all_tags_async(&self, category: Option<String>) -> Result<Vec<String>> {
+        let mut tags = if let Some(cat) = category {
+            // Traverse from tag side: find tags whose knowledge entries belong to the category.
+            // Filtering via `WHERE in.category = ...` on a graph edge table does not work in
+            // SurrealDB 2.x — the predicate matches nothing even though the field is present.
+            // Reverse traversal through the tag record works correctly.
+            let mut response = with_db!(self, db, {
+                db.query(
+                    "SELECT VALUE name FROM tag \
+                     WHERE <-tagged_with<-knowledge.category CONTAINS type::thing('category', $cat)",
+                )
+                .bind(("cat", cat))
+                .await
+                .context("Failed to list tags by category")
+            })?;
+            let tags: Vec<String> = response.take(0).unwrap_or_default();
+            tags
+        } else {
+            // Only return tags that are actually in use (have at least one incoming edge).
+            // The previous query used `array::distinct(out.name)` on the edge table, but
+            // `out.name` is a scalar string per row — array::distinct expects an array and errors.
+            let mut response = with_db!(self, db, {
+                db.query("SELECT VALUE name FROM tag WHERE <-tagged_with")
+                    .await
+                    .context("Failed to list all tags")
+            })?;
+            let tags: Vec<String> = response.take(0).unwrap_or_default();
+            tags
+        };
+
+        tags.sort();
+        Ok(tags)
+    }
+
     /// List all applicability types
     pub fn list_applicability_types(&self) -> Result<Vec<ApplicabilityType>> {
         Self::runtime().block_on(self.list_applicability_types_async())
@@ -3354,6 +3393,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.set_tags_for_entry(entry_id, tags)
     }
 
+    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        self.list_all_tags(category)
+    }
+
     fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_applicability_for_entry(entry_id)
     }
@@ -4499,5 +4542,81 @@ mod tests {
             None,
             "get_summary_state() must return None when summary is absent"
         );
+    }
+
+    // =========================================================================
+    // list_all_tags TESTS (PR #147)
+    // =========================================================================
+
+    fn make_tagged_entry(
+        id: &str,
+        category: &str,
+        tags: Vec<String>,
+    ) -> crate::knowledge::KnowledgeEntry {
+        let mut entry = make_test_entry(id, 5, 0.0);
+        entry.category_id = category.to_string();
+        entry.tags = tags;
+        entry
+    }
+
+    #[test]
+    fn test_list_all_tags_returns_distinct_tags() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag1",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag2",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags, vec!["async", "error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_with_category_filter() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag3",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag4",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let pattern_tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert_eq!(pattern_tags.len(), 2);
+        assert_eq!(pattern_tags, vec!["async", "rust"]);
+
+        let technique_tags = db.list_all_tags(Some("technique")).unwrap();
+        assert_eq!(technique_tags.len(), 2);
+        assert_eq!(technique_tags, vec!["error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_empty_database() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert!(tags.is_empty());
+
+        let tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert!(tags.is_empty());
     }
 }

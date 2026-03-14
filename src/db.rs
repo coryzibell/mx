@@ -966,6 +966,27 @@ impl Database {
         Ok(())
     }
 
+    pub fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        let tags = if let Some(cat) = category {
+            let mut stmt = self.conn.prepare(
+                "SELECT DISTINCT t.tag FROM tags t \
+                 JOIN knowledge k ON k.id = t.entry_id \
+                 WHERE k.category_id = ?1 \
+                 ORDER BY t.tag",
+            )?;
+            stmt.query_map(params![cat], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        } else {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT tag FROM tags ORDER BY tag")?;
+            stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        };
+
+        Ok(tags)
+    }
+
     // Junction table helpers - Applicability for Knowledge
     pub fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
@@ -1461,6 +1482,10 @@ impl KnowledgeStore for Database {
         self.set_tags_for_entry(entry_id, tags)
     }
 
+    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+        self.list_all_tags(category)
+    }
+
     fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         self.get_applicability_for_entry(entry_id)
     }
@@ -1784,5 +1809,61 @@ mod tests {
 
         let insights = db.list_by_category("insight").unwrap();
         assert_eq!(insights.len(), 0);
+    }
+
+    // =========================================================================
+    // list_all_tags TESTS (PR #147)
+    // =========================================================================
+
+    #[test]
+    fn test_list_all_tags_returns_distinct_tags() {
+        let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
+
+        let mut entry1 = make_entry("kn-t1", "pattern", "Entry 1");
+        entry1.tags = vec!["rust".to_string(), "async".to_string()];
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let mut entry2 = make_entry("kn-t2", "technique", "Entry 2");
+        entry2.tags = vec!["rust".to_string(), "error-handling".to_string()];
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags, vec!["async", "error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_with_category_filter() {
+        let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
+
+        let mut entry1 = make_entry("kn-t1", "pattern", "Pattern Entry");
+        entry1.tags = vec!["rust".to_string(), "async".to_string()];
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let mut entry2 = make_entry("kn-t2", "technique", "Technique Entry");
+        entry2.tags = vec!["rust".to_string(), "error-handling".to_string()];
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let pattern_tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert_eq!(pattern_tags.len(), 2);
+        assert_eq!(pattern_tags, vec!["async", "rust"]);
+
+        let technique_tags = db.list_all_tags(Some("technique")).unwrap();
+        assert_eq!(technique_tags.len(), 2);
+        assert_eq!(technique_tags, vec!["error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_empty_database() {
+        let db = Database::open_in_memory().unwrap();
+        seed_test_db(&db);
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert!(tags.is_empty());
+
+        let tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert!(tags.is_empty());
     }
 }
