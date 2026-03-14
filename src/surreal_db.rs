@@ -4684,4 +4684,80 @@ mod tests {
             "High-resonance ephemeral entry should appear in all-types query"
         );
     }
+
+    // =========================================================================
+    // list_all_tags TESTS (PR #147)
+    // =========================================================================
+
+    fn make_tagged_entry(
+        id: &str,
+        category: &str,
+        tags: Vec<String>,
+    ) -> crate::knowledge::KnowledgeEntry {
+        let mut entry = make_test_entry(id, 5, 0.0);
+        entry.category_id = category.to_string();
+        entry.tags = tags;
+        entry
+    }
+
+    #[test]
+    fn test_list_all_tags_returns_distinct_tags() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag1",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag2",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags, vec!["async", "error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_with_category_filter() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag3",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag4",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let pattern_tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert_eq!(pattern_tags.len(), 2);
+        assert_eq!(pattern_tags, vec!["async", "rust"]);
+
+        let technique_tags = db.list_all_tags(Some("technique")).unwrap();
+        assert_eq!(technique_tags.len(), 2);
+        assert_eq!(technique_tags, vec!["error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_empty_database() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert!(tags.is_empty());
+
+        let tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert!(tags.is_empty());
+    }
 }
