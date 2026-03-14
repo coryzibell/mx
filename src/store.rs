@@ -236,9 +236,6 @@ pub trait KnowledgeStore {
     /// Set tags for an entry (replaces all)
     fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()>;
 
-    /// List all distinct tags, optionally filtered by category
-    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>>;
-
     // =========================================================================
     // APPLICABILITY OPERATIONS
     // =========================================================================

@@ -2058,45 +2058,6 @@ impl SurrealDatabase {
         Ok(tags)
     }
 
-    /// List all distinct tag names, optionally filtered by category
-    pub fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
-        Self::runtime().block_on(self.list_all_tags_async(category.map(|s| s.to_string())))
-    }
-
-    async fn list_all_tags_async(&self, category: Option<String>) -> Result<Vec<String>> {
-        let mut tags = if let Some(cat) = category {
-            // Traverse from tag side: find tags whose knowledge entries belong to the category.
-            // Filtering via `WHERE in.category = ...` on a graph edge table does not work in
-            // SurrealDB 2.x — the predicate matches nothing even though the field is present.
-            // Reverse traversal through the tag record works correctly.
-            let mut response = with_db!(self, db, {
-                db.query(
-                    "SELECT VALUE name FROM tag \
-                     WHERE <-tagged_with<-knowledge.category CONTAINS type::thing('category', $cat)",
-                )
-                .bind(("cat", cat))
-                .await
-                .context("Failed to list tags by category")
-            })?;
-            let tags: Vec<String> = response.take(0).unwrap_or_default();
-            tags
-        } else {
-            // Only return tags that are actually in use (have at least one incoming edge).
-            // The previous query used `array::distinct(out.name)` on the edge table, but
-            // `out.name` is a scalar string per row — array::distinct expects an array and errors.
-            let mut response = with_db!(self, db, {
-                db.query("SELECT VALUE name FROM tag WHERE <-tagged_with")
-                    .await
-                    .context("Failed to list all tags")
-            })?;
-            let tags: Vec<String> = response.take(0).unwrap_or_default();
-            tags
-        };
-
-        tags.sort();
-        Ok(tags)
-    }
-
     /// List all applicability types
     pub fn list_applicability_types(&self) -> Result<Vec<ApplicabilityType>> {
         Self::runtime().block_on(self.list_applicability_types_async())
@@ -3391,10 +3352,6 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
         self.set_tags_for_entry(entry_id, tags)
-    }
-
-    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
-        self.list_all_tags(category)
     }
 
     fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
