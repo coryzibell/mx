@@ -1401,9 +1401,7 @@ impl SurrealDatabase {
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
             format: serde_json::from_value(obj["format"].clone())
                 .unwrap_or_else(|_| "markdown".to_string()),
-            effective_resonance: obj
-                .get("effective_resonance")
-                .and_then(|v| v.as_f64()),
+            effective_resonance: obj.get("effective_resonance").and_then(|v| v.as_f64()),
         })
     }
 

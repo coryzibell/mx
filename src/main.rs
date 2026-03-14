@@ -4019,7 +4019,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     // fall back to raw resonance for SQLite entries that lack it.
                     let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
                     let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
-                    b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+                    b_val
+                        .partial_cmp(&a_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
             // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
