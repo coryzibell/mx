@@ -671,12 +671,16 @@ impl SurrealDatabase {
     }
 
     /// Test helper - open temporary database
+    ///
+    /// Forces embedded mode regardless of `MX_SURREAL_MODE` env var,
+    /// so tests never hit the live database.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         use tempfile::tempdir;
 
         let temp_dir = tempdir()?;
-        Self::open(temp_dir.path())
+        let config = SurrealConfig::default(); // always Embedded
+        Self::connect(temp_dir.path(), &config)
     }
 
     /// Get reference to underlying Surreal instance (embedded only)
