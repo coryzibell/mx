@@ -2698,6 +2698,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 };
 
                 // Insert the fact
@@ -2866,6 +2867,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 embedding_model: None,
                 embedded_at: None,
                 format: "markdown".to_string(),
+                effective_resonance: None,
             };
 
             // Insert into database (applicability already set in struct)
@@ -3977,12 +3979,26 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
+            // Warn when resonance-dependent flags are used with the SQLite backend,
+            // which hardcodes resonance: 0 and has no decay computation.
+            let is_sqlite = !matches!(
+                std::env::var("MX_MEMORY_BACKEND").as_deref(),
+                Ok("surrealdb") | Ok("surreal")
+            );
+            if is_sqlite && sort == "resonance" {
+                eprintln!(
+                    "warning: --sort resonance uses the SQLite backend, which does not support \
+                     resonance decay computation. Results will sort by raw resonance (always 0). \
+                     Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
+                );
+            }
+
             // Note: Listing doesn't activate facts - bulk view != focused access
             // Decide which query to use:
-            //   --resonance-type <x>  => use ephemeral query then filter to <x>
-            //   --all-types           => query all resonance types
+            //   --all-types           => query all resonance types (takes priority)
             //   (default)             => ephemeral only (backwards compatible)
-            let mut facts = if all_types && resonance_type.is_none() {
+            // --resonance-type filter is applied post-query in both cases.
+            let mut facts = if all_types {
                 db.query_recent_facts_all_types(days)?
             } else {
                 db.query_recent_facts(days)?
@@ -3993,19 +4009,21 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
             }
 
-            // Apply sort: "resonance" sorts highest-first; default is chronological
-            // (query_recent_facts already returns decay-ordered; query_recent_facts_all_types
-            // also returns decay-ordered. Chronological sort re-orders by created_at desc.)
+            // Apply sort: "resonance" sorts by effective_resonance (decay-adjusted) highest-first.
+            // DB already returns entries ORDER BY effective_resonance DESC; the default path
+            // preserves that ordering rather than re-sorting, so a resonance-9 from 6 months
+            // ago does not outrank a resonance-7 from yesterday.
             if sort == "resonance" {
                 facts.sort_by(|a, b| {
-                    b.resonance
-                        .partial_cmp(&a.resonance)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    // Sort by effective_resonance (decay-adjusted) when available;
+                    // fall back to raw resonance for SQLite entries that lack it.
+                    let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
+                    let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
+                    b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
                 });
-            } else {
-                // Chronological: most recent first
-                facts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             }
+            // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
+            // created_at DESC from SQLite). No re-sort needed.
 
             // Apply limit
             facts.truncate(limit);

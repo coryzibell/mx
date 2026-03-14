@@ -327,6 +327,7 @@ impl SurrealKnowledgeRecord {
             embedding_model: self.embedding_model,
             embedded_at: self.embedded_at,
             format: self.format,
+            effective_resonance: None,
         }
     }
 }
@@ -1400,6 +1401,9 @@ impl SurrealDatabase {
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
             format: serde_json::from_value(obj["format"].clone())
                 .unwrap_or_else(|_| "markdown".to_string()),
+            effective_resonance: obj
+                .get("effective_resonance")
+                .and_then(|v| v.as_f64()),
         })
     }
 
@@ -3727,6 +3731,7 @@ mod tests {
             embedding_model: None,
             embedded_at: None,
             format: "markdown".to_string(),
+            effective_resonance: None,
         }
     }
 

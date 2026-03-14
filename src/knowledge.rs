@@ -96,6 +96,12 @@ pub struct KnowledgeEntry {
     // Stele encoding format (Issue #122)
     #[serde(default = "default_format")]
     pub format: String, // markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
+
+    // Computed decay value from SurrealDB (effective_resonance = resonance * decay factor).
+    // None for SQLite backend (no decay support). Use this for resonance-sorted display;
+    // raw `resonance` does not account for age.
+    #[serde(default)]
+    pub effective_resonance: Option<f64>,
 }
 
 fn default_format() -> String {
@@ -310,6 +316,7 @@ impl KnowledgeEntry {
             embedded_at: None,
             // Format - markdown files are markdown
             format: "markdown".to_string(),
+            effective_resonance: None,
         })
     }
 }
@@ -538,6 +545,7 @@ Body"#;
             embedding_model: None,
             embedded_at: None,
             format: "markdown".to_string(),
+            effective_resonance: None,
         };
 
         let text = entry.embedding_text();
@@ -582,6 +590,7 @@ Body"#;
             embedding_model: None,
             embedded_at: None,
             format: "markdown".to_string(),
+            effective_resonance: None,
         };
 
         let text = entry.embedding_text();
