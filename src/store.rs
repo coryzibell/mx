@@ -174,10 +174,6 @@ pub trait KnowledgeStore {
     /// Query recent ephemeral facts with decay computation
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
 
-    /// Query recent facts across ALL resonance types (ephemeral, foundational, transformative, etc.)
-    /// with decay computation. Foundational/transformative entries are exempt from decay.
-    fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
-
     /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
     ///
     /// # Arguments
