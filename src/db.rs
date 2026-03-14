@@ -295,6 +295,7 @@ impl Database {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -359,6 +360,7 @@ impl Database {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -421,6 +423,7 @@ impl Database {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -482,6 +485,7 @@ impl Database {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 })
             })
             .ok();
@@ -1406,11 +1410,85 @@ impl KnowledgeStore for Database {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         // Load tags for each entry
+        for entry in &mut entries {
+            entry.tags = self.get_tags_for_entry(&entry.id)?;
+            entry.applicability = self.get_applicability_for_entry(&entry.id)?;
+        }
+
+        Ok(entries)
+    }
+
+    fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // SQLite backend: graceful degradation - return recent entries across all resonance types
+        // (no decay computation; ordered by created_at desc).
+        // Warn: --all-types and --sort resonance require SurrealDB for decay-aware results.
+        eprintln!(
+            "warning: --all-types uses the SQLite backend, which does not support resonance \
+             decay computation. Results are ordered by created_at. \
+             Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
+        );
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT id, category_id, title, body, summary,
+                   source_project_id, source_agent_id, file_path,
+                   created_at, updated_at, content_hash,
+                   source_type_id, entry_type_id, session_id, ephemeral, content_type_id
+            FROM knowledge
+            WHERE created_at > ?1
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let mut entries = stmt
+            .query_map(params![cutoff_str], |row| {
+                Ok(KnowledgeEntry {
+                    id: row.get(0)?,
+                    category_id: row.get(1)?,
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    summary: row.get(4)?,
+                    applicability: vec![],
+                    source_project_id: row.get(5)?,
+                    source_agent_id: row.get(6)?,
+                    file_path: row.get(7)?,
+                    tags: vec![],
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                    content_hash: row.get(10)?,
+                    source_type_id: row.get(11)?,
+                    entry_type_id: row.get(12)?,
+                    session_id: row.get(13)?,
+                    ephemeral: row.get::<_, i32>(14)? != 0,
+                    content_type_id: row.get(15)?,
+                    owner: None,
+                    visibility: "public".to_string(),
+                    resonance: 0,
+                    resonance_type: None,
+                    last_activated: None,
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                    format: "markdown".to_string(),
+                    effective_resonance: None,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
         for entry in &mut entries {
             entry.tags = self.get_tags_for_entry(&entry.id)?;
             entry.applicability = self.get_applicability_for_entry(&entry.id)?;
@@ -1734,6 +1812,7 @@ mod tests {
             embedding_model: None,
             embedded_at: None,
             format: "markdown".to_string(),
+            effective_resonance: None,
         }
     }
 
