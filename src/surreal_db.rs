@@ -746,6 +746,11 @@ impl SurrealDatabase {
     ///   resonance 4-5   -> 5%/week  (base 0.95)
     ///   resonance 6+    -> 2.5%/week (base 0.975)
     /// foundational/transformative entries are exempt from decay (effective_resonance = resonance).
+    ///
+    /// All other resonance types -- including `session`, `ephemeral`, `relational`,
+    /// and `operational` -- are subject to decay. `session` entries intentionally decay
+    /// like ephemeral: they represent per-session context that should lose salience over
+    /// time rather than persist at full resonance indefinitely.
     fn effective_resonance_expr() -> &'static str {
         "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
          ELSE resonance * math::pow(\

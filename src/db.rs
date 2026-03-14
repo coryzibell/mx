@@ -1427,12 +1427,8 @@ impl KnowledgeStore for Database {
     fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
         // SQLite backend: graceful degradation - return recent entries across all resonance types
         // (no decay computation; ordered by created_at desc).
-        // Warn: --all-types and --sort resonance require SurrealDB for decay-aware results.
-        eprintln!(
-            "warning: --all-types uses the SQLite backend, which does not support resonance \
-             decay computation. Results are ordered by created_at. \
-             Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
-        );
+        // Note: the caller (main.rs) already warns when --sort resonance is used on SQLite;
+        // we intentionally do NOT warn here to avoid duplicate warnings.
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
         let cutoff_str = cutoff.to_rfc3339();
 

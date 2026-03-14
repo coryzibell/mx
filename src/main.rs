@@ -21,7 +21,7 @@ mod wake_ritual;
 mod wake_token;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::index::{
     IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
@@ -491,6 +491,15 @@ fn normalize_id(id: &str) -> String {
     } else {
         format!("kn-{}", id)
     }
+}
+
+/// Sort order for `memory recent` results.
+#[derive(Clone, Debug, ValueEnum)]
+enum RecentSortOrder {
+    /// Sort by creation time (most recent first)
+    Chronological,
+    /// Sort by effective resonance (highest first, decay-adjusted)
+    Resonance,
 }
 
 #[derive(Subcommand)]
@@ -1087,13 +1096,14 @@ enum MemoryCommands {
         resonance_type: Option<String>,
 
         /// Surface all resonance types (blooms, patterns, insights, decisions, ephemeral, etc.)
-        /// instead of ephemeral-only. Ignored if --resonance-type is set.
+        /// instead of ephemeral-only. Can be combined with --resonance-type to filter within
+        /// the broader set.
         #[arg(long)]
         all_types: bool,
 
         /// Sort order: "chronological" (default) or "resonance" (highest first)
-        #[arg(long, default_value = "chronological")]
-        sort: String,
+        #[arg(long, value_enum, default_value_t = RecentSortOrder::Chronological)]
+        sort: RecentSortOrder,
 
         /// Maximum number of results
         #[arg(long, default_value = "100")]
@@ -4024,7 +4034,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 std::env::var("MX_MEMORY_BACKEND").as_deref(),
                 Ok("surrealdb") | Ok("surreal")
             );
-            if is_sqlite && sort == "resonance" {
+            if is_sqlite && matches!(sort, RecentSortOrder::Resonance) {
                 eprintln!(
                     "warning: --sort resonance uses the SQLite backend, which does not support \
                      resonance decay computation. Results will sort by raw resonance (always 0). \
@@ -4033,9 +4043,14 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Note: Listing doesn't activate facts - bulk view != focused access
+            // Auto-enable all_types when --resonance-type is set, otherwise the
+            // default ephemeral-only query would silently return nothing for
+            // non-ephemeral types (e.g. `--resonance-type foundational`).
+            let all_types = all_types || resonance_type.is_some();
+
             // Decide which query to use:
-            //   --all-types           => query all resonance types (takes priority)
-            //   (default)             => ephemeral only (backwards compatible)
+            //   --all-types (or --resonance-type) => query all resonance types
+            //   (default)                         => ephemeral only (backwards compatible)
             // --resonance-type filter is applied post-query in both cases.
             let mut facts = if all_types {
                 db.query_recent_facts_all_types(days)?
@@ -4052,7 +4067,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // DB already returns entries ORDER BY effective_resonance DESC; the default path
             // preserves that ordering rather than re-sorting, so a resonance-9 from 6 months
             // ago does not outrank a resonance-7 from yesterday.
-            if sort == "resonance" {
+            if matches!(sort, RecentSortOrder::Resonance) {
                 facts.sort_by(|a, b| {
                     // Sort by effective_resonance (decay-adjusted) when available;
                     // fall back to raw resonance for SQLite entries that lack it.
