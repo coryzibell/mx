@@ -174,6 +174,10 @@ pub trait KnowledgeStore {
     /// Query recent ephemeral facts with decay computation
     fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Query recent facts across ALL resonance types (ephemeral, foundational, transformative, etc.)
+    /// with decay computation. Foundational/transformative entries are exempt from decay.
+    fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
+
     /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
     ///
     /// # Arguments
@@ -235,6 +239,9 @@ pub trait KnowledgeStore {
 
     /// Set tags for an entry (replaces all)
     fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()>;
+
+    /// List all distinct tags, optionally filtered by category
+    fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>>;
 
     // =========================================================================
     // APPLICABILITY OPERATIONS

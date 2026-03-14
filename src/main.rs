@@ -445,6 +445,10 @@ struct EntryFilter {
     /// Limit number of results
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Filter by tags (can specify multiple: soren,kade) (matches any)
+    #[arg(long, value_delimiter = ',')]
+    tags: Option<Vec<String>>,
 }
 
 /// Apply in-memory field presence filters to a list of entries
@@ -463,6 +467,12 @@ fn apply_entry_filters(
         })
         .filter(|e| {
             !filter.missing_resonance_type || e.resonance_type.as_ref().is_none_or(|s| s.is_empty())
+        })
+        .filter(|e| {
+            filter
+                .tags
+                .as_ref()
+                .is_none_or(|filter_tags| filter_tags.iter().any(|t| e.tags.contains(t)))
         })
         .collect();
 
@@ -628,7 +638,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -739,7 +749,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Update resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Update resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -957,6 +967,12 @@ enum MemoryCommands {
         command: CategoriesCommands,
     },
 
+    /// Query tags used in memory entries
+    Tags {
+        #[command(subcommand)]
+        command: TagsCommands,
+    },
+
     /// Manage source types
     SourceTypes {
         #[command(subcommand)]
@@ -1066,9 +1082,18 @@ enum MemoryCommands {
         #[arg(long, default_value = "text", hide = true)]
         format: String,
 
-        /// Filter by resonance type (e.g., ephemeral)
+        /// Filter by resonance type (e.g., ephemeral). When omitted without --all-types, defaults to ephemeral only.
         #[arg(long)]
         resonance_type: Option<String>,
+
+        /// Surface all resonance types (blooms, patterns, insights, decisions, ephemeral, etc.)
+        /// instead of ephemeral-only. Ignored if --resonance-type is set.
+        #[arg(long)]
+        all_types: bool,
+
+        /// Sort order: "chronological" (default) or "resonance" (highest first)
+        #[arg(long, default_value = "chronological")]
+        sort: String,
 
         /// Maximum number of results
         #[arg(long, default_value = "100")]
@@ -1399,6 +1424,20 @@ enum CategoriesCommands {
     Remove {
         /// Category ID to remove
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TagsCommands {
+    /// List all tags (optionally filter by category)
+    List {
+        /// Filter to tags used in a specific category
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2313,12 +2352,17 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut provider = FastEmbedProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
-                db.semantic_search(
-                    &query_embedding,
-                    &ctx,
-                    &db_filter,
-                    filter.limit.unwrap_or(20),
-                )?
+                // When --tags is present the in-memory filter will thin the DB results.
+                // Over-fetch (5x) so the tag filter has enough candidates to return the
+                // requested number of entries.
+                let requested_limit = filter.limit.unwrap_or(20);
+                let db_limit = if filter.tags.is_some() {
+                    requested_limit * 5
+                } else {
+                    requested_limit
+                };
+
+                db.semantic_search(&query_embedding, &ctx, &db_filter, db_limit)?
             } else {
                 db.search(&query, &ctx, &db_filter)?
             };
@@ -2689,6 +2733,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 };
 
                 // Insert the fact
@@ -2807,6 +2852,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&rtype.as_str()) {
                     bail!(
@@ -2857,6 +2903,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 embedding_model: None,
                 embedded_at: None,
                 format: "markdown".to_string(),
+                effective_resonance: None,
             };
 
             // Insert into database (applicability already set in struct)
@@ -3090,6 +3137,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&new_type.as_str()) {
                     bail!(
@@ -3827,6 +3875,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
         MemoryCommands::Categories { command } => handle_categories(command, &config)?,
 
+        MemoryCommands::Tags { command } => handle_tags(command, &config)?,
+
         MemoryCommands::SourceTypes { command } => handle_source_types(command, &config)?,
 
         MemoryCommands::EntryTypes { command } => handle_entry_types(command, &config)?,
@@ -3962,18 +4012,59 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             json,
             format,
             resonance_type,
+            all_types,
+            sort,
             limit,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
-            // Note: Listing doesn't activate facts - bulk view != focused access
-            // Query recent facts with decay
-            let mut facts = db.query_recent_facts(days)?;
+            // Warn when resonance-dependent flags are used with the SQLite backend,
+            // which hardcodes resonance: 0 and has no decay computation.
+            let is_sqlite = !matches!(
+                std::env::var("MX_MEMORY_BACKEND").as_deref(),
+                Ok("surrealdb") | Ok("surreal")
+            );
+            if is_sqlite && sort == "resonance" {
+                eprintln!(
+                    "warning: --sort resonance uses the SQLite backend, which does not support \
+                     resonance decay computation. Results will sort by raw resonance (always 0). \
+                     Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
+                );
+            }
 
-            // Filter by resonance_type if provided
+            // Note: Listing doesn't activate facts - bulk view != focused access
+            // Decide which query to use:
+            //   --all-types           => query all resonance types (takes priority)
+            //   (default)             => ephemeral only (backwards compatible)
+            // --resonance-type filter is applied post-query in both cases.
+            let mut facts = if all_types {
+                db.query_recent_facts_all_types(days)?
+            } else {
+                db.query_recent_facts(days)?
+            };
+
+            // Filter by resonance_type if provided (works with both code paths)
             if let Some(ref rtype) = resonance_type {
                 facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
             }
+
+            // Apply sort: "resonance" sorts by effective_resonance (decay-adjusted) highest-first.
+            // DB already returns entries ORDER BY effective_resonance DESC; the default path
+            // preserves that ordering rather than re-sorting, so a resonance-9 from 6 months
+            // ago does not outrank a resonance-7 from yesterday.
+            if sort == "resonance" {
+                facts.sort_by(|a, b| {
+                    // Sort by effective_resonance (decay-adjusted) when available;
+                    // fall back to raw resonance for SQLite entries that lack it.
+                    let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
+                    let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
+                    b_val
+                        .partial_cmp(&a_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
+            // created_at DESC from SQLite). No re-sort needed.
 
             // Apply limit
             facts.truncate(limit);
@@ -4578,6 +4669,49 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
                 }
                 Err(e) => {
                     return Err(e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_tags(cmd: TagsCommands, config: &IndexConfig) -> Result<()> {
+    let db = store::create_store(&config.db_path)?;
+
+    match cmd {
+        TagsCommands::List { category, json } => {
+            // Validate category if provided
+            if let Some(ref cat) = category
+                && db.get_category(cat)?.is_none()
+            {
+                let categories = db.list_categories()?;
+                let valid_ids: Vec<&str> = categories.iter().map(|c| c.id.as_str()).collect();
+                bail!(
+                    "Unknown category '{}'. Valid categories: {}",
+                    cat,
+                    valid_ids.join(", ")
+                );
+            }
+
+            let tags = db.list_all_tags(category.as_deref())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&tags)?);
+            } else if tags.is_empty() {
+                if let Some(cat) = &category {
+                    println!("No tags found in category '{}'", cat);
+                } else {
+                    println!("No tags found");
+                }
+            } else {
+                if let Some(cat) = &category {
+                    println!("Tags in category '{}':\n", cat);
+                } else {
+                    println!("All tags:\n");
+                }
+                for tag in tags {
+                    println!("  {}", tag);
                 }
             }
         }
