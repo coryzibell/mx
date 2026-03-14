@@ -628,7 +628,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -739,7 +739,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Update resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Update resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -2817,6 +2817,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&rtype.as_str()) {
                     bail!(
@@ -3101,6 +3102,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&new_type.as_str()) {
                     bail!(
