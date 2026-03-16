@@ -920,7 +920,7 @@ enum MemoryCommands {
         verbose: bool,
     },
 
-    /// Apply database schema migrations
+    /// Show database schema status
     Migrate {
         /// Show migration status (list tables)
         #[arg(long)]
@@ -3819,26 +3819,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Migrate { status } => {
-            if status {
-                // Show current tables
-                let db = store::create_store(&config.db_path)?;
-                let tables: Vec<String> = db.list_tables()?;
-                println!("Database tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
-            } else {
-                let db = store::create_store(&config.db_path)?;
-                println!("SurrealDB backend at {:?}", config.db_path);
-                println!("Schema applied successfully");
+        MemoryCommands::Migrate { status: _ } => {
+            let db = store::create_store(&config.db_path)?;
+            println!("SurrealDB backend at {:?}", config.db_path);
+            println!("Schema is current.");
 
-                // Show what exists now
-                let tables = db.list_tables()?;
-                println!("\nCurrent tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
+            let tables: Vec<String> = db.list_tables()?;
+            println!("\nTables:");
+            for table in tables {
+                println!("  {}", table);
             }
         }
 
