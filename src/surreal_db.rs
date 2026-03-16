@@ -11,12 +11,12 @@ use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
-use crate::db::{
+use crate::knowledge::KnowledgeEntry;
+use crate::store::KnowledgeStore;
+use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };
-use crate::knowledge::KnowledgeEntry;
-use crate::store::KnowledgeStore;
 
 // ============================================================================
 // CONNECTION MODE CONFIGURATION
@@ -361,7 +361,7 @@ fn normalize_datetime(s: &str) -> String {
         return s.to_string();
     }
 
-    // SQLite format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
+    // Space-separated format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
     if s.contains(' ') && !s.contains('T') {
         return s.replace(' ', "T") + "Z";
     }
@@ -3668,7 +3668,7 @@ mod tests {
 
     #[test]
     fn test_upsert_applicability_type_with_datetime() {
-        use crate::db::ApplicabilityType;
+        use crate::types::ApplicabilityType;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3687,7 +3687,7 @@ mod tests {
 
     #[test]
     fn test_upsert_project_with_datetime() {
-        use crate::db::Project;
+        use crate::types::Project;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3710,7 +3710,7 @@ mod tests {
 
     #[test]
     fn test_upsert_agent_with_datetime() {
-        use crate::db::Agent;
+        use crate::types::Agent;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 

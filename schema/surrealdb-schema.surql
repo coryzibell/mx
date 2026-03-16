@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Memory Knowledge Base - SurrealDB Schema
 -- Version: 1.0
--- Migrated from SQLite v5
+-- SurrealDB-native schema
 -- =============================================================================
 
 -- Use namespace and database

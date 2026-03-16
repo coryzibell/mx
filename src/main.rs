@@ -4,7 +4,6 @@ mod codex;
 mod commit;
 mod content_ops;
 mod convert;
-mod db;
 mod doctor;
 mod embeddings;
 mod engage;
@@ -17,6 +16,7 @@ mod store;
 mod surreal_db;
 mod sync;
 mod tensor;
+mod types;
 mod wake_ritual;
 mod wake_token;
 
@@ -920,20 +920,8 @@ enum MemoryCommands {
         verbose: bool,
     },
 
-    /// Apply database schema migrations
-    Migrate {
-        /// Show migration status (list tables)
-        #[arg(long)]
-        status: bool,
-
-        /// Source database path (SQLite file path)
-        #[arg(long)]
-        from: Option<String>,
-
-        /// Target database type (currently only "surrealdb")
-        #[arg(long)]
-        to: Option<String>,
-    },
+    /// Show database schema status
+    Migrate,
 
     /// Manage agents registry
     Agents {
@@ -2159,19 +2147,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot_product / (magnitude_a * magnitude_b)
 }
 
-/// Auto-embed a knowledge entry if in network SurrealDB mode
+/// Auto-embed a knowledge entry after add/update
 ///
 /// This silently generates and updates the embedding for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
     use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
-
-    // Only auto-embed in SurrealDB mode
-    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
-
-    if backend != "surrealdb" && backend != "surreal" {
-        return Ok(()); // Not SurrealDB, skip
-    }
 
     // Get agent context for fetching the entry
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -2206,23 +2186,15 @@ fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
     Ok(())
 }
 
-/// Auto-anchor a knowledge entry if in SurrealDB mode
+/// Auto-anchor a knowledge entry after add/update
 ///
 /// This silently finds similar entries and adds anchors for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 /// Uses defaults: threshold 0.75, max 5 anchors.
 fn auto_anchor(
     entry_id: &str,
     db: &dyn store::KnowledgeStore,
     explicitly_removed: Option<&[String]>,
 ) -> Result<()> {
-    // Only auto-anchor in SurrealDB mode
-    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
-
-    if backend != "surrealdb" && backend != "surreal" {
-        return Ok(()); // Not SurrealDB, skip
-    }
-
     // Get agent context for fetching entries
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
         Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
@@ -3843,35 +3815,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Migrate { status, from, to } => {
-            // Handle migration from SQLite to SurrealDB
-            if let (Some(source_path), Some(target_type)) = (from, to) {
-                if target_type != "surrealdb" {
-                    bail!("Only 'surrealdb' is supported as --to value");
-                }
+        MemoryCommands::Migrate => {
+            let db = store::create_store(&config.db_path)?;
+            println!("SurrealDB backend at {:?}", config.db_path);
+            println!("Schema is current.");
 
-                // Perform migration
-                perform_migration(&source_path, &config)?;
-            } else if status {
-                // Show current tables
-                let db = store::create_store(&config.db_path)?;
-                let tables: Vec<String> = db.list_tables()?;
-                println!("Database tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
-            } else {
-                // Apply migrations (schema is applied in Database::open via init_schema)
-                let db = store::create_store(&config.db_path)?;
-                println!("Applying migrations to {:?}...", config.db_path);
-                println!("Schema applied successfully");
-
-                // Show what exists now
-                let tables = db.list_tables()?;
-                println!("\nCurrent tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
+            let tables: Vec<String> = db.list_tables()?;
+            println!("\nTables:");
+            for table in tables {
+                println!("  {}", table);
             }
         }
 
@@ -4365,7 +4317,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
             domain,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let agent = db::Agent {
+            let agent = types::Agent {
                 id: id.clone(),
                 description: Some(description.clone()),
                 domain: Some(domain.clone()),
@@ -4449,7 +4401,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 if let Some((frontmatter, _body)) = parse_frontmatter(&content)
                     && let Ok(agent_data) = serde_yaml::from_str::<AgentFrontmatter>(&frontmatter)
                 {
-                    let agent = db::Agent {
+                    let agent = types::Agent {
                         id: agent_data.name.clone(),
                         description: Some(agent_data.description.clone()),
                         domain: agent_data.domain,
@@ -4512,7 +4464,7 @@ fn handle_projects(cmd: ProjectsCommands, config: &IndexConfig) -> Result<()> {
             description,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let project = db::Project {
+            let project = types::Project {
                 id: id.clone(),
                 name: name.clone(),
                 path,
@@ -4558,7 +4510,7 @@ fn handle_applicability(cmd: ApplicabilityCommands, config: &IndexConfig) -> Res
             scope,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let atype = db::ApplicabilityType {
+            let atype = types::ApplicabilityType {
                 id: id.clone(),
                 description: description.clone(),
                 scope,
@@ -4607,7 +4559,7 @@ fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
         } => {
             let now = chrono::Utc::now().to_rfc3339();
             let id = format!("sess-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            let session = db::Session {
+            let session = types::Session {
                 id: id.clone(),
                 session_type_id: session_type,
                 project_id: project,
@@ -4658,7 +4610,7 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
             }
 
             let now = chrono::Utc::now().to_rfc3339();
-            let category = db::Category {
+            let category = types::Category {
                 id: id.clone(),
                 description: description.clone(),
                 created_at: now,
@@ -5508,171 +5460,6 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     if let Some(body) = &entry.body {
         println!("{}", body);
     }
-}
-
-/// Perform migration from SQLite to SurrealDB
-fn perform_migration(source_path: &str, config: &IndexConfig) -> Result<()> {
-    use crate::db::Database;
-    use crate::store::KnowledgeStore;
-    use crate::surreal_db::SurrealDatabase;
-    use std::path::PathBuf;
-
-    // Expand ~ in source path
-    let source_path_expanded = if source_path.starts_with('~') {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        PathBuf::from(source_path.replacen('~', &home.to_string_lossy(), 1))
-    } else {
-        PathBuf::from(source_path)
-    };
-
-    println!(
-        "Migrating from {:?} to SurrealDB...\n",
-        source_path_expanded
-    );
-
-    // Open source SQLite database
-    let source_db = Database::open(&source_path_expanded).with_context(|| {
-        format!(
-            "Failed to open source database at {:?}",
-            source_path_expanded
-        )
-    })?;
-
-    // Open target SurrealDB
-    let target_path = config.db_path.with_extension("surreal");
-    let target_db: Box<dyn KnowledgeStore> = Box::new(
-        SurrealDatabase::open(&target_path)
-            .with_context(|| format!("Failed to open target database at {:?}", target_path))?,
-    );
-
-    println!("Lookup tables:");
-
-    // Migrate categories
-    let categories = source_db.list_categories()?;
-    println!("  categories: {}", categories.len());
-
-    // Migrate source types
-    let source_types = source_db.list_source_types()?;
-    println!("  source_types: {}", source_types.len());
-
-    // Migrate entry types
-    let entry_types = source_db.list_entry_types()?;
-    println!("  entry_types: {}", entry_types.len());
-
-    // Migrate content types
-    let content_types = source_db.list_content_types()?;
-    println!("  content_types: {}", content_types.len());
-
-    // Migrate session types
-    let session_types = source_db.list_session_types()?;
-    println!("  session_types: {}", session_types.len());
-
-    // Migrate relationship types
-    let relationship_types = source_db.list_relationship_types()?;
-    println!("  relationship_types: {}", relationship_types.len());
-
-    // Migrate applicability types
-    let applicability_types = source_db.list_applicability_types()?;
-    println!("  applicability_types: {}", applicability_types.len());
-    for atype in &applicability_types {
-        target_db.upsert_applicability_type(atype)?;
-    }
-
-    println!("\nEntities:");
-
-    // Migrate agents
-    let agents = source_db.list_agents()?;
-    println!("  agents: {}", agents.len());
-    for agent in &agents {
-        target_db.upsert_agent(agent)?;
-    }
-
-    // Migrate projects
-    let projects = source_db.list_projects(false)?;
-    println!("  projects: {}", projects.len());
-    for project in &projects {
-        target_db.upsert_project(project)?;
-    }
-
-    // Migrate knowledge entries
-    let mut all_knowledge = Vec::new();
-    let categories_for_knowledge = source_db.list_categories()?;
-    for category in &categories_for_knowledge {
-        let entries = source_db.list_by_category(&category.id)?;
-        all_knowledge.extend(entries);
-    }
-    println!("  knowledge: {}", all_knowledge.len());
-
-    // Count tags across all entries
-    let mut total_tags = 0;
-    for entry in &all_knowledge {
-        total_tags += entry.tags.len();
-        target_db.upsert_knowledge(entry)?;
-    }
-    println!("  tags: {}", total_tags);
-
-    // Migrate relationships
-    let mut all_relationships = Vec::new();
-    for entry in &all_knowledge {
-        let rels = source_db.list_relationships_for_entry(&entry.id)?;
-        for rel in rels {
-            // Avoid duplicates - only add if from_entry_id matches current entry
-            if rel.from_entry_id == entry.id {
-                all_relationships.push(rel);
-            }
-        }
-    }
-    println!("  relationships: {}", all_relationships.len());
-    for rel in &all_relationships {
-        target_db.add_relationship(&rel.from_entry_id, &rel.to_entry_id, &rel.relationship_type)?;
-    }
-
-    // Migrate sessions
-    let sessions = source_db.list_sessions(None)?;
-    println!("  sessions: {}", sessions.len());
-    for session in &sessions {
-        target_db.upsert_session(session)?;
-    }
-
-    println!("\nValidation:");
-
-    // Validate counts
-    let target_knowledge_count = target_db.count()?;
-    if target_knowledge_count == all_knowledge.len() {
-        println!("  ✓ Knowledge entries match: {}", target_knowledge_count);
-    } else {
-        println!(
-            "  ✗ Knowledge entries mismatch: source={}, target={}",
-            all_knowledge.len(),
-            target_knowledge_count
-        );
-    }
-
-    let target_agents = target_db.list_agents()?;
-    if target_agents.len() == agents.len() {
-        println!("  ✓ Agents match: {}", target_agents.len());
-    } else {
-        println!(
-            "  ✗ Agents mismatch: source={}, target={}",
-            agents.len(),
-            target_agents.len()
-        );
-    }
-
-    let target_projects = target_db.list_projects(false)?;
-    if target_projects.len() == projects.len() {
-        println!("  ✓ Projects match: {}", target_projects.len());
-    } else {
-        println!(
-            "  ✗ Projects mismatch: source={}, target={}",
-            projects.len(),
-            target_projects.len()
-        );
-    }
-
-    println!("\nMigration complete!");
-
-    Ok(())
 }
 
 #[cfg(test)]
