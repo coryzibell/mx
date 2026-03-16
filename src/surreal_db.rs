@@ -11,7 +11,7 @@ use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
-use crate::db::{
+use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::db::{
+use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };

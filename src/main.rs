@@ -17,6 +17,7 @@ mod store;
 mod surreal_db;
 mod sync;
 mod tensor;
+mod types;
 mod wake_ritual;
 mod wake_token;
 
