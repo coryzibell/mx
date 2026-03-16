@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::path::Path;
 
+use crate::knowledge::KnowledgeEntry;
 use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };
-use crate::knowledge::KnowledgeEntry;
 
 /// Agent context for privacy-aware queries
 #[derive(Debug, Clone)]

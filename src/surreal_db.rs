@@ -11,12 +11,12 @@ use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
+use crate::knowledge::KnowledgeEntry;
+use crate::store::KnowledgeStore;
 use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };
-use crate::knowledge::KnowledgeEntry;
-use crate::store::KnowledgeStore;
 
 // ============================================================================
 // CONNECTION MODE CONFIGURATION

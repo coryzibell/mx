@@ -5477,7 +5477,6 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
