@@ -921,11 +921,7 @@ enum MemoryCommands {
     },
 
     /// Show database schema status
-    Migrate {
-        /// Show migration status (list tables)
-        #[arg(long)]
-        status: bool,
-    },
+    Migrate,
 
     /// Manage agents registry
     Agents {
@@ -3819,7 +3815,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Migrate { status: _ } => {
+        MemoryCommands::Migrate => {
             let db = store::create_store(&config.db_path)?;
             println!("SurrealDB backend at {:?}", config.db_path);
             println!("Schema is current.");
