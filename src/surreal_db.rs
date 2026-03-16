@@ -3668,7 +3668,7 @@ mod tests {
 
     #[test]
     fn test_upsert_applicability_type_with_datetime() {
-        use crate::db::ApplicabilityType;
+        use crate::types::ApplicabilityType;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3687,7 +3687,7 @@ mod tests {
 
     #[test]
     fn test_upsert_project_with_datetime() {
-        use crate::db::Project;
+        use crate::types::Project;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3710,7 +3710,7 @@ mod tests {
 
     #[test]
     fn test_upsert_agent_with_datetime() {
-        use crate::db::Agent;
+        use crate::types::Agent;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 

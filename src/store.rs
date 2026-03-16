@@ -100,7 +100,7 @@ pub struct ReinforcementResult {
     pub activation_count: i32,
 }
 
-/// Abstract interface for knowledge storage backends (SQLite, SurrealDB, etc)
+/// Abstract interface for knowledge storage backends
 pub trait KnowledgeStore {
     // =========================================================================
     // KNOWLEDGE CRUD OPERATIONS
@@ -388,29 +388,22 @@ pub trait KnowledgeStore {
     fn list_tables(&self) -> Result<Vec<String>>;
 }
 
-/// Factory function to create appropriate store based on configuration
+/// Factory function to create the SurrealDB store
 pub fn create_store(db_path: &Path) -> Result<Box<dyn KnowledgeStore>> {
     create_store_with_verbose(db_path, false)
 }
 
 /// Factory function with verbose control
 pub fn create_store_with_verbose(db_path: &Path, verbose: bool) -> Result<Box<dyn KnowledgeStore>> {
-    // Check environment variable first
-    let backend = std::env::var("MX_MEMORY_BACKEND")
-        .ok()
-        .unwrap_or_else(|| "sqlite".to_string());
-
-    match backend.as_str() {
-        "surrealdb" | "surreal" => {
-            // Replace .db extension with .surreal directory
-            let surreal_path = db_path.with_extension("surreal");
-            Ok(Box::new(
-                crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?,
-            ))
-        }
-        _ => {
-            // Default to SQLite
-            Ok(Box::new(crate::db::Database::open(db_path)?))
+    // Warn if someone still has MX_MEMORY_BACKEND set to sqlite
+    if let Ok(backend) = std::env::var("MX_MEMORY_BACKEND") {
+        if backend == "sqlite" {
+            eprintln!("Warning: MX_MEMORY_BACKEND=sqlite is no longer supported. Using SurrealDB.");
         }
     }
+
+    let surreal_path = db_path.with_extension("surreal");
+    Ok(Box::new(
+        crate::surreal_db::SurrealDatabase::open_with_verbose(surreal_path, verbose)?,
+    ))
 }
