@@ -361,7 +361,7 @@ fn normalize_datetime(s: &str) -> String {
         return s.to_string();
     }
 
-    // SQLite format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
+    // Space-separated format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
     if s.contains(' ') && !s.contains('T') {
         return s.replace(' ', "T") + "Z";
     }
