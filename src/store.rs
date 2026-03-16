@@ -396,10 +396,11 @@ pub fn create_store(db_path: &Path) -> Result<Box<dyn KnowledgeStore>> {
 /// Factory function with verbose control
 pub fn create_store_with_verbose(db_path: &Path, verbose: bool) -> Result<Box<dyn KnowledgeStore>> {
     // Warn if someone still has MX_MEMORY_BACKEND set to a removed backend
-    if let Ok(backend) = std::env::var("MX_MEMORY_BACKEND") {
-        if backend != "surrealdb" && backend != "surreal" {
-            eprintln!("Warning: MX_MEMORY_BACKEND={backend} is not supported. Using SurrealDB.");
-        }
+    if let Ok(backend) = std::env::var("MX_MEMORY_BACKEND")
+        && backend != "surrealdb"
+        && backend != "surreal"
+    {
+        eprintln!("Warning: MX_MEMORY_BACKEND={backend} is not supported. Using SurrealDB.");
     }
 
     let surreal_path = db_path.with_extension("surreal");
