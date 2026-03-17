@@ -5540,7 +5540,7 @@ mod tests {
         // Old code: &display[..69] = byte 69 = 2 + 67, and 67 is NOT divisible
         // by 3, so byte 69 lands inside the 23rd CJK char. PANIC!
         let mut s = "ab".to_string();
-        s.extend("\u{4E16}".repeat(24).chars());
+        s.push_str(&"\u{4E16}".repeat(24));
         assert_eq!(s.chars().count(), 26);
         assert!(s.len() > 72);
         // Verify byte 69 is NOT a char boundary (the actual panic trigger)
