@@ -208,8 +208,8 @@ fn print_hint(phrase: &str, attempt: usize) {
             } else {
                 // Single word - show first few letters
                 let first_word = words[0];
-                if first_word.len() > 3 {
-                    let prefix = &first_word[..3];
+                if first_word.chars().count() > 3 {
+                    let prefix: String = first_word.chars().take(3).collect();
                     println!("  {}: \"{}...\"", "hint".yellow(), prefix);
                 }
             }

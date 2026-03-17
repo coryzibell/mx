@@ -409,8 +409,8 @@ fn generate_hint(phrase: &str, attempt: u8) -> String {
                 format!("\"{} ___\"", words[0])
             } else if !words.is_empty() {
                 let first_word = words[0];
-                if first_word.len() > 3 {
-                    let prefix = &first_word[..3];
+                if first_word.chars().count() > 3 {
+                    let prefix: String = first_word.chars().take(3).collect();
                     format!("\"{}...\"", prefix)
                 } else {
                     phrase.to_string()

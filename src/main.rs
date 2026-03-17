@@ -5102,11 +5102,7 @@ fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> Result<()> {
                 };
 
                 // Truncate for display
-                let display_truncated = if display.len() > 72 {
-                    format!("{}...", &display[..69])
-                } else {
-                    display
-                };
+                let display_truncated = safe_truncate(&display, 72);
 
                 println!("\x1b[33m{}\x1b[0m {}", hash, display_truncated);
             }
@@ -5392,11 +5388,7 @@ fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
     println!("  {} [{}]", entry.id, entry.category_id);
     println!("  {}", entry.title);
     if let Some(summary) = &entry.summary {
-        let short = if summary.len() > 80 {
-            format!("{}...", &summary[..77])
-        } else {
-            summary.clone()
-        };
+        let short = safe_truncate(summary, 80);
         println!("  {}", short);
     }
     if !entry.tags.is_empty() {
