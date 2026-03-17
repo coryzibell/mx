@@ -439,3 +439,121 @@ fn print_summary(stats: &EngageStats) {
 
     println!("{}", "─".repeat(65).cyan());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =====================================================================
+    // Regression tests for unicode boundary panic fix (PR #162)
+    //
+    // print_hint() previously used `&first_word[..3]` (byte-index slicing)
+    // for single-word wake phrases on attempt 2. Multi-byte UTF-8 characters
+    // would cause a panic when byte index 3 landed inside a character.
+    // The fix uses `.chars().take(3).collect()` instead.
+    //
+    // Since print_hint() prints to stdout, we test by directly exercising
+    // the prefix extraction logic that would have panicked.
+    // =====================================================================
+
+    #[test]
+    fn test_print_hint_emoji_prefix_would_panic() {
+        // Simulates the exact code path in print_hint for attempt=2,
+        // single word with > 3 chars.
+        //
+        // Old code: `let prefix = &first_word[..3];`
+        // Emoji are 4 bytes each. &word[..3] slices inside the first emoji. PANIC!
+        let phrase = "\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}";
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        assert_eq!(words.len(), 1); // Single word, triggers the prefix path
+
+        let first_word = words[0];
+        assert!(first_word.chars().count() > 3);
+        // Verify byte 3 is NOT a char boundary (the actual panic trigger)
+        assert!(!first_word.is_char_boundary(3));
+
+        // This is what the FIXED code does (would panic with old &first_word[..3])
+        let prefix: String = first_word.chars().take(3).collect();
+        assert_eq!(prefix.chars().count(), 3);
+        assert!(std::str::from_utf8(prefix.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_print_hint_accented_prefix_would_panic() {
+        // Accented chars like U+00E9 are 2 bytes each.
+        // 4 accented chars = 8 bytes. &word[..3] = byte 3, inside 2nd char. PANIC!
+        let phrase = "\u{00E9}\u{00E9}\u{00E9}\u{00E9}";
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        assert_eq!(words.len(), 1);
+
+        let first_word = words[0];
+        assert!(first_word.chars().count() > 3);
+        assert!(!first_word.is_char_boundary(3));
+
+        let prefix: String = first_word.chars().take(3).collect();
+        assert_eq!(prefix.chars().count(), 3);
+    }
+
+    #[test]
+    fn test_print_hint_cjk_prefix_extracts_3_chars_not_1() {
+        // CJK chars are 3 bytes. Old code: &word[..3] = first 3 bytes = 1 char.
+        // Fixed code: .chars().take(3) = 3 characters. Correctness test.
+        let phrase = "\u{4E16}\u{754C}\u{4F60}\u{597D}\u{5417}";
+        let words: Vec<&str> = phrase.split_whitespace().collect();
+        assert_eq!(words.len(), 1);
+
+        let first_word = words[0];
+        assert!(first_word.chars().count() > 3);
+
+        let prefix: String = first_word.chars().take(3).collect();
+        assert_eq!(prefix.chars().count(), 3);
+        assert_eq!(prefix, "\u{4E16}\u{754C}\u{4F60}");
+    }
+
+    #[test]
+    fn test_print_hint_does_not_panic_on_emoji_phrase() {
+        // End-to-end test: calling print_hint should not panic.
+        // attempt=2 triggers the single-word prefix path for single-word phrases.
+        let phrase = "\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}";
+        // This should not panic (it prints to stdout, we just verify no crash)
+        print_hint(phrase, 2);
+    }
+
+    #[test]
+    fn test_print_hint_does_not_panic_on_cjk_phrase() {
+        // End-to-end: single CJK word with > 3 chars
+        let phrase = "\u{4E16}\u{754C}\u{4F60}\u{597D}\u{5417}";
+        print_hint(phrase, 2);
+    }
+
+    #[test]
+    fn test_print_hint_multiword_emoji_does_not_panic() {
+        // Multi-word phrases with emoji: attempt=1 shows first word,
+        // attempt=2 with 3+ words blanks middle word.
+        let phrase = "\u{1F41F}\u{1F41F} middle \u{4E16}\u{754C}";
+        print_hint(phrase, 1);
+        print_hint(phrase, 2);
+    }
+
+    // =====================================================================
+    // Fuzzy match tests with multi-byte characters
+    // =====================================================================
+
+    #[test]
+    fn test_fuzzy_match_exact_with_emoji() {
+        let phrase = "\u{1F41F} fish \u{1F41F}";
+        match fuzzy_match(phrase, phrase) {
+            MatchResult::Exact => {} // expected
+            _ => panic!("Expected exact match for identical emoji strings"),
+        }
+    }
+
+    #[test]
+    fn test_fuzzy_match_with_cjk() {
+        let phrase = "\u{4E16}\u{754C}\u{4F60}\u{597D}";
+        match fuzzy_match(phrase, phrase) {
+            MatchResult::Exact => {} // expected
+            _ => panic!("Expected exact match for identical CJK strings"),
+        }
+    }
+}
