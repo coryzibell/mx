@@ -895,7 +895,37 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
     fs::create_dir_all(&archive_dir)?;
 
     if clean {
-        // Clean mode: generate conversation.md only — no JSONL, no images, no agents
+        // Clean mode: generate conversation.md + extract images — no JSONL, no agent file copies
+
+        // Create images directory and extract images from session content
+        let images_dir = archive_dir.join("images");
+        fs::create_dir_all(&images_dir)?;
+
+        let (_stripped_content, mut all_images) =
+            extract_images_from_jsonl(&content, &images_dir)?;
+
+        // Find associated agent sessions and extract images from them too (no file copy)
+        let agents = find_agent_sessions(session_path, &modified)?;
+        if !agents.is_empty() {
+            for agent in &agents {
+                let source_path = PathBuf::from(&agent.id);
+                if let Ok(agent_content) = fs::read_to_string(&source_path) {
+                    if let Ok((_modified_agent_content, agent_images)) =
+                        extract_images_from_jsonl(&agent_content, &images_dir)
+                    {
+                        for img in agent_images {
+                            if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                                all_images.push(img);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let image_count = all_images.len();
+
+        // Generate clean transcript
         let transcript = generate_clean_transcript(&content)?;
         fs::write(archive_dir.join("conversation.md"), &transcript)?;
 
@@ -911,8 +941,8 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
             agents: Vec::new(),
             size_bytes,
             checksum,
-            image_count: None,
-            images: None,
+            image_count: Some(image_count),
+            images: Some(all_images),
             has_clean_transcript: Some(true),
         };
 
@@ -921,6 +951,7 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
 
         println!("Archived session (clean) to: {}", archive_dir.display());
         println!("  Messages: {}", message_count);
+        println!("  Images: {}", image_count);
         println!("  Size: {} KB", size_bytes / 1024);
         println!("  conversation.md written");
 
