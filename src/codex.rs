@@ -1293,3 +1293,257 @@ fn save_all_sessions(clean: bool) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // strip_system_reminders
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn strip_single_reminder() {
+        let input = "before<system-reminder>secret</system-reminder>after";
+        assert_eq!(strip_system_reminders(input), "beforeafter");
+    }
+
+    #[test]
+    fn strip_multiple_reminders() {
+        let input =
+            "a<system-reminder>one</system-reminder>b<system-reminder>two</system-reminder>c";
+        assert_eq!(strip_system_reminders(input), "abc");
+    }
+
+    #[test]
+    fn strip_no_reminders_unchanged() {
+        let input = "just plain text with no reminders";
+        assert_eq!(strip_system_reminders(input), input);
+    }
+
+    #[test]
+    fn strip_multiline_reminder() {
+        // The regex uses (?s) so . matches newlines
+        let input = "start<system-reminder>\nline one\nline two\n</system-reminder>end";
+        assert_eq!(strip_system_reminders(input), "startend");
+    }
+
+    #[test]
+    fn strip_adjacent_reminders() {
+        // Two reminders with no gap between them
+        let input =
+            "<system-reminder>first</system-reminder><system-reminder>second</system-reminder>";
+        assert_eq!(strip_system_reminders(input), "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — helper
+    // ---------------------------------------------------------------------------
+
+    /// Build a JSONL line for a user message with string content.
+    fn user_str(text: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"content":{}}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// Build a JSONL line for a user message with array content (tool results).
+    fn user_array() -> &'static str {
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"some output"}]}}"#
+    }
+
+    /// Build a JSONL line for an assistant message with a single text block.
+    fn assistant_text(text: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}}]}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// Build a JSONL line for an assistant message with a tool_use block only.
+    fn assistant_tool_use() -> &'static str {
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#
+    }
+
+    /// Build a JSONL line for an assistant message with both text and tool_use blocks.
+    fn assistant_mixed(text: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}},{{"type":"tool_use","id":"t2","name":"Read","input":{{}}}}]}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — user string content
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn user_string_gets_geoff_prefix() {
+        let jsonl = user_str("Hello there");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** Hello there\n\n");
+    }
+
+    #[test]
+    fn user_string_content_is_trimmed() {
+        let jsonl = user_str("  spaced out  ");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** spaced out\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — user array content dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn user_array_content_is_dropped() {
+        let result = generate_clean_transcript(user_array()).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — assistant text blocks
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn assistant_text_gets_soren_prefix() {
+        let jsonl = assistant_text("Here is my answer.");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Here is my answer.\n\n");
+    }
+
+    #[test]
+    fn assistant_multiple_text_blocks_joined() {
+        // Two text blocks in one assistant message → joined with \n\n, single prefix
+        let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Part one."},{"type":"text","text":"Part two."}]}}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Part one.\n\nPart two.\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — assistant tool_use blocks dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn assistant_tool_use_only_is_dropped() {
+        let result = generate_clean_transcript(assistant_tool_use()).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn assistant_mixed_keeps_only_text() {
+        // text + tool_use block → only text survives, tool_use dropped
+        let jsonl = assistant_mixed("Thinking out loud.");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Thinking out loud.\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — system reminder stripping
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn system_reminder_stripped_from_user_content() {
+        let text = "real question<system-reminder>ignore me</system-reminder>";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** real question\n\n");
+    }
+
+    #[test]
+    fn user_content_only_reminder_is_dropped() {
+        // After stripping the reminder, content is empty → entire message dropped
+        let text = "<system-reminder>only this</system-reminder>";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn user_content_whitespace_only_after_strip_is_dropped() {
+        let text = "  <system-reminder>noise</system-reminder>  ";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — non-user/non-assistant types dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn file_history_snapshot_type_dropped() {
+        let jsonl =
+            r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn unknown_type_dropped() {
+        let jsonl = r#"{"type":"summary","data":"session summary here"}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — empty / malformed input
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn empty_input_produces_empty_output() {
+        let result = generate_clean_transcript("").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn blank_lines_skipped() {
+        let jsonl = format!("\n\n{}\n\n", user_str("hi"));
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** hi\n\n");
+    }
+
+    #[test]
+    fn malformed_jsonl_line_skipped() {
+        // A bad line followed by a valid line — bad line is silently skipped
+        let jsonl = format!("NOT JSON\n{}", user_str("valid"));
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** valid\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — mixed realistic session
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn realistic_mixed_session() {
+        // A realistic interleaving: user string, user array (tool result), assistant
+        // with tool_use only, assistant with text, unknown type, user with reminder.
+        let lines = vec![
+            user_str("Can you list the files?"),
+            user_array().to_string(),
+            assistant_tool_use().to_string(),
+            assistant_text("Here are the files: foo.rs, bar.rs."),
+            r#"{"type":"file-history-snapshot","content":"snap"}"#.to_string(),
+            user_str(
+                "Thanks<system-reminder>sys note</system-reminder>, what about tests?",
+            ),
+            assistant_mixed("I see test coverage is low."),
+        ];
+        let jsonl = lines.join("\n");
+
+        let result = generate_clean_transcript(&jsonl).unwrap();
+
+        // Expected: user string → Geoff, tool result → dropped, assistant tool_use → dropped,
+        // assistant text → Soren, snapshot → dropped, user with reminder stripped → Geoff,
+        // assistant mixed → Soren (text only)
+        let expected = concat!(
+            "**Geoff:** Can you list the files?\n\n",
+            "**Soren:** Here are the files: foo.rs, bar.rs.\n\n",
+            "**Geoff:** Thanks, what about tests?\n\n",
+            "**Soren:** I see test coverage is low.\n\n",
+        );
+        assert_eq!(result, expected);
+    }
+}
