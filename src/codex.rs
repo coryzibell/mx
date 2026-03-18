@@ -16,9 +16,8 @@ const SOREN_PREFIX: &str = "**Soren:**";
 static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
 
 fn system_reminder_re() -> &'static Regex {
-    SYSTEM_REMINDER_RE.get_or_init(|| {
-        Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap()
-    })
+    SYSTEM_REMINDER_RE
+        .get_or_init(|| Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap())
 }
 
 /// Manifest metadata for an archived session
@@ -673,7 +672,10 @@ fn save_image(
         "image/gif" => "gif",
         "image/svg+xml" => "svg",
         unknown => {
-            eprintln!("Warning: unknown image media type '{}', saving as .bin", unknown);
+            eprintln!(
+                "Warning: unknown image media type '{}', saving as .bin",
+                unknown
+            );
             "bin"
         }
     };
@@ -772,7 +774,10 @@ fn migrate_clean_transcripts(
         if transcript_file.exists() {
             // Already has a clean transcript — skip
             if verbose {
-                println!("  Skipping {} (already has conversation.md)", archive.short_id);
+                println!(
+                    "  Skipping {} (already has conversation.md)",
+                    archive.short_id
+                );
             }
             continue;
         }
@@ -934,8 +939,7 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
         let images_dir = archive_dir.join("images");
         fs::create_dir_all(&images_dir)?;
 
-        let (_stripped_content, mut all_images) =
-            extract_images_from_jsonl(&content, &images_dir)?;
+        let (_stripped_content, mut all_images) = extract_images_from_jsonl(&content, &images_dir)?;
 
         // Find associated agent sessions and extract images from them too (no file copy)
         let agents = find_agent_sessions(session_path, &modified)?;
@@ -1515,8 +1519,7 @@ mod tests {
 
     #[test]
     fn file_history_snapshot_type_dropped() {
-        let jsonl =
-            r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
+        let jsonl = r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
         let result = generate_clean_transcript(jsonl).unwrap();
         assert_eq!(result, "");
     }
@@ -1567,9 +1570,7 @@ mod tests {
             assistant_tool_use().to_string(),
             assistant_text("Here are the files: foo.rs, bar.rs."),
             r#"{"type":"file-history-snapshot","content":"snap"}"#.to_string(),
-            user_str(
-                "Thanks<system-reminder>sys note</system-reminder>, what about tests?",
-            ),
+            user_str("Thanks<system-reminder>sys note</system-reminder>, what about tests?"),
             assistant_mixed("I see test coverage is low."),
         ];
         let jsonl = lines.join("\n");
