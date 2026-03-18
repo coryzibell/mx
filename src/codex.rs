@@ -735,12 +735,12 @@ fn generate_clean_transcript(session_content: &str) -> Result<String> {
                 if let Some(blocks) = msg["message"]["content"].as_array() {
                     let mut text_parts = Vec::new();
                     for block in blocks {
-                        if block["type"].as_str() == Some("text") {
-                            if let Some(text) = block["text"].as_str() {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    text_parts.push(trimmed.to_string());
-                                }
+                        if block["type"].as_str() == Some("text")
+                            && let Some(text) = block["text"].as_str()
+                        {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                text_parts.push(trimmed.to_string());
                             }
                         }
                     }
@@ -946,14 +946,13 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
         if !agents.is_empty() {
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
-                if let Ok(agent_content) = fs::read_to_string(&source_path) {
-                    if let Ok((_modified_agent_content, agent_images)) =
+                if let Ok(agent_content) = fs::read_to_string(&source_path)
+                    && let Ok((_modified_agent_content, agent_images)) =
                         extract_images_from_jsonl(&agent_content, &images_dir)
-                    {
-                        for img in agent_images {
-                            if !all_images.iter().any(|existing| existing.hash == img.hash) {
-                                all_images.push(img);
-                            }
+                {
+                    for img in agent_images {
+                        if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                            all_images.push(img);
                         }
                     }
                 }
@@ -1564,7 +1563,7 @@ mod tests {
     fn realistic_mixed_session() {
         // A realistic interleaving: user string, user array (tool result), assistant
         // with tool_use only, assistant with text, unknown type, user with reminder.
-        let lines = vec![
+        let lines = [
             user_str("Can you list the files?"),
             user_array().to_string(),
             assistant_tool_use().to_string(),
