@@ -409,8 +409,8 @@ fn generate_hint(phrase: &str, attempt: u8) -> String {
                 format!("\"{} ___\"", words[0])
             } else if !words.is_empty() {
                 let first_word = words[0];
-                if first_word.len() > 3 {
-                    let prefix = &first_word[..3];
+                if first_word.chars().count() > 3 {
+                    let prefix: String = first_word.chars().take(3).collect();
                     format!("\"{}...\"", prefix)
                 } else {
                     phrase.to_string()
@@ -420,5 +420,113 @@ fn generate_hint(phrase: &str, attempt: u8) -> String {
             }
         }
         _ => "one more try...".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =====================================================================
+    // Regression tests for unicode boundary panic fix (PR #162)
+    //
+    // generate_hint() previously used `&first_word[..3]` (byte-index slicing)
+    // on single-word wake phrases. Multi-byte UTF-8 characters at the start
+    // of the word would cause a panic when byte index 3 landed inside a
+    // character. The fix uses `.chars().take(3).collect()` instead.
+    // =====================================================================
+
+    #[test]
+    fn test_generate_hint_single_emoji_word_would_panic() {
+        // Single-word wake phrase made of emoji (4 bytes each).
+        // Old code: `&first_word[..3]` slices at byte 3, which is inside
+        // the first emoji (bytes 0..3). PANIC!
+        let phrase = "\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}";
+        assert_eq!(phrase.chars().count(), 5);
+        // Verify byte 3 is NOT a char boundary (the actual panic trigger)
+        assert!(!phrase.is_char_boundary(3));
+
+        // attempt=2 triggers the single-word prefix path
+        let result = generate_hint(phrase, 2);
+        // Should contain first 3 characters (emoji), not panic
+        let expected_prefix: String = phrase.chars().take(3).collect();
+        assert!(result.contains(&expected_prefix));
+        assert!(result.contains("..."));
+    }
+
+    #[test]
+    fn test_generate_hint_single_cjk_word_would_panic() {
+        // Single CJK word (no spaces). CJK chars are 3 bytes each.
+        // Old code: `&first_word[..3]` = first 3 bytes = exactly 1 CJK char.
+        // This actually happens to NOT panic for pure CJK (3 divides evenly),
+        // but it only takes 1 character instead of 3. The fix correctly
+        // takes 3 characters.
+        let phrase = "\u{4E16}\u{754C}\u{4F60}\u{597D}\u{5417}"; // 5 CJK chars
+        assert_eq!(phrase.chars().count(), 5);
+
+        let result = generate_hint(phrase, 2);
+        let expected_prefix: String = phrase.chars().take(3).collect();
+        assert!(result.contains(&expected_prefix));
+    }
+
+    #[test]
+    fn test_generate_hint_single_mixed_multibyte_word_would_panic() {
+        // A word starting with a 2-byte char (e.g., U+00E9 'e with acute').
+        // "\u{00E9}" is 2 bytes. "\u{00E9}abc" = "eabc", 4 chars, 5 bytes.
+        // Old code: &word[..3] = bytes 0..3, byte 2 is inside 'a' which is
+        // fine here. But "\u{00E9}\u{00E9}\u{00E9}\u{00E9}" = 4 chars, 8 bytes.
+        // &word[..3] = byte 3, inside the 2nd char (bytes 2..3). PANIC!
+        let phrase = "\u{00E9}\u{00E9}\u{00E9}\u{00E9}";
+        assert_eq!(phrase.chars().count(), 4);
+        assert_eq!(phrase.len(), 8);
+        // Byte 3 is NOT a char boundary
+        assert!(!phrase.is_char_boundary(3));
+
+        let result = generate_hint(phrase, 2);
+        let expected_prefix: String = phrase.chars().take(3).collect();
+        assert!(result.contains(&expected_prefix));
+    }
+
+    #[test]
+    fn test_generate_hint_attempt_1_first_word_with_emoji() {
+        // attempt=1 shows "starts with <first_word>..."
+        // This path was safe (uses the whole first word), but verify it
+        // still works with multi-byte characters.
+        let phrase = "\u{1F41F}\u{1F41F} hello world";
+        let result = generate_hint(phrase, 1);
+        assert!(result.contains("\u{1F41F}\u{1F41F}"));
+        assert!(result.starts_with("starts with"));
+    }
+
+    #[test]
+    fn test_generate_hint_attempt_2_multiword_with_emoji() {
+        // attempt=2 with 3+ words blanks the middle word.
+        // Should work fine with emoji words.
+        let phrase = "\u{1F41F}\u{1F41F} middle \u{4E16}\u{754C}";
+        let result = generate_hint(phrase, 2);
+        assert!(result.contains("___"));
+        // First and last words should be preserved
+        assert!(result.contains("\u{1F41F}\u{1F41F}"));
+        assert!(result.contains("\u{4E16}\u{754C}"));
+    }
+
+    #[test]
+    fn test_generate_hint_attempt_2_two_emoji_words() {
+        // attempt=2 with exactly 2 words: shows "first ___"
+        let phrase = "\u{1F41F}\u{1F41F} \u{4E16}\u{754C}";
+        let result = generate_hint(phrase, 2);
+        assert!(result.contains("\u{1F41F}\u{1F41F}"));
+        assert!(result.contains("___"));
+    }
+
+    #[test]
+    fn test_generate_hint_short_single_emoji_word() {
+        // Single word with <= 3 chars: returns the phrase as-is (no prefix).
+        let phrase = "\u{1F41F}\u{1F41F}"; // 2 chars
+        assert_eq!(phrase.chars().count(), 2);
+
+        let result = generate_hint(phrase, 2);
+        // chars().count() <= 3, so it returns phrase.to_string()
+        assert_eq!(result, phrase);
     }
 }
