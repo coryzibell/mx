@@ -7,10 +7,19 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 
 const GEOFF_PREFIX: &str = "**Geoff:**";
 const SOREN_PREFIX: &str = "**Soren:**";
+
+static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
+
+fn system_reminder_re() -> &'static Regex {
+    SYSTEM_REMINDER_RE.get_or_init(|| {
+        Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap()
+    })
+}
 
 /// Manifest metadata for an archived session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,16 +182,28 @@ pub fn read_session(
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
 
     if clean {
-        let transcript_file = archive_dir.join("conversation.md");
-        if !transcript_file.exists() {
-            anyhow::bail!(
-                "No clean transcript for archive '{}'. Re-save with --clean or run 'codex migrate --clean'.",
-                id
-            );
+        if json {
+            // Fall through to the manifest path below
+        } else {
+            let transcript_file = archive_dir.join("conversation.md");
+            if !transcript_file.exists() {
+                anyhow::bail!(
+                    "No clean transcript for archive '{}'. Re-save with --clean or run 'codex migrate --clean'.",
+                    id
+                );
+            }
+            let content = fs::read_to_string(&transcript_file)?;
+            if let Some(pattern) = grep_pattern {
+                for line in content.lines() {
+                    if line.contains(&pattern) {
+                        println!("{}", line);
+                    }
+                }
+            } else {
+                print!("{}", content);
+            }
+            return Ok(());
         }
-        let content = fs::read_to_string(&transcript_file)?;
-        print!("{}", content);
-        return Ok(());
     }
 
     if json {
@@ -648,7 +669,13 @@ fn save_image(
     let ext = match media_type {
         "image/png" => "png",
         "image/jpeg" => "jpg",
-        _ => return Err(anyhow::anyhow!("Unsupported media type: {}", media_type)),
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        unknown => {
+            eprintln!("Warning: unknown image media type '{}', saving as .bin", unknown);
+            "bin"
+        }
     };
 
     let filename = format!("{}.{}", hash, ext);
@@ -667,8 +694,7 @@ fn save_image(
 
 /// Strip <system-reminder>...</system-reminder> blocks from a string
 fn strip_system_reminders(content: &str) -> String {
-    let re = Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap();
-    re.replace_all(content, "").to_string()
+    system_reminder_re().replace_all(content, "").to_string()
 }
 
 /// Generate a clean markdown transcript from JSONL session content
@@ -927,7 +953,15 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
 
         // Generate clean transcript
         let transcript = generate_clean_transcript(&content)?;
-        fs::write(archive_dir.join("conversation.md"), &transcript)?;
+        let conversation_md_path = archive_dir.join("conversation.md");
+        fs::write(&conversation_md_path, &transcript)?;
+
+        // Compute actual archive size: conversation.md + all image files
+        let md_size = fs::metadata(&conversation_md_path)
+            .map(|m| m.len())
+            .unwrap_or(transcript.len() as u64);
+        let images_size: u64 = all_images.iter().map(|img| img.size_bytes).sum();
+        let archive_size_bytes = md_size + images_size;
 
         let manifest = Manifest {
             version: 2,
@@ -939,7 +973,7 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
             message_count,
             agent_count: 0,
             agents: Vec::new(),
-            size_bytes,
+            size_bytes: archive_size_bytes,
             checksum,
             image_count: Some(image_count),
             images: Some(all_images),
@@ -952,7 +986,7 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
         println!("Archived session (clean) to: {}", archive_dir.display());
         println!("  Messages: {}", message_count);
         println!("  Images: {}", image_count);
-        println!("  Size: {} KB", size_bytes / 1024);
+        println!("  Size: {} KB", archive_size_bytes / 1024);
         println!("  conversation.md written");
 
         return Ok(());

@@ -1266,7 +1266,7 @@ enum CodexCommands {
         json: bool,
 
         /// Read the clean markdown transcript (conversation.md)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "human", conflicts_with = "agents")]
         clean: bool,
     },
 
