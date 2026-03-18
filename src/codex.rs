@@ -791,6 +791,13 @@ fn migrate_clean_transcripts(
         needs_transcript.push(archive);
     }
 
+    // Deduplicate by short_id: multiple incremental archives (e.g.
+    // 2026-03-18-154306-c5739feb and 2026-03-18-154338-c5739feb) share the
+    // same short_id.  Keep only the archive with the highest incremental
+    // counter so the count reflects unique sessions, not archive directories.
+    needs_transcript.sort_by(|a, b| b.incremental.cmp(&a.incremental));
+    needs_transcript.dedup_by(|a, b| a.short_id == b.short_id);
+
     if needs_transcript.is_empty() {
         println!("All archives already have clean transcripts (or have no session.jsonl).");
         return Ok(());
