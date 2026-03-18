@@ -1227,6 +1227,10 @@ enum CodexCommands {
         /// Archive all unarchived sessions
         #[arg(long)]
         all: bool,
+
+        /// Save only conversation.md + manifest.json (no JSONL, no images)
+        #[arg(long)]
+        clean: bool,
     },
 
     /// List archived sessions
@@ -1260,6 +1264,10 @@ enum CodexCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Read the clean markdown transcript (conversation.md)
+        #[arg(long)]
+        clean: bool,
     },
 
     /// Search all archives for a pattern
@@ -1281,6 +1289,10 @@ enum CodexCommands {
         /// Show detailed progress
         #[arg(long)]
         verbose: bool,
+
+        /// Generate conversation.md for archives that have session.jsonl but no clean transcript
+        #[arg(long)]
+        clean: bool,
     },
 }
 
@@ -4897,8 +4909,8 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
 
 fn handle_codex(cmd: CodexCommands) -> Result<()> {
     match cmd {
-        CodexCommands::Save { path, all } => {
-            codex::save_session(path, all)?;
+        CodexCommands::Save { path, all, clean } => {
+            codex::save_session(path, all, clean)?;
             Ok(())
         }
         CodexCommands::List { all, json } => {
@@ -4911,16 +4923,21 @@ fn handle_codex(cmd: CodexCommands) -> Result<()> {
             agents,
             grep,
             json,
+            clean,
         } => {
-            codex::read_session(id, human, grep, agents, json)?;
+            codex::read_session(id, human, grep, agents, json, clean)?;
             Ok(())
         }
         CodexCommands::Search { pattern, json } => {
             codex::search_archives(pattern, json)?;
             Ok(())
         }
-        CodexCommands::Migrate { dry_run, verbose } => {
-            codex::migrate_archives(dry_run, verbose)?;
+        CodexCommands::Migrate {
+            dry_run,
+            verbose,
+            clean,
+        } => {
+            codex::migrate_archives(dry_run, verbose, clean)?;
             Ok(())
         }
     }

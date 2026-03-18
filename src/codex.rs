@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+const GEOFF_PREFIX: &str = "**Geoff:**";
+const SOREN_PREFIX: &str = "**Soren:**";
 
 /// Manifest metadata for an archived session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +31,9 @@ pub struct Manifest {
     pub image_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageInfo>>,
+    // v3 fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_clean_transcript: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,12 +53,12 @@ pub struct ImageInfo {
 }
 
 /// Archive the current session to the codex
-pub fn save_session(session_path: Option<String>, all: bool) -> Result<()> {
+pub fn save_session(session_path: Option<String>, all: bool, clean: bool) -> Result<()> {
     if all {
-        save_all_sessions()?;
+        save_all_sessions(clean)?;
     } else {
         let path = resolve_session_path(session_path)?;
-        archive_session(&path)?;
+        archive_session(&path, clean)?;
     }
     Ok(())
 }
@@ -160,9 +167,23 @@ pub fn read_session(
     grep_pattern: Option<String>,
     include_agents: bool,
     json: bool,
+    clean: bool,
 ) -> Result<()> {
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
+
+    if clean {
+        let transcript_file = archive_dir.join("conversation.md");
+        if !transcript_file.exists() {
+            anyhow::bail!(
+                "No clean transcript for archive '{}'. Re-save with --clean or run 'codex migrate --clean'.",
+                id
+            );
+        }
+        let content = fs::read_to_string(&transcript_file)?;
+        print!("{}", content);
+        return Ok(());
+    }
 
     if json {
         // Output manifest as JSON
@@ -287,7 +308,7 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
 }
 
 /// Migrate all v1 archives to v2 (extract images to files)
-pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
+pub fn migrate_archives(dry_run: bool, verbose: bool, clean: bool) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
@@ -300,6 +321,11 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
     if archives.is_empty() {
         println!("No archives found");
         return Ok(());
+    }
+
+    // --clean mode: generate conversation.md for archives that have session.jsonl but no transcript
+    if clean {
+        return migrate_clean_transcripts(&codex_dir, archives, dry_run, verbose);
     }
 
     // Find archives that need migration (version < 2 or missing version)
@@ -637,6 +663,162 @@ fn save_image(
     Ok(format!("images/{}", filename))
 }
 
+// --- Clean transcript helpers ---
+
+/// Strip <system-reminder>...</system-reminder> blocks from a string
+fn strip_system_reminders(content: &str) -> String {
+    let re = Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap();
+    re.replace_all(content, "").to_string()
+}
+
+/// Generate a clean markdown transcript from JSONL session content
+fn generate_clean_transcript(session_content: &str) -> Result<String> {
+    let mut output = String::new();
+
+    for line in session_content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let msg: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // skip malformed lines
+        };
+
+        let msg_type = match msg["type"].as_str() {
+            Some(t) => t,
+            None => continue,
+        };
+
+        match msg_type {
+            "user" => {
+                let content = &msg["message"]["content"];
+                if let Some(text) = content.as_str() {
+                    // String content: strip system reminders, skip if empty
+                    let stripped = strip_system_reminders(text);
+                    let trimmed = stripped.trim();
+                    if !trimmed.is_empty() {
+                        output.push_str(&format!("{} {}\n\n", GEOFF_PREFIX, trimmed));
+                    }
+                }
+                // Array content (tool results): skip
+            }
+            "assistant" => {
+                if let Some(blocks) = msg["message"]["content"].as_array() {
+                    let mut text_parts = Vec::new();
+                    for block in blocks {
+                        if block["type"].as_str() == Some("text") {
+                            if let Some(text) = block["text"].as_str() {
+                                let trimmed = text.trim();
+                                if !trimmed.is_empty() {
+                                    text_parts.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                    let joined = text_parts.join("\n\n");
+                    if !joined.is_empty() {
+                        output.push_str(&format!("{} {}\n\n", SOREN_PREFIX, joined));
+                    }
+                }
+            }
+            _ => {} // skip summary, tool results, etc.
+        }
+    }
+
+    Ok(output)
+}
+
+/// Generate clean transcripts for archives that have session.jsonl but no conversation.md
+fn migrate_clean_transcripts(
+    codex_dir: &Path,
+    archives: Vec<ArchiveEntry>,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
+    let mut needs_transcript = Vec::new();
+
+    for archive in archives {
+        let archive_dir = codex_dir.join(&archive.dir_name);
+        let session_file = archive_dir.join("session.jsonl");
+        let transcript_file = archive_dir.join("conversation.md");
+
+        if transcript_file.exists() {
+            // Already has a clean transcript — skip
+            if verbose {
+                println!("  Skipping {} (already has conversation.md)", archive.short_id);
+            }
+            continue;
+        }
+
+        if !session_file.exists() {
+            // Clean-only archive or missing JSONL — can't generate
+            if verbose {
+                println!(
+                    "  Skipping {} (no session.jsonl to generate from)",
+                    archive.short_id
+                );
+            }
+            continue;
+        }
+
+        needs_transcript.push(archive);
+    }
+
+    if needs_transcript.is_empty() {
+        println!("All archives already have clean transcripts (or have no session.jsonl).");
+        return Ok(());
+    }
+
+    println!(
+        "Found {} archive(s) needing clean transcript",
+        needs_transcript.len()
+    );
+
+    if dry_run {
+        println!("\n[DRY RUN MODE - No changes will be made]\n");
+        for archive in &needs_transcript {
+            println!("  Would generate conversation.md for {}", archive.short_id);
+        }
+        return Ok(());
+    }
+
+    let mut generated = 0;
+
+    for archive in &needs_transcript {
+        let archive_dir = codex_dir.join(&archive.dir_name);
+        let session_file = archive_dir.join("session.jsonl");
+        let transcript_file = archive_dir.join("conversation.md");
+        let manifest_path = archive_dir.join("manifest.json");
+
+        let session_content = fs::read_to_string(&session_file)?;
+        let transcript = generate_clean_transcript(&session_content)?;
+
+        fs::write(&transcript_file, &transcript)?;
+
+        // Update manifest to record has_clean_transcript
+        if manifest_path.exists() {
+            let manifest_content = fs::read_to_string(&manifest_path)?;
+            if let Ok(mut manifest) = serde_json::from_str::<Manifest>(&manifest_content) {
+                manifest.has_clean_transcript = Some(true);
+                let updated = serde_json::to_string_pretty(&manifest)?;
+                fs::write(&manifest_path, updated)?;
+            }
+        }
+
+        if verbose {
+            println!("  Generated conversation.md for {}", archive.short_id);
+        }
+
+        generated += 1;
+    }
+
+    println!("\n--- Migration Summary ---");
+    println!("Clean transcripts generated: {}", generated);
+
+    Ok(())
+}
+
 // --- Internal helpers ---
 
 #[derive(Debug, Clone)]
@@ -663,7 +845,7 @@ fn resolve_session_path(path: Option<String>) -> Result<PathBuf> {
     }
 }
 
-fn archive_session(session_path: &Path) -> Result<()> {
+fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -695,9 +877,6 @@ fn archive_session(session_path: &Path) -> Result<()> {
     hasher.update(&content);
     let checksum = format!("sha256:{:x}", hasher.finalize());
 
-    // Find associated agent sessions
-    let agents = find_agent_sessions(session_path, &modified)?;
-
     // Determine session start/end from file times
     let session_start: DateTime<Utc> = modified.into();
     let session_end: DateTime<Utc> = Utc::now();
@@ -713,8 +892,45 @@ fn archive_session(session_path: &Path) -> Result<()> {
 
     // Check for existing archives and determine incremental suffix
     let archive_dir = determine_archive_dir(&codex_dir, &base_name)?;
-
     fs::create_dir_all(&archive_dir)?;
+
+    if clean {
+        // Clean mode: generate conversation.md only — no JSONL, no images, no agents
+        let transcript = generate_clean_transcript(&content)?;
+        fs::write(archive_dir.join("conversation.md"), &transcript)?;
+
+        let manifest = Manifest {
+            version: 2,
+            session_id: session_id.clone(),
+            archived_at: Utc::now(),
+            session_start,
+            session_end,
+            project_path,
+            message_count,
+            agent_count: 0,
+            agents: Vec::new(),
+            size_bytes,
+            checksum,
+            image_count: None,
+            images: None,
+            has_clean_transcript: Some(true),
+        };
+
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        fs::write(archive_dir.join("manifest.json"), manifest_json)?;
+
+        println!("Archived session (clean) to: {}", archive_dir.display());
+        println!("  Messages: {}", message_count);
+        println!("  Size: {} KB", size_bytes / 1024);
+        println!("  conversation.md written");
+
+        return Ok(());
+    }
+
+    // Full mode (default): find agents, extract images, copy JSONL
+
+    // Find associated agent sessions
+    let agents = find_agent_sessions(session_path, &modified)?;
 
     // Create images directory for extracted images
     let images_dir = archive_dir.join("images");
@@ -772,6 +988,7 @@ fn archive_session(session_path: &Path) -> Result<()> {
         checksum,
         image_count: Some(image_count),
         images: Some(all_images),
+        has_clean_transcript: None,
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -981,7 +1198,7 @@ fn print_human_readable(content: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_all_sessions() -> Result<()> {
+fn save_all_sessions(clean: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let projects_dir = home.join(".claude").join("projects");
 
@@ -1034,7 +1251,7 @@ fn save_all_sessions() -> Result<()> {
                 let session_id = name.trim_end_matches(".jsonl");
                 if !archived_ids.contains(session_id) {
                     println!("Archiving: {}", session_id);
-                    archive_session(&file_path)?;
+                    archive_session(&file_path, clean)?;
                     archived_count += 1;
                 }
             }
