@@ -114,6 +114,9 @@ DEFINE FIELD IF NOT EXISTS session ON knowledge TYPE option<record<session>>;
 
 -- Resonance fields for wake-up cascade
 DEFINE FIELD IF NOT EXISTS resonance ON knowledge TYPE int DEFAULT 0;
+-- Note: 'session' was added to resonance_type allowed values as part of the session resonance
+-- type feature (PR #148), not the tag query feature. It appears here because both changes
+-- landed in the same schema file update.
 DEFINE FIELD IF NOT EXISTS resonance_type ON knowledge TYPE option<string>
   ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral', 'session'];
 DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;

@@ -1,12 +1,24 @@
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::SystemTime;
+
+const GEOFF_PREFIX: &str = "**Geoff:**";
+const SOREN_PREFIX: &str = "**Soren:**";
+
+static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
+
+fn system_reminder_re() -> &'static Regex {
+    SYSTEM_REMINDER_RE
+        .get_or_init(|| Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").unwrap())
+}
 
 /// Manifest metadata for an archived session
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +39,9 @@ pub struct Manifest {
     pub image_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageInfo>>,
+    // v3 fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_clean_transcript: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,12 +61,17 @@ pub struct ImageInfo {
 }
 
 /// Archive the current session to the codex
-pub fn save_session(session_path: Option<String>, all: bool) -> Result<()> {
+pub fn save_session(
+    session_path: Option<String>,
+    all: bool,
+    clean: bool,
+    include_agents: bool,
+) -> Result<()> {
     if all {
-        save_all_sessions()?;
+        save_all_sessions(clean, include_agents)?;
     } else {
         let path = resolve_session_path(session_path)?;
-        archive_session(&path)?;
+        archive_session(&path, clean, include_agents)?;
     }
     Ok(())
 }
@@ -160,9 +180,61 @@ pub fn read_session(
     grep_pattern: Option<String>,
     include_agents: bool,
     json: bool,
+    clean: bool,
+    clean_agents: bool,
 ) -> Result<()> {
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
+
+    if clean && !json {
+        let transcript_file = archive_dir.join("conversation.md");
+        if !transcript_file.exists() {
+            anyhow::bail!(
+                "No clean transcript for archive '{}'. Re-save with --clean or run 'codex migrate --clean'.",
+                id
+            );
+        }
+        let mut content = fs::read_to_string(&transcript_file)?;
+
+        // If --agents requested but transcript doesn't contain agent sections,
+        // attempt to generate them from agent JSONL files in the archive
+        if clean_agents && !content.contains("\n## Agent: ") {
+            let agents_dir = archive_dir.join("agents");
+            if agents_dir.exists() {
+                let mut agent_sessions = Vec::new();
+                for entry in fs::read_dir(&agents_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                        let agent_name = agent_name_from_path(&path);
+                        let agent_content = fs::read_to_string(&path)?;
+                        agent_sessions.push((agent_name, agent_content));
+                    }
+                }
+                agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+                for (agent_name, agent_content) in &agent_sessions {
+                    let agent_transcript = generate_clean_transcript(agent_content)?;
+                    if !agent_transcript.is_empty() {
+                        content.push_str(&format!(
+                            "\n---\n\n## Agent: {}\n\n{}",
+                            agent_name, agent_transcript
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(pattern) = grep_pattern {
+            for line in content.lines() {
+                if line.contains(&pattern) {
+                    println!("{}", line);
+                }
+            }
+        } else {
+            print!("{}", content);
+        }
+        return Ok(());
+    }
 
     if json {
         // Output manifest as JSON
@@ -287,7 +359,12 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
 }
 
 /// Migrate all v1 archives to v2 (extract images to files)
-pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
+pub fn migrate_archives(
+    dry_run: bool,
+    verbose: bool,
+    clean: bool,
+    include_agents: bool,
+) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
@@ -300,6 +377,11 @@ pub fn migrate_archives(dry_run: bool, verbose: bool) -> Result<()> {
     if archives.is_empty() {
         println!("No archives found");
         return Ok(());
+    }
+
+    // --clean mode: generate conversation.md for archives that have session.jsonl but no transcript
+    if clean {
+        return migrate_clean_transcripts(&codex_dir, archives, dry_run, verbose, include_agents);
     }
 
     // Find archives that need migration (version < 2 or missing version)
@@ -622,7 +704,16 @@ fn save_image(
     let ext = match media_type {
         "image/png" => "png",
         "image/jpeg" => "jpg",
-        _ => return Err(anyhow::anyhow!("Unsupported media type: {}", media_type)),
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/svg+xml" => "svg",
+        unknown => {
+            eprintln!(
+                "Warning: unknown image media type '{}', saving as .bin",
+                unknown
+            );
+            "bin"
+        }
     };
 
     let filename = format!("{}.{}", hash, ext);
@@ -635,6 +726,218 @@ fn save_image(
     }
 
     Ok(format!("images/{}", filename))
+}
+
+/// Generate a clean transcript from JSONL, including agent sub-session transcripts.
+/// Each agent's transcript is appended with a separator and heading.
+fn generate_clean_transcript_with_agents(
+    session_content: &str,
+    agent_sessions: &[(String, String)], // (agent_name, jsonl_content)
+) -> Result<String> {
+    let mut output = generate_clean_transcript(session_content)?;
+
+    for (agent_name, agent_content) in agent_sessions {
+        let agent_transcript = generate_clean_transcript(agent_content)?;
+        if !agent_transcript.is_empty() {
+            output.push_str(&format!(
+                "\n---\n\n## Agent: {}\n\n{}",
+                agent_name, agent_transcript
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+/// Extract an agent name from its filename (e.g. "agent-abc12345.jsonl" -> "abc12345")
+fn agent_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .strip_prefix("agent-")
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        })
+        .to_string()
+}
+
+// --- Clean transcript helpers ---
+
+/// Strip <system-reminder>...</system-reminder> blocks from a string
+fn strip_system_reminders(content: &str) -> String {
+    system_reminder_re().replace_all(content, "").to_string()
+}
+
+/// Generate a clean markdown transcript from JSONL session content
+fn generate_clean_transcript(session_content: &str) -> Result<String> {
+    let mut output = String::new();
+
+    for line in session_content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let msg: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // skip malformed lines
+        };
+
+        let msg_type = match msg["type"].as_str() {
+            Some(t) => t,
+            None => continue,
+        };
+
+        match msg_type {
+            "user" => {
+                let content = &msg["message"]["content"];
+                if let Some(text) = content.as_str() {
+                    // String content: strip system reminders, skip if empty
+                    let stripped = strip_system_reminders(text);
+                    let trimmed = stripped.trim();
+                    if !trimmed.is_empty() {
+                        output.push_str(&format!("{} {}\n\n", GEOFF_PREFIX, trimmed));
+                    }
+                }
+                // Array content (tool results): skip
+            }
+            "assistant" => {
+                if let Some(blocks) = msg["message"]["content"].as_array() {
+                    let mut text_parts = Vec::new();
+                    for block in blocks {
+                        if block["type"].as_str() == Some("text")
+                            && let Some(text) = block["text"].as_str()
+                        {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                text_parts.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                    let joined = text_parts.join("\n\n");
+                    if !joined.is_empty() {
+                        output.push_str(&format!("{} {}\n\n", SOREN_PREFIX, joined));
+                    }
+                }
+            }
+            _ => {} // skip summary, tool results, etc.
+        }
+    }
+
+    Ok(output)
+}
+
+/// Generate clean transcripts for archives that have session.jsonl but no conversation.md
+fn migrate_clean_transcripts(
+    codex_dir: &Path,
+    archives: Vec<ArchiveEntry>,
+    dry_run: bool,
+    verbose: bool,
+    include_agents: bool,
+) -> Result<()> {
+    let mut needs_transcript = Vec::new();
+
+    for archive in archives {
+        let archive_dir = codex_dir.join(&archive.dir_name);
+        let session_file = archive_dir.join("session.jsonl");
+        let transcript_file = archive_dir.join("conversation.md");
+
+        if transcript_file.exists() {
+            // Already has a clean transcript — skip
+            if verbose {
+                println!(
+                    "  Skipping {} (already has conversation.md)",
+                    archive.short_id
+                );
+            }
+            continue;
+        }
+
+        if !session_file.exists() {
+            // Clean-only archive or missing JSONL — can't generate
+            if verbose {
+                println!(
+                    "  Skipping {} (no session.jsonl to generate from)",
+                    archive.short_id
+                );
+            }
+            continue;
+        }
+
+        needs_transcript.push(archive);
+    }
+
+    if needs_transcript.is_empty() {
+        println!("All archives already have clean transcripts (or have no session.jsonl).");
+        return Ok(());
+    }
+
+    println!(
+        "Found {} archive(s) needing clean transcript",
+        needs_transcript.len()
+    );
+
+    if dry_run {
+        println!("\n[DRY RUN MODE - No changes will be made]\n");
+        for archive in &needs_transcript {
+            println!("  Would generate conversation.md for {}", archive.short_id);
+        }
+        return Ok(());
+    }
+
+    let mut generated = 0;
+
+    for archive in &needs_transcript {
+        let archive_dir = codex_dir.join(&archive.dir_name);
+        let session_file = archive_dir.join("session.jsonl");
+        let transcript_file = archive_dir.join("conversation.md");
+        let manifest_path = archive_dir.join("manifest.json");
+
+        let session_content = fs::read_to_string(&session_file)?;
+        let transcript = if include_agents {
+            let agents_dir = archive_dir.join("agents");
+            let mut agent_sessions = Vec::new();
+            if agents_dir.exists() {
+                for entry in fs::read_dir(&agents_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                        let agent_name = agent_name_from_path(&path);
+                        let agent_content = fs::read_to_string(&path)?;
+                        agent_sessions.push((agent_name, agent_content));
+                    }
+                }
+                agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            generate_clean_transcript_with_agents(&session_content, &agent_sessions)?
+        } else {
+            generate_clean_transcript(&session_content)?
+        };
+
+        fs::write(&transcript_file, &transcript)?;
+
+        // Update manifest to record has_clean_transcript
+        if manifest_path.exists() {
+            let manifest_content = fs::read_to_string(&manifest_path)?;
+            if let Ok(mut manifest) = serde_json::from_str::<Manifest>(&manifest_content) {
+                manifest.has_clean_transcript = Some(true);
+                let updated = serde_json::to_string_pretty(&manifest)?;
+                fs::write(&manifest_path, updated)?;
+            }
+        }
+
+        if verbose {
+            println!("  Generated conversation.md for {}", archive.short_id);
+        }
+
+        generated += 1;
+    }
+
+    println!("\n--- Migration Summary ---");
+    println!("Clean transcripts generated: {}", generated);
+
+    Ok(())
 }
 
 // --- Internal helpers ---
@@ -663,7 +966,7 @@ fn resolve_session_path(path: Option<String>) -> Result<PathBuf> {
     }
 }
 
-fn archive_session(session_path: &Path) -> Result<()> {
+fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Result<()> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -695,9 +998,6 @@ fn archive_session(session_path: &Path) -> Result<()> {
     hasher.update(&content);
     let checksum = format!("sha256:{:x}", hasher.finalize());
 
-    // Find associated agent sessions
-    let agents = find_agent_sessions(session_path, &modified)?;
-
     // Determine session start/end from file times
     let session_start: DateTime<Utc> = modified.into();
     let session_end: DateTime<Utc> = Utc::now();
@@ -713,8 +1013,95 @@ fn archive_session(session_path: &Path) -> Result<()> {
 
     // Check for existing archives and determine incremental suffix
     let archive_dir = determine_archive_dir(&codex_dir, &base_name)?;
-
     fs::create_dir_all(&archive_dir)?;
+
+    if clean {
+        // Clean mode: generate conversation.md + extract images — no JSONL, no agent file copies
+
+        // Create images directory and extract images from session content
+        let images_dir = archive_dir.join("images");
+        fs::create_dir_all(&images_dir)?;
+
+        let (_stripped_content, mut all_images) = extract_images_from_jsonl(&content, &images_dir)?;
+
+        // Find associated agent sessions and extract images from them too (no file copy)
+        let agents = find_agent_sessions(session_path, &modified)?;
+        if !agents.is_empty() {
+            for agent in &agents {
+                let source_path = PathBuf::from(&agent.id);
+                if let Ok(agent_content) = fs::read_to_string(&source_path)
+                    && let Ok((_modified_agent_content, agent_images)) =
+                        extract_images_from_jsonl(&agent_content, &images_dir)
+                {
+                    for img in agent_images {
+                        if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                            all_images.push(img);
+                        }
+                    }
+                }
+            }
+        }
+
+        let image_count = all_images.len();
+
+        // Generate clean transcript (optionally with agent conversations)
+        let transcript = if include_agents && !agents.is_empty() {
+            let mut agent_sessions = Vec::new();
+            for agent in &agents {
+                let source_path = PathBuf::from(&agent.id);
+                if let Ok(agent_content) = fs::read_to_string(&source_path) {
+                    let agent_name = agent_name_from_path(&source_path);
+                    agent_sessions.push((agent_name, agent_content));
+                }
+            }
+            agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+            generate_clean_transcript_with_agents(&content, &agent_sessions)?
+        } else {
+            generate_clean_transcript(&content)?
+        };
+        let conversation_md_path = archive_dir.join("conversation.md");
+        fs::write(&conversation_md_path, &transcript)?;
+
+        // Compute actual archive size: conversation.md + all image files
+        let md_size = fs::metadata(&conversation_md_path)
+            .map(|m| m.len())
+            .unwrap_or(transcript.len() as u64);
+        let images_size: u64 = all_images.iter().map(|img| img.size_bytes).sum();
+        let archive_size_bytes = md_size + images_size;
+
+        let manifest = Manifest {
+            version: 2,
+            session_id: session_id.clone(),
+            archived_at: Utc::now(),
+            session_start,
+            session_end,
+            project_path,
+            message_count,
+            agent_count: 0,
+            agents: Vec::new(),
+            size_bytes: archive_size_bytes,
+            checksum,
+            image_count: Some(image_count),
+            images: Some(all_images),
+            has_clean_transcript: Some(true),
+        };
+
+        let manifest_json = serde_json::to_string_pretty(&manifest)?;
+        fs::write(archive_dir.join("manifest.json"), manifest_json)?;
+
+        println!("Archived session (clean) to: {}", archive_dir.display());
+        println!("  Messages: {}", message_count);
+        println!("  Images: {}", image_count);
+        println!("  Size: {} KB", archive_size_bytes / 1024);
+        println!("  conversation.md written");
+
+        return Ok(());
+    }
+
+    // Full mode (default): find agents, extract images, copy JSONL
+
+    // Find associated agent sessions
+    let agents = find_agent_sessions(session_path, &modified)?;
 
     // Create images directory for extracted images
     let images_dir = archive_dir.join("images");
@@ -772,6 +1159,7 @@ fn archive_session(session_path: &Path) -> Result<()> {
         checksum,
         image_count: Some(image_count),
         images: Some(all_images),
+        has_clean_transcript: None,
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -981,7 +1369,7 @@ fn print_human_readable(content: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_all_sessions() -> Result<()> {
+fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let projects_dir = home.join(".claude").join("projects");
 
@@ -1034,7 +1422,7 @@ fn save_all_sessions() -> Result<()> {
                 let session_id = name.trim_end_matches(".jsonl");
                 if !archived_ids.contains(session_id) {
                     println!("Archiving: {}", session_id);
-                    archive_session(&file_path)?;
+                    archive_session(&file_path, clean, include_agents)?;
                     archived_count += 1;
                 }
             }
@@ -1044,4 +1432,371 @@ fn save_all_sessions() -> Result<()> {
     println!("Archived {} new session(s)", archived_count);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------------------
+    // strip_system_reminders
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn strip_single_reminder() {
+        let input = "before<system-reminder>secret</system-reminder>after";
+        assert_eq!(strip_system_reminders(input), "beforeafter");
+    }
+
+    #[test]
+    fn strip_multiple_reminders() {
+        let input =
+            "a<system-reminder>one</system-reminder>b<system-reminder>two</system-reminder>c";
+        assert_eq!(strip_system_reminders(input), "abc");
+    }
+
+    #[test]
+    fn strip_no_reminders_unchanged() {
+        let input = "just plain text with no reminders";
+        assert_eq!(strip_system_reminders(input), input);
+    }
+
+    #[test]
+    fn strip_multiline_reminder() {
+        // The regex uses (?s) so . matches newlines
+        let input = "start<system-reminder>\nline one\nline two\n</system-reminder>end";
+        assert_eq!(strip_system_reminders(input), "startend");
+    }
+
+    #[test]
+    fn strip_adjacent_reminders() {
+        // Two reminders with no gap between them
+        let input =
+            "<system-reminder>first</system-reminder><system-reminder>second</system-reminder>";
+        assert_eq!(strip_system_reminders(input), "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — helper
+    // ---------------------------------------------------------------------------
+
+    /// Build a JSONL line for a user message with string content.
+    fn user_str(text: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"content":{}}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// Build a JSONL line for a user message with array content (tool results).
+    fn user_array() -> &'static str {
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"some output"}]}}"#
+    }
+
+    /// Build a JSONL line for an assistant message with a single text block.
+    fn assistant_text(text: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}}]}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    /// Build a JSONL line for an assistant message with a tool_use block only.
+    fn assistant_tool_use() -> &'static str {
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#
+    }
+
+    /// Build a JSONL line for an assistant message with both text and tool_use blocks.
+    fn assistant_mixed(text: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":{}}},{{"type":"tool_use","id":"t2","name":"Read","input":{{}}}}]}}}}"#,
+            serde_json::to_string(text).unwrap()
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — user string content
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn user_string_gets_geoff_prefix() {
+        let jsonl = user_str("Hello there");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** Hello there\n\n");
+    }
+
+    #[test]
+    fn user_string_content_is_trimmed() {
+        let jsonl = user_str("  spaced out  ");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** spaced out\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — user array content dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn user_array_content_is_dropped() {
+        let result = generate_clean_transcript(user_array()).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — assistant text blocks
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn assistant_text_gets_soren_prefix() {
+        let jsonl = assistant_text("Here is my answer.");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Here is my answer.\n\n");
+    }
+
+    #[test]
+    fn assistant_multiple_text_blocks_joined() {
+        // Two text blocks in one assistant message → joined with \n\n, single prefix
+        let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Part one."},{"type":"text","text":"Part two."}]}}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Part one.\n\nPart two.\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — assistant tool_use blocks dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn assistant_tool_use_only_is_dropped() {
+        let result = generate_clean_transcript(assistant_tool_use()).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn assistant_mixed_keeps_only_text() {
+        // text + tool_use block → only text survives, tool_use dropped
+        let jsonl = assistant_mixed("Thinking out loud.");
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Soren:** Thinking out loud.\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — system reminder stripping
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn system_reminder_stripped_from_user_content() {
+        let text = "real question<system-reminder>ignore me</system-reminder>";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** real question\n\n");
+    }
+
+    #[test]
+    fn user_content_only_reminder_is_dropped() {
+        // After stripping the reminder, content is empty → entire message dropped
+        let text = "<system-reminder>only this</system-reminder>";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn user_content_whitespace_only_after_strip_is_dropped() {
+        let text = "  <system-reminder>noise</system-reminder>  ";
+        let jsonl = user_str(text);
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — non-user/non-assistant types dropped
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn file_history_snapshot_type_dropped() {
+        let jsonl = r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn unknown_type_dropped() {
+        let jsonl = r#"{"type":"summary","data":"session summary here"}"#;
+        let result = generate_clean_transcript(jsonl).unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — empty / malformed input
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn empty_input_produces_empty_output() {
+        let result = generate_clean_transcript("").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn blank_lines_skipped() {
+        let jsonl = format!("\n\n{}\n\n", user_str("hi"));
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** hi\n\n");
+    }
+
+    #[test]
+    fn malformed_jsonl_line_skipped() {
+        // A bad line followed by a valid line — bad line is silently skipped
+        let jsonl = format!("NOT JSON\n{}", user_str("valid"));
+        let result = generate_clean_transcript(&jsonl).unwrap();
+        assert_eq!(result, "**Geoff:** valid\n\n");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript — mixed realistic session
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn realistic_mixed_session() {
+        // A realistic interleaving: user string, user array (tool result), assistant
+        // with tool_use only, assistant with text, unknown type, user with reminder.
+        let lines = [
+            user_str("Can you list the files?"),
+            user_array().to_string(),
+            assistant_tool_use().to_string(),
+            assistant_text("Here are the files: foo.rs, bar.rs."),
+            r#"{"type":"file-history-snapshot","content":"snap"}"#.to_string(),
+            user_str("Thanks<system-reminder>sys note</system-reminder>, what about tests?"),
+            assistant_mixed("I see test coverage is low."),
+        ];
+        let jsonl = lines.join("\n");
+
+        let result = generate_clean_transcript(&jsonl).unwrap();
+
+        // Expected: user string → Geoff, tool result → dropped, assistant tool_use → dropped,
+        // assistant text → Soren, snapshot → dropped, user with reminder stripped → Geoff,
+        // assistant mixed → Soren (text only)
+        let expected = concat!(
+            "**Geoff:** Can you list the files?\n\n",
+            "**Soren:** Here are the files: foo.rs, bar.rs.\n\n",
+            "**Geoff:** Thanks, what about tests?\n\n",
+            "**Soren:** I see test coverage is low.\n\n",
+        );
+        assert_eq!(result, expected);
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript_with_agents
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn agents_empty_list_same_as_plain() {
+        let main_session = user_str("Hello");
+        let with_agents = generate_clean_transcript_with_agents(&main_session, &[]).unwrap();
+        let plain = generate_clean_transcript(&main_session).unwrap();
+        assert_eq!(with_agents, plain);
+    }
+
+    #[test]
+    fn agents_single_agent_appended() {
+        let main_jsonl = user_str("Main question");
+        let agent_jsonl = format!(
+            "{}\n{}",
+            user_str("Agent task"),
+            assistant_text("Agent did it.")
+        );
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("worker-1".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        let expected = concat!(
+            "**Geoff:** Main question\n\n",
+            "\n---\n\n## Agent: worker-1\n\n",
+            "**Geoff:** Agent task\n\n",
+            "**Soren:** Agent did it.\n\n",
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn agents_multiple_agents_sorted_by_name() {
+        let main_jsonl = user_str("Start");
+        let agent_b = assistant_text("From agent B.");
+        let agent_a = assistant_text("From agent A.");
+
+        // Pass out of order; function receives pre-sorted in production,
+        // but generate_clean_transcript_with_agents itself just appends in order
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[
+                ("alpha".to_string(), agent_a),
+                ("beta".to_string(), agent_b),
+            ],
+        )
+        .unwrap();
+
+        // Should have agent alpha before beta (passed in that order)
+        assert!(result.contains("## Agent: alpha"));
+        assert!(result.contains("## Agent: beta"));
+        let alpha_pos = result.find("## Agent: alpha").unwrap();
+        let beta_pos = result.find("## Agent: beta").unwrap();
+        assert!(alpha_pos < beta_pos, "alpha should appear before beta");
+    }
+
+    #[test]
+    fn agents_empty_agent_content_skipped() {
+        let main_jsonl = user_str("Main");
+        // Agent JSONL has no user/assistant messages (only tool results)
+        let agent_jsonl = user_array().to_string();
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("empty-agent".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        // Should NOT contain agent section since transcript was empty
+        assert!(!result.contains("## Agent:"));
+        assert_eq!(result, "**Geoff:** Main\n\n");
+    }
+
+    #[test]
+    fn agents_transcript_has_separator() {
+        let main_jsonl = user_str("Question");
+        let agent_jsonl = assistant_text("Answer from agent.");
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("sub-1".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        // Verify separator format
+        assert!(result.contains("\n---\n\n## Agent: sub-1\n\n"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // agent_name_from_path
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn agent_name_strips_prefix() {
+        let path = PathBuf::from("/some/dir/agent-abc12345.jsonl");
+        assert_eq!(agent_name_from_path(&path), "abc12345");
+    }
+
+    #[test]
+    fn agent_name_no_prefix_returns_stem() {
+        let path = PathBuf::from("/some/dir/custom-session.jsonl");
+        assert_eq!(agent_name_from_path(&path), "custom-session");
+    }
+
+    #[test]
+    fn agent_name_agent_prefix_only() {
+        // Edge case: filename is exactly "agent-.jsonl"
+        let path = PathBuf::from("/some/dir/agent-.jsonl");
+        assert_eq!(agent_name_from_path(&path), "");
+    }
 }
