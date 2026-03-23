@@ -344,6 +344,7 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     // Validate encoded output is safe for command-line use
     validate_encoded_output(&encoded.title, "title")?;
     validate_encoded_output(&encoded.body, "body")?;
+    validate_encoded_output(&encoded.footer, "footer")?;
 
     println!("Title:  {}", encoded.title);
     println!("Body:   {}", encoded.body);
@@ -416,6 +417,7 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     // Validate encoded output is safe for command-line use
     validate_encoded_output(&encoded.title, "title")?;
     validate_encoded_output(&encoded.body, "body")?;
+    validate_encoded_output(&encoded.footer, "footer")?;
 
     // Determine merge method
     let method = if rebase {
@@ -453,4 +455,50 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     println!("{}", String::from_utf8_lossy(&output.stdout));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_encoded_clean_ascii() {
+        assert!(validate_encoded_output("hello world", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_encoded_nul_byte() {
+        assert!(validate_encoded_output("hello\0world", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_encoded_c0_control() {
+        assert!(validate_encoded_output("hello\x01world", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_encoded_c1_control() {
+        assert!(validate_encoded_output("hello\u{0085}world", "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_encoded_newline_allowed() {
+        assert!(validate_encoded_output("hello\nworld", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_encoded_tab_allowed() {
+        assert!(validate_encoded_output("hello\tworld", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_encoded_empty() {
+        assert!(validate_encoded_output("", "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_encoded_multibyte_unicode() {
+        // Valid multi-byte chars should pass -- no false positives
+        assert!(validate_encoded_output("\u{1f711}\u{1f754}\u{1f72e}\u{1f716}\u{1f723}\u{1f75c}", "test").is_ok());
+    }
 }
