@@ -4917,7 +4917,12 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
 
 fn handle_codex(cmd: CodexCommands) -> Result<()> {
     match cmd {
-        CodexCommands::Save { path, all, clean, include_agents } => {
+        CodexCommands::Save {
+            path,
+            all,
+            clean,
+            include_agents,
+        } => {
             codex::save_session(path, all, clean, include_agents)?;
             Ok(())
         }

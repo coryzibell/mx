@@ -61,7 +61,12 @@ pub struct ImageInfo {
 }
 
 /// Archive the current session to the codex
-pub fn save_session(session_path: Option<String>, all: bool, clean: bool, include_agents: bool) -> Result<()> {
+pub fn save_session(
+    session_path: Option<String>,
+    all: bool,
+    clean: bool,
+    include_agents: bool,
+) -> Result<()> {
     if all {
         save_all_sessions(clean, include_agents)?;
     } else {
@@ -354,7 +359,12 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
 }
 
 /// Migrate all v1 archives to v2 (extract images to files)
-pub fn migrate_archives(dry_run: bool, verbose: bool, clean: bool, include_agents: bool) -> Result<()> {
+pub fn migrate_archives(
+    dry_run: bool,
+    verbose: bool,
+    clean: bool,
+    include_agents: bool,
+) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
@@ -1789,5 +1799,4 @@ mod tests {
         let path = PathBuf::from("/some/dir/agent-.jsonl");
         assert_eq!(agent_name_from_path(&path), "");
     }
-
 }
