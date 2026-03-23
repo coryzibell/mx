@@ -252,6 +252,36 @@ impl EncodedCommit {
     }
 }
 
+/// Validates that encoded output is safe for use as a command-line argument.
+/// Returns an error if the output contains nul bytes or C0/C1 control characters
+/// that could corrupt git operations.
+fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
+    if let Some(pos) = encoded.find('\0') {
+        bail!(
+            "Encoded {} contains NUL byte at position {} -- this would corrupt git operations. \
+             This suggests an unsafe dictionary was selected. Encoded preview: {:?}",
+            context,
+            pos,
+            &encoded[..encoded.char_indices().take(40).last().map_or(0, |(i, c)| i + c.len_utf8())]
+        );
+    }
+    // Check for C0 controls (except newline, tab) and C1 controls
+    for (i, c) in encoded.char_indices() {
+        let cp = c as u32;
+        if (cp < 0x20 && cp != 0x0A && cp != 0x09) || (0x80..=0x9F).contains(&cp) {
+            bail!(
+                "Encoded {} contains control character U+{:04X} at position {} -- \
+                 this would produce garbled output. Encoded preview: {:?}",
+                context,
+                cp,
+                i,
+                &encoded[..encoded.char_indices().take(40).last().map_or(0, |(i, c)| i + c.len_utf8())]
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Encode title and body into commit parts
 /// Title is hashed, body is compressed, footer shows algos/dicts used
 pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit> {
@@ -310,6 +340,10 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
 
     // Encode: title from diff hash, body from compressed message
     let encoded = encode_commit(&diff, message)?;
+
+    // Validate encoded output is safe for command-line use
+    validate_encoded_output(&encoded.title, "title")?;
+    validate_encoded_output(&encoded.body, "body")?;
 
     println!("Title:  {}", encoded.title);
     println!("Body:   {}", encoded.body);
@@ -378,6 +412,10 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
 
     // Encode: title from diff hash, body from compressed full message
     let encoded = encode_commit(&diff, &full_message)?;
+
+    // Validate encoded output is safe for command-line use
+    validate_encoded_output(&encoded.title, "title")?;
+    validate_encoded_output(&encoded.body, "body")?;
 
     // Determine merge method
     let method = if rebase {
