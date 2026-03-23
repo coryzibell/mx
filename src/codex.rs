@@ -10,10 +10,43 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
-const GEOFF_PREFIX: &str = "**Geoff:**";
-const SOREN_PREFIX: &str = "**Soren:**";
+use std::collections::HashMap;
 
 static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
+
+/// Resolve the user display name for transcripts.
+/// Priority: MX_USER_NAME env var > git config user.name > "User"
+fn resolve_user_name() -> String {
+    if let Ok(name) = std::env::var("MX_USER_NAME") {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    // Fallback: try git config user.name
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["config", "user.name"])
+        .output()
+    {
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    "User".to_string()
+}
+
+/// Resolve the assistant display name for transcripts.
+/// Priority: MX_ASSISTANT_NAME env var > "Claude"
+fn resolve_assistant_name() -> String {
+    if let Ok(name) = std::env::var("MX_ASSISTANT_NAME") {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    "Claude".to_string()
+}
 
 fn system_reminder_re() -> &'static Regex {
     SYSTEM_REMINDER_RE
@@ -42,6 +75,11 @@ pub struct Manifest {
     // v3 fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_clean_transcript: Option<bool>,
+    // v4 fields - configurable speaker names
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,19 +239,39 @@ pub fn read_session(
         if clean_agents && !content.contains("\n## Agent: ") {
             let agents_dir = archive_dir.join("agents");
             if agents_dir.exists() {
+                // Try to build agent type map from session.jsonl if available
+                let session_file = archive_dir.join("session.jsonl");
+                let agent_type_map = if session_file.exists() {
+                    let sc = fs::read_to_string(&session_file).unwrap_or_default();
+                    build_agent_type_map(&sc)
+                } else {
+                    HashMap::new()
+                };
                 let mut agent_sessions = Vec::new();
                 for entry in fs::read_dir(&agents_dir)? {
                     let entry = entry?;
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                        let agent_name = agent_name_from_path(&path);
+                        let agent_name = resolve_agent_display_name(&path, &agent_type_map);
                         let agent_content = fs::read_to_string(&path)?;
                         agent_sessions.push((agent_name, agent_content));
                     }
                 }
                 agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+                // Resolve speaker names: from manifest if available, else env/defaults
+                let manifest_path = archive_dir.join("manifest.json");
+                let (r_user, r_asst) = if manifest_path.exists() {
+                    let mc = fs::read_to_string(&manifest_path).unwrap_or_default();
+                    let m: Option<Manifest> = serde_json::from_str(&mc).ok();
+                    (
+                        m.as_ref().and_then(|m| m.user_name.clone()).unwrap_or_else(resolve_user_name),
+                        m.as_ref().and_then(|m| m.assistant_name.clone()).unwrap_or_else(resolve_assistant_name),
+                    )
+                } else {
+                    (resolve_user_name(), resolve_assistant_name())
+                };
                 for (agent_name, agent_content) in &agent_sessions {
-                    let agent_transcript = generate_clean_transcript(agent_content)?;
+                    let agent_transcript = generate_clean_transcript(agent_content, &r_user, &r_asst)?;
                     if !agent_transcript.is_empty() {
                         content.push_str(&format!(
                             "\n---\n\n## Agent: {}\n\n{}",
@@ -733,11 +791,13 @@ fn save_image(
 fn generate_clean_transcript_with_agents(
     session_content: &str,
     agent_sessions: &[(String, String)], // (agent_name, jsonl_content)
+    user_name: &str,
+    assistant_name: &str,
 ) -> Result<String> {
-    let mut output = generate_clean_transcript(session_content)?;
+    let mut output = generate_clean_transcript(session_content, user_name, assistant_name)?;
 
     for (agent_name, agent_content) in agent_sessions {
-        let agent_transcript = generate_clean_transcript(agent_content)?;
+        let agent_transcript = generate_clean_transcript(agent_content, user_name, assistant_name)?;
         if !agent_transcript.is_empty() {
             output.push_str(&format!(
                 "\n---\n\n## Agent: {}\n\n{}",
@@ -747,6 +807,60 @@ fn generate_clean_transcript_with_agents(
     }
 
     Ok(output)
+}
+
+/// Build a mapping from agentId -> subagent_type by scanning the parent session JSONL
+/// for Agent tool_use calls that contain a "subagent_type" field in their input.
+fn build_agent_type_map(session_content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in session_content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Look for assistant messages with tool_use blocks named "Agent"
+        if msg["type"].as_str() != Some("assistant") {
+            continue;
+        }
+        if let Some(blocks) = msg["message"]["content"].as_array() {
+            for block in blocks {
+                if block["type"].as_str() == Some("tool_use")
+                    && block["name"].as_str() == Some("Agent")
+                {
+                    if let Some(input) = block["input"].as_object() {
+                        if let Some(subagent_type) = input.get("subagent_type").and_then(|v| v.as_str()) {
+                            // The agentId may appear in the tool result as the tool_use id,
+                            // but more commonly is extracted from the agent filename.
+                            // The id field of the tool_use block is the tool_use_id.
+                            if let Some(tool_use_id) = block["id"].as_str() {
+                                map.insert(tool_use_id.to_string(), subagent_type.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Resolve an agent name using the agent type map if possible, falling back to the hex ID.
+fn resolve_agent_display_name(path: &Path, agent_type_map: &HashMap<String, String>) -> String {
+    let hex_id = agent_name_from_path(path);
+    // Check if any tool_use_id in the map matches (agent filenames contain hex IDs that
+    // may overlap with tool_use IDs) or if the hex_id itself is in the map values.
+    // The agent JSONL files are named agent-<hex_id>.jsonl. We need to find the
+    // tool_use call whose result spawned this agent. The mapping is indirect:
+    // we look for tool_use_ids that contain the hex_id or vice versa.
+    for (tool_use_id, subagent_type) in agent_type_map {
+        if tool_use_id.contains(&hex_id) || hex_id.contains(tool_use_id.as_str()) {
+            return subagent_type.clone();
+        }
+    }
+    hex_id
 }
 
 /// Extract an agent name from its filename (e.g. "agent-abc12345.jsonl" -> "abc12345")
@@ -771,8 +885,10 @@ fn strip_system_reminders(content: &str) -> String {
 }
 
 /// Generate a clean markdown transcript from JSONL session content
-fn generate_clean_transcript(session_content: &str) -> Result<String> {
+fn generate_clean_transcript(session_content: &str, user_name: &str, assistant_name: &str) -> Result<String> {
     let mut output = String::new();
+    let user_prefix = format!("**{}:**", user_name);
+    let assistant_prefix = format!("**{}:**", assistant_name);
 
     for line in session_content.lines() {
         if line.trim().is_empty() {
@@ -797,7 +913,7 @@ fn generate_clean_transcript(session_content: &str) -> Result<String> {
                     let stripped = strip_system_reminders(text);
                     let trimmed = stripped.trim();
                     if !trimmed.is_empty() {
-                        output.push_str(&format!("{} {}\n\n", GEOFF_PREFIX, trimmed));
+                        output.push_str(&format!("{} {}\n\n", user_prefix, trimmed));
                     }
                 }
                 // Array content (tool results): skip
@@ -817,7 +933,7 @@ fn generate_clean_transcript(session_content: &str) -> Result<String> {
                     }
                     let joined = text_parts.join("\n\n");
                     if !joined.is_empty() {
-                        output.push_str(&format!("{} {}\n\n", SOREN_PREFIX, joined));
+                        output.push_str(&format!("{} {}\n\n", assistant_prefix, joined));
                     }
                 }
             }
@@ -898,21 +1014,28 @@ fn migrate_clean_transcripts(
         let transcript = if include_agents {
             let agents_dir = archive_dir.join("agents");
             let mut agent_sessions = Vec::new();
+            let agent_type_map = build_agent_type_map(&session_content);
             if agents_dir.exists() {
                 for entry in fs::read_dir(&agents_dir)? {
                     let entry = entry?;
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                        let agent_name = agent_name_from_path(&path);
+                        let agent_name = resolve_agent_display_name(&path, &agent_type_map);
                         let agent_content = fs::read_to_string(&path)?;
                         agent_sessions.push((agent_name, agent_content));
                     }
                 }
                 agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
             }
-            generate_clean_transcript_with_agents(&session_content, &agent_sessions)?
+            {
+                let user_name = resolve_user_name();
+                let assistant_name = resolve_assistant_name();
+                generate_clean_transcript_with_agents(&session_content, &agent_sessions, &user_name, &assistant_name)?
+            }
         } else {
-            generate_clean_transcript(&session_content)?
+            let user_name = resolve_user_name();
+            let assistant_name = resolve_assistant_name();
+            generate_clean_transcript(&session_content, &user_name, &assistant_name)?
         };
 
         fs::write(&transcript_file, &transcript)?;
@@ -1045,19 +1168,26 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         let image_count = all_images.len();
 
         // Generate clean transcript (optionally with agent conversations)
+        let agent_type_map = build_agent_type_map(&content);
         let transcript = if include_agents && !agents.is_empty() {
             let mut agent_sessions = Vec::new();
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
                 if let Ok(agent_content) = fs::read_to_string(&source_path) {
-                    let agent_name = agent_name_from_path(&source_path);
+                    let agent_name = resolve_agent_display_name(&source_path, &agent_type_map);
                     agent_sessions.push((agent_name, agent_content));
                 }
             }
             agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-            generate_clean_transcript_with_agents(&content, &agent_sessions)?
+            {
+                let user_name = resolve_user_name();
+                let assistant_name = resolve_assistant_name();
+                generate_clean_transcript_with_agents(&content, &agent_sessions, &user_name, &assistant_name)?
+            }
         } else {
-            generate_clean_transcript(&content)?
+            let user_name = resolve_user_name();
+            let assistant_name = resolve_assistant_name();
+            generate_clean_transcript(&content, &user_name, &assistant_name)?
         };
         let conversation_md_path = archive_dir.join("conversation.md");
         fs::write(&conversation_md_path, &transcript)?;
@@ -1084,6 +1214,8 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
             image_count: Some(image_count),
             images: Some(all_images),
             has_clean_transcript: Some(true),
+            user_name: Some(resolve_user_name()),
+            assistant_name: Some(resolve_assistant_name()),
         };
 
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -1160,6 +1292,8 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         image_count: Some(image_count),
         images: Some(all_images),
         has_clean_transcript: None,
+        user_name: Some(resolve_user_name()),
+        assistant_name: Some(resolve_assistant_name()),
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -1519,17 +1653,17 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn user_string_gets_geoff_prefix() {
+    fn user_string_gets_user_prefix() {
         let jsonl = user_str("Hello there");
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Geoff:** Hello there\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**User:** Hello there\n\n");
     }
 
     #[test]
     fn user_string_content_is_trimmed() {
         let jsonl = user_str("  spaced out  ");
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Geoff:** spaced out\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**User:** spaced out\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1538,7 +1672,7 @@ mod tests {
 
     #[test]
     fn user_array_content_is_dropped() {
-        let result = generate_clean_transcript(user_array()).unwrap();
+        let result = generate_clean_transcript(user_array(), "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1547,18 +1681,18 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn assistant_text_gets_soren_prefix() {
+    fn assistant_text_gets_assistant_prefix() {
         let jsonl = assistant_text("Here is my answer.");
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Soren:** Here is my answer.\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**Claude:** Here is my answer.\n\n");
     }
 
     #[test]
     fn assistant_multiple_text_blocks_joined() {
         // Two text blocks in one assistant message → joined with \n\n, single prefix
         let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Part one."},{"type":"text","text":"Part two."}]}}"#;
-        let result = generate_clean_transcript(jsonl).unwrap();
-        assert_eq!(result, "**Soren:** Part one.\n\nPart two.\n\n");
+        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**Claude:** Part one.\n\nPart two.\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1567,7 +1701,7 @@ mod tests {
 
     #[test]
     fn assistant_tool_use_only_is_dropped() {
-        let result = generate_clean_transcript(assistant_tool_use()).unwrap();
+        let result = generate_clean_transcript(assistant_tool_use(), "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1575,8 +1709,8 @@ mod tests {
     fn assistant_mixed_keeps_only_text() {
         // text + tool_use block → only text survives, tool_use dropped
         let jsonl = assistant_mixed("Thinking out loud.");
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Soren:** Thinking out loud.\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**Claude:** Thinking out loud.\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1587,8 +1721,8 @@ mod tests {
     fn system_reminder_stripped_from_user_content() {
         let text = "real question<system-reminder>ignore me</system-reminder>";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Geoff:** real question\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**User:** real question\n\n");
     }
 
     #[test]
@@ -1596,7 +1730,7 @@ mod tests {
         // After stripping the reminder, content is empty → entire message dropped
         let text = "<system-reminder>only this</system-reminder>";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl).unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1604,7 +1738,7 @@ mod tests {
     fn user_content_whitespace_only_after_strip_is_dropped() {
         let text = "  <system-reminder>noise</system-reminder>  ";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl).unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1615,14 +1749,14 @@ mod tests {
     #[test]
     fn file_history_snapshot_type_dropped() {
         let jsonl = r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
-        let result = generate_clean_transcript(jsonl).unwrap();
+        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
     fn unknown_type_dropped() {
         let jsonl = r#"{"type":"summary","data":"session summary here"}"#;
-        let result = generate_clean_transcript(jsonl).unwrap();
+        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1632,23 +1766,23 @@ mod tests {
 
     #[test]
     fn empty_input_produces_empty_output() {
-        let result = generate_clean_transcript("").unwrap();
+        let result = generate_clean_transcript("", "User", "Claude").unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
     fn blank_lines_skipped() {
         let jsonl = format!("\n\n{}\n\n", user_str("hi"));
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Geoff:** hi\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**User:** hi\n\n");
     }
 
     #[test]
     fn malformed_jsonl_line_skipped() {
         // A bad line followed by a valid line — bad line is silently skipped
         let jsonl = format!("NOT JSON\n{}", user_str("valid"));
-        let result = generate_clean_transcript(&jsonl).unwrap();
-        assert_eq!(result, "**Geoff:** valid\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        assert_eq!(result, "**User:** valid\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1670,16 +1804,16 @@ mod tests {
         ];
         let jsonl = lines.join("\n");
 
-        let result = generate_clean_transcript(&jsonl).unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
 
-        // Expected: user string → Geoff, tool result → dropped, assistant tool_use → dropped,
-        // assistant text → Soren, snapshot → dropped, user with reminder stripped → Geoff,
-        // assistant mixed → Soren (text only)
+        // Expected: user string → User, tool result → dropped, assistant tool_use → dropped,
+        // assistant text → Claude, snapshot → dropped, user with reminder stripped → User,
+        // assistant mixed → Claude (text only)
         let expected = concat!(
-            "**Geoff:** Can you list the files?\n\n",
-            "**Soren:** Here are the files: foo.rs, bar.rs.\n\n",
-            "**Geoff:** Thanks, what about tests?\n\n",
-            "**Soren:** I see test coverage is low.\n\n",
+            "**User:** Can you list the files?\n\n",
+            "**Claude:** Here are the files: foo.rs, bar.rs.\n\n",
+            "**User:** Thanks, what about tests?\n\n",
+            "**Claude:** I see test coverage is low.\n\n",
         );
         assert_eq!(result, expected);
     }
@@ -1691,8 +1825,8 @@ mod tests {
     #[test]
     fn agents_empty_list_same_as_plain() {
         let main_session = user_str("Hello");
-        let with_agents = generate_clean_transcript_with_agents(&main_session, &[]).unwrap();
-        let plain = generate_clean_transcript(&main_session).unwrap();
+        let with_agents = generate_clean_transcript_with_agents(&main_session, &[], "User", "Claude").unwrap();
+        let plain = generate_clean_transcript(&main_session, "User", "Claude").unwrap();
         assert_eq!(with_agents, plain);
     }
 
@@ -1708,14 +1842,16 @@ mod tests {
         let result = generate_clean_transcript_with_agents(
             &main_jsonl,
             &[("worker-1".to_string(), agent_jsonl)],
+            "User",
+            "Claude",
         )
         .unwrap();
 
         let expected = concat!(
-            "**Geoff:** Main question\n\n",
+            "**User:** Main question\n\n",
             "\n---\n\n## Agent: worker-1\n\n",
-            "**Geoff:** Agent task\n\n",
-            "**Soren:** Agent did it.\n\n",
+            "**User:** Agent task\n\n",
+            "**Claude:** Agent did it.\n\n",
         );
         assert_eq!(result, expected);
     }
@@ -1734,6 +1870,8 @@ mod tests {
                 ("alpha".to_string(), agent_a),
                 ("beta".to_string(), agent_b),
             ],
+            "User",
+            "Claude",
         )
         .unwrap();
 
@@ -1754,12 +1892,14 @@ mod tests {
         let result = generate_clean_transcript_with_agents(
             &main_jsonl,
             &[("empty-agent".to_string(), agent_jsonl)],
+            "User",
+            "Claude",
         )
         .unwrap();
 
         // Should NOT contain agent section since transcript was empty
         assert!(!result.contains("## Agent:"));
-        assert_eq!(result, "**Geoff:** Main\n\n");
+        assert_eq!(result, "**User:** Main\n\n");
     }
 
     #[test]
@@ -1770,6 +1910,8 @@ mod tests {
         let result = generate_clean_transcript_with_agents(
             &main_jsonl,
             &[("sub-1".to_string(), agent_jsonl)],
+            "User",
+            "Claude",
         )
         .unwrap();
 
@@ -1799,4 +1941,106 @@ mod tests {
         let path = PathBuf::from("/some/dir/agent-.jsonl");
         assert_eq!(agent_name_from_path(&path), "");
     }
+    // ---------------------------------------------------------------------------
+    // resolve_user_name / resolve_assistant_name
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn resolve_user_name_from_env() {
+        // SAFETY: test-only env manipulation, tests run serially via cargo test
+        unsafe { std::env::set_var("MX_USER_NAME", "TestHuman"); }
+        let name = resolve_user_name();
+        unsafe { std::env::remove_var("MX_USER_NAME"); }
+        assert_eq!(name, "TestHuman");
+    }
+
+    #[test]
+    fn resolve_user_name_fallback_without_env() {
+        unsafe { std::env::remove_var("MX_USER_NAME"); }
+        let name = resolve_user_name();
+        // Should be either git user.name or "User" — both are valid
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn resolve_assistant_name_from_env() {
+        // SAFETY: test-only env manipulation, tests run serially via cargo test
+        unsafe { std::env::set_var("MX_ASSISTANT_NAME", "Opus"); }
+        let name = resolve_assistant_name();
+        unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
+        assert_eq!(name, "Opus");
+    }
+
+    #[test]
+    fn resolve_assistant_name_default() {
+        unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
+        let name = resolve_assistant_name();
+        assert_eq!(name, "Claude");
+    }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript with custom names
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn custom_speaker_names_in_transcript() {
+        let jsonl = format!(
+            "{}\n{}",
+            user_str("Hello"),
+            assistant_text("Hi there.")
+        );
+        let result = generate_clean_transcript(&jsonl, "Alice", "Bot").unwrap();
+        assert_eq!(
+            result,
+            "**Alice:** Hello\n\n**Bot:** Hi there.\n\n"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // build_agent_type_map
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn agent_type_map_from_parent_jsonl() {
+        // Mock a parent session JSONL with an Agent tool_use call
+        let parent_jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_abc123","name":"Agent","input":{"subagent_type":"Turnkey Whistledown","task":"build it"}}]}}"#;
+        let map = build_agent_type_map(parent_jsonl);
+        assert_eq!(map.get("toolu_abc123").map(|s| s.as_str()), Some("Turnkey Whistledown"));
+    }
+
+    #[test]
+    fn agent_type_map_empty_for_no_agents() {
+        let parent_jsonl = r#"{"type":"user","message":{"content":"hello"}}"#;
+        let map = build_agent_type_map(parent_jsonl);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn agent_type_map_multiple_agents() {
+        let line1 = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_aaa","name":"Agent","input":{"subagent_type":"Builder","task":"build"}},{"type":"tool_use","id":"toolu_bbb","name":"Agent","input":{"subagent_type":"Tester","task":"test"}}]}}"#;
+        let map = build_agent_type_map(line1);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("toolu_aaa").map(|s| s.as_str()), Some("Builder"));
+        assert_eq!(map.get("toolu_bbb").map(|s| s.as_str()), Some("Tester"));
+    }
+
+    #[test]
+    fn resolve_agent_display_name_with_map() {
+        let mut map = HashMap::new();
+        map.insert("toolu_abc123".to_string(), "Whistledown".to_string());
+        // Agent file would be named agent-abc123.jsonl
+        let path = PathBuf::from("/some/dir/agent-abc123.jsonl");
+        // The hex_id is "abc123", which is contained in "toolu_abc123"
+        let name = resolve_agent_display_name(&path, &map);
+        assert_eq!(name, "Whistledown");
+    }
+
+    #[test]
+    fn resolve_agent_display_name_fallback() {
+        let map = HashMap::new();
+        let path = PathBuf::from("/some/dir/agent-def456.jsonl");
+        let name = resolve_agent_display_name(&path, &map);
+        assert_eq!(name, "def456");
+    }
+
 }
