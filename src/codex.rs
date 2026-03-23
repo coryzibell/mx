@@ -13,10 +13,12 @@ use std::time::SystemTime;
 use std::collections::HashMap;
 
 static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
+static USER_NAME: OnceLock<String> = OnceLock::new();
+static ASSISTANT_NAME: OnceLock<String> = OnceLock::new();
 
-/// Resolve the user display name for transcripts.
-/// Priority: MX_USER_NAME env var > git config user.name > "User"
-fn resolve_user_name() -> String {
+/// Resolve the user display name (uncached). Used by tests and as the
+/// initializer for the OnceLock cache.
+fn resolve_user_name_inner() -> String {
     if let Ok(name) = std::env::var("MX_USER_NAME") {
         if !name.is_empty() {
             return name;
@@ -37,15 +39,29 @@ fn resolve_user_name() -> String {
     "User".to_string()
 }
 
-/// Resolve the assistant display name for transcripts.
-/// Priority: MX_ASSISTANT_NAME env var > "Claude"
-fn resolve_assistant_name() -> String {
+/// Resolve the user display name for transcripts.
+/// Priority: MX_USER_NAME env var > git config user.name > "User"
+/// Result is cached for the lifetime of the process via OnceLock.
+fn resolve_user_name() -> String {
+    USER_NAME.get_or_init(resolve_user_name_inner).clone()
+}
+
+/// Resolve the assistant display name (uncached). Used by tests and as the
+/// initializer for the OnceLock cache.
+fn resolve_assistant_name_inner() -> String {
     if let Ok(name) = std::env::var("MX_ASSISTANT_NAME") {
         if !name.is_empty() {
             return name;
         }
     }
     "Claude".to_string()
+}
+
+/// Resolve the assistant display name for transcripts.
+/// Priority: MX_ASSISTANT_NAME env var > "Claude"
+/// Result is cached for the lifetime of the process via OnceLock.
+fn resolve_assistant_name() -> String {
+    ASSISTANT_NAME.get_or_init(resolve_assistant_name_inner).clone()
 }
 
 fn system_reminder_re() -> &'static Regex {
@@ -850,6 +866,9 @@ fn build_agent_type_map(session_content: &str) -> HashMap<String, String> {
 /// Resolve an agent name using the agent type map if possible, falling back to the hex ID.
 fn resolve_agent_display_name(path: &Path, agent_type_map: &HashMap<String, String>) -> String {
     let hex_id = agent_name_from_path(path);
+    if hex_id.is_empty() {
+        return hex_id;
+    }
     // Check if any tool_use_id in the map matches (agent filenames contain hex IDs that
     // may overlap with tool_use IDs) or if the hex_id itself is in the map values.
     // The agent JSONL files are named agent-<hex_id>.jsonl. We need to find the
@@ -1027,11 +1046,9 @@ fn migrate_clean_transcripts(
                 }
                 agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
             }
-            {
-                let user_name = resolve_user_name();
-                let assistant_name = resolve_assistant_name();
-                generate_clean_transcript_with_agents(&session_content, &agent_sessions, &user_name, &assistant_name)?
-            }
+            let user_name = resolve_user_name();
+            let assistant_name = resolve_assistant_name();
+            generate_clean_transcript_with_agents(&session_content, &agent_sessions, &user_name, &assistant_name)?
         } else {
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
@@ -1045,6 +1062,8 @@ fn migrate_clean_transcripts(
             let manifest_content = fs::read_to_string(&manifest_path)?;
             if let Ok(mut manifest) = serde_json::from_str::<Manifest>(&manifest_content) {
                 manifest.has_clean_transcript = Some(true);
+                manifest.user_name = Some(resolve_user_name());
+                manifest.assistant_name = Some(resolve_assistant_name());
                 let updated = serde_json::to_string_pretty(&manifest)?;
                 fs::write(&manifest_path, updated)?;
             }
@@ -1179,11 +1198,9 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
                 }
             }
             agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-            {
-                let user_name = resolve_user_name();
-                let assistant_name = resolve_assistant_name();
-                generate_clean_transcript_with_agents(&content, &agent_sessions, &user_name, &assistant_name)?
-            }
+            let user_name = resolve_user_name();
+            let assistant_name = resolve_assistant_name();
+            generate_clean_transcript_with_agents(&content, &agent_sessions, &user_name, &assistant_name)?
         } else {
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
@@ -1947,9 +1964,11 @@ mod tests {
 
     #[test]
     fn resolve_user_name_from_env() {
-        // SAFETY: test-only env manipulation, tests run serially via cargo test
+        // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
+        // These tests may race if run in parallel -- acceptable risk for unit tests.
+        // Use `cargo test -- --test-threads=1` if flaky.
         unsafe { std::env::set_var("MX_USER_NAME", "TestHuman"); }
-        let name = resolve_user_name();
+        let name = resolve_user_name_inner();
         unsafe { std::env::remove_var("MX_USER_NAME"); }
         assert_eq!(name, "TestHuman");
     }
@@ -1957,16 +1976,18 @@ mod tests {
     #[test]
     fn resolve_user_name_fallback_without_env() {
         unsafe { std::env::remove_var("MX_USER_NAME"); }
-        let name = resolve_user_name();
+        let name = resolve_user_name_inner();
         // Should be either git user.name or "User" — both are valid
         assert!(!name.is_empty());
     }
 
     #[test]
     fn resolve_assistant_name_from_env() {
-        // SAFETY: test-only env manipulation, tests run serially via cargo test
+        // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
+        // These tests may race if run in parallel -- acceptable risk for unit tests.
+        // Use `cargo test -- --test-threads=1` if flaky.
         unsafe { std::env::set_var("MX_ASSISTANT_NAME", "Opus"); }
-        let name = resolve_assistant_name();
+        let name = resolve_assistant_name_inner();
         unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
         assert_eq!(name, "Opus");
     }
@@ -1974,7 +1995,7 @@ mod tests {
     #[test]
     fn resolve_assistant_name_default() {
         unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
-        let name = resolve_assistant_name();
+        let name = resolve_assistant_name_inner();
         assert_eq!(name, "Claude");
     }
 
@@ -2041,6 +2062,53 @@ mod tests {
         let path = PathBuf::from("/some/dir/agent-def456.jsonl");
         let name = resolve_agent_display_name(&path, &map);
         assert_eq!(name, "def456");
+    }
+
+    // ---------------------------------------------------------------------------
+    // W4: backwards-compat & edge-case tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn manifest_deserialize_without_speaker_names() {
+        // Old archives will not have user_name or assistant_name fields.
+        // Verify they deserialize as None for backwards compatibility.
+        let json = r#"{
+            "version": 2,
+            "session_id": "abc123",
+            "archived_at": "2026-01-01T00:00:00Z",
+            "session_start": "2026-01-01T00:00:00Z",
+            "session_end": "2026-01-01T00:00:00Z",
+            "project_path": null,
+            "message_count": 10,
+            "agent_count": 0,
+            "agents": [],
+            "size_bytes": 1024,
+            "checksum": "sha256:aaa"
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.user_name, None);
+        assert_eq!(manifest.assistant_name, None);
+        assert_eq!(manifest.has_clean_transcript, None);
+        assert_eq!(manifest.image_count, None);
+    }
+
+    #[test]
+    fn resolve_agent_display_name_empty_hex_id() {
+        // S2 guard: an empty hex_id (from "agent-.jsonl") should be returned as-is,
+        // not match every tool_use_id via "anything".contains("").
+        let mut map = HashMap::new();
+        map.insert("toolu_xyz789".to_string(), "ShouldNotMatch".to_string());
+        let path = PathBuf::from("/some/dir/agent-.jsonl");
+        let name = resolve_agent_display_name(&path, &map);
+        assert_eq!(name, "");
+    }
+
+    #[test]
+    fn build_agent_type_map_missing_subagent_type() {
+        // Agent tool_use block without subagent_type field should be silently skipped.
+        let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_notype","name":"Agent","input":{"task":"do something"}}]}}"#;
+        let map = build_agent_type_map(jsonl);
+        assert!(map.is_empty(), "map should be empty when subagent_type is missing");
     }
 
 }
