@@ -54,11 +54,11 @@ fn resolve_assistant_name_inner() -> String {
             return name;
         }
     }
-    "Claude".to_string()
+    "Orchestrator".to_string()
 }
 
 /// Resolve the assistant display name for transcripts.
-/// Priority: MX_ASSISTANT_NAME env var > "Claude"
+/// Priority: MX_ASSISTANT_NAME env var > "Orchestrator"
 /// Result is cached for the lifetime of the process via OnceLock.
 fn resolve_assistant_name() -> String {
     ASSISTANT_NAME.get_or_init(resolve_assistant_name_inner).clone()
@@ -1672,14 +1672,14 @@ mod tests {
     #[test]
     fn user_string_gets_user_prefix() {
         let jsonl = user_str("Hello there");
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "**User:** Hello there\n\n");
     }
 
     #[test]
     fn user_string_content_is_trimmed() {
         let jsonl = user_str("  spaced out  ");
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "**User:** spaced out\n\n");
     }
 
@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn user_array_content_is_dropped() {
-        let result = generate_clean_transcript(user_array(), "User", "Claude").unwrap();
+        let result = generate_clean_transcript(user_array(), "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1700,16 +1700,16 @@ mod tests {
     #[test]
     fn assistant_text_gets_assistant_prefix() {
         let jsonl = assistant_text("Here is my answer.");
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
-        assert_eq!(result, "**Claude:** Here is my answer.\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
+        assert_eq!(result, "**Orchestrator:** Here is my answer.\n\n");
     }
 
     #[test]
     fn assistant_multiple_text_blocks_joined() {
         // Two text blocks in one assistant message → joined with \n\n, single prefix
         let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Part one."},{"type":"text","text":"Part two."}]}}"#;
-        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
-        assert_eq!(result, "**Claude:** Part one.\n\nPart two.\n\n");
+        let result = generate_clean_transcript(jsonl, "User", "Orchestrator").unwrap();
+        assert_eq!(result, "**Orchestrator:** Part one.\n\nPart two.\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1718,7 +1718,7 @@ mod tests {
 
     #[test]
     fn assistant_tool_use_only_is_dropped() {
-        let result = generate_clean_transcript(assistant_tool_use(), "User", "Claude").unwrap();
+        let result = generate_clean_transcript(assistant_tool_use(), "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1726,8 +1726,8 @@ mod tests {
     fn assistant_mixed_keeps_only_text() {
         // text + tool_use block → only text survives, tool_use dropped
         let jsonl = assistant_mixed("Thinking out loud.");
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
-        assert_eq!(result, "**Claude:** Thinking out loud.\n\n");
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
+        assert_eq!(result, "**Orchestrator:** Thinking out loud.\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -1738,7 +1738,7 @@ mod tests {
     fn system_reminder_stripped_from_user_content() {
         let text = "real question<system-reminder>ignore me</system-reminder>";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "**User:** real question\n\n");
     }
 
@@ -1747,7 +1747,7 @@ mod tests {
         // After stripping the reminder, content is empty → entire message dropped
         let text = "<system-reminder>only this</system-reminder>";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1755,7 +1755,7 @@ mod tests {
     fn user_content_whitespace_only_after_strip_is_dropped() {
         let text = "  <system-reminder>noise</system-reminder>  ";
         let jsonl = user_str(text);
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1766,14 +1766,14 @@ mod tests {
     #[test]
     fn file_history_snapshot_type_dropped() {
         let jsonl = r#"{"type":"file-history-snapshot","message":{"content":"snapshot data"}}"#;
-        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
     fn unknown_type_dropped() {
         let jsonl = r#"{"type":"summary","data":"session summary here"}"#;
-        let result = generate_clean_transcript(jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1783,14 +1783,14 @@ mod tests {
 
     #[test]
     fn empty_input_produces_empty_output() {
-        let result = generate_clean_transcript("", "User", "Claude").unwrap();
+        let result = generate_clean_transcript("", "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
     #[test]
     fn blank_lines_skipped() {
         let jsonl = format!("\n\n{}\n\n", user_str("hi"));
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "**User:** hi\n\n");
     }
 
@@ -1798,7 +1798,7 @@ mod tests {
     fn malformed_jsonl_line_skipped() {
         // A bad line followed by a valid line — bad line is silently skipped
         let jsonl = format!("NOT JSON\n{}", user_str("valid"));
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
         assert_eq!(result, "**User:** valid\n\n");
     }
 
@@ -1821,16 +1821,16 @@ mod tests {
         ];
         let jsonl = lines.join("\n");
 
-        let result = generate_clean_transcript(&jsonl, "User", "Claude").unwrap();
+        let result = generate_clean_transcript(&jsonl, "User", "Orchestrator").unwrap();
 
         // Expected: user string → User, tool result → dropped, assistant tool_use → dropped,
-        // assistant text → Claude, snapshot → dropped, user with reminder stripped → User,
-        // assistant mixed → Claude (text only)
+        // assistant text → Orchestrator, snapshot → dropped, user with reminder stripped → User,
+        // assistant mixed → Orchestrator (text only)
         let expected = concat!(
             "**User:** Can you list the files?\n\n",
-            "**Claude:** Here are the files: foo.rs, bar.rs.\n\n",
+            "**Orchestrator:** Here are the files: foo.rs, bar.rs.\n\n",
             "**User:** Thanks, what about tests?\n\n",
-            "**Claude:** I see test coverage is low.\n\n",
+            "**Orchestrator:** I see test coverage is low.\n\n",
         );
         assert_eq!(result, expected);
     }
@@ -1842,8 +1842,8 @@ mod tests {
     #[test]
     fn agents_empty_list_same_as_plain() {
         let main_session = user_str("Hello");
-        let with_agents = generate_clean_transcript_with_agents(&main_session, &[], "User", "Claude").unwrap();
-        let plain = generate_clean_transcript(&main_session, "User", "Claude").unwrap();
+        let with_agents = generate_clean_transcript_with_agents(&main_session, &[], "User", "Orchestrator").unwrap();
+        let plain = generate_clean_transcript(&main_session, "User", "Orchestrator").unwrap();
         assert_eq!(with_agents, plain);
     }
 
@@ -1860,7 +1860,7 @@ mod tests {
             &main_jsonl,
             &[("worker-1".to_string(), agent_jsonl)],
             "User",
-            "Claude",
+            "Orchestrator",
         )
         .unwrap();
 
@@ -1868,7 +1868,7 @@ mod tests {
             "**User:** Main question\n\n",
             "\n---\n\n## Agent: worker-1\n\n",
             "**User:** Agent task\n\n",
-            "**Claude:** Agent did it.\n\n",
+            "**Orchestrator:** Agent did it.\n\n",
         );
         assert_eq!(result, expected);
     }
@@ -1888,7 +1888,7 @@ mod tests {
                 ("beta".to_string(), agent_b),
             ],
             "User",
-            "Claude",
+            "Orchestrator",
         )
         .unwrap();
 
@@ -1910,7 +1910,7 @@ mod tests {
             &main_jsonl,
             &[("empty-agent".to_string(), agent_jsonl)],
             "User",
-            "Claude",
+            "Orchestrator",
         )
         .unwrap();
 
@@ -1928,7 +1928,7 @@ mod tests {
             &main_jsonl,
             &[("sub-1".to_string(), agent_jsonl)],
             "User",
-            "Claude",
+            "Orchestrator",
         )
         .unwrap();
 
@@ -1996,7 +1996,7 @@ mod tests {
     fn resolve_assistant_name_default() {
         unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
         let name = resolve_assistant_name_inner();
-        assert_eq!(name, "Claude");
+        assert_eq!(name, "Orchestrator");
     }
 
     // ---------------------------------------------------------------------------
