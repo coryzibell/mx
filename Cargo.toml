@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.88"
+version = "0.1.89"
 edition = "2024"
 description = "Tsunderground CLI - memory, workflow, and identity tooling"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
