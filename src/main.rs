@@ -1228,7 +1228,7 @@ enum CodexCommands {
         #[arg(long)]
         all: bool,
 
-        /// Save only conversation.md + manifest.json (no JSONL, no images)
+        /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
         #[arg(long)]
         clean: bool,
     },
