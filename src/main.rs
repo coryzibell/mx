@@ -1231,6 +1231,10 @@ enum CodexCommands {
         /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
         #[arg(long)]
         clean: bool,
+
+        /// Include agent sub-session conversations in clean transcript
+        #[arg(long, requires = "clean")]
+        include_agents: bool,
     },
 
     /// List archived sessions
@@ -1266,7 +1270,7 @@ enum CodexCommands {
         json: bool,
 
         /// Read the clean markdown transcript (conversation.md)
-        #[arg(long, conflicts_with = "human", conflicts_with = "agents")]
+        #[arg(long, conflicts_with = "human")]
         clean: bool,
     },
 
@@ -1293,6 +1297,10 @@ enum CodexCommands {
         /// Generate conversation.md for archives that have session.jsonl but no clean transcript
         #[arg(long)]
         clean: bool,
+
+        /// Include agent sub-session conversations in clean transcript
+        #[arg(long, requires = "clean")]
+        include_agents: bool,
     },
 }
 
@@ -4909,8 +4917,8 @@ fn handle_session(cmd: SessionCommands) -> Result<()> {
 
 fn handle_codex(cmd: CodexCommands) -> Result<()> {
     match cmd {
-        CodexCommands::Save { path, all, clean } => {
-            codex::save_session(path, all, clean)?;
+        CodexCommands::Save { path, all, clean, include_agents } => {
+            codex::save_session(path, all, clean, include_agents)?;
             Ok(())
         }
         CodexCommands::List { all, json } => {
@@ -4925,7 +4933,8 @@ fn handle_codex(cmd: CodexCommands) -> Result<()> {
             json,
             clean,
         } => {
-            codex::read_session(id, human, grep, agents, json, clean)?;
+            let clean_agents = clean && agents;
+            codex::read_session(id, human, grep, agents, json, clean, clean_agents)?;
             Ok(())
         }
         CodexCommands::Search { pattern, json } => {
@@ -4936,8 +4945,9 @@ fn handle_codex(cmd: CodexCommands) -> Result<()> {
             dry_run,
             verbose,
             clean,
+            include_agents,
         } => {
-            codex::migrate_archives(dry_run, verbose, clean)?;
+            codex::migrate_archives(dry_run, verbose, clean, include_agents)?;
             Ok(())
         }
     }

@@ -61,12 +61,12 @@ pub struct ImageInfo {
 }
 
 /// Archive the current session to the codex
-pub fn save_session(session_path: Option<String>, all: bool, clean: bool) -> Result<()> {
+pub fn save_session(session_path: Option<String>, all: bool, clean: bool, include_agents: bool) -> Result<()> {
     if all {
-        save_all_sessions(clean)?;
+        save_all_sessions(clean, include_agents)?;
     } else {
         let path = resolve_session_path(session_path)?;
-        archive_session(&path, clean)?;
+        archive_session(&path, clean, include_agents)?;
     }
     Ok(())
 }
@@ -176,6 +176,7 @@ pub fn read_session(
     include_agents: bool,
     json: bool,
     clean: bool,
+    clean_agents: bool,
 ) -> Result<()> {
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
@@ -188,7 +189,36 @@ pub fn read_session(
                 id
             );
         }
-        let content = fs::read_to_string(&transcript_file)?;
+        let mut content = fs::read_to_string(&transcript_file)?;
+
+        // If --agents requested but transcript doesn't contain agent sections,
+        // attempt to generate them from agent JSONL files in the archive
+        if clean_agents && !content.contains("\n## Agent: ") {
+            let agents_dir = archive_dir.join("agents");
+            if agents_dir.exists() {
+                let mut agent_sessions = Vec::new();
+                for entry in fs::read_dir(&agents_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                        let agent_name = agent_name_from_path(&path);
+                        let agent_content = fs::read_to_string(&path)?;
+                        agent_sessions.push((agent_name, agent_content));
+                    }
+                }
+                agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+                for (agent_name, agent_content) in &agent_sessions {
+                    let agent_transcript = generate_clean_transcript(agent_content)?;
+                    if !agent_transcript.is_empty() {
+                        content.push_str(&format!(
+                            "\n---\n\n## Agent: {}\n\n{}",
+                            agent_name, agent_transcript
+                        ));
+                    }
+                }
+            }
+        }
+
         if let Some(pattern) = grep_pattern {
             for line in content.lines() {
                 if line.contains(&pattern) {
@@ -324,7 +354,7 @@ pub fn search_archives(pattern: String, json: bool) -> Result<()> {
 }
 
 /// Migrate all v1 archives to v2 (extract images to files)
-pub fn migrate_archives(dry_run: bool, verbose: bool, clean: bool) -> Result<()> {
+pub fn migrate_archives(dry_run: bool, verbose: bool, clean: bool, include_agents: bool) -> Result<()> {
     let codex_dir = get_codex_dir()?;
 
     if !codex_dir.exists() {
@@ -341,7 +371,7 @@ pub fn migrate_archives(dry_run: bool, verbose: bool, clean: bool) -> Result<()>
 
     // --clean mode: generate conversation.md for archives that have session.jsonl but no transcript
     if clean {
-        return migrate_clean_transcripts(&codex_dir, archives, dry_run, verbose);
+        return migrate_clean_transcripts(&codex_dir, archives, dry_run, verbose, include_agents);
     }
 
     // Find archives that need migration (version < 2 or missing version)
@@ -688,6 +718,41 @@ fn save_image(
     Ok(format!("images/{}", filename))
 }
 
+/// Generate a clean transcript from JSONL, including agent sub-session transcripts.
+/// Each agent's transcript is appended with a separator and heading.
+fn generate_clean_transcript_with_agents(
+    session_content: &str,
+    agent_sessions: &[(String, String)], // (agent_name, jsonl_content)
+) -> Result<String> {
+    let mut output = generate_clean_transcript(session_content)?;
+
+    for (agent_name, agent_content) in agent_sessions {
+        let agent_transcript = generate_clean_transcript(agent_content)?;
+        if !agent_transcript.is_empty() {
+            output.push_str(&format!(
+                "\n---\n\n## Agent: {}\n\n{}",
+                agent_name, agent_transcript
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+/// Extract an agent name from its filename (e.g. "agent-abc12345.jsonl" -> "abc12345")
+fn agent_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .strip_prefix("agent-")
+        .unwrap_or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        })
+        .to_string()
+}
+
 // --- Clean transcript helpers ---
 
 /// Strip <system-reminder>...</system-reminder> blocks from a string
@@ -759,6 +824,7 @@ fn migrate_clean_transcripts(
     archives: Vec<ArchiveEntry>,
     dry_run: bool,
     verbose: bool,
+    include_agents: bool,
 ) -> Result<()> {
     let mut needs_transcript = Vec::new();
 
@@ -819,7 +885,25 @@ fn migrate_clean_transcripts(
         let manifest_path = archive_dir.join("manifest.json");
 
         let session_content = fs::read_to_string(&session_file)?;
-        let transcript = generate_clean_transcript(&session_content)?;
+        let transcript = if include_agents {
+            let agents_dir = archive_dir.join("agents");
+            let mut agent_sessions = Vec::new();
+            if agents_dir.exists() {
+                for entry in fs::read_dir(&agents_dir)? {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                        let agent_name = agent_name_from_path(&path);
+                        let agent_content = fs::read_to_string(&path)?;
+                        agent_sessions.push((agent_name, agent_content));
+                    }
+                }
+                agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            generate_clean_transcript_with_agents(&session_content, &agent_sessions)?
+        } else {
+            generate_clean_transcript(&session_content)?
+        };
 
         fs::write(&transcript_file, &transcript)?;
 
@@ -872,7 +956,7 @@ fn resolve_session_path(path: Option<String>) -> Result<PathBuf> {
     }
 }
 
-fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
+fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Result<()> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -950,8 +1034,21 @@ fn archive_session(session_path: &Path, clean: bool) -> Result<()> {
 
         let image_count = all_images.len();
 
-        // Generate clean transcript
-        let transcript = generate_clean_transcript(&content)?;
+        // Generate clean transcript (optionally with agent conversations)
+        let transcript = if include_agents && !agents.is_empty() {
+            let mut agent_sessions = Vec::new();
+            for agent in &agents {
+                let source_path = PathBuf::from(&agent.id);
+                if let Ok(agent_content) = fs::read_to_string(&source_path) {
+                    let agent_name = agent_name_from_path(&source_path);
+                    agent_sessions.push((agent_name, agent_content));
+                }
+            }
+            agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
+            generate_clean_transcript_with_agents(&content, &agent_sessions)?
+        } else {
+            generate_clean_transcript(&content)?
+        };
         let conversation_md_path = archive_dir.join("conversation.md");
         fs::write(&conversation_md_path, &transcript)?;
 
@@ -1262,7 +1359,7 @@ fn print_human_readable(content: &str) -> Result<()> {
     Ok(())
 }
 
-fn save_all_sessions(clean: bool) -> Result<()> {
+fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     let projects_dir = home.join(".claude").join("projects");
 
@@ -1315,7 +1412,7 @@ fn save_all_sessions(clean: bool) -> Result<()> {
                 let session_id = name.trim_end_matches(".jsonl");
                 if !archived_ids.contains(session_id) {
                     println!("Archiving: {}", session_id);
-                    archive_session(&file_path, clean)?;
+                    archive_session(&file_path, clean, include_agents)?;
                     archived_count += 1;
                 }
             }
@@ -1576,4 +1673,121 @@ mod tests {
         );
         assert_eq!(result, expected);
     }
+
+    // ---------------------------------------------------------------------------
+    // generate_clean_transcript_with_agents
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn agents_empty_list_same_as_plain() {
+        let main_session = user_str("Hello");
+        let with_agents = generate_clean_transcript_with_agents(&main_session, &[]).unwrap();
+        let plain = generate_clean_transcript(&main_session).unwrap();
+        assert_eq!(with_agents, plain);
+    }
+
+    #[test]
+    fn agents_single_agent_appended() {
+        let main_jsonl = user_str("Main question");
+        let agent_jsonl = format!(
+            "{}\n{}",
+            user_str("Agent task"),
+            assistant_text("Agent did it.")
+        );
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("worker-1".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        let expected = concat!(
+            "**Geoff:** Main question\n\n",
+            "\n---\n\n## Agent: worker-1\n\n",
+            "**Geoff:** Agent task\n\n",
+            "**Soren:** Agent did it.\n\n",
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn agents_multiple_agents_sorted_by_name() {
+        let main_jsonl = user_str("Start");
+        let agent_b = assistant_text("From agent B.");
+        let agent_a = assistant_text("From agent A.");
+
+        // Pass out of order; function receives pre-sorted in production,
+        // but generate_clean_transcript_with_agents itself just appends in order
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[
+                ("alpha".to_string(), agent_a),
+                ("beta".to_string(), agent_b),
+            ],
+        )
+        .unwrap();
+
+        // Should have agent alpha before beta (passed in that order)
+        assert!(result.contains("## Agent: alpha"));
+        assert!(result.contains("## Agent: beta"));
+        let alpha_pos = result.find("## Agent: alpha").unwrap();
+        let beta_pos = result.find("## Agent: beta").unwrap();
+        assert!(alpha_pos < beta_pos, "alpha should appear before beta");
+    }
+
+    #[test]
+    fn agents_empty_agent_content_skipped() {
+        let main_jsonl = user_str("Main");
+        // Agent JSONL has no user/assistant messages (only tool results)
+        let agent_jsonl = user_array().to_string();
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("empty-agent".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        // Should NOT contain agent section since transcript was empty
+        assert!(!result.contains("## Agent:"));
+        assert_eq!(result, "**Geoff:** Main\n\n");
+    }
+
+    #[test]
+    fn agents_transcript_has_separator() {
+        let main_jsonl = user_str("Question");
+        let agent_jsonl = assistant_text("Answer from agent.");
+
+        let result = generate_clean_transcript_with_agents(
+            &main_jsonl,
+            &[("sub-1".to_string(), agent_jsonl)],
+        )
+        .unwrap();
+
+        // Verify separator format
+        assert!(result.contains("\n---\n\n## Agent: sub-1\n\n"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // agent_name_from_path
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn agent_name_strips_prefix() {
+        let path = PathBuf::from("/some/dir/agent-abc12345.jsonl");
+        assert_eq!(agent_name_from_path(&path), "abc12345");
+    }
+
+    #[test]
+    fn agent_name_no_prefix_returns_stem() {
+        let path = PathBuf::from("/some/dir/custom-session.jsonl");
+        assert_eq!(agent_name_from_path(&path), "custom-session");
+    }
+
+    #[test]
+    fn agent_name_agent_prefix_only() {
+        // Edge case: filename is exactly "agent-.jsonl"
+        let path = PathBuf::from("/some/dir/agent-.jsonl");
+        assert_eq!(agent_name_from_path(&path), "");
+    }
+
 }
