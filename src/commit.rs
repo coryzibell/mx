@@ -262,7 +262,11 @@ fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
              This suggests an unsafe dictionary was selected. Encoded preview: {:?}",
             context,
             pos,
-            &encoded[..encoded.char_indices().take(40).last().map_or(0, |(i, c)| i + c.len_utf8())]
+            &encoded[..encoded
+                .char_indices()
+                .take(40)
+                .last()
+                .map_or(0, |(i, c)| i + c.len_utf8())]
         );
     }
     // Check for C0 controls (except newline, tab) and C1 controls
@@ -275,7 +279,11 @@ fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
                 context,
                 cp,
                 i,
-                &encoded[..encoded.char_indices().take(40).last().map_or(0, |(i, c)| i + c.len_utf8())]
+                &encoded[..encoded
+                    .char_indices()
+                    .take(40)
+                    .last()
+                    .map_or(0, |(i, c)| i + c.len_utf8())]
             );
         }
     }
@@ -499,6 +507,12 @@ mod tests {
     #[test]
     fn test_validate_encoded_multibyte_unicode() {
         // Valid multi-byte chars should pass -- no false positives
-        assert!(validate_encoded_output("\u{1f711}\u{1f754}\u{1f72e}\u{1f716}\u{1f723}\u{1f75c}", "test").is_ok());
+        assert!(
+            validate_encoded_output(
+                "\u{1f711}\u{1f754}\u{1f72e}\u{1f716}\u{1f723}\u{1f75c}",
+                "test"
+            )
+            .is_ok()
+        );
     }
 }
