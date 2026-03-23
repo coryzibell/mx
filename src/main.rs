@@ -4,7 +4,6 @@ mod codex;
 mod commit;
 mod content_ops;
 mod convert;
-mod db;
 mod doctor;
 mod embeddings;
 mod engage;
@@ -17,11 +16,12 @@ mod store;
 mod surreal_db;
 mod sync;
 mod tensor;
+mod types;
 mod wake_ritual;
 mod wake_token;
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::index::{
     IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
@@ -493,6 +493,15 @@ fn normalize_id(id: &str) -> String {
     }
 }
 
+/// Sort order for `memory recent` results.
+#[derive(Clone, Debug, ValueEnum)]
+enum RecentSortOrder {
+    /// Sort by creation time (most recent first)
+    Chronological,
+    /// Sort by effective resonance (highest first, decay-adjusted)
+    Resonance,
+}
+
 #[derive(Subcommand)]
 enum MemoryCommands {
     /// Rebuild the knowledge index
@@ -638,7 +647,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -749,7 +758,7 @@ enum MemoryCommands {
         #[arg(long)]
         resonance: Option<i32>,
 
-        /// Update resonance type (foundational, transformative, relational, operational, ephemeral)
+        /// Update resonance type (foundational, transformative, relational, operational, ephemeral, session)
         #[arg(long)]
         resonance_type: Option<String>,
 
@@ -911,20 +920,8 @@ enum MemoryCommands {
         verbose: bool,
     },
 
-    /// Apply database schema migrations
-    Migrate {
-        /// Show migration status (list tables)
-        #[arg(long)]
-        status: bool,
-
-        /// Source database path (SQLite file path)
-        #[arg(long)]
-        from: Option<String>,
-
-        /// Target database type (currently only "surrealdb")
-        #[arg(long)]
-        to: Option<String>,
-    },
+    /// Show database schema status
+    Migrate,
 
     /// Manage agents registry
     Agents {
@@ -1082,9 +1079,19 @@ enum MemoryCommands {
         #[arg(long, default_value = "text", hide = true)]
         format: String,
 
-        /// Filter by resonance type (e.g., ephemeral)
+        /// Filter by resonance type (e.g., ephemeral). When omitted without --all-types, defaults to ephemeral only.
         #[arg(long)]
         resonance_type: Option<String>,
+
+        /// Surface all resonance types (blooms, patterns, insights, decisions, ephemeral, etc.)
+        /// instead of ephemeral-only. Can be combined with --resonance-type to filter within
+        /// the broader set.
+        #[arg(long)]
+        all_types: bool,
+
+        /// Sort order: "chronological" (default) or "resonance" (highest first)
+        #[arg(long, value_enum, default_value_t = RecentSortOrder::Chronological)]
+        sort: RecentSortOrder,
 
         /// Maximum number of results
         #[arg(long, default_value = "100")]
@@ -2160,19 +2167,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot_product / (magnitude_a * magnitude_b)
 }
 
-/// Auto-embed a knowledge entry if in network SurrealDB mode
+/// Auto-embed a knowledge entry after add/update
 ///
 /// This silently generates and updates the embedding for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
     use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
-
-    // Only auto-embed in SurrealDB mode
-    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
-
-    if backend != "surrealdb" && backend != "surreal" {
-        return Ok(()); // Not SurrealDB, skip
-    }
 
     // Get agent context for fetching the entry
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -2207,23 +2206,15 @@ fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
     Ok(())
 }
 
-/// Auto-anchor a knowledge entry if in SurrealDB mode
+/// Auto-anchor a knowledge entry after add/update
 ///
 /// This silently finds similar entries and adds anchors for a single entry.
-/// Only runs when MX_MEMORY_BACKEND=surrealdb (network or local mode).
 /// Uses defaults: threshold 0.75, max 5 anchors.
 fn auto_anchor(
     entry_id: &str,
     db: &dyn store::KnowledgeStore,
     explicitly_removed: Option<&[String]>,
 ) -> Result<()> {
-    // Only auto-anchor in SurrealDB mode
-    let backend = std::env::var("MX_MEMORY_BACKEND").unwrap_or_else(|_| "sqlite".to_string());
-
-    if backend != "surrealdb" && backend != "surreal" {
-        return Ok(()); // Not SurrealDB, skip
-    }
-
     // Get agent context for fetching entries
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
         Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
@@ -2746,6 +2737,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     embedding_model: None,
                     embedded_at: None,
                     format: "markdown".to_string(),
+                    effective_resonance: None,
                 };
 
                 // Insert the fact
@@ -2864,6 +2856,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&rtype.as_str()) {
                     bail!(
@@ -2914,6 +2907,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 embedding_model: None,
                 embedded_at: None,
                 format: "markdown".to_string(),
+                effective_resonance: None,
             };
 
             // Insert into database (applicability already set in struct)
@@ -3147,6 +3141,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "relational",
                     "operational",
                     "ephemeral",
+                    "session",
                 ];
                 if !valid_types.contains(&new_type.as_str()) {
                     bail!(
@@ -3842,35 +3837,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Migrate { status, from, to } => {
-            // Handle migration from SQLite to SurrealDB
-            if let (Some(source_path), Some(target_type)) = (from, to) {
-                if target_type != "surrealdb" {
-                    bail!("Only 'surrealdb' is supported as --to value");
-                }
+        MemoryCommands::Migrate => {
+            let db = store::create_store(&config.db_path)?;
+            println!("SurrealDB backend at {:?}", config.db_path);
+            println!("Schema is current.");
 
-                // Perform migration
-                perform_migration(&source_path, &config)?;
-            } else if status {
-                // Show current tables
-                let db = store::create_store(&config.db_path)?;
-                let tables: Vec<String> = db.list_tables()?;
-                println!("Database tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
-            } else {
-                // Apply migrations (schema is applied in Database::open via init_schema)
-                let db = store::create_store(&config.db_path)?;
-                println!("Applying migrations to {:?}...", config.db_path);
-                println!("Schema applied successfully");
-
-                // Show what exists now
-                let tables = db.list_tables()?;
-                println!("\nCurrent tables:");
-                for table in tables {
-                    println!("  {}", table);
-                }
+            let tables: Vec<String> = db.list_tables()?;
+            println!("\nTables:");
+            for table in tables {
+                println!("  {}", table);
             }
         }
 
@@ -4021,18 +3996,64 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             json,
             format,
             resonance_type,
+            all_types,
+            sort,
             limit,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
-            // Note: Listing doesn't activate facts - bulk view != focused access
-            // Query recent facts with decay
-            let mut facts = db.query_recent_facts(days)?;
+            // Warn when resonance-dependent flags are used with the SQLite backend,
+            // which hardcodes resonance: 0 and has no decay computation.
+            let is_sqlite = !matches!(
+                std::env::var("MX_MEMORY_BACKEND").as_deref(),
+                Ok("surrealdb") | Ok("surreal")
+            );
+            if is_sqlite && matches!(sort, RecentSortOrder::Resonance) {
+                eprintln!(
+                    "warning: --sort resonance uses the SQLite backend, which does not support \
+                     resonance decay computation. Results will sort by raw resonance (always 0). \
+                     Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
+                );
+            }
 
-            // Filter by resonance_type if provided
+            // Note: Listing doesn't activate facts - bulk view != focused access
+            // Auto-enable all_types when --resonance-type is set, otherwise the
+            // default ephemeral-only query would silently return nothing for
+            // non-ephemeral types (e.g. `--resonance-type foundational`).
+            let all_types = all_types || resonance_type.is_some();
+
+            // Decide which query to use:
+            //   --all-types (or --resonance-type) => query all resonance types
+            //   (default)                         => ephemeral only (backwards compatible)
+            // --resonance-type filter is applied post-query in both cases.
+            let mut facts = if all_types {
+                db.query_recent_facts_all_types(days)?
+            } else {
+                db.query_recent_facts(days)?
+            };
+
+            // Filter by resonance_type if provided (works with both code paths)
             if let Some(ref rtype) = resonance_type {
                 facts.retain(|f| f.resonance_type.as_deref() == Some(rtype.as_str()));
             }
+
+            // Apply sort: "resonance" sorts by effective_resonance (decay-adjusted) highest-first.
+            // DB already returns entries ORDER BY effective_resonance DESC; the default path
+            // preserves that ordering rather than re-sorting, so a resonance-9 from 6 months
+            // ago does not outrank a resonance-7 from yesterday.
+            if matches!(sort, RecentSortOrder::Resonance) {
+                facts.sort_by(|a, b| {
+                    // Sort by effective_resonance (decay-adjusted) when available;
+                    // fall back to raw resonance for SQLite entries that lack it.
+                    let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
+                    let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
+                    b_val
+                        .partial_cmp(&a_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
+            // created_at DESC from SQLite). No re-sort needed.
 
             // Apply limit
             facts.truncate(limit);
@@ -4318,7 +4339,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
             domain,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let agent = db::Agent {
+            let agent = types::Agent {
                 id: id.clone(),
                 description: Some(description.clone()),
                 domain: Some(domain.clone()),
@@ -4402,7 +4423,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
                 if let Some((frontmatter, _body)) = parse_frontmatter(&content)
                     && let Ok(agent_data) = serde_yaml::from_str::<AgentFrontmatter>(&frontmatter)
                 {
-                    let agent = db::Agent {
+                    let agent = types::Agent {
                         id: agent_data.name.clone(),
                         description: Some(agent_data.description.clone()),
                         domain: agent_data.domain,
@@ -4465,7 +4486,7 @@ fn handle_projects(cmd: ProjectsCommands, config: &IndexConfig) -> Result<()> {
             description,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let project = db::Project {
+            let project = types::Project {
                 id: id.clone(),
                 name: name.clone(),
                 path,
@@ -4511,7 +4532,7 @@ fn handle_applicability(cmd: ApplicabilityCommands, config: &IndexConfig) -> Res
             scope,
         } => {
             let now = chrono::Utc::now().to_rfc3339();
-            let atype = db::ApplicabilityType {
+            let atype = types::ApplicabilityType {
                 id: id.clone(),
                 description: description.clone(),
                 scope,
@@ -4560,7 +4581,7 @@ fn handle_sessions(cmd: SessionsCommands, config: &IndexConfig) -> Result<()> {
         } => {
             let now = chrono::Utc::now().to_rfc3339();
             let id = format!("sess-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-            let session = db::Session {
+            let session = types::Session {
                 id: id.clone(),
                 session_type_id: session_type,
                 project_id: project,
@@ -4611,7 +4632,7 @@ fn handle_categories(cmd: CategoriesCommands, config: &IndexConfig) -> Result<()
             }
 
             let now = chrono::Utc::now().to_rfc3339();
-            let category = db::Category {
+            let category = types::Category {
                 id: id.clone(),
                 description: description.clone(),
                 created_at: now,
@@ -5115,11 +5136,7 @@ fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> Result<()> {
                 };
 
                 // Truncate for display
-                let display_truncated = if display.len() > 72 {
-                    format!("{}...", &display[..69])
-                } else {
-                    display
-                };
+                let display_truncated = safe_truncate(&display, 72);
 
                 println!("\x1b[33m{}\x1b[0m {}", hash, display_truncated);
             }
@@ -5405,11 +5422,7 @@ fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
     println!("  {} [{}]", entry.id, entry.category_id);
     println!("  {}", entry.title);
     if let Some(summary) = &entry.summary {
-        let short = if summary.len() > 80 {
-            format!("{}...", &summary[..77])
-        } else {
-            summary.clone()
-        };
+        let short = safe_truncate(summary, 80);
         println!("  {}", short);
     }
     if !entry.tags.is_empty() {
@@ -5475,171 +5488,6 @@ fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
     }
 }
 
-/// Perform migration from SQLite to SurrealDB
-fn perform_migration(source_path: &str, config: &IndexConfig) -> Result<()> {
-    use crate::db::Database;
-    use crate::store::KnowledgeStore;
-    use crate::surreal_db::SurrealDatabase;
-    use std::path::PathBuf;
-
-    // Expand ~ in source path
-    let source_path_expanded = if source_path.starts_with('~') {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        PathBuf::from(source_path.replacen('~', &home.to_string_lossy(), 1))
-    } else {
-        PathBuf::from(source_path)
-    };
-
-    println!(
-        "Migrating from {:?} to SurrealDB...\n",
-        source_path_expanded
-    );
-
-    // Open source SQLite database
-    let source_db = Database::open(&source_path_expanded).with_context(|| {
-        format!(
-            "Failed to open source database at {:?}",
-            source_path_expanded
-        )
-    })?;
-
-    // Open target SurrealDB
-    let target_path = config.db_path.with_extension("surreal");
-    let target_db: Box<dyn KnowledgeStore> = Box::new(
-        SurrealDatabase::open(&target_path)
-            .with_context(|| format!("Failed to open target database at {:?}", target_path))?,
-    );
-
-    println!("Lookup tables:");
-
-    // Migrate categories
-    let categories = source_db.list_categories()?;
-    println!("  categories: {}", categories.len());
-
-    // Migrate source types
-    let source_types = source_db.list_source_types()?;
-    println!("  source_types: {}", source_types.len());
-
-    // Migrate entry types
-    let entry_types = source_db.list_entry_types()?;
-    println!("  entry_types: {}", entry_types.len());
-
-    // Migrate content types
-    let content_types = source_db.list_content_types()?;
-    println!("  content_types: {}", content_types.len());
-
-    // Migrate session types
-    let session_types = source_db.list_session_types()?;
-    println!("  session_types: {}", session_types.len());
-
-    // Migrate relationship types
-    let relationship_types = source_db.list_relationship_types()?;
-    println!("  relationship_types: {}", relationship_types.len());
-
-    // Migrate applicability types
-    let applicability_types = source_db.list_applicability_types()?;
-    println!("  applicability_types: {}", applicability_types.len());
-    for atype in &applicability_types {
-        target_db.upsert_applicability_type(atype)?;
-    }
-
-    println!("\nEntities:");
-
-    // Migrate agents
-    let agents = source_db.list_agents()?;
-    println!("  agents: {}", agents.len());
-    for agent in &agents {
-        target_db.upsert_agent(agent)?;
-    }
-
-    // Migrate projects
-    let projects = source_db.list_projects(false)?;
-    println!("  projects: {}", projects.len());
-    for project in &projects {
-        target_db.upsert_project(project)?;
-    }
-
-    // Migrate knowledge entries
-    let mut all_knowledge = Vec::new();
-    let categories_for_knowledge = source_db.list_categories()?;
-    for category in &categories_for_knowledge {
-        let entries = source_db.list_by_category(&category.id)?;
-        all_knowledge.extend(entries);
-    }
-    println!("  knowledge: {}", all_knowledge.len());
-
-    // Count tags across all entries
-    let mut total_tags = 0;
-    for entry in &all_knowledge {
-        total_tags += entry.tags.len();
-        target_db.upsert_knowledge(entry)?;
-    }
-    println!("  tags: {}", total_tags);
-
-    // Migrate relationships
-    let mut all_relationships = Vec::new();
-    for entry in &all_knowledge {
-        let rels = source_db.list_relationships_for_entry(&entry.id)?;
-        for rel in rels {
-            // Avoid duplicates - only add if from_entry_id matches current entry
-            if rel.from_entry_id == entry.id {
-                all_relationships.push(rel);
-            }
-        }
-    }
-    println!("  relationships: {}", all_relationships.len());
-    for rel in &all_relationships {
-        target_db.add_relationship(&rel.from_entry_id, &rel.to_entry_id, &rel.relationship_type)?;
-    }
-
-    // Migrate sessions
-    let sessions = source_db.list_sessions(None)?;
-    println!("  sessions: {}", sessions.len());
-    for session in &sessions {
-        target_db.upsert_session(session)?;
-    }
-
-    println!("\nValidation:");
-
-    // Validate counts
-    let target_knowledge_count = target_db.count()?;
-    if target_knowledge_count == all_knowledge.len() {
-        println!("  ✓ Knowledge entries match: {}", target_knowledge_count);
-    } else {
-        println!(
-            "  ✗ Knowledge entries mismatch: source={}, target={}",
-            all_knowledge.len(),
-            target_knowledge_count
-        );
-    }
-
-    let target_agents = target_db.list_agents()?;
-    if target_agents.len() == agents.len() {
-        println!("  ✓ Agents match: {}", target_agents.len());
-    } else {
-        println!(
-            "  ✗ Agents mismatch: source={}, target={}",
-            agents.len(),
-            target_agents.len()
-        );
-    }
-
-    let target_projects = target_db.list_projects(false)?;
-    if target_projects.len() == projects.len() {
-        println!("  ✓ Projects match: {}", target_projects.len());
-    } else {
-        println!(
-            "  ✗ Projects mismatch: source={}, target={}",
-            projects.len(),
-            target_projects.len()
-        );
-    }
-
-    println!("\nMigration complete!");
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5691,5 +5539,119 @@ mod tests {
         let result = safe_truncate("hello world", 3);
         // Should handle gracefully (saturating_sub prevents underflow)
         assert_eq!(result, "...");
+    }
+
+    // =====================================================================
+    // Regression tests for unicode boundary panic fix (PR #162)
+    //
+    // These tests exercise the CALL SITES that previously used raw byte-index
+    // slicing (&s[..N]) and would have panicked on multi-byte UTF-8 characters.
+    // The fix replaced those with safe_truncate() which counts characters.
+    // =====================================================================
+
+    #[test]
+    fn test_log_display_emoji_would_panic_at_byte_69() {
+        // Regression: handle_log used `&display[..69]` which panics if byte 69
+        // lands inside a multi-byte character.
+        //
+        // 73 fish emoji (U+1F41F, 4 bytes each) = 73 chars, 292 bytes.
+        // Old code: `&display[..69]` slices at byte 69, inside the 18th emoji
+        // (bytes 68..71). This panics with "byte index 69 is not a char boundary".
+        let emoji_str: String = "\u{1F41F}".repeat(73);
+        assert_eq!(emoji_str.chars().count(), 73);
+        assert!(emoji_str.len() > 72);
+
+        let result = safe_truncate(&emoji_str, 72);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 72);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_log_display_cjk_mixed_would_panic_at_byte_69() {
+        // Mixed ASCII + CJK where byte 69 falls inside a CJK character.
+        // 2 ASCII bytes + 24 CJK chars (72 bytes) = 26 chars, 74 bytes.
+        // Old code: &display[..69] = byte 69 = 2 + 67, and 67 is NOT divisible
+        // by 3, so byte 69 lands inside the 23rd CJK char. PANIC!
+        let mut s = "ab".to_string();
+        s.push_str(&"\u{4E16}".repeat(24));
+        assert_eq!(s.chars().count(), 26);
+        assert!(s.len() > 72);
+        // Verify byte 69 is NOT a char boundary (the actual panic trigger)
+        assert!(!s.is_char_boundary(69));
+
+        let result = safe_truncate(&s, 72);
+        // 26 chars < 72 limit, no truncation needed
+        assert_eq!(result, s);
+    }
+
+    #[test]
+    fn test_entry_summary_emoji_would_panic_at_byte_77() {
+        // Regression: print_entry_summary used `&summary[..77]` which panics
+        // if byte 77 lands inside a multi-byte character.
+        //
+        // 81 fish emoji = 81 chars, 324 bytes.
+        // Old code: `&summary[..77]` = byte 77, inside the 20th emoji
+        // (bytes 76..79). Panics with "byte index 77 is not a char boundary".
+        let emoji_summary: String = "\u{1F41F}".repeat(81);
+        assert_eq!(emoji_summary.chars().count(), 81);
+
+        let result = safe_truncate(&emoji_summary, 80);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 80);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn test_entry_summary_cjk_would_panic_at_byte_77() {
+        // 81 CJK chars (U+4E16) = 243 bytes.
+        // Old code: &summary[..77]. 77 / 3 = 25.67 -> byte 77 is NOT on a
+        // character boundary (char boundaries at 75, 78...). PANIC!
+        let cjk_summary: String = "\u{4E16}".repeat(81);
+        assert_eq!(cjk_summary.chars().count(), 81);
+        // Verify byte 77 is indeed NOT a char boundary
+        assert!(!cjk_summary.is_char_boundary(77));
+
+        let result = safe_truncate(&cjk_summary, 80);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 80);
+    }
+
+    #[test]
+    fn test_entry_summary_mixed_ascii_emoji_would_panic_at_byte_77() {
+        // 75 ASCII + 6 emoji (4 bytes each) = 81 chars, 99 bytes.
+        // Old code: &summary[..77] = byte 77 = 75 + 2, which is 2 bytes into
+        // the first emoji. PANIC!
+        let mut mixed = "x".repeat(75);
+        for _ in 0..6 {
+            mixed.push('\u{1F41F}');
+        }
+        assert_eq!(mixed.chars().count(), 81);
+        // Verify byte 77 is NOT a char boundary (inside first emoji)
+        assert!(!mixed.is_char_boundary(77));
+
+        let result = safe_truncate(&mixed, 80);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 80);
+    }
+
+    #[test]
+    fn test_fact_title_truncation_emoji_at_60_boundary() {
+        // memory add --type uses safe_truncate(&body, 60) for fact titles.
+        // 61 emoji = 244 bytes. Old byte-slicing would have panicked.
+        let emoji_body: String = "\u{1F41F}".repeat(61);
+        let result = safe_truncate(&emoji_body, 60);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 60);
+    }
+
+    #[test]
+    fn test_recent_preview_cjk_at_60_boundary() {
+        // memory recent uses safe_truncate(content, 60).
+        // 61 CJK chars = 183 bytes.
+        let long_cjk: String = "\u{4E16}".repeat(61);
+        let result = safe_truncate(&long_cjk, 60);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.chars().count(), 60);
     }
 }

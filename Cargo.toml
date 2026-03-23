@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.83"
+version = "0.1.88"
 edition = "2024"
 description = "Tsunderground CLI - memory, workflow, and identity tooling"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
@@ -10,9 +10,6 @@ repository = "https://github.com/coryzibell/mx"
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
-
-# SQLite
-rusqlite = { version = "0.37", features = ["bundled"] }
 
 # SurrealDB
 surrealdb = { version = "2", features = ["kv-surrealkv", "protocol-ws"] }
@@ -75,9 +72,6 @@ features = ["user-hooks"]
 
 [dev-dependencies]
 serial_test = "3"
-
-[features]
-surrealdb = []
 
 [[bin]]
 name = "mx"

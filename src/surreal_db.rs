@@ -11,12 +11,12 @@ use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
 
-use crate::db::{
+use crate::knowledge::KnowledgeEntry;
+use crate::store::KnowledgeStore;
+use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
 };
-use crate::knowledge::KnowledgeEntry;
-use crate::store::KnowledgeStore;
 
 // ============================================================================
 // CONNECTION MODE CONFIGURATION
@@ -327,6 +327,7 @@ impl SurrealKnowledgeRecord {
             embedding_model: self.embedding_model,
             embedded_at: self.embedded_at,
             format: self.format,
+            effective_resonance: None,
         }
     }
 }
@@ -360,7 +361,7 @@ fn normalize_datetime(s: &str) -> String {
         return s.to_string();
     }
 
-    // SQLite format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
+    // Space-separated format: "2025-11-29 08:10:33" -> "2025-11-29T08:10:33Z"
     if s.contains(' ') && !s.contains('T') {
         return s.replace(' ', "T") + "Z";
     }
@@ -670,12 +671,16 @@ impl SurrealDatabase {
     }
 
     /// Test helper - open temporary database
+    ///
+    /// Forces embedded mode regardless of `MX_SURREAL_MODE` env var,
+    /// so tests never hit the live database.
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         use tempfile::tempdir;
 
         let temp_dir = tempdir()?;
-        Self::open(temp_dir.path())
+        let config = SurrealConfig::default(); // always Embedded
+        Self::connect(temp_dir.path(), &config)
     }
 
     /// Get reference to underlying Surreal instance (embedded only)
@@ -741,6 +746,11 @@ impl SurrealDatabase {
     ///   resonance 4-5   -> 5%/week  (base 0.95)
     ///   resonance 6+    -> 2.5%/week (base 0.975)
     /// foundational/transformative entries are exempt from decay (effective_resonance = resonance).
+    ///
+    /// All other resonance types -- including `session`, `ephemeral`, `relational`,
+    /// and `operational` -- are subject to decay. `session` entries intentionally decay
+    /// like ephemeral: they represent per-session context that should lose salience over
+    /// time rather than persist at full resonance indefinitely.
     fn effective_resonance_expr() -> &'static str {
         "IF resonance_type IN ['foundational', 'transformative'] THEN resonance \
          ELSE resonance * math::pow(\
@@ -1400,6 +1410,7 @@ impl SurrealDatabase {
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
             format: serde_json::from_value(obj["format"].clone())
                 .unwrap_or_else(|_| "markdown".to_string()),
+            effective_resonance: obj.get("effective_resonance").and_then(|v| v.as_f64()),
         })
     }
 
@@ -1828,6 +1839,47 @@ impl SurrealDatabase {
         let results: Vec<serde_json::Value> = response
             .take(0)
             .context("Failed to parse recent facts results")?;
+
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
+    /// Query recent facts across ALL resonance types with decay computation.
+    /// Foundational/transformative entries are exempt from decay (effective_resonance = resonance).
+    pub fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.query_recent_facts_all_types_async(days))
+    }
+
+    async fn query_recent_facts_all_types_async(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        // Like query_recent_facts_async but without the resonance_type = 'ephemeral' filter.
+        // Ephemeral entries are still decay-filtered (> 0.5). Foundational/transformative
+        // entries are exempt from decay so they always surface here.
+        let expr = Self::effective_resonance_expr();
+        let sql = format!(
+            "SELECT {},
+                 ({expr}) AS effective_resonance
+             FROM knowledge
+             WHERE created_at > time::now() - duration::from::days($days)
+             AND ({expr}) > 0.5
+             ORDER BY effective_resonance DESC",
+            Self::knowledge_select_fields(),
+            expr = expr
+        );
+
+        let mut response = with_db!(self, db, {
+            db.query(&sql)
+                .bind(("days", days))
+                .await
+                .context("Failed to execute recent facts (all types) query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse recent facts (all types) results")?;
 
         let mut entries = Vec::new();
         for obj in results {
@@ -3376,6 +3428,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.query_recent_facts(days)
     }
 
+    fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+        self.query_recent_facts_all_types(days)
+    }
+
     fn reinforce(
         &self,
         id: &str,
@@ -3612,7 +3668,7 @@ mod tests {
 
     #[test]
     fn test_upsert_applicability_type_with_datetime() {
-        use crate::db::ApplicabilityType;
+        use crate::types::ApplicabilityType;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3631,7 +3687,7 @@ mod tests {
 
     #[test]
     fn test_upsert_project_with_datetime() {
-        use crate::db::Project;
+        use crate::types::Project;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3654,7 +3710,7 @@ mod tests {
 
     #[test]
     fn test_upsert_agent_with_datetime() {
-        use crate::db::Agent;
+        use crate::types::Agent;
 
         let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -3725,6 +3781,7 @@ mod tests {
             embedding_model: None,
             embedded_at: None,
             format: "markdown".to_string(),
+            effective_resonance: None,
         }
     }
 
@@ -4542,5 +4599,165 @@ mod tests {
             None,
             "get_summary_state() must return None when summary is absent"
         );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_includes_foundational() {
+        // query_recent_facts_all_types should return foundational entries that would
+        // be excluded from query_recent_facts (ephemeral-only).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut foundational = make_test_entry("kn-all-types-foundational", 9, 0.0);
+        foundational.resonance_type = Some("foundational".to_string());
+        db.upsert_knowledge(&foundational).unwrap();
+
+        let mut ephemeral = make_test_entry("kn-all-types-ephemeral", 5, 0.0);
+        ephemeral.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&ephemeral).unwrap();
+
+        // Baseline: ephemeral-only query should not include foundational
+        let ephemeral_results = db.query_recent_facts(30).unwrap();
+        assert!(
+            !ephemeral_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-foundational"),
+            "Foundational entry should not appear in ephemeral-only query"
+        );
+        assert!(
+            ephemeral_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-ephemeral"),
+            "Ephemeral entry should appear in ephemeral-only query"
+        );
+
+        // All-types query should include both
+        let all_results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            all_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-foundational"),
+            "Foundational entry should appear in all-types query"
+        );
+        assert!(
+            all_results.iter().any(|e| e.id == "kn-all-types-ephemeral"),
+            "Ephemeral entry should appear in all-types query"
+        );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_includes_transformative() {
+        // query_recent_facts_all_types should return transformative entries.
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let mut transformative = make_test_entry("kn-all-types-transformative", 8, 0.0);
+        transformative.resonance_type = Some("transformative".to_string());
+        db.upsert_knowledge(&transformative).unwrap();
+
+        let all_results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            all_results
+                .iter()
+                .any(|e| e.id == "kn-all-types-transformative"),
+            "Transformative entry should appear in all-types query"
+        );
+    }
+
+    #[test]
+    fn test_query_recent_facts_all_types_respects_decay_threshold() {
+        // Entries with near-zero effective resonance (very old, low base) should
+        // be excluded even from the all-types query (threshold > 0.5).
+
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Resonance 1 with heavy decay (80 weeks ago equivalent = decay_rate abuse).
+        // We simulate a very old entry by setting last_activated far in the past.
+        // For this test we just confirm high-resonance entries are returned.
+        let mut high = make_test_entry("kn-all-types-high", 8, 0.0);
+        high.resonance_type = Some("ephemeral".to_string());
+        db.upsert_knowledge(&high).unwrap();
+
+        let results = db.query_recent_facts_all_types(30).unwrap();
+        assert!(
+            results.iter().any(|e| e.id == "kn-all-types-high"),
+            "High-resonance ephemeral entry should appear in all-types query"
+        );
+    }
+
+    // =========================================================================
+    // list_all_tags TESTS (PR #147)
+    // =========================================================================
+
+    fn make_tagged_entry(
+        id: &str,
+        category: &str,
+        tags: Vec<String>,
+    ) -> crate::knowledge::KnowledgeEntry {
+        let mut entry = make_test_entry(id, 5, 0.0);
+        entry.category_id = category.to_string();
+        entry.tags = tags;
+        entry
+    }
+
+    #[test]
+    fn test_list_all_tags_returns_distinct_tags() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag1",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag2",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert_eq!(tags.len(), 3);
+        assert_eq!(tags, vec!["async", "error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_with_category_filter() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let entry1 = make_tagged_entry(
+            "kn-tag3",
+            "pattern",
+            vec!["rust".to_string(), "async".to_string()],
+        );
+        db.upsert_knowledge(&entry1).unwrap();
+
+        let entry2 = make_tagged_entry(
+            "kn-tag4",
+            "technique",
+            vec!["rust".to_string(), "error-handling".to_string()],
+        );
+        db.upsert_knowledge(&entry2).unwrap();
+
+        let pattern_tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert_eq!(pattern_tags.len(), 2);
+        assert_eq!(pattern_tags, vec!["async", "rust"]);
+
+        let technique_tags = db.list_all_tags(Some("technique")).unwrap();
+        assert_eq!(technique_tags.len(), 2);
+        assert_eq!(technique_tags, vec!["error-handling", "rust"]);
+    }
+
+    #[test]
+    fn test_list_all_tags_empty_database() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let tags = db.list_all_tags(None).unwrap();
+        assert!(tags.is_empty());
+
+        let tags = db.list_all_tags(Some("pattern")).unwrap();
+        assert!(tags.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 -- =============================================================================
 -- Memory Knowledge Base - SurrealDB Schema
 -- Version: 1.0
--- Migrated from SQLite v5
+-- SurrealDB-native schema
 -- =============================================================================
 
 -- Use namespace and database
@@ -118,7 +118,7 @@ DEFINE FIELD IF NOT EXISTS resonance ON knowledge TYPE int DEFAULT 0;
 -- type feature (PR #148), not the tag query feature. It appears here because both changes
 -- landed in the same schema file update.
 DEFINE FIELD IF NOT EXISTS resonance_type ON knowledge TYPE option<string>
-  ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral'];
+  ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral', 'session'];
 DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
