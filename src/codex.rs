@@ -19,21 +19,20 @@ static ASSISTANT_NAME: OnceLock<String> = OnceLock::new();
 /// Resolve the user display name (uncached). Used by tests and as the
 /// initializer for the OnceLock cache.
 fn resolve_user_name_inner() -> String {
-    if let Ok(name) = std::env::var("MX_USER_NAME") {
-        if !name.is_empty() {
-            return name;
-        }
+    if let Ok(name) = std::env::var("MX_USER_NAME")
+        && !name.is_empty()
+    {
+        return name;
     }
     // Fallback: try git config user.name
     if let Ok(output) = std::process::Command::new("git")
         .args(["config", "user.name"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !name.is_empty() {
-                return name;
-            }
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return name;
         }
     }
     "User".to_string()
@@ -49,10 +48,10 @@ fn resolve_user_name() -> String {
 /// Resolve the assistant display name (uncached). Used by tests and as the
 /// initializer for the OnceLock cache.
 fn resolve_assistant_name_inner() -> String {
-    if let Ok(name) = std::env::var("MX_ASSISTANT_NAME") {
-        if !name.is_empty() {
-            return name;
-        }
+    if let Ok(name) = std::env::var("MX_ASSISTANT_NAME")
+        && !name.is_empty()
+    {
+        return name;
     }
     "Orchestrator".to_string()
 }
@@ -852,18 +851,14 @@ fn build_agent_type_map(session_content: &str) -> HashMap<String, String> {
             for block in blocks {
                 if block["type"].as_str() == Some("tool_use")
                     && block["name"].as_str() == Some("Agent")
+                    && let Some(input) = block["input"].as_object()
+                    && let Some(subagent_type) = input.get("subagent_type").and_then(|v| v.as_str())
                 {
-                    if let Some(input) = block["input"].as_object() {
-                        if let Some(subagent_type) =
-                            input.get("subagent_type").and_then(|v| v.as_str())
-                        {
-                            // The agentId may appear in the tool result as the tool_use id,
-                            // but more commonly is extracted from the agent filename.
-                            // The id field of the tool_use block is the tool_use_id.
-                            if let Some(tool_use_id) = block["id"].as_str() {
-                                map.insert(tool_use_id.to_string(), subagent_type.to_string());
-                            }
-                        }
+                    // The agentId may appear in the tool result as the tool_use id,
+                    // but more commonly is extracted from the agent filename.
+                    // The id field of the tool_use block is the tool_use_id.
+                    if let Some(tool_use_id) = block["id"].as_str() {
+                        map.insert(tool_use_id.to_string(), subagent_type.to_string());
                     }
                 }
             }
