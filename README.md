@@ -58,7 +58,7 @@ mx memory search "how to handle state" --semantic
 
 # Add a knowledge entry
 mx memory add \
-  --category recipe \
+  --category pattern \
   --title "SurrealDB connection retry pattern" \
   --content "When the connection drops, use exponential backoff..." \
   --tags "surrealdb,reliability" \
@@ -68,13 +68,13 @@ mx memory add \
 mx memory show kn-abc123
 
 # List entries filtered by category
-mx memory list -c discovery
+mx memory list -c insight
 
 # Statistics
 mx memory stats
 ```
 
-Memory categories: `recipe`, `method`, `discovery`, `pipe-dream`, `decree`, `ingredient`, `shift`, `conveyor`.
+Default categories: `pattern`, `technique`, `insight`, `gotcha`, `reference`, `decision`, `bloom`, `session`. Categories are customizable per-deployment -- run `mx memory categories list` to see available categories.
 
 ### PR Merge
 
