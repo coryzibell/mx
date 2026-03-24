@@ -1,10 +1,16 @@
 # mx
 
-Tsunderground CLI -- memory, workflow, and identity tooling.
+A Swiss army knife for Claude Code and multi-agent toolkits.
 
-A Rust binary that provides encoded git operations, a SurrealDB-backed knowledge graph, session archival, GitHub sync, and emotional state tensors. Built for use with Claude agent workflows.
+A Rust CLI providing encoded git operations, a SurrealDB-backed knowledge graph, session archival, GitHub sync, and emotional state tensors. Designed for use with Claude Code, but works with any multi-agent workflow that needs persistent memory, encoded commits, or session management.
 
 ## Installation
+
+```bash
+cargo install mx
+```
+
+Or from source:
 
 ```bash
 cargo install --path .
@@ -156,6 +162,6 @@ See the [project wiki](https://github.com/coryzibell/mx/wiki) for full documenta
 
 ## Status
 
-This is a personal tool. It is not published to crates.io and makes no stability guarantees. The API surface changes when it needs to.
+Published on [crates.io](https://crates.io/crates/mx). The API surface is evolving.
 
 Licensed under MIT OR Apache-2.0.
