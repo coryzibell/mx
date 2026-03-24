@@ -330,7 +330,7 @@ enum PrCommands {
         /// PR number
         number: u32,
 
-        /// Use rebase merge (mutually exclusive with --merge)
+        /// Use rebase merge instead of squash (mutually exclusive with --merge-commit)
         #[arg(long, conflicts_with = "merge")]
         rebase: bool,
 
