@@ -61,7 +61,9 @@ fn resolve_assistant_name_inner() -> String {
 /// Priority: MX_ASSISTANT_NAME env var > "Orchestrator"
 /// Result is cached for the lifetime of the process via OnceLock.
 fn resolve_assistant_name() -> String {
-    ASSISTANT_NAME.get_or_init(resolve_assistant_name_inner).clone()
+    ASSISTANT_NAME
+        .get_or_init(resolve_assistant_name_inner)
+        .clone()
 }
 
 fn system_reminder_re() -> &'static Regex {
@@ -280,14 +282,19 @@ pub fn read_session(
                     let mc = fs::read_to_string(&manifest_path).unwrap_or_default();
                     let m: Option<Manifest> = serde_json::from_str(&mc).ok();
                     (
-                        m.as_ref().and_then(|m| m.user_name.clone()).unwrap_or_else(resolve_user_name),
-                        m.as_ref().and_then(|m| m.assistant_name.clone()).unwrap_or_else(resolve_assistant_name),
+                        m.as_ref()
+                            .and_then(|m| m.user_name.clone())
+                            .unwrap_or_else(resolve_user_name),
+                        m.as_ref()
+                            .and_then(|m| m.assistant_name.clone())
+                            .unwrap_or_else(resolve_assistant_name),
                     )
                 } else {
                     (resolve_user_name(), resolve_assistant_name())
                 };
                 for (agent_name, agent_content) in &agent_sessions {
-                    let agent_transcript = generate_clean_transcript(agent_content, &r_user, &r_asst)?;
+                    let agent_transcript =
+                        generate_clean_transcript(agent_content, &r_user, &r_asst)?;
                     if !agent_transcript.is_empty() {
                         content.push_str(&format!(
                             "\n---\n\n## Agent: {}\n\n{}",
@@ -847,7 +854,9 @@ fn build_agent_type_map(session_content: &str) -> HashMap<String, String> {
                     && block["name"].as_str() == Some("Agent")
                 {
                     if let Some(input) = block["input"].as_object() {
-                        if let Some(subagent_type) = input.get("subagent_type").and_then(|v| v.as_str()) {
+                        if let Some(subagent_type) =
+                            input.get("subagent_type").and_then(|v| v.as_str())
+                        {
                             // The agentId may appear in the tool result as the tool_use id,
                             // but more commonly is extracted from the agent filename.
                             // The id field of the tool_use block is the tool_use_id.
@@ -904,7 +913,11 @@ fn strip_system_reminders(content: &str) -> String {
 }
 
 /// Generate a clean markdown transcript from JSONL session content
-fn generate_clean_transcript(session_content: &str, user_name: &str, assistant_name: &str) -> Result<String> {
+fn generate_clean_transcript(
+    session_content: &str,
+    user_name: &str,
+    assistant_name: &str,
+) -> Result<String> {
     let mut output = String::new();
     let user_prefix = format!("**{}:**", user_name);
     let assistant_prefix = format!("**{}:**", assistant_name);
@@ -1048,7 +1061,12 @@ fn migrate_clean_transcripts(
             }
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
-            generate_clean_transcript_with_agents(&session_content, &agent_sessions, &user_name, &assistant_name)?
+            generate_clean_transcript_with_agents(
+                &session_content,
+                &agent_sessions,
+                &user_name,
+                &assistant_name,
+            )?
         } else {
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
@@ -1200,7 +1218,12 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
             agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
-            generate_clean_transcript_with_agents(&content, &agent_sessions, &user_name, &assistant_name)?
+            generate_clean_transcript_with_agents(
+                &content,
+                &agent_sessions,
+                &user_name,
+                &assistant_name,
+            )?
         } else {
             let user_name = resolve_user_name();
             let assistant_name = resolve_assistant_name();
@@ -1718,7 +1741,8 @@ mod tests {
 
     #[test]
     fn assistant_tool_use_only_is_dropped() {
-        let result = generate_clean_transcript(assistant_tool_use(), "User", "Orchestrator").unwrap();
+        let result =
+            generate_clean_transcript(assistant_tool_use(), "User", "Orchestrator").unwrap();
         assert_eq!(result, "");
     }
 
@@ -1842,7 +1866,9 @@ mod tests {
     #[test]
     fn agents_empty_list_same_as_plain() {
         let main_session = user_str("Hello");
-        let with_agents = generate_clean_transcript_with_agents(&main_session, &[], "User", "Orchestrator").unwrap();
+        let with_agents =
+            generate_clean_transcript_with_agents(&main_session, &[], "User", "Orchestrator")
+                .unwrap();
         let plain = generate_clean_transcript(&main_session, "User", "Orchestrator").unwrap();
         assert_eq!(with_agents, plain);
     }
@@ -1967,15 +1993,21 @@ mod tests {
         // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
         // These tests may race if run in parallel -- acceptable risk for unit tests.
         // Use `cargo test -- --test-threads=1` if flaky.
-        unsafe { std::env::set_var("MX_USER_NAME", "TestHuman"); }
+        unsafe {
+            std::env::set_var("MX_USER_NAME", "TestHuman");
+        }
         let name = resolve_user_name_inner();
-        unsafe { std::env::remove_var("MX_USER_NAME"); }
+        unsafe {
+            std::env::remove_var("MX_USER_NAME");
+        }
         assert_eq!(name, "TestHuman");
     }
 
     #[test]
     fn resolve_user_name_fallback_without_env() {
-        unsafe { std::env::remove_var("MX_USER_NAME"); }
+        unsafe {
+            std::env::remove_var("MX_USER_NAME");
+        }
         let name = resolve_user_name_inner();
         // Should be either git user.name or "User" — both are valid
         assert!(!name.is_empty());
@@ -1986,15 +2018,21 @@ mod tests {
         // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
         // These tests may race if run in parallel -- acceptable risk for unit tests.
         // Use `cargo test -- --test-threads=1` if flaky.
-        unsafe { std::env::set_var("MX_ASSISTANT_NAME", "Opus"); }
+        unsafe {
+            std::env::set_var("MX_ASSISTANT_NAME", "Opus");
+        }
         let name = resolve_assistant_name_inner();
-        unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
+        unsafe {
+            std::env::remove_var("MX_ASSISTANT_NAME");
+        }
         assert_eq!(name, "Opus");
     }
 
     #[test]
     fn resolve_assistant_name_default() {
-        unsafe { std::env::remove_var("MX_ASSISTANT_NAME"); }
+        unsafe {
+            std::env::remove_var("MX_ASSISTANT_NAME");
+        }
         let name = resolve_assistant_name_inner();
         assert_eq!(name, "Orchestrator");
     }
@@ -2005,16 +2043,9 @@ mod tests {
 
     #[test]
     fn custom_speaker_names_in_transcript() {
-        let jsonl = format!(
-            "{}\n{}",
-            user_str("Hello"),
-            assistant_text("Hi there.")
-        );
+        let jsonl = format!("{}\n{}", user_str("Hello"), assistant_text("Hi there."));
         let result = generate_clean_transcript(&jsonl, "Alice", "Bot").unwrap();
-        assert_eq!(
-            result,
-            "**Alice:** Hello\n\n**Bot:** Hi there.\n\n"
-        );
+        assert_eq!(result, "**Alice:** Hello\n\n**Bot:** Hi there.\n\n");
     }
 
     // ---------------------------------------------------------------------------
@@ -2026,7 +2057,10 @@ mod tests {
         // Mock a parent session JSONL with an Agent tool_use call
         let parent_jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_abc123","name":"Agent","input":{"subagent_type":"Turnkey Whistledown","task":"build it"}}]}}"#;
         let map = build_agent_type_map(parent_jsonl);
-        assert_eq!(map.get("toolu_abc123").map(|s| s.as_str()), Some("Turnkey Whistledown"));
+        assert_eq!(
+            map.get("toolu_abc123").map(|s| s.as_str()),
+            Some("Turnkey Whistledown")
+        );
     }
 
     #[test]
@@ -2108,7 +2142,9 @@ mod tests {
         // Agent tool_use block without subagent_type field should be silently skipped.
         let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_notype","name":"Agent","input":{"task":"do something"}}]}}"#;
         let map = build_agent_type_map(jsonl);
-        assert!(map.is_empty(), "map should be empty when subagent_type is missing");
+        assert!(
+            map.is_empty(),
+            "map should be empty when subagent_type is missing"
+        );
     }
-
 }
