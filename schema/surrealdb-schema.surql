@@ -11,7 +11,7 @@
 -- LOOKUP TABLES (Records with metadata)
 -- =============================================================================
 
--- Categories: pattern, technique, insight, etc.
+-- Categories: default seeds below; deployments may customize via 'mx memory categories'
 DEFINE TABLE IF NOT EXISTS category SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS description ON category TYPE string;
 DEFINE FIELD IF NOT EXISTS created_at ON category TYPE datetime DEFAULT time::now();

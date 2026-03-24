@@ -394,7 +394,7 @@ pub enum SyncCommands {
 /// Shared filter flags for search/list commands (extracted from duplicated definitions)
 #[derive(Debug, Clone, clap::Args)]
 struct EntryFilter {
-    /// Filter by category (can specify multiple: bloom,technique)
+    /// Filter by category (comma-separated, see 'mx memory categories list' for valid names)
     #[arg(short, long, value_delimiter = ',')]
     category: Option<Vec<String>>,
 
@@ -565,7 +565,7 @@ enum MemoryCommands {
 
     /// Add a new entry directly to the database
     Add {
-        /// Category (archive, pattern, technique, insight, ritual, artifact, chronicle, project, future, session)
+        /// Category name (run 'mx memory categories list' to see available categories)
         /// When --type is provided, category is auto-determined from fact type routing
         #[arg(long, required_unless_present = "type")]
         category: Option<String>,
@@ -2065,6 +2065,10 @@ fn find_open_thread_by_content(
     bail!("No open thread found matching content: '{}'", content)
 }
 
+/// Route a fact type to its target category and tags.
+/// NOTE: The category targets below (decision, insight, reference, thread) map to the default
+/// seed categories in schema/surrealdb-schema.surql. Custom deployments that rename or remove
+/// these seed categories must update this routing table accordingly.
 fn route_fact_type(fact_type: &str) -> Result<FactRouting> {
     const VALID_FACT_TYPES: &[&str] = &[
         "decision",
