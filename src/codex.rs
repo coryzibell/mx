@@ -5,12 +5,11 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::SystemTime;
-
-use std::collections::HashMap;
 
 static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
 static USER_NAME: OnceLock<String> = OnceLock::new();
@@ -93,9 +92,9 @@ pub struct Manifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub has_clean_transcript: Option<bool>,
     // v4 fields - configurable speaker names
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_name: Option<String>,
 }
 
@@ -241,6 +240,15 @@ pub fn read_session(
     let codex_dir = get_codex_dir()?;
     let archive_dir = find_archive_by_id(&codex_dir, &id)?;
 
+    // Load manifest once for use across all code paths that need it
+    let manifest_path = archive_dir.join("manifest.json");
+    let manifest: Option<Manifest> = if manifest_path.exists() {
+        let mc = fs::read_to_string(&manifest_path)?;
+        serde_json::from_str(&mc).ok()
+    } else {
+        None
+    };
+
     if clean && !json {
         let transcript_file = archive_dir.join("conversation.md");
         if !transcript_file.exists() {
@@ -275,22 +283,17 @@ pub fn read_session(
                     }
                 }
                 agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-                // Resolve speaker names: from manifest if available, else env/defaults
-                let manifest_path = archive_dir.join("manifest.json");
-                let (r_user, r_asst) = if manifest_path.exists() {
-                    let mc = fs::read_to_string(&manifest_path).unwrap_or_default();
-                    let m: Option<Manifest> = serde_json::from_str(&mc).ok();
-                    (
-                        m.as_ref()
-                            .and_then(|m| m.user_name.clone())
-                            .unwrap_or_else(resolve_user_name),
-                        m.as_ref()
-                            .and_then(|m| m.assistant_name.clone())
-                            .unwrap_or_else(resolve_assistant_name),
-                    )
-                } else {
-                    (resolve_user_name(), resolve_assistant_name())
-                };
+                // Resolve speaker names from manifest loaded at function entry
+                let (r_user, r_asst) = (
+                    manifest
+                        .as_ref()
+                        .and_then(|m| m.user_name.clone())
+                        .unwrap_or_else(resolve_user_name),
+                    manifest
+                        .as_ref()
+                        .and_then(|m| m.assistant_name.clone())
+                        .unwrap_or_else(resolve_assistant_name),
+                );
                 for (agent_name, agent_content) in &agent_sessions {
                     let agent_transcript =
                         generate_clean_transcript(agent_content, &r_user, &r_asst)?;
@@ -317,12 +320,9 @@ pub fn read_session(
     }
 
     if json {
-        // Output manifest as JSON
-        let manifest_path = archive_dir.join("manifest.json");
-        if manifest_path.exists() {
-            let manifest_content = fs::read_to_string(&manifest_path)?;
-            let manifest: Manifest = serde_json::from_str(&manifest_content)?;
-            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        // Output manifest as JSON (using pre-loaded manifest)
+        if let Some(ref m) = manifest {
+            println!("{}", serde_json::to_string_pretty(m)?);
         } else {
             anyhow::bail!("Manifest not found in archive");
         }
@@ -868,20 +868,23 @@ fn build_agent_type_map(session_content: &str) -> HashMap<String, String> {
 }
 
 /// Resolve an agent name using the agent type map if possible, falling back to the hex ID.
+/// Matches by checking if the tool_use_id ends with the hex_id extracted from the agent
+/// filename (e.g., tool_use_id "toolu_abc123" ends with hex_id "abc123"). When multiple
+/// entries match, the longest matching tool_use_id wins to avoid false positives from
+/// short hex IDs.
 fn resolve_agent_display_name(path: &Path, agent_type_map: &HashMap<String, String>) -> String {
     let hex_id = agent_name_from_path(path);
     if hex_id.is_empty() {
         return hex_id;
     }
-    // Check if any tool_use_id in the map matches (agent filenames contain hex IDs that
-    // may overlap with tool_use IDs) or if the hex_id itself is in the map values.
-    // The agent JSONL files are named agent-<hex_id>.jsonl. We need to find the
-    // tool_use call whose result spawned this agent. The mapping is indirect:
-    // we look for tool_use_ids that contain the hex_id or vice versa.
-    for (tool_use_id, subagent_type) in agent_type_map {
-        if tool_use_id.contains(&hex_id) || hex_id.contains(tool_use_id.as_str()) {
-            return subagent_type.clone();
-        }
+    // Find the best match: tool_use_id that ends with the hex_id.
+    // Pick the longest tool_use_id among matches to avoid ambiguity with short hex IDs.
+    let best_match = agent_type_map
+        .iter()
+        .filter(|(tool_use_id, _)| tool_use_id.ends_with(&hex_id))
+        .max_by_key(|(tool_use_id, _)| tool_use_id.len());
+    if let Some((_, subagent_type)) = best_match {
+        return subagent_type.clone();
     }
     hex_id
 }
@@ -1126,6 +1129,10 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
 
+    // Resolve speaker names once for the entire function
+    let user_name = resolve_user_name();
+    let assistant_name = resolve_assistant_name();
+
     // Extract session metadata
     let session_id = session_path
         .file_stem()
@@ -1211,8 +1218,6 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
                 }
             }
             agent_sessions.sort_by(|a, b| a.0.cmp(&b.0));
-            let user_name = resolve_user_name();
-            let assistant_name = resolve_assistant_name();
             generate_clean_transcript_with_agents(
                 &content,
                 &agent_sessions,
@@ -1220,8 +1225,6 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
                 &assistant_name,
             )?
         } else {
-            let user_name = resolve_user_name();
-            let assistant_name = resolve_assistant_name();
             generate_clean_transcript(&content, &user_name, &assistant_name)?
         };
         let conversation_md_path = archive_dir.join("conversation.md");
@@ -1249,8 +1252,8 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
             image_count: Some(image_count),
             images: Some(all_images),
             has_clean_transcript: Some(true),
-            user_name: Some(resolve_user_name()),
-            assistant_name: Some(resolve_assistant_name()),
+            user_name: Some(user_name.clone()),
+            assistant_name: Some(assistant_name.clone()),
         };
 
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -1327,8 +1330,8 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         image_count: Some(image_count),
         images: Some(all_images),
         has_clean_transcript: None,
-        user_name: Some(resolve_user_name()),
-        assistant_name: Some(resolve_assistant_name()),
+        user_name: Some(user_name),
+        assistant_name: Some(assistant_name),
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
