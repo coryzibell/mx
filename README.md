@@ -164,4 +164,4 @@ See the [project wiki](https://github.com/coryzibell/mx/wiki) for full documenta
 
 Published on [crates.io](https://crates.io/crates/mx). The API surface is evolving.
 
-Licensed under MIT OR Apache-2.0.
+Licensed under [Apache 2.0](LICENSE).
