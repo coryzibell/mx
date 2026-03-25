@@ -10,6 +10,7 @@ mod engage;
 mod github;
 mod index;
 mod knowledge;
+mod paths;
 mod session;
 mod state;
 mod store;
@@ -1827,7 +1828,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&schema_list)?);
             } else if schemas.is_empty() {
-                println!("No schemas found in ~/.crewu/schemas/");
+                println!("No schemas found in {}", paths::schemas_dir().display());
                 println!("\nCreate a schema file (YAML or JSON) to get started.");
             } else {
                 println!("Available schemas:\n");
@@ -1978,10 +1979,10 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 pref
             } else {
                 let path = file.unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .map(|h| h.join(".crewu/swap/session-bootstrap.md"))
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default()
+                    paths::swap_dir()
+                        .join("session-bootstrap.md")
+                        .to_string_lossy()
+                        .to_string()
                 });
 
                 let content = std::fs::read_to_string(&path)
