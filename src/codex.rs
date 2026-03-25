@@ -951,7 +951,7 @@ struct ArchiveEntry {
 }
 
 fn get_codex_dir() -> Result<PathBuf> {
-    Ok(crate::paths::codex_dir())
+    crate::paths::codex_dir()
 }
 
 fn resolve_session_path(path: Option<String>) -> Result<PathBuf> {

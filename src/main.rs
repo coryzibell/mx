@@ -1828,7 +1828,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&schema_list)?);
             } else if schemas.is_empty() {
-                println!("No schemas found in {}", paths::schemas_dir().display());
+                println!("No schemas found in {}", paths::schemas_dir()?.display());
                 println!("\nCreate a schema file (YAML or JSON) to get started.");
             } else {
                 println!("Available schemas:\n");
@@ -1978,12 +1978,8 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             let pref_str = if let Some(pref) = preference {
                 pref
             } else {
-                let path = file.unwrap_or_else(|| {
-                    paths::swap_dir()
-                        .join("session-bootstrap.md")
-                        .to_string_lossy()
-                        .to_string()
-                });
+                let default_path = paths::swap_dir()?.join("session-bootstrap.md");
+                let path = file.unwrap_or_else(|| default_path.to_string_lossy().to_string());
 
                 let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read file: {}", path))?;
