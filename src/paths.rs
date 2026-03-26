@@ -20,10 +20,10 @@ static MX_HOME: OnceLock<PathBuf> = OnceLock::new();
 /// Result is cached for the lifetime of the process.
 pub fn mx_home() -> &'static PathBuf {
     MX_HOME.get_or_init(|| {
-        if let Ok(val) = std::env::var("MX_HOME") {
-            if !val.is_empty() {
-                return PathBuf::from(val);
-            }
+        if let Ok(val) = std::env::var("MX_HOME")
+            && !val.is_empty()
+        {
+            return PathBuf::from(val);
         }
         dirs::home_dir()
             .expect("Could not determine home directory")
@@ -76,10 +76,10 @@ pub fn agents_dir() -> PathBuf {
 /// Override: `MX_CODEX_PATH` env var.
 /// Default: `$MX_HOME/codex/`
 pub fn codex_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("MX_CODEX_PATH") {
-        if !path.is_empty() {
-            return PathBuf::from(path);
-        }
+    if let Ok(path) = std::env::var("MX_CODEX_PATH")
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
     }
     mx_home().join("codex")
 }
@@ -126,10 +126,10 @@ mod tests {
 
     /// Resolve mx_home without caching (for test isolation).
     fn resolve_mx_home_uncached() -> PathBuf {
-        if let Ok(val) = std::env::var("MX_HOME") {
-            if !val.is_empty() {
-                return PathBuf::from(val);
-            }
+        if let Ok(val) = std::env::var("MX_HOME")
+            && !val.is_empty()
+        {
+            return PathBuf::from(val);
         }
         dirs::home_dir()
             .expect("Could not determine home directory")
