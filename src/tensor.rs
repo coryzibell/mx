@@ -126,7 +126,11 @@ impl TensorSchema {
             return Self::load(&json_path);
         }
 
-        bail!("Schema '{}' not found in {}", schema_id, schemas_dir.display())
+        bail!(
+            "Schema '{}' not found in {}",
+            schema_id,
+            schemas_dir.display()
+        )
     }
 
     /// Load default schema (from MX_STATE_SCHEMA or crewu)

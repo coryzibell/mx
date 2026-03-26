@@ -160,5 +160,3 @@ fn check_github_token() -> Check {
         Err(_) => Check::with_message("GitHub token", false, "not found in ~/.claude.json"),
     }
 }
-
-
