@@ -161,7 +161,10 @@ mod tests {
         assert_eq!(agents.file_name().unwrap(), "agents");
 
         let artifacts = artifacts_dir();
-        assert!(artifacts.starts_with(home), "artifacts_dir not under mx_home");
+        assert!(
+            artifacts.starts_with(home),
+            "artifacts_dir not under mx_home"
+        );
         assert_eq!(artifacts.file_name().unwrap(), "artifacts");
 
         // codex_dir without override should also be under mx_home

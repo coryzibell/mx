@@ -66,10 +66,7 @@ pub fn run_checks(json: bool) -> Result<()> {
     let checks = vec![
         check_file_exists(&claude_md.display().to_string(), &claude_md),
         check_file_exists(&identity_colors.display().to_string(), &identity_colors),
-        check_directory_exists(
-            &format!("{}/", ram_dir.display()),
-            &ram_dir,
-        ),
+        check_directory_exists(&format!("{}/", ram_dir.display()), &ram_dir),
         check_github_token(),
     ];
 
