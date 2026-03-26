@@ -114,20 +114,23 @@ impl TensorSchema {
             }
         }
 
-        // Check ~/.crewu/schemas/{id}.yaml
-        if let Some(home) = dirs::home_dir() {
-            let yaml_path = home.join(format!(".crewu/schemas/{}.yaml", schema_id));
-            if yaml_path.exists() {
-                return Self::load(&yaml_path);
-            }
-
-            let json_path = home.join(format!(".crewu/schemas/{}.json", schema_id));
-            if json_path.exists() {
-                return Self::load(&json_path);
-            }
+        // Check $MX_HOME/schemas/{id}.yaml
+        let schemas_dir = crate::paths::schemas_dir();
+        let yaml_path = schemas_dir.join(format!("{}.yaml", schema_id));
+        if yaml_path.exists() {
+            return Self::load(&yaml_path);
         }
 
-        bail!("Schema '{}' not found in ~/.crewu/schemas/", schema_id)
+        let json_path = schemas_dir.join(format!("{}.json", schema_id));
+        if json_path.exists() {
+            return Self::load(&json_path);
+        }
+
+        bail!(
+            "Schema '{}' not found in {}",
+            schema_id,
+            schemas_dir.display()
+        )
     }
 
     /// Load default schema (from MX_STATE_SCHEMA or crewu)
@@ -144,22 +147,20 @@ impl TensorSchema {
         Self::load_by_id("crewu")
     }
 
-    /// List available schemas in ~/.crewu/schemas/
+    /// List available schemas in $MX_HOME/schemas/
     pub fn list_available() -> Result<Vec<String>> {
         let mut schemas = Vec::new();
 
-        if let Some(home) = dirs::home_dir() {
-            let schemas_dir = home.join(".crewu/schemas");
-            if schemas_dir.exists() {
-                for entry in fs::read_dir(&schemas_dir)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if let Some(ext) = path.extension()
-                        && (ext == "yaml" || ext == "yml" || ext == "json")
-                        && let Some(stem) = path.file_stem()
-                    {
-                        schemas.push(stem.to_string_lossy().to_string());
-                    }
+        let schemas_dir = crate::paths::schemas_dir();
+        if schemas_dir.exists() {
+            for entry in fs::read_dir(&schemas_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if let Some(ext) = path.extension()
+                    && (ext == "yaml" || ext == "yml" || ext == "json")
+                    && let Some(stem) = path.file_stem()
+                {
+                    schemas.push(stem.to_string_lossy().to_string());
                 }
             }
         }
