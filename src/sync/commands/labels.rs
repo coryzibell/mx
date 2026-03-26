@@ -1,6 +1,6 @@
 //! Labels sync command - sync identity labels to repository
 //!
-//! Reads identity colors from ~/.matrix/artifacts/etc/identity-colors.yaml
+//! Reads identity colors from $MX_HOME/artifacts/etc/identity-colors.yaml
 //! and ensures the repository has matching labels.
 
 use anyhow::{Context, Result};

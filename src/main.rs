@@ -10,6 +10,7 @@ mod engage;
 mod github;
 mod index;
 mod knowledge;
+pub mod paths;
 mod session;
 mod state;
 mod store;
@@ -347,7 +348,7 @@ pub enum SyncCommands {
         /// Repository (owner/repo format)
         repo: String,
 
-        /// Output directory (defaults to ~/.matrix/cache/sync/<repo>)
+        /// Output directory (defaults to $MX_HOME/cache/sync/<repo>)
         #[arg(short, long)]
         output: Option<String>,
 
@@ -361,7 +362,7 @@ pub enum SyncCommands {
         /// Repository (owner/repo format)
         repo: String,
 
-        /// Input directory (defaults to ~/.matrix/cache/sync/<repo>)
+        /// Input directory (defaults to $MX_HOME/cache/sync/<repo>)
         #[arg(short, long)]
         input: Option<String>,
 
@@ -1342,7 +1343,7 @@ enum AgentsCommands {
 
     /// Seed agents from markdown files with YAML frontmatter
     Seed {
-        /// Path to agents directory (defaults to ~/.matrix/agents/)
+        /// Path to agents directory (defaults to $MX_HOME/agents/)
         #[arg(short, long)]
         path: Option<String>,
     },
@@ -1564,6 +1565,8 @@ enum WikiCommands {
 }
 
 fn main() -> Result<()> {
+    paths::emit_mx_home_note();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -1827,7 +1830,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&schema_list)?);
             } else if schemas.is_empty() {
-                println!("No schemas found in ~/.crewu/schemas/");
+                println!("No schemas found (checked $MX_HOME/schemas/)");
                 println!("\nCreate a schema file (YAML or JSON) to get started.");
             } else {
                 println!("Available schemas:\n");
@@ -1979,7 +1982,7 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             } else {
                 let path = file.unwrap_or_else(|| {
                     dirs::home_dir()
-                        .map(|h| h.join(".crewu/swap/session-bootstrap.md"))
+                        .map(|_h| crate::paths::swap_dir().join("session-bootstrap.md"))
                         .map(|p| p.to_string_lossy().to_string())
                         .unwrap_or_default()
                 });
@@ -4387,9 +4390,8 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
             let agents_dir = if let Some(p) = path {
                 PathBuf::from(p)
             } else {
-                // Default: ~/.matrix/agents/
-                let home = dirs::home_dir().context("Could not determine home directory")?;
-                home.join(".matrix").join("agents")
+                // Default: $MX_HOME/agents/
+                crate::paths::agents_dir()
             };
 
             if !agents_dir.exists() {

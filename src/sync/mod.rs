@@ -19,21 +19,12 @@ use crate::SyncCommands;
 
 /// Default sync cache directory for a repo
 pub fn default_sync_dir(repo: &str) -> PathBuf {
-    let repo_slug = repo.replace('/', "-");
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".matrix")
-        .join("cache")
-        .join("sync")
-        .join(repo_slug)
+    crate::paths::sync_cache_dir(repo)
 }
 
-/// Matrix artifacts directory
+/// Artifacts directory
 pub fn artifacts_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".matrix")
-        .join("artifacts")
+    crate::paths::artifacts_dir()
 }
 
 pub fn handle_sync(cmd: SyncCommands) -> Result<()> {
