@@ -114,7 +114,10 @@ mod tests {
         // via resolve_mx_home directly.
         let base = resolve_mx_home().expect("resolve_mx_home() should succeed");
         unsafe { std::env::remove_var("MX_HOME") };
-        assert_eq!(base.join("schemas"), PathBuf::from("/tmp/test-mx-home/schemas"));
+        assert_eq!(
+            base.join("schemas"),
+            PathBuf::from("/tmp/test-mx-home/schemas")
+        );
     }
 
     #[test]
@@ -143,7 +146,10 @@ mod tests {
         // Test the composition via resolve_mx_home() to avoid OnceLock dependency.
         let base = resolve_mx_home().expect("resolve_mx_home() should succeed");
         unsafe { std::env::remove_var("MX_HOME") };
-        assert_eq!(base.join("logs/codex"), PathBuf::from("/tmp/test-mx-home/logs/codex"));
+        assert_eq!(
+            base.join("logs/codex"),
+            PathBuf::from("/tmp/test-mx-home/logs/codex")
+        );
     }
 
     #[test]
@@ -164,7 +170,10 @@ mod tests {
         unsafe { std::env::set_var("MX_HOME", "/tmp/test-mx-home") };
         let base = resolve_mx_home().expect("resolve_mx_home() should succeed");
         unsafe { std::env::remove_var("MX_HOME") };
-        assert_eq!(base.join("artifacts"), PathBuf::from("/tmp/test-mx-home/artifacts"));
+        assert_eq!(
+            base.join("artifacts"),
+            PathBuf::from("/tmp/test-mx-home/artifacts")
+        );
     }
 
     #[test]
@@ -173,6 +182,9 @@ mod tests {
         unsafe { std::env::set_var("MX_HOME", "/tmp/test-mx-home") };
         let base = resolve_mx_home().expect("resolve_mx_home() should succeed");
         unsafe { std::env::remove_var("MX_HOME") };
-        assert_eq!(base.join("agents"), PathBuf::from("/tmp/test-mx-home/agents"));
+        assert_eq!(
+            base.join("agents"),
+            PathBuf::from("/tmp/test-mx-home/agents")
+        );
     }
 }
