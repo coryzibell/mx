@@ -33,7 +33,7 @@ pub fn mx_home() -> &'static PathBuf {
 
 /// Emit a startup note to stderr when MX_HOME is not explicitly configured.
 pub fn emit_mx_home_note() {
-    if std::env::var("MX_HOME").is_err() {
+    if std::env::var("MX_HOME").map_or(true, |v| v.is_empty()) {
         eprintln!(
             "note: Using default {}. Set MX_HOME to customize.",
             mx_home().display()
@@ -100,16 +100,6 @@ pub fn doctor_ram_dir() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Display helpers for CLI help text
-// ---------------------------------------------------------------------------
-
-/// The default MX_HOME path as a display string (for help text).
-/// Returns something like `~/.mx` regardless of MX_HOME override.
-pub fn default_mx_home_display() -> &'static str {
-    "~/.mx"
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -154,17 +144,34 @@ mod tests {
 
     #[test]
     fn derived_dirs_under_mx_home() {
-        unsafe { std::env::set_var("MX_HOME", "/tmp/test-mx") };
-        let home = resolve_mx_home_uncached();
-        unsafe { std::env::remove_var("MX_HOME") };
+        // Test real derived-path functions against the cached mx_home().
+        // Each function should return a path rooted under mx_home().
+        let home = mx_home();
 
-        // Verify that derived paths would be under the home
-        assert!(home.join("schemas").starts_with(&home));
-        assert!(home.join("swap").starts_with(&home));
-        assert!(home.join("agents").starts_with(&home));
-        assert!(home.join("artifacts").starts_with(&home));
-        assert!(home.join("codex").starts_with(&home));
-        assert!(home.join("cache").join("sync").starts_with(&home));
+        let schemas = schemas_dir();
+        assert!(schemas.starts_with(home), "schemas_dir not under mx_home");
+        assert_eq!(schemas.file_name().unwrap(), "schemas");
+
+        let swap = swap_dir();
+        assert!(swap.starts_with(home), "swap_dir not under mx_home");
+        assert_eq!(swap.file_name().unwrap(), "swap");
+
+        let agents = agents_dir();
+        assert!(agents.starts_with(home), "agents_dir not under mx_home");
+        assert_eq!(agents.file_name().unwrap(), "agents");
+
+        let artifacts = artifacts_dir();
+        assert!(artifacts.starts_with(home), "artifacts_dir not under mx_home");
+        assert_eq!(artifacts.file_name().unwrap(), "artifacts");
+
+        // codex_dir without override should also be under mx_home
+        unsafe { std::env::remove_var("MX_CODEX_PATH") };
+        let codex = codex_dir();
+        assert!(codex.starts_with(home), "codex_dir not under mx_home");
+        assert_eq!(codex.file_name().unwrap(), "codex");
+
+        let sync = sync_cache_dir("owner/repo");
+        assert!(sync.starts_with(home), "sync_cache_dir not under mx_home");
     }
 
     #[test]

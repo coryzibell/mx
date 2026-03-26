@@ -17,12 +17,14 @@ use std::path::PathBuf;
 
 use crate::SyncCommands;
 
-/// Default sync cache directory for a repo
+/// Default sync cache directory for a repo.
+/// Delegates to `crate::paths::sync_cache_dir`; kept for sub-module convenience.
 pub fn default_sync_dir(repo: &str) -> PathBuf {
     crate::paths::sync_cache_dir(repo)
 }
 
-/// Artifacts directory
+/// Artifacts directory.
+/// Delegates to `crate::paths::artifacts_dir`; kept for sub-module convenience.
 pub fn artifacts_dir() -> PathBuf {
     crate::paths::artifacts_dir()
 }

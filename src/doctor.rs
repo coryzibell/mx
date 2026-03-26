@@ -59,18 +59,16 @@ impl Check {
 pub fn run_checks(json: bool) -> Result<()> {
     let use_color = std::io::stdout().is_terminal();
 
+    let claude_md = crate::paths::doctor_claude_md();
+    let identity_colors = crate::paths::doctor_identity_colors();
+    let ram_dir = crate::paths::doctor_ram_dir();
+
     let checks = vec![
-        check_file_exists(
-            &format!("{}", crate::paths::doctor_claude_md().display()),
-            &crate::paths::doctor_claude_md(),
-        ),
-        check_file_exists(
-            &format!("{}", crate::paths::doctor_identity_colors().display()),
-            &crate::paths::doctor_identity_colors(),
-        ),
+        check_file_exists(&claude_md.display().to_string(), &claude_md),
+        check_file_exists(&identity_colors.display().to_string(), &identity_colors),
         check_directory_exists(
-            &format!("{}/", crate::paths::doctor_ram_dir().display()),
-            &crate::paths::doctor_ram_dir(),
+            &format!("{}/", ram_dir.display()),
+            &ram_dir,
         ),
         check_github_token(),
     ];

@@ -1981,10 +1981,10 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
                 pref
             } else {
                 let path = file.unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .map(|_h| crate::paths::swap_dir().join("session-bootstrap.md"))
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default()
+                    crate::paths::swap_dir()
+                        .join("session-bootstrap.md")
+                        .to_string_lossy()
+                        .to_string()
                 });
 
                 let content = std::fs::read_to_string(&path)
