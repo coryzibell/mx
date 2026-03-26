@@ -114,7 +114,7 @@ impl TensorSchema {
             }
         }
 
-        // Check $MX_HOME/schemas/{id}.yaml (default: ~/.crewu/schemas/)
+        // Check $MX_HOME/schemas/{id}.yaml (default: ~/.mx/schemas/)
         let schemas = crate::paths::schemas_dir()?;
         let yaml_path = schemas.join(format!("{}.yaml", schema_id));
         if yaml_path.exists() {
@@ -143,7 +143,7 @@ impl TensorSchema {
         Self::load_by_id("crewu")
     }
 
-    /// List available schemas in `$MX_HOME/schemas/` (default: `~/.crewu/schemas/`)
+    /// List available schemas in `$MX_HOME/schemas/` (default: `~/.mx/schemas/`)
     pub fn list_available() -> Result<Vec<String>> {
         let mut schemas = Vec::new();
 

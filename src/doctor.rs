@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
 use crate::sync::github::auth::get_github_token;
 
@@ -60,13 +59,14 @@ impl Check {
 pub fn run_checks(json: bool) -> Result<()> {
     let use_color = std::io::stdout().is_terminal();
 
+    let home = crate::paths::mx_home()?;
     let checks = vec![
-        check_file_exists("~/.matrix/CLAUDE.md", &home_path(".matrix/CLAUDE.md")),
+        check_file_exists("$MX_HOME/CLAUDE.md", &home.join("CLAUDE.md")),
         check_file_exists(
-            "~/.matrix/artifacts/etc/identity-colors.yaml",
-            &home_path(".matrix/artifacts/etc/identity-colors.yaml"),
+            "$MX_HOME/artifacts/etc/identity-colors.yaml",
+            &home.join("artifacts/etc/identity-colors.yaml"),
         ),
-        check_directory_exists("~/.matrix/ram/neo/", &home_path(".matrix/ram/neo")),
+        check_directory_exists("$MX_HOME/ram/neo/", &home.join("ram/neo")),
         check_github_token(),
     ];
 
@@ -156,9 +156,3 @@ fn check_github_token() -> Check {
     }
 }
 
-/// Resolve home directory path
-fn home_path(relative: &str) -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(relative)
-}

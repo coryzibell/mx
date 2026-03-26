@@ -348,7 +348,7 @@ pub enum SyncCommands {
         /// Repository (owner/repo format)
         repo: String,
 
-        /// Output directory (defaults to ~/.matrix/cache/sync/<repo>)
+        /// Output directory (defaults to $MX_HOME/cache/sync/<repo>)
         #[arg(short, long)]
         output: Option<String>,
 
@@ -362,7 +362,7 @@ pub enum SyncCommands {
         /// Repository (owner/repo format)
         repo: String,
 
-        /// Input directory (defaults to ~/.matrix/cache/sync/<repo>)
+        /// Input directory (defaults to $MX_HOME/cache/sync/<repo>)
         #[arg(short, long)]
         input: Option<String>,
 
@@ -1343,7 +1343,7 @@ enum AgentsCommands {
 
     /// Seed agents from markdown files with YAML frontmatter
     Seed {
-        /// Path to agents directory (defaults to ~/.matrix/agents/)
+        /// Path to agents directory (defaults to $MX_HOME/agents/)
         #[arg(short, long)]
         path: Option<String>,
     },
@@ -1566,6 +1566,8 @@ enum WikiCommands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    crate::paths::warn_if_no_mx_home();
 
     match cli.command {
         Commands::Memory { command } => handle_memory(command, cli.verbose),
@@ -4380,9 +4382,7 @@ fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
             let agents_dir = if let Some(p) = path {
                 PathBuf::from(p)
             } else {
-                // Default: ~/.matrix/agents/
-                let home = dirs::home_dir().context("Could not determine home directory")?;
-                home.join(".matrix").join("agents")
+                crate::paths::agents_dir()?
             };
 
             if !agents_dir.exists() {
