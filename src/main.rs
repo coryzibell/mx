@@ -1099,6 +1099,13 @@ enum MemoryCommands {
         limit: usize,
     },
 
+    /// Fetch facts for the wake ritual (resonance >= 3, all types, sorted by resonance)
+    WakeFetch {
+        /// Number of days to look back
+        #[arg(long, default_value = "15")]
+        days: i32,
+    },
+
     /// List facts extracted from a specific session
     ForSession {
         /// Session ID (with or without kn- prefix)
@@ -4125,6 +4132,73 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
             }
+        }
+
+        MemoryCommands::WakeFetch { days } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            let mut facts = db.query_recent_facts_all_types(days)?;
+
+            // Filter: resonance >= 3 and type is present
+            facts.retain(|f| {
+                if f.resonance < 3 {
+                    return false;
+                }
+                // Check that fact_type exists in summary JSON
+                f.summary
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("fact_type")?.as_str().map(String::from))
+                    .is_some()
+            });
+
+            // Sort by effective resonance (decay-adjusted), highest first
+            facts.sort_by(|a, b| {
+                let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
+                let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
+                b_val
+                    .partial_cmp(&a_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            if facts.is_empty() {
+                println!("(no memory entries returned)");
+                return Ok(());
+            }
+
+            println!("<facts>");
+            for (i, fact) in facts.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+
+                let fact_type = fact
+                    .summary
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| {
+                        v.get("fact_type")
+                            .and_then(|t| t.as_str())
+                            .map(String::from)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let date = fact
+                    .created_at
+                    .as_ref()
+                    .and_then(|dt_str| chrono::DateTime::parse_from_rfc3339(dt_str).ok())
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let content = fact.body.as_deref().unwrap_or("");
+
+                println!(
+                    "[{}] {} (resonance {}) {}",
+                    date, fact_type, fact.resonance, fact.id
+                );
+                println!("{}", content);
+            }
+            println!("</facts>");
         }
 
         MemoryCommands::ForSession {
