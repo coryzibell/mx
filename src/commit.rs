@@ -58,7 +58,7 @@ pub fn stage_all() -> Result<()> {
 
 /// Encode text using base-d with hash and random dictionary
 /// Returns (encoded_text, hash_algorithm, dictionary_name)
-pub fn encode_hash_with_registry(
+fn encode_hash_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
@@ -73,7 +73,7 @@ pub fn encode_hash_with_registry(
 }
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo, dictionary_name)
-pub fn encode_compress_with_registry(
+fn encode_compress_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
@@ -280,6 +280,19 @@ fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
+/// Format the footer tag: `[hash_algo:title_dict|compress_algo:body_dict]`
+fn format_footer_tag(
+    hash_algo: &str,
+    title_dict: &str,
+    compress_algo: &str,
+    body_dict: &str,
+) -> String {
+    format!(
+        "[{}:{}|{}:{}]",
+        hash_algo, title_dict, compress_algo, body_dict
+    )
+}
+
 /// Encode title and body into commit parts with automatic retry on unsafe output.
 ///
 /// Loads the dictionary registry once and retries up to MAX_ENCODE_ATTEMPTS times
@@ -304,14 +317,8 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
         let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
         // Footer: [hash_algo:title_dict|compress_algo:body_dict]
-        let footer = format!(
-            "[{}:{}|{}:{}]{}",
-            hash_algo,
-            title_dict,
-            compress_algo,
-            body_dict,
-            if dejavu { "\nwhoa." } else { "" }
-        );
+        let footer_tag = format_footer_tag(&hash_algo, &title_dict, &compress_algo, &body_dict);
+        let footer = format!("{}{}", footer_tag, if dejavu { "\nwhoa." } else { "" });
 
         // Validate all parts for unsafe characters
         let title_check = validate_encoded_output(&title, "title");
@@ -319,10 +326,6 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
         let footer_check = validate_encoded_output(&footer, "footer");
 
         if let Err(e) = title_check.and(body_check).and(footer_check) {
-            let footer_tag = format!(
-                "[{}:{}|{}:{}]",
-                hash_algo, title_dict, compress_algo, body_dict
-            );
             if attempt < MAX_ENCODE_ATTEMPTS {
                 eprintln!("Tried {}: {}, retrying...", footer_tag, e);
             } else {
@@ -334,10 +337,6 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
 
         // Success
         if attempt > 1 {
-            let footer_tag = format!(
-                "[{}:{}|{}:{}]",
-                hash_algo, title_dict, compress_algo, body_dict
-            );
             eprintln!("Tried {}: OK", footer_tag);
         }
 
