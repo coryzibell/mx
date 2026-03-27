@@ -12,6 +12,10 @@ use anyhow::{Context, Result, bail};
 use base_d::prelude::*;
 use std::process::Command;
 
+/// Maximum number of encoding attempts before giving up.
+/// Each attempt re-rolls the random dictionary selection.
+const MAX_ENCODE_ATTEMPTS: usize = 5;
+
 /// Get the staged diff from git
 pub fn get_staged_diff() -> Result<String> {
     let output = Command::new("git")
@@ -52,34 +56,35 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
-/// Detect which dictionary was used to encode text
-fn detect_dictionary(encoded: &str) -> Result<String> {
-    let matches = base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    Ok(matches.first().map(|m| m.name.clone()).unwrap_or_default())
-}
-
 /// Encode text using base-d with hash and random dictionary
-/// Returns (encoded_text, hash_algorithm)
-pub fn encode_hash(text: &str) -> Result<(String, String)> {
-    let registry = DictionaryRegistry::load_default()
-        .map_err(|e| anyhow::anyhow!("Failed to load dictionaries: {}", e))?;
-
-    let result = hash_encode(text.as_bytes(), &registry)
+/// Returns (encoded_text, hash_algorithm, dictionary_name)
+fn encode_hash_with_registry(
+    text: &str,
+    registry: &DictionaryRegistry,
+) -> Result<(String, String, String)> {
+    let result = hash_encode(text.as_bytes(), registry)
         .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
 
-    Ok((result.encoded, result.hash_algo.as_str().to_string()))
+    Ok((
+        result.encoded,
+        result.hash_algo.as_str().to_string(),
+        result.dictionary_name,
+    ))
 }
 
-/// Compress and encode text using base-d, returns (encoded, compress_algo)
-pub fn encode_compress(text: &str) -> Result<(String, String)> {
-    let registry = DictionaryRegistry::load_default()
-        .map_err(|e| anyhow::anyhow!("Failed to load dictionaries: {}", e))?;
-
-    let result = compress_encode(text.as_bytes(), &registry)
+/// Compress and encode text using base-d, returns (encoded, compress_algo, dictionary_name)
+fn encode_compress_with_registry(
+    text: &str,
+    registry: &DictionaryRegistry,
+) -> Result<(String, String, String)> {
+    let result = compress_encode(text.as_bytes(), registry)
         .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
 
-    Ok((result.encoded, result.compress_algo.as_str().to_string()))
+    Ok((
+        result.encoded,
+        result.compress_algo.as_str().to_string(),
+        result.dictionary_name,
+    ))
 }
 
 /// Decode and decompress text that was encoded with encode_compress
@@ -243,6 +248,7 @@ pub struct EncodedCommit {
     pub footer: String,
     pub dejavu: bool,
     pub title_dict: String,
+    pub body_dict: String,
 }
 
 impl EncodedCommit {
@@ -253,76 +259,103 @@ impl EncodedCommit {
 }
 
 /// Validates that encoded output is safe for use as a command-line argument.
-/// Returns an error if the output contains nul bytes or C0/C1 control characters
-/// that could corrupt git operations.
+/// Returns Ok(()) if safe, or Err with a description of the problem (position and character).
+/// The error message does NOT include dictionary info -- that is handled by the retry loop.
 fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
     if let Some(pos) = encoded.find('\0') {
-        bail!(
-            "Encoded {} contains NUL byte at position {} -- this would corrupt git operations. \
-             This suggests an unsafe dictionary was selected. Encoded preview: {:?}",
-            context,
-            pos,
-            &encoded[..encoded
-                .char_indices()
-                .take(40)
-                .last()
-                .map_or(0, |(i, c)| i + c.len_utf8())]
-        );
+        bail!("NUL byte at position {} in {}", pos, context,);
     }
     // Check for C0 controls (except newline, tab) and C1 controls
     for (i, c) in encoded.char_indices() {
         let cp = c as u32;
         if (cp < 0x20 && cp != 0x0A && cp != 0x09) || (0x80..=0x9F).contains(&cp) {
             bail!(
-                "Encoded {} contains control character U+{:04X} at position {} -- \
-                 this would produce garbled output. Encoded preview: {:?}",
-                context,
+                "control character U+{:04X} at position {} in {}",
                 cp,
                 i,
-                &encoded[..encoded
-                    .char_indices()
-                    .take(40)
-                    .last()
-                    .map_or(0, |(i, c)| i + c.len_utf8())]
+                context,
             );
         }
     }
     Ok(())
 }
 
-/// Encode title and body into commit parts
-/// Title is hashed, body is compressed, footer shows algos/dicts used
+/// Format the footer tag: `[hash_algo:title_dict|compress_algo:body_dict]`
+fn format_footer_tag(
+    hash_algo: &str,
+    title_dict: &str,
+    compress_algo: &str,
+    body_dict: &str,
+) -> String {
+    format!(
+        "[{}:{}|{}:{}]",
+        hash_algo, title_dict, compress_algo, body_dict
+    )
+}
+
+/// Encode title and body into commit parts with automatic retry on unsafe output.
+///
+/// Loads the dictionary registry once and retries up to MAX_ENCODE_ATTEMPTS times
+/// if the encoded output contains NUL bytes or control characters. Each retry
+/// re-rolls the random dictionary selection. Failed attempts are logged to stderr
+/// with the dictionary/codec combo that produced unsafe output.
 pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit> {
-    // Generate title (hash) - random dictionary
-    let (title, hash_algo) = encode_hash(title_text)?;
+    // Load registry once for all attempts
+    let registry = DictionaryRegistry::load_default()
+        .map_err(|e| anyhow::anyhow!("Failed to load dictionaries: {}", e))?;
 
-    // Generate body (compressed) - random dictionary
-    let (body, compress_algo) = encode_compress(body_text)?;
+    let mut failed_footers: Vec<String> = Vec::new();
 
-    // Detect dictionaries
-    let title_dict = detect_dictionary(&title)?;
-    let body_dict = detect_dictionary(&body)?;
+    for attempt in 1..=MAX_ENCODE_ATTEMPTS {
+        // Generate title (hash) - random dictionary
+        let (title, hash_algo, title_dict) = encode_hash_with_registry(title_text, &registry)?;
 
-    // Dejavu detection - same dictionary for both?
-    let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
+        // Generate body (compressed) - random dictionary
+        let (body, compress_algo, body_dict) = encode_compress_with_registry(body_text, &registry)?;
 
-    // Footer: [hash_algo:title_dict|compress_algo:body_dict]
-    let footer = format!(
-        "[{}:{}|{}:{}]{}",
-        hash_algo,
-        title_dict,
-        compress_algo,
-        body_dict,
-        if dejavu { "\nwhoa." } else { "" }
-    );
+        // Dejavu detection - same dictionary for both?
+        let dejavu = !title_dict.is_empty() && !body_dict.is_empty() && title_dict == body_dict;
 
-    Ok(EncodedCommit {
-        title,
-        body,
-        footer,
-        dejavu,
-        title_dict,
-    })
+        // Footer: [hash_algo:title_dict|compress_algo:body_dict]
+        let footer_tag = format_footer_tag(&hash_algo, &title_dict, &compress_algo, &body_dict);
+        let footer = format!("{}{}", footer_tag, if dejavu { "\nwhoa." } else { "" });
+
+        // Validate all parts for unsafe characters
+        let title_check = validate_encoded_output(&title, "title");
+        let body_check = validate_encoded_output(&body, "body");
+        let footer_check = validate_encoded_output(&footer, "footer");
+
+        if let Err(e) = title_check.and(body_check).and(footer_check) {
+            if attempt < MAX_ENCODE_ATTEMPTS {
+                eprintln!("Tried {}: {}, retrying...", footer_tag, e);
+            } else {
+                eprintln!("Tried {}: {}", footer_tag, e);
+            }
+            failed_footers.push(footer_tag);
+            continue;
+        }
+
+        // Success
+        if attempt > 1 {
+            eprintln!("Tried {}: OK", footer_tag);
+        }
+
+        return Ok(EncodedCommit {
+            title,
+            body,
+            footer,
+            dejavu,
+            title_dict,
+            body_dict,
+        });
+    }
+
+    // All attempts failed
+    bail!(
+        "All {} encoding attempts produced unsafe output. Failed dictionaries: {}",
+        MAX_ENCODE_ATTEMPTS,
+        failed_footers.join(", ")
+    )
 }
 
 /// Generate an encoded commit message from title and body
@@ -346,13 +379,8 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     // Get diff for hashing (title is hash of diff)
     let diff = get_staged_diff()?;
 
-    // Encode: title from diff hash, body from compressed message
+    // Encode with retry: title from diff hash, body from compressed message
     let encoded = encode_commit(&diff, message)?;
-
-    // Validate encoded output is safe for command-line use
-    validate_encoded_output(&encoded.title, "title")?;
-    validate_encoded_output(&encoded.body, "body")?;
-    validate_encoded_output(&encoded.footer, "footer")?;
 
     println!("Title:  {}", encoded.title);
     println!("Body:   {}", encoded.body);
@@ -419,13 +447,8 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     // Combine PR title and body into full message for body encoding
     let full_message = format!("{}\n\n{}", pr_title, pr_body);
 
-    // Encode: title from diff hash, body from compressed full message
+    // Encode with retry: title from diff hash, body from compressed full message
     let encoded = encode_commit(&diff, &full_message)?;
-
-    // Validate encoded output is safe for command-line use
-    validate_encoded_output(&encoded.title, "title")?;
-    validate_encoded_output(&encoded.body, "body")?;
-    validate_encoded_output(&encoded.footer, "footer")?;
 
     // Determine merge method
     let method = if rebase {
