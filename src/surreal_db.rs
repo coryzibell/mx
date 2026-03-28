@@ -4506,8 +4506,8 @@ mod tests {
         // Agent-b attempts to delete it
         let ctx_b = crate::store::AgentContext::for_agent("agent-b");
         let result = db.delete("kn-private-del-target", &ctx_b).unwrap();
-        assert_eq!(
-            result, false,
+        assert!(
+            !result,
             "agent-b should not be able to delete agent-a's private entry"
         );
 
@@ -4542,8 +4542,8 @@ mod tests {
                 &ctx_b,
             )
             .unwrap();
-        assert_eq!(
-            result, false,
+        assert!(
+            !result,
             "agent-b should not be able to update summary on agent-a's private entry"
         );
 
