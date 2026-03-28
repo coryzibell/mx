@@ -696,7 +696,7 @@ enum MemoryCommands {
         content: Option<String>,
 
         /// Replace content from file (full replacement)
-        #[arg(short, long, conflicts_with_all = ["content", "append_content", "append_file", "prepend_content", "prepend_file", "find"])]
+        #[arg(short, long, visible_alias = "content-file", conflicts_with_all = ["content", "append_content", "append_file", "prepend_content", "prepend_file", "find"])]
         file: Option<String>,
 
         /// Append text to end of existing content
