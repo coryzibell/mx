@@ -1759,21 +1759,75 @@ impl SurrealDatabase {
         Ok(())
     }
 
-    /// Update only the summary field of a knowledge entry
-    pub fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
-        Self::runtime().block_on(self.update_summary_async(id, summary))
+    /// Update only the summary field of a knowledge entry.
+    /// Respects visibility: agents can only update summaries on entries they can see.
+    /// Returns Ok(false) for entries that don't exist OR that the agent can't see
+    /// (to avoid leaking existence of private entries).
+    pub fn update_summary(
+        &self,
+        id: &str,
+        summary: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<bool> {
+        Self::runtime().block_on(self.update_summary_async(id, summary, ctx))
     }
 
-    async fn update_summary_async(&self, id: &str, summary: &str) -> Result<()> {
+    async fn update_summary_async(
+        &self,
+        id: &str,
+        summary: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<bool> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
-        let record_thing = Thing::from(("knowledge".to_string(), id_part.to_string()));
+
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Check if the record exists AND is visible to the current agent.
+        // If the entry exists but isn't visible, we return false (same as "not found")
+        // to avoid leaking the existence of private entries.
+        let check_sql = format!(
+            "SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id {} GROUP ALL",
+            visibility_clause
+        );
+
+        let mut check_response = with_db!(self, db, {
+            let mut query = db.query(&check_sql).bind(("id", id_part.to_string()));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query
+                .await
+                .context("Failed to check knowledge record existence for summary update")
+        })?;
+
+        let count_results: Vec<serde_json::Value> = check_response.take(0)?;
+        let exists = count_results
+            .first()
+            .and_then(|v| v["c"].as_i64())
+            .unwrap_or(0)
+            > 0;
+
+        if !exists {
+            return Ok(false);
+        }
+
+        // Update with the same visibility filter to prevent TOCTOU race conditions.
+        // Even though we checked above, re-applying the filter on the UPDATE ensures
+        // no bypass is possible between check and update.
+        let update_sql = format!(
+            "UPDATE knowledge SET summary = $summary WHERE meta::id(id) = $id {}",
+            visibility_clause
+        );
 
         let mut response = with_db!(self, db, {
-            db.query("UPDATE knowledge SET summary = $summary WHERE id = $id")
-                .bind(("id", record_thing))
-                .bind(("summary", summary.to_string()))
-                .await
-                .context("Failed to update summary")
+            let mut query = db
+                .query(&update_sql)
+                .bind(("id", id_part.to_string()))
+                .bind(("summary", summary.to_string()));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query.await.context("Failed to update summary")
         })?;
 
         let errors = response.take_errors();
@@ -1781,7 +1835,7 @@ impl SurrealDatabase {
             return Err(anyhow::anyhow!("Failed to update summary: {:?}", errors));
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Increment activation_count only — does NOT reset last_activated.
@@ -3441,8 +3495,13 @@ impl KnowledgeStore for SurrealDatabase {
         self.update_activations(ids)
     }
 
-    fn update_summary(&self, id: &str, summary: &str) -> Result<()> {
-        self.update_summary(id, summary)
+    fn update_summary(
+        &self,
+        id: &str,
+        summary: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<bool> {
+        self.update_summary(id, summary, ctx)
     }
 
     fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
@@ -4425,6 +4484,82 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // CROSS-AGENT VISIBILITY BYPASS TESTS (PR #186 / PR #187)
+    // =========================================================================
+    // These tests prove that the visibility filter on delete and update_summary
+    // prevents cross-agent operations on private entries. Agent-b must not be
+    // able to delete or update_summary on agent-a's private entries.
+
+    #[test]
+    fn test_delete_cross_agent_visibility_blocked() {
+        // PR #186: delete must respect visibility. Agent-b cannot delete
+        // agent-a's private entry.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry
+        let mut entry = make_test_entry("kn-private-del-target", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-b attempts to delete it
+        let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+        let result = db.delete("kn-private-del-target", &ctx_b).unwrap();
+        assert!(
+            !result,
+            "agent-b should not be able to delete agent-a's private entry"
+        );
+
+        // Verify entry still exists for agent-a
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let still_exists = db.get("kn-private-del-target", &ctx_a).unwrap();
+        assert!(
+            still_exists.is_some(),
+            "Entry should still exist for agent-a after failed cross-agent delete"
+        );
+    }
+
+    #[test]
+    fn test_update_summary_cross_agent_visibility_blocked() {
+        // This branch's fix: update_summary must respect visibility.
+        // Agent-b cannot update the summary of agent-a's private entry.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry with a summary
+        let mut entry = make_test_entry("kn-private-summary-target", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        entry.summary = Some(r#"{"state":"open"}"#.to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-b attempts to update the summary
+        let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+        let result = db
+            .update_summary(
+                "kn-private-summary-target",
+                r#"{"state":"compromised"}"#,
+                &ctx_b,
+            )
+            .unwrap();
+        assert!(
+            !result,
+            "agent-b should not be able to update summary on agent-a's private entry"
+        );
+
+        // Verify the original summary is unchanged for agent-a
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let unchanged = db
+            .get("kn-private-summary-target", &ctx_a)
+            .unwrap()
+            .unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(unchanged.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            summary["state"], "open",
+            "Summary should be unchanged after failed cross-agent update"
+        );
+    }
     #[test]
     fn test_reinforce_basic() {
         // Test basic reinforcement functionality
@@ -4543,7 +4678,13 @@ mod tests {
 
         // Update summary to closed state (mirrors thread_closed handler)
         let new_summary = r#"{"state":"closed","topic":"test thread"}"#;
-        db.update_summary("kn-summary-test", new_summary).unwrap();
+        let result = db
+            .update_summary("kn-summary-test", new_summary, &ctx)
+            .unwrap();
+        assert!(
+            result,
+            "update_summary should return true for visible entry"
+        );
 
         // Read it back and verify the change persisted
         let updated = db.get("kn-summary-test", &ctx).unwrap().unwrap();
@@ -4565,8 +4706,10 @@ mod tests {
         db.upsert_knowledge(&entry).unwrap();
 
         // Update using raw ID (no prefix) - should still work
-        db.update_summary("summary-norm", r#"{"state":"closed"}"#)
+        let result = db
+            .update_summary("summary-norm", r#"{"state":"closed"}"#, &ctx)
             .unwrap();
+        assert!(result, "update_summary should return true with raw ID");
 
         let updated = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
         let summary: serde_json::Value =
@@ -4574,8 +4717,13 @@ mod tests {
         assert_eq!(summary["state"], "closed");
 
         // Update using prefixed ID - should also work
-        db.update_summary("kn-summary-norm", r#"{"state":"reopened"}"#)
+        let result2 = db
+            .update_summary("kn-summary-norm", r#"{"state":"reopened"}"#, &ctx)
             .unwrap();
+        assert!(
+            result2,
+            "update_summary should return true with prefixed ID"
+        );
 
         let updated2 = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
         let summary2: serde_json::Value =
@@ -4597,8 +4745,13 @@ mod tests {
 
         // The thread_closed handler writes the closed state via update_summary
         let closed_summary = r#"{"state":"closed","topic":"pre-convention thread"}"#;
-        db.update_summary("kn-no-summary-thread", closed_summary)
+        let result = db
+            .update_summary("kn-no-summary-thread", closed_summary, &ctx)
             .unwrap();
+        assert!(
+            result,
+            "update_summary should return true for entry with no prior summary"
+        );
 
         // Verify the state persisted correctly
         let updated = db.get("kn-no-summary-thread", &ctx).unwrap().unwrap();
