@@ -2659,7 +2659,11 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             );
                         }
                         let new_summary = meta.to_string();
-                        db.update_summary(&tid, &new_summary)?;
+                        db.update_summary(
+                            &tid,
+                            &new_summary,
+                            &store::AgentContext::for_agent(&agent_id),
+                        )?;
                         println!("Closed thread: {}", tid);
                         return Ok(());
                     } else {

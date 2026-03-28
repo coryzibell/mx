@@ -160,11 +160,15 @@ pub trait KnowledgeStore {
     fn update_activations(&self, ids: &[String]) -> Result<()>;
 
     /// Update only the summary field of a knowledge entry (targeted update, bypasses SCHEMAFULL UPSERT)
+    /// Respects visibility: agents can only update summaries on entries they can see.
+    /// Returns Ok(false) for entries that don't exist OR that the agent can't see
+    /// (to avoid leaking existence of private entries).
     ///
     /// # Arguments
     /// * `id` - Entry ID, with or without "kn-" prefix (normalized internally)
     /// * `summary` - New summary value to set
-    fn update_summary(&self, id: &str, summary: &str) -> Result<()>;
+    /// * `ctx` - Agent context for visibility filtering
+    fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool>;
 
     /// Increment activation_count only — does NOT reset last_activated.
     /// Use for passive bulk surfacing (wake cascade, for-session view) so entries
