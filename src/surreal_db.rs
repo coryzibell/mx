@@ -1141,20 +1141,33 @@ impl SurrealDatabase {
         Ok(Some(record.into_knowledge_entry(tags, applicability)))
     }
 
-    /// Delete a knowledge entry (edges cascade automatically)
-    pub fn delete_knowledge(&self, id: &str) -> Result<bool> {
-        Self::runtime().block_on(self.delete_knowledge_async(id))
+    /// Delete a knowledge entry (edges cascade automatically).
+    /// Respects visibility: agents can only delete entries they can see.
+    /// Returns Ok(false) for entries that don't exist OR that the agent can't see
+    /// (to avoid leaking existence of private entries).
+    pub fn delete_knowledge(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<bool> {
+        Self::runtime().block_on(self.delete_knowledge_async(id, ctx))
     }
 
-    async fn delete_knowledge_async(&self, id: &str) -> Result<bool> {
+    async fn delete_knowledge_async(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<bool> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
-        // First check if the record exists
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Check if the record exists AND is visible to the current agent.
+        // If the entry exists but isn't visible, we return false (same as "not found")
+        // to avoid leaking the existence of private entries.
+        let check_sql = format!(
+            "SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id {} GROUP ALL",
+            visibility_clause
+        );
+
         let mut check_response = with_db!(self, db, {
-            db.query("SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id GROUP ALL")
-                .bind(("id", id_part.to_string()))
-                .await
-                .context("Failed to check knowledge record existence")
+            let mut query = db.query(&check_sql).bind(("id", id_part.to_string()));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query.await.context("Failed to check knowledge record existence")
         })?;
 
         let count_results: Vec<serde_json::Value> = check_response.take(0)?;
@@ -1168,14 +1181,20 @@ impl SurrealDatabase {
             return Ok(false);
         }
 
-        // Delete without RETURN to avoid deserialization issues with Thing fields
-        // The knowledge table has many Thing fields (category, source_type, etc) that
-        // surrealdb::sql::Value cannot deserialize
+        // Delete with the same visibility filter to prevent TOCTOU race conditions.
+        // Even though we checked above, re-applying the filter on the DELETE ensures
+        // no bypass is possible between check and delete.
+        let delete_sql = format!(
+            "DELETE FROM knowledge WHERE meta::id(id) = $id {}",
+            visibility_clause
+        );
+
         let mut response = with_db!(self, db, {
-            db.query("DELETE type::thing('knowledge', $id)")
-                .bind(("id", id_part.to_string()))
-                .await
-                .context("Failed to delete knowledge record")
+            let mut query = db.query(&delete_sql).bind(("id", id_part.to_string()));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query.await.context("Failed to delete knowledge record")
         })?;
 
         // Check for errors
@@ -3362,8 +3381,8 @@ impl KnowledgeStore for SurrealDatabase {
         self.get_knowledge(id, ctx)
     }
 
-    fn delete(&self, id: &str) -> Result<bool> {
-        self.delete_knowledge(id)
+    fn delete(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<bool> {
+        self.delete_knowledge(id, ctx)
     }
 
     fn search(
