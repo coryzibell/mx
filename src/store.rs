@@ -112,8 +112,8 @@ pub trait KnowledgeStore {
     /// Get a knowledge entry by ID
     fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
 
-    /// Delete a knowledge entry
-    fn delete(&self, id: &str) -> Result<bool>;
+    /// Delete a knowledge entry (respects visibility: agents can only delete entries they can see)
+    fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool>;
 
     /// Search knowledge entries
     fn search(

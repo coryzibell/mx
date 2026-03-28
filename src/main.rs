@@ -2533,7 +2533,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let id = normalize_id(&id);
 
-            if db.delete(&id)? {
+            // Respect visibility: agents can only delete entries they can see
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
+
+            if db.delete(&id, &ctx)? {
                 if json {
                     println!(
                         "{}",
