@@ -1149,7 +1149,11 @@ impl SurrealDatabase {
         Self::runtime().block_on(self.delete_knowledge_async(id, ctx))
     }
 
-    async fn delete_knowledge_async(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<bool> {
+    async fn delete_knowledge_async(
+        &self,
+        id: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<bool> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
@@ -1167,7 +1171,9 @@ impl SurrealDatabase {
             if let Some(ref agent) = current_agent {
                 query = query.bind(("current_agent", agent.clone()));
             }
-            query.await.context("Failed to check knowledge record existence")
+            query
+                .await
+                .context("Failed to check knowledge record existence")
         })?;
 
         let count_results: Vec<serde_json::Value> = check_response.take(0)?;
