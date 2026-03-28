@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.98"
+version = "0.1.99"
 edition = "2024"
 description = "A Swiss army knife for Claude Code and multi-agent toolkits"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
