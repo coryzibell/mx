@@ -1968,14 +1968,18 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Reinforce a knowledge entry
+    /// Reinforce a knowledge entry.
+    /// Respects visibility: agents can only reinforce entries they can see.
+    /// Returns Ok(None) for entries that don't exist OR that the agent can't see
+    /// (to avoid leaking existence of private entries).
     pub fn reinforce(
         &self,
         id: &str,
         amount: i32,
         cap: Option<i32>,
-    ) -> Result<crate::store::ReinforcementResult> {
-        Self::runtime().block_on(self.reinforce_async(id, amount, cap))
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<crate::store::ReinforcementResult>> {
+        Self::runtime().block_on(self.reinforce_async(id, amount, cap, ctx))
     }
 
     async fn reinforce_async(
@@ -1983,7 +1987,8 @@ impl SurrealDatabase {
         id: &str,
         amount: i32,
         cap: Option<i32>,
-    ) -> Result<crate::store::ReinforcementResult> {
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<crate::store::ReinforcementResult>> {
         // Normalize ID
         let normalized_id = if id.starts_with("kn-") {
             id.to_string()
@@ -1993,21 +1998,32 @@ impl SurrealDatabase {
 
         let id_part = normalized_id.strip_prefix("kn-").unwrap_or(&normalized_id);
 
-        // First, get the current entry to read old values
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Check if the record exists AND is visible to the current agent.
+        // If the entry exists but isn't visible, we return None (same as "not found")
+        // to avoid leaking the existence of private entries.
+        let select_sql = format!(
+            "SELECT resonance, activation_count FROM knowledge WHERE meta::id(id) = $id {}",
+            visibility_clause
+        );
+
         let mut response = with_db!(self, db, {
-            db.query("SELECT resonance, activation_count FROM knowledge WHERE meta::id(id) = $id")
-                .bind(("id", id_part.to_string()))
-                .await
-                .context("Failed to select entry for reinforce")
+            let mut query = db.query(&select_sql).bind(("id", id_part.to_string()));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query.await.context("Failed to select entry for reinforce")
         })?;
 
         let results: Vec<serde_json::Value> = response
             .take(0)
             .context("Failed to parse entry for reinforce")?;
 
-        let current = results
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", normalized_id))?;
+        let current = match results.first() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         let old_resonance = current
             .get("resonance")
@@ -2034,30 +2050,40 @@ impl SurrealDatabase {
 
         let new_activation_count = old_activation_count + 1;
 
-        // Create a Thing for the update
-        let record_thing = Thing::from(("knowledge".to_string(), id_part.to_string()));
-
-        // Update the entry
-        let sql = "UPDATE knowledge SET
+        // Update with the same visibility filter to prevent TOCTOU race conditions.
+        // Even though we checked above, re-applying the filter on the UPDATE ensures
+        // no bypass is possible between check and update.
+        let update_sql = format!(
+            "UPDATE knowledge SET
             resonance = $new_resonance,
             last_activated = time::now(),
             activation_count = $new_count,
             updated_at = time::now()
-            WHERE id = $id";
+            WHERE meta::id(id) = $id {}",
+            visibility_clause
+        );
 
-        with_db!(self, db, {
-            db.query(sql)
-                .bind(("id", record_thing))
+        let mut update_response = with_db!(self, db, {
+            let mut query = db
+                .query(&update_sql)
+                .bind(("id", id_part.to_string()))
                 .bind(("new_resonance", new_resonance))
-                .bind(("new_count", new_activation_count))
-                .await
-                .context("Failed to update entry for reinforce")
+                .bind(("new_count", new_activation_count));
+            if let Some(ref agent) = current_agent {
+                query = query.bind(("current_agent", agent.clone()));
+            }
+            query.await.context("Failed to update entry for reinforce")
         })?;
+
+        let errors = update_response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Failed to reinforce entry: {:?}", errors));
+        }
 
         // Get current timestamp for response
         let now = Utc::now().to_rfc3339();
 
-        Ok(crate::store::ReinforcementResult {
+        Ok(Some(crate::store::ReinforcementResult {
             id: normalized_id,
             old_resonance,
             new_resonance,
@@ -2065,7 +2091,7 @@ impl SurrealDatabase {
             capped,
             last_activated: now,
             activation_count: new_activation_count,
-        })
+        }))
     }
 
     // =========================================================================
@@ -3521,8 +3547,9 @@ impl KnowledgeStore for SurrealDatabase {
         id: &str,
         amount: i32,
         cap: Option<i32>,
-    ) -> Result<crate::store::ReinforcementResult> {
-        self.reinforce(id, amount, cap)
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<crate::store::ReinforcementResult>> {
+        self.reinforce(id, amount, cap, ctx)
     }
 
     fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
@@ -4564,6 +4591,7 @@ mod tests {
     fn test_reinforce_basic() {
         // Test basic reinforcement functionality
         let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
 
         // Create an entry with resonance 5
         let mut entry = make_test_entry("kn-test-reinforce", 5, 0.0);
@@ -4571,7 +4599,10 @@ mod tests {
         db.upsert_knowledge(&entry).unwrap();
 
         // Reinforce by 2, with cap of 10
-        let result = db.reinforce("kn-test-reinforce", 2, Some(10)).unwrap();
+        let result = db
+            .reinforce("kn-test-reinforce", 2, Some(10), &ctx)
+            .unwrap()
+            .expect("reinforce should return Some for visible entry");
 
         // Verify results
         assert_eq!(result.id, "kn-test-reinforce");
@@ -4582,7 +4613,6 @@ mod tests {
         assert_eq!(result.activation_count, 11);
 
         // Verify the entry was actually updated
-        let ctx = crate::store::AgentContext::public_only();
         let updated = db.get("kn-test-reinforce", &ctx).unwrap().unwrap();
         assert_eq!(updated.resonance, 7);
         assert_eq!(updated.activation_count, 11);
@@ -4593,13 +4623,17 @@ mod tests {
     fn test_reinforce_with_cap() {
         // Test that cap is enforced
         let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
 
         // Create an entry with resonance 9
         let entry = make_test_entry("kn-test-cap", 9, 0.0);
         db.upsert_knowledge(&entry).unwrap();
 
         // Try to reinforce by 5, but cap at 10
-        let result = db.reinforce("kn-test-cap", 5, Some(10)).unwrap();
+        let result = db
+            .reinforce("kn-test-cap", 5, Some(10), &ctx)
+            .unwrap()
+            .expect("reinforce should return Some for visible entry");
 
         // Should be capped at 10
         assert_eq!(result.old_resonance, 9);
@@ -4608,7 +4642,6 @@ mod tests {
         assert!(result.capped);
 
         // Verify the entry was capped
-        let ctx = crate::store::AgentContext::public_only();
         let updated = db.get("kn-test-cap", &ctx).unwrap().unwrap();
         assert_eq!(updated.resonance, 10);
     }
@@ -4617,13 +4650,17 @@ mod tests {
     fn test_reinforce_without_cap() {
         // Test reinforcement without a cap (for transcendent blooms)
         let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
 
         // Create an entry with resonance 9
         let entry = make_test_entry("kn-test-no-cap", 9, 0.0);
         db.upsert_knowledge(&entry).unwrap();
 
         // Reinforce by 5 with no cap
-        let result = db.reinforce("kn-test-no-cap", 5, None).unwrap();
+        let result = db
+            .reinforce("kn-test-no-cap", 5, None, &ctx)
+            .unwrap()
+            .expect("reinforce should return Some for visible entry");
 
         // Should go above 10
         assert_eq!(result.old_resonance, 9);
@@ -4631,36 +4668,110 @@ mod tests {
         assert!(!result.capped);
 
         // Verify the entry was updated
-        let ctx = crate::store::AgentContext::public_only();
         let updated = db.get("kn-test-no-cap", &ctx).unwrap().unwrap();
         assert_eq!(updated.resonance, 14);
     }
 
     #[test]
     fn test_reinforce_nonexistent() {
-        // Test that reinforcing a nonexistent entry returns error
+        // Test that reinforcing a nonexistent entry returns None
         let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
 
-        let result = db.reinforce("kn-nonexistent", 1, Some(10));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        let result = db.reinforce("kn-nonexistent", 1, Some(10), &ctx).unwrap();
+        assert!(
+            result.is_none(),
+            "reinforce should return None for nonexistent entry"
+        );
     }
 
     #[test]
     fn test_reinforce_id_normalization() {
         // Test that ID normalization works
         let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
 
         // Create entry with full ID
         let entry = make_test_entry("kn-test-norm", 5, 0.0);
         db.upsert_knowledge(&entry).unwrap();
 
         // Reinforce with partial ID (no "kn-" prefix)
-        let result = db.reinforce("test-norm", 2, Some(10)).unwrap();
+        let result = db
+            .reinforce("test-norm", 2, Some(10), &ctx)
+            .unwrap()
+            .expect("reinforce should return Some for visible entry");
 
         // Should normalize correctly
         assert_eq!(result.id, "kn-test-norm");
         assert_eq!(result.new_resonance, 7);
+    }
+
+    #[test]
+    fn test_reinforce_cross_agent_visibility_blocked() {
+        // Fix #157: reinforce must respect visibility.
+        // Agent-b cannot reinforce agent-a's private entry.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry with known resonance
+        let mut entry = make_test_entry("kn-private-reinforce-target", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        entry.activation_count = 3;
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-b attempts to reinforce it
+        let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+        let result = db
+            .reinforce("kn-private-reinforce-target", 2, Some(10), &ctx_b)
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "agent-b should not be able to reinforce agent-a's private entry"
+        );
+
+        // Verify the entry is unchanged for agent-a
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let unchanged = db
+            .get("kn-private-reinforce-target", &ctx_a)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            unchanged.resonance, 5,
+            "Resonance should be unchanged after failed cross-agent reinforce"
+        );
+        assert_eq!(
+            unchanged.activation_count, 3,
+            "Activation count should be unchanged after failed cross-agent reinforce"
+        );
+    }
+
+    #[test]
+    fn test_reinforce_own_private_entry() {
+        // Agent-a should be able to reinforce their own private entry
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry
+        let mut entry = make_test_entry("kn-private-reinforce-own", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        entry.activation_count = 3;
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-a reinforces their own entry
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let result = db
+            .reinforce("kn-private-reinforce-own", 2, Some(10), &ctx_a)
+            .unwrap()
+            .expect("agent-a should be able to reinforce their own private entry");
+
+        assert_eq!(result.old_resonance, 5);
+        assert_eq!(result.new_resonance, 7);
+        assert_eq!(result.activation_count, 4);
+
+        // Verify it actually persisted
+        let updated = db.get("kn-private-reinforce-own", &ctx_a).unwrap().unwrap();
+        assert_eq!(updated.resonance, 7);
+        assert_eq!(updated.activation_count, 4);
     }
 
     #[test]

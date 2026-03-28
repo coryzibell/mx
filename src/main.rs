@@ -4305,22 +4305,30 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Normalize ID
             let normalized_id = normalize_id(&id);
 
-            // Call reinforce on the store
-            let result = db.reinforce(&normalized_id, amount, Some(cap))?;
+            // Respect visibility: agents can only reinforce entries they can see
+            let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                _ => store::AgentContext::public_only(),
+            };
 
-            // Output result - support both --json flag and legacy --format json
-            if json || format == "json" {
-                println!("{}", serde_json::to_string_pretty(&result)?);
-            } else {
-                println!("Reinforced entry: {}", result.id);
-                println!("  Old resonance: {}", result.old_resonance);
-                println!("  New resonance: {}", result.new_resonance);
-                println!("  Amount added: {}", result.amount_added);
-                if result.capped {
-                    println!("  (Capped at {})", cap);
+            // Call reinforce on the store
+            if let Some(result) = db.reinforce(&normalized_id, amount, Some(cap), &ctx)? {
+                // Output result - support both --json flag and legacy --format json
+                if json || format == "json" {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("Reinforced entry: {}", result.id);
+                    println!("  Old resonance: {}", result.old_resonance);
+                    println!("  New resonance: {}", result.new_resonance);
+                    println!("  Amount added: {}", result.amount_added);
+                    if result.capped {
+                        println!("  (Capped at {})", cap);
+                    }
+                    println!("  Last activated: {}", result.last_activated);
+                    println!("  Activation count: {}", result.activation_count);
                 }
-                println!("  Last activated: {}", result.last_activated);
-                println!("  Activation count: {}", result.activation_count);
+            } else {
+                bail!("Entry '{}' not found", normalized_id);
             }
         }
     }

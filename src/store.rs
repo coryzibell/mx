@@ -183,15 +183,25 @@ pub trait KnowledgeStore {
     fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>>;
 
     /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
+    /// Respects visibility: agents can only reinforce entries they can see.
+    /// Returns Ok(None) for entries that don't exist OR that the agent can't see
+    /// (to avoid leaking existence of private entries).
     ///
     /// # Arguments
     /// * `id` - Entry ID to reinforce
     /// * `amount` - Amount to increase resonance by
     /// * `cap` - Maximum resonance value (None = no cap)
+    /// * `ctx` - Agent context for visibility filtering
     ///
     /// # Returns
-    /// Result containing the old/new values and whether cap was hit
-    fn reinforce(&self, id: &str, amount: i32, cap: Option<i32>) -> Result<ReinforcementResult>;
+    /// Result containing the old/new values and whether cap was hit, or None if not found/not visible
+    fn reinforce(
+        &self,
+        id: &str,
+        amount: i32,
+        cap: Option<i32>,
+        ctx: &AgentContext,
+    ) -> Result<Option<ReinforcementResult>>;
 
     // =========================================================================
     // CONTENT PATCH OPERATIONS
