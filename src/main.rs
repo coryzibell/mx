@@ -2659,12 +2659,15 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             );
                         }
                         let new_summary = meta.to_string();
-                        db.update_summary(
+                        if db.update_summary(
                             &tid,
                             &new_summary,
                             &store::AgentContext::for_agent(&agent_id),
-                        )?;
-                        println!("Closed thread: {}", tid);
+                        )? {
+                            println!("Closed thread: {}", tid);
+                        } else {
+                            bail!("Entry '{}' not found", tid);
+                        }
                         return Ok(());
                     } else {
                         bail!("Thread not found: {}", tid);

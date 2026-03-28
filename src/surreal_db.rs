@@ -4484,6 +4484,82 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // CROSS-AGENT VISIBILITY BYPASS TESTS (PR #186 / PR #187)
+    // =========================================================================
+    // These tests prove that the visibility filter on delete and update_summary
+    // prevents cross-agent operations on private entries. Agent-b must not be
+    // able to delete or update_summary on agent-a's private entries.
+
+    #[test]
+    fn test_delete_cross_agent_visibility_blocked() {
+        // PR #186: delete must respect visibility. Agent-b cannot delete
+        // agent-a's private entry.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry
+        let mut entry = make_test_entry("kn-private-del-target", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-b attempts to delete it
+        let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+        let result = db.delete("kn-private-del-target", &ctx_b).unwrap();
+        assert_eq!(
+            result, false,
+            "agent-b should not be able to delete agent-a's private entry"
+        );
+
+        // Verify entry still exists for agent-a
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let still_exists = db.get("kn-private-del-target", &ctx_a).unwrap();
+        assert!(
+            still_exists.is_some(),
+            "Entry should still exist for agent-a after failed cross-agent delete"
+        );
+    }
+
+    #[test]
+    fn test_update_summary_cross_agent_visibility_blocked() {
+        // This branch's fix: update_summary must respect visibility.
+        // Agent-b cannot update the summary of agent-a's private entry.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Agent-a creates a private entry with a summary
+        let mut entry = make_test_entry("kn-private-summary-target", 5, 0.0);
+        entry.visibility = "private".to_string();
+        entry.owner = Some("agent-a".to_string());
+        entry.summary = Some(r#"{"state":"open"}"#.to_string());
+        db.upsert_knowledge(&entry).unwrap();
+
+        // Agent-b attempts to update the summary
+        let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+        let result = db
+            .update_summary(
+                "kn-private-summary-target",
+                r#"{"state":"compromised"}"#,
+                &ctx_b,
+            )
+            .unwrap();
+        assert_eq!(
+            result, false,
+            "agent-b should not be able to update summary on agent-a's private entry"
+        );
+
+        // Verify the original summary is unchanged for agent-a
+        let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+        let unchanged = db
+            .get("kn-private-summary-target", &ctx_a)
+            .unwrap()
+            .unwrap();
+        let summary: serde_json::Value =
+            serde_json::from_str(unchanged.summary.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            summary["state"], "open",
+            "Summary should be unchanged after failed cross-agent update"
+        );
+    }
     #[test]
     fn test_reinforce_basic() {
         // Test basic reinforcement functionality
@@ -4602,8 +4678,13 @@ mod tests {
 
         // Update summary to closed state (mirrors thread_closed handler)
         let new_summary = r#"{"state":"closed","topic":"test thread"}"#;
-        db.update_summary("kn-summary-test", new_summary, &ctx)
+        let result = db
+            .update_summary("kn-summary-test", new_summary, &ctx)
             .unwrap();
+        assert!(
+            result,
+            "update_summary should return true for visible entry"
+        );
 
         // Read it back and verify the change persisted
         let updated = db.get("kn-summary-test", &ctx).unwrap().unwrap();
@@ -4625,8 +4706,10 @@ mod tests {
         db.upsert_knowledge(&entry).unwrap();
 
         // Update using raw ID (no prefix) - should still work
-        db.update_summary("summary-norm", r#"{"state":"closed"}"#, &ctx)
+        let result = db
+            .update_summary("summary-norm", r#"{"state":"closed"}"#, &ctx)
             .unwrap();
+        assert!(result, "update_summary should return true with raw ID");
 
         let updated = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
         let summary: serde_json::Value =
@@ -4634,8 +4717,13 @@ mod tests {
         assert_eq!(summary["state"], "closed");
 
         // Update using prefixed ID - should also work
-        db.update_summary("kn-summary-norm", r#"{"state":"reopened"}"#, &ctx)
+        let result2 = db
+            .update_summary("kn-summary-norm", r#"{"state":"reopened"}"#, &ctx)
             .unwrap();
+        assert!(
+            result2,
+            "update_summary should return true with prefixed ID"
+        );
 
         let updated2 = db.get("kn-summary-norm", &ctx).unwrap().unwrap();
         let summary2: serde_json::Value =
@@ -4657,8 +4745,13 @@ mod tests {
 
         // The thread_closed handler writes the closed state via update_summary
         let closed_summary = r#"{"state":"closed","topic":"pre-convention thread"}"#;
-        db.update_summary("kn-no-summary-thread", closed_summary, &ctx)
+        let result = db
+            .update_summary("kn-no-summary-thread", closed_summary, &ctx)
             .unwrap();
+        assert!(
+            result,
+            "update_summary should return true for entry with no prior summary"
+        );
 
         // Verify the state persisted correctly
         let updated = db.get("kn-no-summary-thread", &ctx).unwrap().unwrap();
