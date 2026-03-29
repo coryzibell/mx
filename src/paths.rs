@@ -78,7 +78,7 @@ pub fn agents_dir() -> PathBuf {
 /// Pure resolution logic for codex directory. Takes the `MX_CODEX_PATH` env
 /// var value as a parameter so callers (especially tests) don't need to touch
 /// process state.
-pub fn codex_dir_with(env_val: Option<&str>, home: &Path) -> PathBuf {
+fn codex_dir_with(env_val: Option<&str>, home: &Path) -> PathBuf {
     if let Some(path) = env_val
         && !path.is_empty()
     {

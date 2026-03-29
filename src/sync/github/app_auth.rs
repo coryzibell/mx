@@ -41,6 +41,17 @@ lazy_static::lazy_static! {
     static ref TOKEN_CACHE: Arc<Mutex<Option<CachedToken>>> = Arc::new(Mutex::new(None));
 }
 
+/// Pure logic for checking whether GitHub App credentials are present.
+/// Takes the env values as parameters so callers (especially tests) don't
+/// need to touch process state.
+fn is_app_configured_with(
+    app_id: Option<&str>,
+    installation_id: Option<&str>,
+    private_key: Option<&str>,
+) -> bool {
+    app_id.is_some() && installation_id.is_some() && private_key.is_some()
+}
+
 /// Check if GitHub App credentials are configured
 ///
 /// Returns true if all required environment variables are set:
@@ -48,9 +59,11 @@ lazy_static::lazy_static! {
 /// - DOTMATRIX_INSTALLATION_ID
 /// - DOTMATRIX_PRIVATE_KEY
 pub fn is_app_configured() -> bool {
-    env::var("DOTMATRIX_APP_ID").is_ok()
-        && env::var("DOTMATRIX_INSTALLATION_ID").is_ok()
-        && env::var("DOTMATRIX_PRIVATE_KEY").is_ok()
+    is_app_configured_with(
+        env::var("DOTMATRIX_APP_ID").ok().as_deref(),
+        env::var("DOTMATRIX_INSTALLATION_ID").ok().as_deref(),
+        env::var("DOTMATRIX_PRIVATE_KEY").ok().as_deref(),
+    )
 }
 
 /// Generate a JWT for GitHub App authentication
@@ -175,18 +188,18 @@ mod tests {
 
     #[test]
     fn test_is_app_configured_missing_vars() {
-        // Should return false if any var is missing
-        // SAFETY: While tests run in parallel, these environment variables
-        // (DOTMATRIX_*) are only accessed by tests in this module, and the
-        // other tests that read them are marked #[ignore]. No other tests
-        // in the default test suite access these variables, preventing races.
-        // This is fragile - future tests reading these vars must coordinate.
-        unsafe {
-            env::remove_var("DOTMATRIX_APP_ID");
-            env::remove_var("DOTMATRIX_INSTALLATION_ID");
-            env::remove_var("DOTMATRIX_PRIVATE_KEY");
-        }
-        assert!(!is_app_configured());
+        // Calls the _with variant directly -- no env mutation, no unsafe,
+        // safe to run in parallel with any other test.
+        assert!(!is_app_configured_with(None, None, None));
+        assert!(!is_app_configured_with(Some("123"), None, None));
+        assert!(!is_app_configured_with(Some("123"), Some("456"), None));
+        assert!(!is_app_configured_with(None, Some("456"), Some("key")));
+        // All present -> true
+        assert!(is_app_configured_with(
+            Some("123"),
+            Some("456"),
+            Some("key")
+        ));
     }
 
     #[test]
