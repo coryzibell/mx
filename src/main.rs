@@ -4204,7 +4204,8 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "[{}] {} (resonance {}) {}",
                     date, fact_type, fact.resonance, fact.id
                 );
-                println!("<![CDATA[{}]]>", content);
+                let escaped = content.replace("]]>", "]]]]><![CDATA[>");
+                println!("<![CDATA[{}]]>", escaped);
             }
             println!("</facts>");
         }
