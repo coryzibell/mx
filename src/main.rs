@@ -4033,20 +4033,6 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
-            // Warn when resonance-dependent flags are used with the SQLite backend,
-            // which hardcodes resonance: 0 and has no decay computation.
-            let is_sqlite = !matches!(
-                std::env::var("MX_MEMORY_BACKEND").as_deref(),
-                Ok("surrealdb") | Ok("surreal")
-            );
-            if is_sqlite && matches!(sort, RecentSortOrder::Resonance) {
-                eprintln!(
-                    "warning: --sort resonance uses the SQLite backend, which does not support \
-                     resonance decay computation. Results will sort by raw resonance (always 0). \
-                     Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
-                );
-            }
-
             // Note: Listing doesn't activate facts - bulk view != focused access
             // Auto-enable all_types when --resonance-type is set, otherwise the
             // default ephemeral-only query would silently return nothing for
@@ -4075,7 +4061,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if matches!(sort, RecentSortOrder::Resonance) {
                 facts.sort_by(|a, b| {
                     // Sort by effective_resonance (decay-adjusted) when available;
-                    // fall back to raw resonance for SQLite entries that lack it.
+                    // fall back to raw resonance for entries that lack it.
                     let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
                     let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
                     b_val
@@ -4083,8 +4069,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
-            // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
-            // created_at DESC from SQLite). No re-sort needed.
+            // Default: preserve DB ordering (effective_resonance DESC). No re-sort needed.
 
             // Apply limit
             facts.truncate(limit);

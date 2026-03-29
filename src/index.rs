@@ -24,7 +24,7 @@ impl Default for IndexConfig {
 
         Self {
             memory_root: base.join("memory"),
-            db_path: base.join("memory").join("knowledge.db"),
+            db_path: base.join("memory").join("knowledge.surreal"),
             jsonl_path: base.join("memory").join("index.jsonl"),
             excluded_dirs: vec!["future".to_string()],
         }
