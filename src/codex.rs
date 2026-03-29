@@ -15,13 +15,13 @@ static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
 static USER_NAME: OnceLock<String> = OnceLock::new();
 static ASSISTANT_NAME: OnceLock<String> = OnceLock::new();
 
-/// Resolve the user display name (uncached). Used by tests and as the
-/// initializer for the OnceLock cache.
-fn resolve_user_name_inner() -> String {
-    if let Ok(name) = std::env::var("MX_USER_NAME")
+/// Pure resolution logic for user display name. Takes the env var value as a
+/// parameter so callers (especially tests) don't need to touch process state.
+fn resolve_user_name_with(env_val: Option<&str>) -> String {
+    if let Some(name) = env_val
         && !name.is_empty()
     {
-        return name;
+        return name.to_string();
     }
     // Fallback: try git config user.name
     if let Ok(output) = std::process::Command::new("git")
@@ -37,6 +37,13 @@ fn resolve_user_name_inner() -> String {
     "User".to_string()
 }
 
+/// Resolve the user display name (uncached). Used as the initializer for the
+/// OnceLock cache. Reads MX_USER_NAME from the environment and delegates to
+/// the pure `resolve_user_name_with`.
+fn resolve_user_name_inner() -> String {
+    resolve_user_name_with(std::env::var("MX_USER_NAME").ok().as_deref())
+}
+
 /// Resolve the user display name for transcripts.
 /// Priority: MX_USER_NAME env var > git config user.name > "User"
 /// Result is cached for the lifetime of the process via OnceLock.
@@ -44,15 +51,23 @@ fn resolve_user_name() -> String {
     USER_NAME.get_or_init(resolve_user_name_inner).clone()
 }
 
-/// Resolve the assistant display name (uncached). Used by tests and as the
-/// initializer for the OnceLock cache.
-fn resolve_assistant_name_inner() -> String {
-    if let Ok(name) = std::env::var("MX_ASSISTANT_NAME")
+/// Pure resolution logic for assistant display name. Takes the env var value
+/// as a parameter so callers (especially tests) don't need to touch process
+/// state.
+fn resolve_assistant_name_with(env_val: Option<&str>) -> String {
+    if let Some(name) = env_val
         && !name.is_empty()
     {
-        return name;
+        return name.to_string();
     }
     "Orchestrator".to_string()
+}
+
+/// Resolve the assistant display name (uncached). Used as the initializer for
+/// the OnceLock cache. Reads MX_ASSISTANT_NAME from the environment and
+/// delegates to the pure `resolve_assistant_name_with`.
+fn resolve_assistant_name_inner() -> String {
+    resolve_assistant_name_with(std::env::var("MX_ASSISTANT_NAME").ok().as_deref())
 }
 
 /// Resolve the assistant display name for transcripts.
@@ -1984,50 +1999,39 @@ mod tests {
 
     #[test]
     fn resolve_user_name_from_env() {
-        // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
-        // These tests may race if run in parallel -- acceptable risk for unit tests.
-        // Use `cargo test -- --test-threads=1` if flaky.
-        unsafe {
-            std::env::set_var("MX_USER_NAME", "TestHuman");
-        }
-        let name = resolve_user_name_inner();
-        unsafe {
-            std::env::remove_var("MX_USER_NAME");
-        }
+        let name = resolve_user_name_with(Some("TestHuman"));
         assert_eq!(name, "TestHuman");
     }
 
     #[test]
     fn resolve_user_name_fallback_without_env() {
-        unsafe {
-            std::env::remove_var("MX_USER_NAME");
-        }
-        let name = resolve_user_name_inner();
-        // Should be either git user.name or "User" — both are valid
+        let name = resolve_user_name_with(None);
+        // Should be either git user.name or "User" -- both are valid
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn resolve_user_name_empty_env_is_fallback() {
+        let name = resolve_user_name_with(Some(""));
+        // Empty string should behave like None -- fall back to git or "User"
         assert!(!name.is_empty());
     }
 
     #[test]
     fn resolve_assistant_name_from_env() {
-        // SAFETY: env var manipulation is unsafe in Rust 2024 edition.
-        // These tests may race if run in parallel -- acceptable risk for unit tests.
-        // Use `cargo test -- --test-threads=1` if flaky.
-        unsafe {
-            std::env::set_var("MX_ASSISTANT_NAME", "Opus");
-        }
-        let name = resolve_assistant_name_inner();
-        unsafe {
-            std::env::remove_var("MX_ASSISTANT_NAME");
-        }
+        let name = resolve_assistant_name_with(Some("Opus"));
         assert_eq!(name, "Opus");
     }
 
     #[test]
     fn resolve_assistant_name_default() {
-        unsafe {
-            std::env::remove_var("MX_ASSISTANT_NAME");
-        }
-        let name = resolve_assistant_name_inner();
+        let name = resolve_assistant_name_with(None);
+        assert_eq!(name, "Orchestrator");
+    }
+
+    #[test]
+    fn resolve_assistant_name_empty_env_is_default() {
+        let name = resolve_assistant_name_with(Some(""));
         assert_eq!(name, "Orchestrator");
     }
 
