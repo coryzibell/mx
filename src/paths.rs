@@ -9,26 +9,30 @@
 //! Subsystem-specific overrides (`MX_CODEX_PATH`, `MX_MEMORY_PATH`, etc.)
 //! continue to work -- they take precedence over the derived path when set.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static MX_HOME: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pure resolution logic for MX_HOME. Takes the env var value as a parameter
+/// so callers (especially tests) don't need to touch process state.
+fn resolve_mx_home_with(env_val: Option<&str>) -> PathBuf {
+    if let Some(val) = env_val
+        && !val.is_empty()
+    {
+        return PathBuf::from(val);
+    }
+    dirs::home_dir()
+        .expect("Could not determine home directory")
+        .join(".mx")
+}
 
 /// Resolve the MX_HOME base directory.
 ///
 /// Priority: `MX_HOME` env var > `~/.mx/`
 /// Result is cached for the lifetime of the process.
 pub fn mx_home() -> &'static PathBuf {
-    MX_HOME.get_or_init(|| {
-        if let Ok(val) = std::env::var("MX_HOME")
-            && !val.is_empty()
-        {
-            return PathBuf::from(val);
-        }
-        dirs::home_dir()
-            .expect("Could not determine home directory")
-            .join(".mx")
-    })
+    MX_HOME.get_or_init(|| resolve_mx_home_with(std::env::var("MX_HOME").ok().as_deref()))
 }
 
 /// Emit a startup note to stderr when MX_HOME is not explicitly configured.
@@ -71,17 +75,24 @@ pub fn agents_dir() -> PathBuf {
     mx_home().join("agents")
 }
 
+/// Pure resolution logic for codex directory. Takes the `MX_CODEX_PATH` env
+/// var value as a parameter so callers (especially tests) don't need to touch
+/// process state.
+pub fn codex_dir_with(env_val: Option<&str>, home: &Path) -> PathBuf {
+    if let Some(path) = env_val
+        && !path.is_empty()
+    {
+        return PathBuf::from(path);
+    }
+    home.join("codex")
+}
+
 /// Codex directory (session archives).
 ///
 /// Override: `MX_CODEX_PATH` env var.
 /// Default: `$MX_HOME/codex/`
 pub fn codex_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("MX_CODEX_PATH")
-        && !path.is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    mx_home().join("codex")
+    codex_dir_with(std::env::var("MX_CODEX_PATH").ok().as_deref(), mx_home())
 }
 
 /// Doctor check: CLAUDE.md path: `$MX_HOME/CLAUDE.md`
@@ -107,39 +118,27 @@ pub fn doctor_ram_dir() -> PathBuf {
 mod tests {
     use super::*;
 
-    // NOTE: These tests manipulate env vars and are NOT safe to run in parallel
-    // with other tests that read MX_HOME / MX_CODEX_PATH. Run with:
-    //   cargo test paths:: -- --test-threads=1
-    //
-    // Because OnceLock caches the first call, we test the *inner* resolution
-    // logic directly rather than going through the cached `mx_home()`.
-
-    /// Resolve mx_home without caching (for test isolation).
-    fn resolve_mx_home_uncached() -> PathBuf {
-        if let Ok(val) = std::env::var("MX_HOME")
-            && !val.is_empty()
-        {
-            return PathBuf::from(val);
-        }
-        dirs::home_dir()
-            .expect("Could not determine home directory")
-            .join(".mx")
-    }
+    // Tests call the `_with` variants directly with explicit parameters,
+    // avoiding any env-var mutation and running safely in parallel.
 
     #[test]
     fn mx_home_default_when_unset() {
-        unsafe { std::env::remove_var("MX_HOME") };
-        let result = resolve_mx_home_uncached();
+        let result = resolve_mx_home_with(None);
         let expected = dirs::home_dir().unwrap().join(".mx");
         assert_eq!(result, expected);
     }
 
     #[test]
     fn mx_home_respects_env_var() {
-        unsafe { std::env::set_var("MX_HOME", "/tmp/test-mx-home") };
-        let result = resolve_mx_home_uncached();
-        unsafe { std::env::remove_var("MX_HOME") };
+        let result = resolve_mx_home_with(Some("/tmp/test-mx-home"));
         assert_eq!(result, PathBuf::from("/tmp/test-mx-home"));
+    }
+
+    #[test]
+    fn mx_home_empty_env_is_default() {
+        let result = resolve_mx_home_with(Some(""));
+        let expected = dirs::home_dir().unwrap().join(".mx");
+        assert_eq!(result, expected);
     }
 
     #[test]
@@ -168,8 +167,7 @@ mod tests {
         assert_eq!(artifacts.file_name().unwrap(), "artifacts");
 
         // codex_dir without override should also be under mx_home
-        unsafe { std::env::remove_var("MX_CODEX_PATH") };
-        let codex = codex_dir();
+        let codex = codex_dir_with(None, home);
         assert!(codex.starts_with(home), "codex_dir not under mx_home");
         assert_eq!(codex.file_name().unwrap(), "codex");
 
@@ -179,10 +177,23 @@ mod tests {
 
     #[test]
     fn codex_dir_respects_override() {
-        unsafe { std::env::set_var("MX_CODEX_PATH", "/custom/codex") };
-        let result = codex_dir();
-        unsafe { std::env::remove_var("MX_CODEX_PATH") };
+        let home = mx_home().clone();
+        let result = codex_dir_with(Some("/custom/codex"), &home);
         assert_eq!(result, PathBuf::from("/custom/codex"));
+    }
+
+    #[test]
+    fn codex_dir_empty_override_is_default() {
+        let home = mx_home().clone();
+        let result = codex_dir_with(Some(""), &home);
+        assert_eq!(result, home.join("codex"));
+    }
+
+    #[test]
+    fn codex_dir_none_override_is_default() {
+        let home = mx_home().clone();
+        let result = codex_dir_with(None, &home);
+        assert_eq!(result, home.join("codex"));
     }
 
     #[test]
