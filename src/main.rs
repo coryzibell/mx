@@ -1104,6 +1104,10 @@ enum MemoryCommands {
         /// Number of days to look back
         #[arg(long, default_value = "15")]
         days: i32,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// List facts extracted from a specific session
@@ -4155,26 +4159,32 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::WakeFetch { days } => {
+        MemoryCommands::WakeFetch { days, limit } => {
+            if days <= 0 {
+                bail!("--days must be a positive integer (got {days})");
+            }
+
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             let mut facts = db.query_recent_facts_all_types(days)?;
 
-            // Filter: resonance >= 3 and fact_type is present in summary JSON
-            facts.retain(|f| {
-                if f.resonance < 3 {
-                    return false;
-                }
-                // Check that fact_type exists in summary JSON
-                f.summary
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("fact_type")?.as_str().map(String::from))
-                    .is_some()
-            });
+            // Filter to resonance >= 3 AND extract fact_type in a single pass.
+            // Collect (entry, fact_type) pairs so we don't re-parse summary JSON later.
+            let mut typed_facts: Vec<(crate::knowledge::KnowledgeEntry, String)> = facts
+                .drain(..)
+                .filter(|f| f.resonance >= 3)
+                .filter_map(|f| {
+                    let ft = f
+                        .summary
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("fact_type")?.as_str().map(String::from))?;
+                    Some((f, ft))
+                })
+                .collect();
 
             // Sort by effective resonance (decay-adjusted), highest first
-            facts.sort_by(|a, b| {
+            typed_facts.sort_by(|(a, _), (b, _)| {
                 let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
                 let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
                 b_val
@@ -4182,27 +4192,19 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
 
-            if facts.is_empty() {
+            // Apply limit
+            typed_facts.truncate(limit);
+
+            if typed_facts.is_empty() {
                 println!("(no memory entries returned)");
                 return Ok(());
             }
 
             println!("<facts>");
-            for (i, fact) in facts.iter().enumerate() {
+            for (i, (fact, fact_type)) in typed_facts.iter().enumerate() {
                 if i > 0 {
                     println!();
                 }
-
-                let fact_type = fact
-                    .summary
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| {
-                        v.get("fact_type")
-                            .and_then(|t| t.as_str())
-                            .map(String::from)
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
 
                 let date = fact
                     .created_at
@@ -4217,7 +4219,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "[{}] {} (resonance {}) {}",
                     date, fact_type, fact.resonance, fact.id
                 );
-                println!("{}", content);
+                println!("<![CDATA[{}]]>", content);
             }
             println!("</facts>");
         }
