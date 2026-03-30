@@ -1099,6 +1099,17 @@ enum MemoryCommands {
         limit: usize,
     },
 
+    /// Fetch facts for the wake ritual (resonance >= 3, all types, sorted by resonance)
+    WakeFetch {
+        /// Number of days to look back
+        #[arg(long, default_value = "15")]
+        days: i32,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "100")]
+        limit: usize,
+    },
+
     /// List facts extracted from a specific session
     ForSession {
         /// Session ID (with or without kn- prefix)
@@ -4022,20 +4033,6 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
-            // Warn when resonance-dependent flags are used with the SQLite backend,
-            // which hardcodes resonance: 0 and has no decay computation.
-            let is_sqlite = !matches!(
-                std::env::var("MX_MEMORY_BACKEND").as_deref(),
-                Ok("surrealdb") | Ok("surreal")
-            );
-            if is_sqlite && matches!(sort, RecentSortOrder::Resonance) {
-                eprintln!(
-                    "warning: --sort resonance uses the SQLite backend, which does not support \
-                     resonance decay computation. Results will sort by raw resonance (always 0). \
-                     Use MX_MEMORY_BACKEND=surrealdb for decay-aware resonance sorting."
-                );
-            }
-
             // Note: Listing doesn't activate facts - bulk view != focused access
             // Auto-enable all_types when --resonance-type is set, otherwise the
             // default ephemeral-only query would silently return nothing for
@@ -4064,7 +4061,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if matches!(sort, RecentSortOrder::Resonance) {
                 facts.sort_by(|a, b| {
                     // Sort by effective_resonance (decay-adjusted) when available;
-                    // fall back to raw resonance for SQLite entries that lack it.
+                    // fall back to raw resonance for entries that lack it.
                     let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
                     let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
                     b_val
@@ -4072,8 +4069,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
-            // Default: preserve DB ordering (effective_resonance DESC from SurrealDB,
-            // created_at DESC from SQLite). No re-sort needed.
+            // Default: preserve DB ordering (effective_resonance DESC). No re-sort needed.
 
             // Apply limit
             facts.truncate(limit);
@@ -4146,6 +4142,72 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
             }
+        }
+
+        MemoryCommands::WakeFetch { days, limit } => {
+            if days <= 0 {
+                bail!("--days must be a positive integer (got {days})");
+            }
+
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            let mut facts = db.query_recent_facts_all_types(days)?;
+
+            // Filter to resonance >= 3 AND extract fact_type in a single pass.
+            // Collect (entry, fact_type) pairs so we don't re-parse summary JSON later.
+            let mut typed_facts: Vec<(crate::knowledge::KnowledgeEntry, String)> = facts
+                .drain(..)
+                .filter(|f| f.resonance >= 3)
+                .filter_map(|f| {
+                    let ft = f
+                        .summary
+                        .as_ref()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("fact_type")?.as_str().map(String::from))?;
+                    Some((f, ft))
+                })
+                .collect();
+
+            // Sort by effective resonance (decay-adjusted), highest first
+            typed_facts.sort_by(|(a, _), (b, _)| {
+                let a_val = a.effective_resonance.unwrap_or(a.resonance as f64);
+                let b_val = b.effective_resonance.unwrap_or(b.resonance as f64);
+                b_val
+                    .partial_cmp(&a_val)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Apply limit
+            typed_facts.truncate(limit);
+
+            if typed_facts.is_empty() {
+                println!("(no memory entries returned)");
+                return Ok(());
+            }
+
+            println!("<facts>");
+            for (i, (fact, fact_type)) in typed_facts.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+
+                let date = fact
+                    .created_at
+                    .as_ref()
+                    .and_then(|dt_str| chrono::DateTime::parse_from_rfc3339(dt_str).ok())
+                    .map(|dt| dt.format("%Y-%m-%d").to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let content = fact.body.as_deref().unwrap_or("");
+
+                println!(
+                    "[{}] {} (resonance {}) {}",
+                    date, fact_type, fact.resonance, fact.id
+                );
+                let escaped = content.replace("]]>", "]]]]><![CDATA[>");
+                println!("<![CDATA[{}]]>", escaped);
+            }
+            println!("</facts>");
         }
 
         MemoryCommands::ForSession {

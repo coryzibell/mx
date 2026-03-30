@@ -97,8 +97,8 @@ pub struct KnowledgeEntry {
     #[serde(default = "default_format")]
     pub format: String, // markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
 
-    // Computed decay value from SurrealDB (effective_resonance = resonance * decay factor).
-    // None for SQLite backend (no decay support). Use this for resonance-sorted display;
+    // Computed decay value (effective_resonance = resonance * decay factor).
+    // None when decay hasn't been computed yet. Use this for resonance-sorted display;
     // raw `resonance` does not account for age.
     #[serde(default)]
     pub effective_resonance: Option<f64>,
