@@ -173,7 +173,7 @@ fn delete_discussion(
 fn format_comment_body(message: &str, identity: Option<&str>) -> String {
     if let Some(id) = identity {
         format!(
-            "**[{}]**\n\n{}\n\n---\n*Posted by dotmatrix-ai • Identity: {}*",
+            "**[{}]**\n\n{}\n\n---\n*Posted by mx • Identity: {}*",
             id, message, id
         )
     } else {
