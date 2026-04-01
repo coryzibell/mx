@@ -150,13 +150,12 @@ impl SurrealConfig {
 
         let database = std::env::var("MX_SURREAL_DB").unwrap_or_else(|_| "knowledge".to_string());
 
-        let auth_level_str = std::env::var("MX_SURREAL_AUTH_LEVEL")
-            .unwrap_or_else(|_| "root".to_string());
-        let auth_level = AuthLevel::from_env_str(&auth_level_str)
-            .unwrap_or_else(|e| {
-                eprintln!("[mx] WARNING: {e}, defaulting to root");
-                AuthLevel::Root
-            });
+        let auth_level_str =
+            std::env::var("MX_SURREAL_AUTH_LEVEL").unwrap_or_else(|_| "root".to_string());
+        let auth_level = AuthLevel::from_env_str(&auth_level_str).unwrap_or_else(|e| {
+            eprintln!("[mx] WARNING: {e}, defaulting to root");
+            AuthLevel::Root
+        });
 
         Self {
             mode,
