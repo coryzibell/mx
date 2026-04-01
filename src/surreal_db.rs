@@ -33,7 +33,7 @@ pub enum SurrealMode {
 }
 
 /// Authentication level for SurrealDB signin
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AuthLevel {
     /// Root-level authentication (default)
     #[default]
@@ -153,7 +153,10 @@ impl SurrealConfig {
         let auth_level_str = std::env::var("MX_SURREAL_AUTH_LEVEL")
             .unwrap_or_else(|_| "root".to_string());
         let auth_level = AuthLevel::from_env_str(&auth_level_str)
-            .expect("Invalid MX_SURREAL_AUTH_LEVEL value");
+            .unwrap_or_else(|e| {
+                eprintln!("[mx] WARNING: {e}, defaulting to root");
+                AuthLevel::Root
+            });
 
         Self {
             mode,
