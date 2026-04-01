@@ -1,9 +1,9 @@
 //! GitHub App authentication - JWT generation and installation token management
 //!
 //! Environment variables:
-//! - DOTMATRIX_APP_ID: GitHub App ID
-//! - DOTMATRIX_INSTALLATION_ID: Installation ID
-//! - DOTMATRIX_PRIVATE_KEY: Full PEM private key content
+//! - MX_GITHUB_APP_ID: GitHub App ID
+//! - MX_GITHUB_INSTALLATION_ID: Installation ID
+//! - MX_GITHUB_PRIVATE_KEY: Full PEM private key content
 
 use anyhow::{Context, Result};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -55,14 +55,14 @@ fn is_app_configured_with(
 /// Check if GitHub App credentials are configured
 ///
 /// Returns true if all required environment variables are set:
-/// - DOTMATRIX_APP_ID
-/// - DOTMATRIX_INSTALLATION_ID
-/// - DOTMATRIX_PRIVATE_KEY
+/// - MX_GITHUB_APP_ID
+/// - MX_GITHUB_INSTALLATION_ID
+/// - MX_GITHUB_PRIVATE_KEY
 pub fn is_app_configured() -> bool {
     is_app_configured_with(
-        env::var("DOTMATRIX_APP_ID").ok().as_deref(),
-        env::var("DOTMATRIX_INSTALLATION_ID").ok().as_deref(),
-        env::var("DOTMATRIX_PRIVATE_KEY").ok().as_deref(),
+        env::var("MX_GITHUB_APP_ID").ok().as_deref(),
+        env::var("MX_GITHUB_INSTALLATION_ID").ok().as_deref(),
+        env::var("MX_GITHUB_PRIVATE_KEY").ok().as_deref(),
     )
 }
 
@@ -102,9 +102,9 @@ pub fn generate_jwt(app_id: &str, private_key: &str) -> Result<String> {
 /// Get an installation access token (caches and refreshes automatically)
 ///
 /// Reads credentials from environment variables:
-/// - DOTMATRIX_APP_ID
-/// - DOTMATRIX_INSTALLATION_ID
-/// - DOTMATRIX_PRIVATE_KEY
+/// - MX_GITHUB_APP_ID
+/// - MX_GITHUB_INSTALLATION_ID
+/// - MX_GITHUB_PRIVATE_KEY
 ///
 /// Tokens are cached with a 5-minute expiry buffer (refreshed at 5 minutes before expiry).
 ///
@@ -129,11 +129,11 @@ pub fn get_installation_token() -> Result<String> {
 
     // Cache miss or expired - generate new token
     let app_id =
-        env::var("DOTMATRIX_APP_ID").context("DOTMATRIX_APP_ID environment variable not set")?;
-    let installation_id = env::var("DOTMATRIX_INSTALLATION_ID")
-        .context("DOTMATRIX_INSTALLATION_ID environment variable not set")?;
-    let private_key = env::var("DOTMATRIX_PRIVATE_KEY")
-        .context("DOTMATRIX_PRIVATE_KEY environment variable not set")?;
+        env::var("MX_GITHUB_APP_ID").context("MX_GITHUB_APP_ID environment variable not set")?;
+    let installation_id = env::var("MX_GITHUB_INSTALLATION_ID")
+        .context("MX_GITHUB_INSTALLATION_ID environment variable not set")?;
+    let private_key = env::var("MX_GITHUB_PRIVATE_KEY")
+        .context("MX_GITHUB_PRIVATE_KEY environment variable not set")?;
 
     // Generate JWT
     let jwt = generate_jwt(&app_id, &private_key)?;
@@ -206,8 +206,8 @@ mod tests {
     #[ignore]
     fn test_generate_jwt_integration() {
         // This test requires actual credentials
-        let app_id = env::var("DOTMATRIX_APP_ID").expect("DOTMATRIX_APP_ID not set");
-        let private_key = env::var("DOTMATRIX_PRIVATE_KEY").expect("DOTMATRIX_PRIVATE_KEY not set");
+        let app_id = env::var("MX_GITHUB_APP_ID").expect("MX_GITHUB_APP_ID not set");
+        let private_key = env::var("MX_GITHUB_PRIVATE_KEY").expect("MX_GITHUB_PRIVATE_KEY not set");
 
         let jwt = generate_jwt(&app_id, &private_key).expect("JWT generation failed");
         assert!(!jwt.is_empty());
