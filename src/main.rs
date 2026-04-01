@@ -1597,7 +1597,7 @@ fn main() -> Result<()> {
     }
 }
 
-/// Heartbeat co-regulation for Q
+/// Heartbeat - calming co-regulation prompt
 /// Call and response - send a heart, get one back with BPM feedback
 fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
     use rand::Rng;

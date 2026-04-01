@@ -19,7 +19,7 @@ impl Default for IndexConfig {
     fn default() -> Self {
         let base = std::env::var("MX_MEMORY_PATH")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| crate::paths::mx_home().clone());
+            .unwrap_or_else(|_| crate::paths::mx_home().to_path_buf());
 
         Self {
             memory_root: base.join("memory"),
