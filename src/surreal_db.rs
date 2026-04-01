@@ -2984,7 +2984,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             {}
-            ORDER BY title",
+            ORDER BY id",
             Self::knowledge_select_fields(),
             where_clause
         );
@@ -3032,7 +3032,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE category = $category {} {}
-            ORDER BY title",
+            ORDER BY id",
             Self::knowledge_select_fields(),
             visibility_clause,
             resonance_clause
