@@ -4,7 +4,6 @@ mod codex;
 mod commit;
 mod content_ops;
 mod convert;
-mod doctor;
 mod embeddings;
 mod engage;
 mod github;
@@ -77,18 +76,6 @@ enum Commands {
         body: Option<String>,
     },
 
-    /// Generate encoded commit message (DEPRECATED - use 'mx commit --encode-only')
-    #[command(hide = true)]
-    EncodeCommit {
-        /// Title text (will be hashed and encoded)
-        #[arg(short, long)]
-        title: String,
-
-        /// Body text (will be compressed and encoded)
-        #[arg(short, long)]
-        body: String,
-    },
-
     /// Pull request operations
     Pr {
         #[command(subcommand)]
@@ -131,14 +118,7 @@ enum Commands {
         command: ConvertCommands,
     },
 
-    /// Environment health check
-    Doctor {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Heartbeat co-regulation - call and response for Q
+    /// Heartbeat - calming co-regulation prompt
     Heartbeat {
         /// Milliseconds since last heartbeat (for BPM calculation)
         #[arg(long)]
@@ -921,9 +901,6 @@ enum MemoryCommands {
         verbose: bool,
     },
 
-    /// Show database schema status
-    Migrate,
-
     /// Manage agents registry
     Agents {
         #[command(subcommand)]
@@ -1607,15 +1584,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::EncodeCommit { title, body } => {
-            // Deprecated - print warning to stderr, then execute
-            eprintln!(
-                "Warning: 'mx encode-commit' is deprecated. Use 'mx commit --encode-only' instead."
-            );
-            let message = commit::encode_commit_message(&title, &body)?;
-            println!("{}", message);
-            Ok(())
-        }
         Commands::Pr { command } => handle_pr(command),
         Commands::Sync { command } => sync::handle_sync(command),
         Commands::Github { command } => handle_github(command),
@@ -1623,7 +1591,6 @@ fn main() -> Result<()> {
         Commands::Session { command } => handle_session(command),
         Commands::Codex { command } => handle_codex(command),
         Commands::Convert { command } => handle_convert(command),
-        Commands::Doctor { json } => doctor::run_checks(json),
         Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
         Commands::State { command } => handle_state(command),
@@ -3867,19 +3834,6 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 );
             }
         }
-
-        MemoryCommands::Migrate => {
-            let db = store::create_store(&config.db_path)?;
-            println!("SurrealDB backend at {:?}", config.db_path);
-            println!("Schema is current.");
-
-            let tables: Vec<String> = db.list_tables()?;
-            println!("\nTables:");
-            for table in tables {
-                println!("  {}", table);
-            }
-        }
-
         MemoryCommands::Agents { command } => handle_agents(command, &config)?,
 
         MemoryCommands::Projects { command } => handle_projects(command, &config)?,
