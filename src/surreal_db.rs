@@ -2980,6 +2980,10 @@ impl SurrealDatabase {
         // Convert AND to WHERE for list_all (no WHERE clause exists yet)
         let where_clause = visibility_clause.replacen("AND", "WHERE", 1);
 
+        // ORDER BY id instead of title to avoid SurrealDB query planner
+        // selecting BM25 full-text index (knowledge_title_fts) for sort
+        // resolution, which crashes with "No iterator has been found".
+        // See: coryzibell/mx#191
         let sql = format!(
             "SELECT {}
             FROM knowledge
@@ -3028,6 +3032,7 @@ impl SurrealDatabase {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
 
+        // ORDER BY id instead of title — see comment in list_all_async
         let sql = format!(
             "SELECT {}
             FROM knowledge
