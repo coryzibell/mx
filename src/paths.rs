@@ -95,21 +95,6 @@ pub fn codex_dir() -> PathBuf {
     codex_dir_with(std::env::var("MX_CODEX_PATH").ok().as_deref(), mx_home())
 }
 
-/// Doctor check: CLAUDE.md path: `$MX_HOME/CLAUDE.md`
-pub fn doctor_claude_md() -> PathBuf {
-    mx_home().join("CLAUDE.md")
-}
-
-/// Doctor check: identity colors path: `$MX_HOME/artifacts/etc/identity-colors.yaml`
-pub fn doctor_identity_colors() -> PathBuf {
-    artifacts_dir().join("etc").join("identity-colors.yaml")
-}
-
-/// Doctor check: ram directory: `$MX_HOME/ram/neo/`
-pub fn doctor_ram_dir() -> PathBuf {
-    mx_home().join("ram").join("neo")
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
