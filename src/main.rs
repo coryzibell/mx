@@ -77,7 +77,7 @@ enum Commands {
 
         /// Show the full encoded commit fields (Title/Body/Dejavu/Footer).
         /// Default output is just the footer line and `Committed.`
-        #[arg(long, conflicts_with = "encode_only")]
+        #[arg(long, conflicts_with = "encode_only", conflicts_with_all = ["title", "body"])]
         show_encoded: bool,
     },
 

@@ -666,19 +666,21 @@ mod tests {
     }
 
     #[test]
-    fn test_format_verbose_matches_historical_field_order() {
+    fn test_format_verbose_exact_bytes_match_historical_output() {
         // Historical order (before this change) was Title, Body,
         // optional Dejavu, Footer. Keep that order exact so `--show-encoded`
-        // is a byte-for-byte match of pre-refactor stdout.
+        // is a byte-for-byte match of pre-refactor stdout. Asserting on the
+        // full string (not just substring order) catches any drift in
+        // spacing, field labels, or separators -- two formatters that
+        // happened to interleave the fields in the right order but with
+        // different whitespace would have passed the old substring check.
         let encoded = sample_encoded_with_dejavu();
         let out = format_encoded_commit(&encoded, true);
-        let title_pos = out.find("Title:").unwrap();
-        let body_pos = out.find("Body:").unwrap();
-        let dejavu_pos = out.find("Dejavu:").unwrap();
-        let footer_pos = out.find("Footer:").unwrap();
-        assert!(title_pos < body_pos);
-        assert!(body_pos < dejavu_pos);
-        assert!(dejavu_pos < footer_pos);
+        let expected = "Title:  TTTT-title-glyphs\n\
+                        Body:   BBBB-body-glyphs\n\
+                        Dejavu: true (both used base62)\n\
+                        Footer: [sha384:base62|lzma:base62]\nwhoa.";
+        assert_eq!(out, expected);
     }
 
     #[test]
