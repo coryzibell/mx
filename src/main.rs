@@ -74,6 +74,11 @@ enum Commands {
         /// Body text for PR-style encoding (requires --encode-only)
         #[arg(short, long, requires = "encode_only", requires = "title")]
         body: Option<String>,
+
+        /// Show the full encoded commit fields (Title/Body/Dejavu/Footer).
+        /// Default output is just the footer line and `Committed.`
+        #[arg(long, conflicts_with = "encode_only")]
+        show_encoded: bool,
     },
 
     /// Pull request operations
@@ -1566,9 +1571,12 @@ fn main() -> Result<()> {
             encode_only,
             title,
             body,
+            show_encoded,
         } => {
             if encode_only {
-                // PR-style encoding: encode title and body, print to stdout
+                // PR-style encoding: encode title and body, print to stdout.
+                // `--encode-only` is its own print path and is deliberately
+                // left alone — its entire purpose is to emit encoded output.
                 if let (Some(t), Some(b)) = (title, body) {
                     let encoded_message = commit::encode_commit_message(&t, &b)?;
                     println!("{}", encoded_message);
@@ -1580,7 +1588,7 @@ fn main() -> Result<()> {
                 // Normal commit workflow
                 let msg =
                     message.ok_or_else(|| anyhow::anyhow!("message is required for commit"))?;
-                commit::upload_commit(&msg, all, push)?;
+                commit::upload_commit(&msg, all, push, show_encoded)?;
             }
             Ok(())
         }
