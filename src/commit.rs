@@ -364,8 +364,51 @@ pub fn encode_commit_message(title_text: &str, body_text: &str) -> Result<String
     Ok(encode_commit(title_text, body_text)?.message())
 }
 
-/// Perform the full upload commit
-pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<()> {
+/// Format an `EncodedCommit` for human-facing stdout display.
+///
+/// - `show_encoded == false` (default): returns only the `Footer:` line.
+///   The title and body are random-glyph noise with a freshly-rolled
+///   dictionary per commit, so they are useless to a human at stdout.
+///   The footer identifies the hash/compression/dictionary combo, which
+///   IS meaningful confirmation that encoding succeeded.
+///
+/// - `show_encoded == true`: returns the full dump (`Title:`, `Body:`,
+///   `Dejavu:` when applicable, `Footer:`), matching the historical
+///   behavior of `upload_commit` verbatim.
+///
+/// The returned string does NOT include a trailing newline or the
+/// `Committed.` / `Pushed.` status lines — those are the caller's
+/// responsibility. Kept as a pure function so tests can assert on the
+/// exact output without spawning a subprocess.
+pub fn format_encoded_commit(encoded: &EncodedCommit, show_encoded: bool) -> String {
+    let mut out = String::new();
+    if show_encoded {
+        out.push_str(&format!("Title:  {}\n", encoded.title));
+        out.push_str(&format!("Body:   {}\n", encoded.body));
+        if encoded.dejavu {
+            out.push_str(&format!(
+                "Dejavu: true (both used {})\n",
+                encoded.title_dict
+            ));
+        }
+    }
+    out.push_str(&format!("Footer: {}", encoded.footer));
+    out
+}
+
+/// Perform the full upload commit.
+///
+/// `show_encoded` controls stdout verbosity:
+/// - `false` (default): prints only the footer line and `Committed.`
+///   (plus `Pushed.` if `push` is set).
+/// - `true`: prints the full `Title:` / `Body:` / `Dejavu:` / `Footer:`
+///   block — historical behavior, opt-in via `mx commit --show-encoded`.
+pub fn upload_commit(
+    message: &str,
+    stage_all_flag: bool,
+    push: bool,
+    show_encoded: bool,
+) -> Result<()> {
     // Stage if requested
     if stage_all_flag {
         stage_all()?;
@@ -382,12 +425,7 @@ pub fn upload_commit(message: &str, stage_all_flag: bool, push: bool) -> Result<
     // Encode with retry: title from diff hash, body from compressed message
     let encoded = encode_commit(&diff, message)?;
 
-    println!("Title:  {}", encoded.title);
-    println!("Body:   {}", encoded.body);
-    if encoded.dejavu {
-        println!("Dejavu: true (both used {})", encoded.title_dict);
-    }
-    println!("Footer: {}", encoded.footer);
+    println!("{}", format_encoded_commit(&encoded, show_encoded));
 
     // Commit
     git_commit(&encoded.title, &encoded.body, &encoded.footer)?;
@@ -537,5 +575,122 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // --- format_encoded_commit ---
+
+    fn sample_encoded_no_dejavu() -> EncodedCommit {
+        EncodedCommit {
+            title: "TTTT-title-glyphs".to_string(),
+            body: "BBBB-body-glyphs".to_string(),
+            footer: "[sha384:base62|lzma:uuencode]".to_string(),
+            dejavu: false,
+            title_dict: "base62".to_string(),
+            body_dict: "uuencode".to_string(),
+        }
+    }
+
+    fn sample_encoded_with_dejavu() -> EncodedCommit {
+        EncodedCommit {
+            title: "TTTT-title-glyphs".to_string(),
+            body: "BBBB-body-glyphs".to_string(),
+            footer: "[sha384:base62|lzma:base62]\nwhoa.".to_string(),
+            dejavu: true,
+            title_dict: "base62".to_string(),
+            body_dict: "base62".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_format_default_omits_title_and_body() {
+        let encoded = sample_encoded_no_dejavu();
+        let out = format_encoded_commit(&encoded, false);
+        assert!(
+            !out.contains("Title:"),
+            "default output must not contain Title: -- got {:?}",
+            out
+        );
+        assert!(
+            !out.contains("Body:"),
+            "default output must not contain Body: -- got {:?}",
+            out
+        );
+        assert!(
+            !out.contains("Dejavu:"),
+            "default output must not contain Dejavu: -- got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_format_default_contains_footer() {
+        let encoded = sample_encoded_no_dejavu();
+        let out = format_encoded_commit(&encoded, false);
+        assert!(
+            out.contains("Footer: [sha384:base62|lzma:uuencode]"),
+            "default output must contain the footer line -- got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn test_format_default_dejavu_still_hidden() {
+        // Even when dejavu is true, default mode hides everything but footer.
+        let encoded = sample_encoded_with_dejavu();
+        let out = format_encoded_commit(&encoded, false);
+        assert!(!out.contains("Dejavu:"));
+        assert!(!out.contains("Title:"));
+        assert!(!out.contains("Body:"));
+        assert!(out.contains("Footer:"));
+    }
+
+    #[test]
+    fn test_format_verbose_contains_all_fields() {
+        let encoded = sample_encoded_no_dejavu();
+        let out = format_encoded_commit(&encoded, true);
+        assert!(out.contains("Title:  TTTT-title-glyphs"));
+        assert!(out.contains("Body:   BBBB-body-glyphs"));
+        assert!(out.contains("Footer: [sha384:base62|lzma:uuencode]"));
+        // No dejavu on this sample, so the line should NOT appear.
+        assert!(!out.contains("Dejavu:"));
+    }
+
+    #[test]
+    fn test_format_verbose_shows_dejavu_when_true() {
+        let encoded = sample_encoded_with_dejavu();
+        let out = format_encoded_commit(&encoded, true);
+        assert!(out.contains("Title:  TTTT-title-glyphs"));
+        assert!(out.contains("Body:   BBBB-body-glyphs"));
+        assert!(out.contains("Dejavu: true (both used base62)"));
+        assert!(out.contains("Footer: [sha384:base62|lzma:base62]"));
+    }
+
+    #[test]
+    fn test_format_verbose_exact_bytes_match_historical_output() {
+        // Historical order (before this change) was Title, Body,
+        // optional Dejavu, Footer. Keep that order exact so `--show-encoded`
+        // is a byte-for-byte match of pre-refactor stdout. Asserting on the
+        // full string (not just substring order) catches any drift in
+        // spacing, field labels, or separators -- two formatters that
+        // happened to interleave the fields in the right order but with
+        // different whitespace would have passed the old substring check.
+        let encoded = sample_encoded_with_dejavu();
+        let out = format_encoded_commit(&encoded, true);
+        let expected = "Title:  TTTT-title-glyphs\n\
+                        Body:   BBBB-body-glyphs\n\
+                        Dejavu: true (both used base62)\n\
+                        Footer: [sha384:base62|lzma:base62]\nwhoa.";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_format_no_trailing_newline() {
+        // Caller adds its own newline via println!; the formatter must not
+        // double-space the output.
+        let encoded = sample_encoded_no_dejavu();
+        let out = format_encoded_commit(&encoded, false);
+        assert!(!out.ends_with('\n'));
+        let out_v = format_encoded_commit(&encoded, true);
+        assert!(!out_v.ends_with('\n'));
     }
 }
