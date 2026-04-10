@@ -32,6 +32,48 @@ pub enum SurrealMode {
     Network,
 }
 
+/// Authentication level for SurrealDB signin
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AuthLevel {
+    /// Root-level authentication (default)
+    #[default]
+    Root,
+    /// Namespace-level authentication
+    Namespace,
+    /// Database-level authentication
+    Database,
+}
+
+impl AuthLevel {
+    /// Parse an auth level from an environment variable string.
+    ///
+    /// Accepts lowercase aliases:
+    /// - "root" -> Root
+    /// - "namespace" or "ns" -> Namespace
+    /// - "database" or "db" -> Database
+    pub fn from_env_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "root" => Ok(Self::Root),
+            "namespace" | "ns" => Ok(Self::Namespace),
+            "database" | "db" => Ok(Self::Database),
+            other => anyhow::bail!(
+                "Unknown MX_SURREAL_AUTH_LEVEL '{}'. Valid values: root, namespace (ns), database (db)",
+                other
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for AuthLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Root => write!(f, "root"),
+            Self::Namespace => write!(f, "namespace"),
+            Self::Database => write!(f, "database"),
+        }
+    }
+}
+
 /// Configuration for SurrealDB connection
 ///
 /// Parsed from environment variables:
@@ -58,7 +100,7 @@ pub struct SurrealConfig {
     /// SurrealDB database name
     pub database: String,
     /// Auth level for signin (root, namespace, or database)
-    pub auth_level: String,
+    pub auth_level: AuthLevel,
 }
 
 impl Default for SurrealConfig {
@@ -70,7 +112,7 @@ impl Default for SurrealConfig {
             pass: None,
             namespace: "memory".to_string(),
             database: "knowledge".to_string(),
-            auth_level: "root".to_string(),
+            auth_level: AuthLevel::Root,
         }
     }
 }
@@ -108,9 +150,12 @@ impl SurrealConfig {
 
         let database = std::env::var("MX_SURREAL_DB").unwrap_or_else(|_| "knowledge".to_string());
 
-        let auth_level = std::env::var("MX_SURREAL_AUTH_LEVEL")
-            .unwrap_or_else(|_| "root".to_string())
-            .to_lowercase();
+        let auth_level_str =
+            std::env::var("MX_SURREAL_AUTH_LEVEL").unwrap_or_else(|_| "root".to_string());
+        let auth_level = AuthLevel::from_env_str(&auth_level_str).unwrap_or_else(|e| {
+            eprintln!("[mx] WARNING: {e}, defaulting to root");
+            AuthLevel::Root
+        });
 
         Self {
             mode,
@@ -580,8 +625,8 @@ impl SurrealDatabase {
                     config.user, config.auth_level
                 );
             }
-            match config.auth_level.as_str() {
-                "namespace" | "ns" => {
+            match config.auth_level {
+                AuthLevel::Namespace => {
                     db.signin(Namespace {
                         namespace: &config.namespace,
                         username: &config.user,
@@ -595,7 +640,7 @@ impl SurrealDatabase {
                         )
                     })?;
                 }
-                "database" | "db" => {
+                AuthLevel::Database => {
                     db.signin(Database {
                         namespace: &config.namespace,
                         database: &config.database,
@@ -610,7 +655,7 @@ impl SurrealDatabase {
                         )
                     })?;
                 }
-                "root" => {
+                AuthLevel::Root => {
                     db.signin(Root {
                         username: &config.user,
                         password: pass,
@@ -622,12 +667,6 @@ impl SurrealDatabase {
                             config.url, config.user
                         )
                     })?;
-                }
-                other => {
-                    anyhow::bail!(
-                        "Unknown MX_SURREAL_AUTH_LEVEL '{}'. Valid values: root, namespace (ns), database (db)",
-                        other
-                    );
                 }
             }
         } else if verbose {
