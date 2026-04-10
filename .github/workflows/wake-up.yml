@@ -15,6 +15,6 @@ jobs:
   ci:
     uses: coryzibell/nebuchadnezzar/.github/workflows/wake-up.yml@main
     with:
-      needs-openssl: true
+      needs-openssl: false
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}

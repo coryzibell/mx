@@ -63,7 +63,7 @@ tempfile = "3"
 colored = "2"
 
 # Embeddings
-fastembed = { version = "5.6", default-features = false, features = ["hf-hub-rustls-tls", "image-models", "ort-download-binaries"] }
+fastembed = { version = "5.6", default-features = false, features = ["hf-hub-rustls-tls", "image-models", "ort-download-binaries-rustls-tls"] }
 
 [dev-dependencies.cargo-husky]
 version = "1"
