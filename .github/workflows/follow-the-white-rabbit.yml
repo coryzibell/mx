@@ -12,7 +12,7 @@ jobs:
   release:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@main
     with:
-      needs-openssl: true
+      needs-openssl: false
       # ONNX Runtime doesn't provide prebuilt binaries for musl or FreeBSD targets
       # aarch64-unknown-linux-gnu: ort-sys static linking fails in cross-compilation (see issue)
       # x86_64-apple-darwin: ort dropped Intel Mac support upstream (ort 2.0+)
