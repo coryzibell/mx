@@ -2534,17 +2534,19 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Respect visibility: agents can only delete entries they can see
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Backup before delete (Issue #206)
             if let Some(entry) = db.get(&id, &ctx)? {
-                let agent = std::env::var("MX_CURRENT_AGENT").ok();
-                if let Err(e) = db.backup_content(&entry, "delete", agent.as_deref()) {
-                    eprintln!("Warning: failed to create backup: {}", e);
-                }
+                let _ = db
+                    .backup_content(&entry, "delete", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             if db.delete(&id, &ctx)? {
@@ -3069,9 +3071,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 || find.is_some();
 
             if will_change_body {
-                if let Err(e) = db.backup_content(&entry, "update", current_agent.as_deref()) {
-                    eprintln!("Warning: failed to create backup: {}", e);
-                }
+                let _ = db
+                    .backup_content(&entry, "update", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             // Update title if provided
@@ -3471,17 +3473,19 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Backup before edit (Issue #206)
             if let Some(entry) = db.get(&id, &ctx)? {
-                let agent = std::env::var("MX_CURRENT_AGENT").ok();
-                if let Err(e) = db.backup_content(&entry, "edit", agent.as_deref()) {
-                    eprintln!("Warning: failed to create backup: {}", e);
-                }
+                let _ = db
+                    .backup_content(&entry, "edit", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             let result = db.edit_content(&id, &ctx, &find, &replace, replace_all, nth)?;
@@ -3522,9 +3526,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Get content from argument, file, or stdin
@@ -3547,10 +3554,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Backup before append (Issue #206)
             if let Some(entry) = db.get(&id, &ctx)? {
-                let agent = std::env::var("MX_CURRENT_AGENT").ok();
-                if let Err(e) = db.backup_content(&entry, "append", agent.as_deref()) {
-                    eprintln!("Warning: failed to create backup: {}", e);
-                }
+                let _ = db
+                    .backup_content(&entry, "append", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             db.append_content(&id, &ctx, &text)?;
@@ -3587,9 +3593,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Get content from argument, file, or stdin
@@ -3612,10 +3621,9 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Backup before prepend (Issue #206)
             if let Some(entry) = db.get(&id, &ctx)? {
-                let agent = std::env::var("MX_CURRENT_AGENT").ok();
-                if let Err(e) = db.backup_content(&entry, "prepend", agent.as_deref()) {
-                    eprintln!("Warning: failed to create backup: {}", e);
-                }
+                let _ = db
+                    .backup_content(&entry, "prepend", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             db.prepend_content(&id, &ctx, &text)?;
