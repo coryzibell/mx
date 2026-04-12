@@ -263,7 +263,7 @@ pub trait KnowledgeStore {
     fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>>;
 
     /// Purge old backups, keeping the most recent `keep` per entry
-    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<usize>;
+    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()>;
 
     // =========================================================================
     // TAG OPERATIONS

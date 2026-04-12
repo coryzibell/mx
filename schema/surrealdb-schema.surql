@@ -227,6 +227,8 @@ DEFINE INDEX IF NOT EXISTS relates_to_unique ON relates_to FIELDS in, out, relat
 -- =============================================================================
 
 DEFINE TABLE IF NOT EXISTS memory_backup SCHEMAFULL;
+-- entry_id is a plain string (not record<knowledge>) because backups must
+-- survive entry deletion — a deleted entry has no record to reference.
 DEFINE FIELD IF NOT EXISTS entry_id     ON memory_backup TYPE string;
 DEFINE FIELD IF NOT EXISTS title        ON memory_backup TYPE string;
 DEFINE FIELD IF NOT EXISTS body         ON memory_backup TYPE option<string>;

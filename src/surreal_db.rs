@@ -1237,7 +1237,7 @@ impl SurrealDatabase {
         let backup_id = format!(
             "{}_{}",
             entry_id.replace("kn-", ""),
-            Utc::now().format("%Y%m%dT%H%M%S")
+            Utc::now().format("%Y%m%dT%H%M%S%.3f")
         );
 
         let _response = with_db!(self, db, {
@@ -1323,11 +1323,11 @@ impl SurrealDatabase {
     }
 
     /// Purge old backups, keeping the most recent `keep` per entry
-    pub fn purge_backups_internal(&self, entry_id: &str, keep: usize) -> Result<usize> {
+    pub fn purge_backups_internal(&self, entry_id: &str, keep: usize) -> Result<()> {
         Self::runtime().block_on(self.purge_backups_async(entry_id, keep))
     }
 
-    async fn purge_backups_async(&self, entry_id: &str, keep: usize) -> Result<usize> {
+    async fn purge_backups_async(&self, entry_id: &str, keep: usize) -> Result<()> {
         // Delete backups older than the Nth newest
         let _response = with_db!(self, db, {
             db.query(
@@ -1346,7 +1346,7 @@ impl SurrealDatabase {
             .context("Failed to purge old backups")
         })?;
 
-        Ok(0)
+        Ok(())
     }
 
     /// Search knowledge using BM25 full-text indexes
@@ -3888,7 +3888,7 @@ impl KnowledgeStore for SurrealDatabase {
         self.latest_backup_internal(entry_id)
     }
 
-    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<usize> {
+    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
         self.purge_backups_internal(entry_id, keep)
     }
 
