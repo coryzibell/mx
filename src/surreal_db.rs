@@ -1274,10 +1274,7 @@ impl SurrealDatabase {
         Self::runtime().block_on(self.list_backups_async(entry_id))
     }
 
-    async fn list_backups_async(
-        &self,
-        entry_id: &str,
-    ) -> Result<Vec<crate::types::MemoryBackup>> {
+    async fn list_backups_async(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
         let mut response = with_db!(self, db, {
             db.query(
                 "SELECT meta::id(id) AS id, entry_id, title, body, content_hash,

@@ -3676,7 +3676,10 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 if let Some(current) = db.get(&id, &ctx)? {
                     let agent = std::env::var("MX_CURRENT_AGENT").ok();
                     if let Err(e) = db.backup_content(&current, "update", agent.as_deref()) {
-                        eprintln!("Warning: failed to backup current state before restore: {}", e);
+                        eprintln!(
+                            "Warning: failed to backup current state before restore: {}",
+                            e
+                        );
                     }
                 }
 
