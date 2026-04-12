@@ -1212,6 +1212,143 @@ impl SurrealDatabase {
         Ok(true)
     }
 
+    // =========================================================================
+    // BACKUP OPERATIONS (Issue #206)
+    // =========================================================================
+
+    /// Create a pre-mutation backup of entry content
+    pub fn backup_content_internal(
+        &self,
+        entry: &KnowledgeEntry,
+        operation: &str,
+        agent: Option<&str>,
+    ) -> Result<String> {
+        Self::runtime().block_on(self.backup_content_async(entry, operation, agent))
+    }
+
+    async fn backup_content_async(
+        &self,
+        entry: &KnowledgeEntry,
+        operation: &str,
+        agent: Option<&str>,
+    ) -> Result<String> {
+        let entry_id = entry.id.clone();
+        let content_hash = entry.content_hash.clone().unwrap_or_default();
+        let backup_id = format!(
+            "{}_{}",
+            entry_id.replace("kn-", ""),
+            Utc::now().format("%Y%m%dT%H%M%S%.3f")
+        );
+
+        let _response = with_db!(self, db, {
+            db.query(
+                "CREATE type::thing('memory_backup', $backup_id) SET
+                    entry_id = $entry_id,
+                    title = $title,
+                    body = $body,
+                    content_hash = $content_hash,
+                    operation = $operation,
+                    source_agent = $source_agent,
+                    created_at = time::now()
+                ",
+            )
+            .bind(("backup_id", backup_id.clone()))
+            .bind(("entry_id", entry_id.clone()))
+            .bind(("title", entry.title.clone()))
+            .bind(("body", entry.body.clone()))
+            .bind(("content_hash", content_hash))
+            .bind(("operation", operation.to_string()))
+            .bind(("source_agent", agent.map(|s| s.to_string())))
+            .await
+            .context("Failed to create memory backup")
+        })?;
+
+        // Purge old backups (keep 10 per entry) — non-fatal
+        let _ = self.purge_backups_async(&entry_id, 10).await;
+
+        Ok(backup_id)
+    }
+
+    /// List backups for an entry, newest first
+    pub fn list_backups_internal(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+        Self::runtime().block_on(self.list_backups_async(entry_id))
+    }
+
+    async fn list_backups_async(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(id) AS id, entry_id, title, body, content_hash,
+                        operation, source_agent, created_at
+                 FROM memory_backup
+                 WHERE entry_id = $entry_id
+                 ORDER BY created_at DESC",
+            )
+            .bind(("entry_id", entry_id.to_string()))
+            .await
+            .context("Failed to list memory backups")
+        })?;
+
+        let backups: Vec<crate::types::MemoryBackup> = response.take(0)?;
+        Ok(backups)
+    }
+
+    /// Get the most recent backup for an entry
+    pub fn latest_backup_internal(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<crate::types::MemoryBackup>> {
+        Self::runtime().block_on(self.latest_backup_async(entry_id))
+    }
+
+    async fn latest_backup_async(
+        &self,
+        entry_id: &str,
+    ) -> Result<Option<crate::types::MemoryBackup>> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(id) AS id, entry_id, title, body, content_hash,
+                        operation, source_agent, created_at
+                 FROM memory_backup
+                 WHERE entry_id = $entry_id
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+            )
+            .bind(("entry_id", entry_id.to_string()))
+            .await
+            .context("Failed to get latest backup")
+        })?;
+
+        let backups: Vec<crate::types::MemoryBackup> = response.take(0)?;
+        Ok(backups.into_iter().next())
+    }
+
+    /// Purge old backups, keeping the most recent `keep` per entry
+    pub fn purge_backups_internal(&self, entry_id: &str, keep: usize) -> Result<()> {
+        Self::runtime().block_on(self.purge_backups_async(entry_id, keep))
+    }
+
+    async fn purge_backups_async(&self, entry_id: &str, keep: usize) -> Result<()> {
+        // Delete backups older than the Nth newest
+        let _response = with_db!(self, db, {
+            db.query(
+                "DELETE FROM memory_backup
+                    WHERE entry_id = $entry_id
+                    AND id NOT IN (
+                        SELECT VALUE id FROM memory_backup
+                        WHERE entry_id = $entry_id
+                        ORDER BY created_at DESC
+                        LIMIT $keep
+                    )",
+            )
+            .bind(("entry_id", entry_id.to_string()))
+            .bind(("keep", keep as i64))
+            .await
+            .context("Failed to purge old backups")
+        })?;
+
+        Ok(())
+    }
+
     /// Search knowledge using BM25 full-text indexes
     pub fn search_knowledge(
         &self,
@@ -3732,6 +3869,27 @@ impl KnowledgeStore for SurrealDatabase {
         content: &str,
     ) -> Result<()> {
         self.prepend_content(id, ctx, content)
+    }
+
+    fn backup_content(
+        &self,
+        entry: &KnowledgeEntry,
+        operation: &str,
+        agent: Option<&str>,
+    ) -> Result<String> {
+        self.backup_content_internal(entry, operation, agent)
+    }
+
+    fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+        self.list_backups_internal(entry_id)
+    }
+
+    fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>> {
+        self.latest_backup_internal(entry_id)
+    }
+
+    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
+        self.purge_backups_internal(entry_id, keep)
     }
 
     fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String> {

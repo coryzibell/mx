@@ -873,6 +873,20 @@ enum MemoryCommands {
         json: bool,
     },
 
+    /// Restore entry content from a backup
+    Restore {
+        /// Entry ID to restore
+        id: String,
+
+        /// List available backups instead of restoring
+        #[arg(long)]
+        list: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Generate embedding for a knowledge entry
     Embed {
         /// Entry ID to embed (not used with --all)
@@ -2520,10 +2534,20 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Respect visibility: agents can only delete entries they can see
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
+
+            // Backup before delete (Issue #206)
+            if let Some(entry) = db.get(&id, &ctx)? {
+                let _ = db
+                    .backup_content(&entry, "delete", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
+            }
 
             if db.delete(&id, &ctx)? {
                 if json {
@@ -3014,9 +3038,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // For Update, use current agent context to allow updating own private entries
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            // #10: read MX_CURRENT_AGENT once, reuse for both ctx and backup
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Fetch existing entry
@@ -3032,6 +3060,21 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             let mut changes = Vec::new();
+
+            // Backup before body mutation (Issue #206)
+            let will_change_body = content.is_some()
+                || file.is_some()
+                || append_content.is_some()
+                || append_file.is_some()
+                || prepend_content.is_some()
+                || prepend_file.is_some()
+                || find.is_some();
+
+            if will_change_body {
+                let _ = db
+                    .backup_content(&entry, "update", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
+            }
 
             // Update title if provided
             if let Some(new_title) = title {
@@ -3430,10 +3473,20 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
+
+            // Backup before edit (Issue #206)
+            if let Some(entry) = db.get(&id, &ctx)? {
+                let _ = db
+                    .backup_content(&entry, "edit", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
+            }
 
             let result = db.edit_content(&id, &ctx, &find, &replace, replace_all, nth)?;
 
@@ -3473,9 +3526,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Get content from argument, file, or stdin
@@ -3494,6 +3550,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             if text.is_empty() {
                 bail!("No content provided");
+            }
+
+            // Backup before append (Issue #206)
+            if let Some(entry) = db.get(&id, &ctx)? {
+                let _ = db
+                    .backup_content(&entry, "append", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             db.append_content(&id, &ctx, &text)?;
@@ -3530,9 +3593,12 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let id = normalize_id(&id);
 
             // Use current agent context for private entry access
-            let ctx = match std::env::var("MX_CURRENT_AGENT") {
-                Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-                _ => store::AgentContext::public_only(),
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
             };
 
             // Get content from argument, file, or stdin
@@ -3551,6 +3617,13 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             if text.is_empty() {
                 bail!("No content provided");
+            }
+
+            // Backup before prepend (Issue #206)
+            if let Some(entry) = db.get(&id, &ctx)? {
+                let _ = db
+                    .backup_content(&entry, "prepend", current_agent.as_deref())
+                    .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
             }
 
             db.prepend_content(&id, &ctx, &text)?;
@@ -3572,6 +3645,115 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             } else {
                 println!("Prepended to entry: {}", id);
                 println!("  {} bytes added", text.len());
+            }
+        }
+
+        MemoryCommands::Restore { id, list, json } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+            let id = normalize_id(&id);
+
+            // Shared agent context (#10: read MX_CURRENT_AGENT once)
+            let current_agent = std::env::var("MX_CURRENT_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let ctx = match &current_agent {
+                Some(agent) => store::AgentContext::for_agent(agent),
+                None => store::AgentContext::public_only(),
+            };
+
+            if list {
+                // List available backups
+                // #7: filter by visibility — only show backups for entries the agent can see
+                if db.get(&id, &ctx)?.is_none() {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&serde_json::json!([]))?);
+                    } else {
+                        println!("No entry or backups found for {}", id);
+                    }
+                } else {
+                    let backups = db.list_backups(&id)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&backups)?);
+                    } else if backups.is_empty() {
+                        println!("No backups found for {}", id);
+                    } else {
+                        println!("Backups for {}:", id);
+                        for b in &backups {
+                            let body_len = b.body.as_ref().map(|s| s.len()).unwrap_or(0);
+                            println!(
+                                "  {} | {} | {} | {} bytes",
+                                b.id,
+                                b.created_at.as_deref().unwrap_or("unknown"),
+                                b.operation,
+                                body_len,
+                            );
+                        }
+                    }
+                }
+            } else {
+                let backup = db
+                    .latest_backup(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("No backups found for {}", id))?;
+
+                // #5: single fetch, #6: better error for deleted entries
+                let mut entry = match db.get(&id, &ctx)? {
+                    Some(entry) => {
+                        // Backup current state before restoring
+                        if let Err(e) =
+                            db.backup_content(&entry, "update", current_agent.as_deref())
+                        {
+                            eprintln!(
+                                "Warning: failed to backup current state before restore: {}",
+                                e
+                            );
+                        }
+                        entry
+                    }
+                    None => {
+                        bail!(
+                            "Entry '{}' not found (may have been deleted). \
+                             Restore from backup after deletion is not yet supported.",
+                            id
+                        );
+                    }
+                };
+
+                // Restore body from backup
+                entry.body = backup.body.clone();
+
+                // #4: set updated_at
+                entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+
+                // Recompute content hash
+                let hash_body = entry.body.as_deref().unwrap_or("").to_string();
+                entry.content_hash = Some(knowledge::KnowledgeEntry::compute_hash(&hash_body));
+
+                db.upsert_knowledge(&entry)?;
+
+                // #3: update embeddings and anchors like all other mutation paths
+                auto_embed(&id, db.as_ref())?;
+                auto_anchor(&id, db.as_ref(), None)?;
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "restored": true,
+                            "id": id,
+                            "from_backup": backup.id,
+                            "backup_created": backup.created_at,
+                            "operation": backup.operation,
+                        }))?
+                    );
+                } else {
+                    println!("Restored entry: {}", id);
+                    println!("  from backup: {}", backup.id);
+                    println!(
+                        "  backup created: {}",
+                        backup.created_at.as_deref().unwrap_or("unknown")
+                    );
+                    println!("  original operation: {}", backup.operation);
+                }
             }
         }
 

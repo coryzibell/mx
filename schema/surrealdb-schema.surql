@@ -223,6 +223,26 @@ DEFINE FIELD IF NOT EXISTS created_at ON relates_to TYPE datetime DEFAULT time::
 DEFINE INDEX IF NOT EXISTS relates_to_unique ON relates_to FIELDS in, out, relationship_type UNIQUE;
 
 -- =============================================================================
+-- MEMORY BACKUPS (Issue #206 - pre-mutation content snapshots)
+-- =============================================================================
+
+DEFINE TABLE IF NOT EXISTS memory_backup SCHEMAFULL;
+-- entry_id is a plain string (not record<knowledge>) because backups must
+-- survive entry deletion — a deleted entry has no record to reference.
+DEFINE FIELD IF NOT EXISTS entry_id     ON memory_backup TYPE string;
+DEFINE FIELD IF NOT EXISTS title        ON memory_backup TYPE string;
+DEFINE FIELD IF NOT EXISTS body         ON memory_backup TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS content_hash ON memory_backup TYPE string;
+DEFINE FIELD IF NOT EXISTS operation    ON memory_backup TYPE string
+  ASSERT $value IN ['update', 'delete', 'edit', 'append', 'prepend'];
+DEFINE FIELD IF NOT EXISTS source_agent ON memory_backup TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created_at   ON memory_backup TYPE datetime DEFAULT time::now();
+
+DEFINE INDEX IF NOT EXISTS backup_entry_id   ON memory_backup FIELDS entry_id;
+DEFINE INDEX IF NOT EXISTS backup_created    ON memory_backup FIELDS created_at;
+DEFINE INDEX IF NOT EXISTS backup_entry_time ON memory_backup FIELDS entry_id, created_at;
+
+-- =============================================================================
 -- METADATA TABLES
 -- =============================================================================
 

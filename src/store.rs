@@ -245,6 +245,27 @@ pub trait KnowledgeStore {
     fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()>;
 
     // =========================================================================
+    // BACKUP OPERATIONS (Issue #206)
+    // =========================================================================
+
+    /// Create a pre-mutation backup of entry content
+    fn backup_content(
+        &self,
+        entry: &KnowledgeEntry,
+        operation: &str,
+        agent: Option<&str>,
+    ) -> Result<String>;
+
+    /// List backups for a specific entry, newest first
+    fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>>;
+
+    /// Get the most recent backup for an entry
+    fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>>;
+
+    /// Purge old backups, keeping the most recent `keep` per entry
+    fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()>;
+
+    // =========================================================================
     // TAG OPERATIONS
     // =========================================================================
 

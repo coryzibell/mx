@@ -71,6 +71,22 @@ pub struct RelationshipType {
     pub created_at: String,
 }
 
+/// Pre-mutation content backup (Issue #206)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryBackup {
+    pub id: String,
+    pub entry_id: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub content_hash: String,
+    pub operation: String,
+    #[serde(default)]
+    pub source_agent: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relationship {
     pub id: String,
