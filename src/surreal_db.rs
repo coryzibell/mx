@@ -2398,7 +2398,7 @@ impl SurrealDatabase {
                         <string>created_at AS created_at
                  FROM relates_to
                  WHERE in = $entry OR out = $entry
-                 ORDER BY created_at DESC"
+                 ORDER BY created_at DESC",
             )
             .bind(("entry", entry_thing))
             .await
