@@ -2376,10 +2376,26 @@ impl SurrealDatabase {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
-        // Query both outgoing and incoming relationships
+        // Use meta::id() to extract plain string IDs from Thing record links.
+        // Direct deserialization of Thing fields via serde_json::Value fails
+        // because surrealdb::sql::Thing serializes as an untagged enum tuple
+        // that serde_json cannot round-trip. meta::id() returns a plain string.
+        #[derive(Debug, Deserialize)]
+        struct RelRow {
+            id: String,
+            from_entry_id: String,
+            to_entry_id: String,
+            relationship_type: String,
+            created_at: String,
+        }
+
         let mut response = with_db!(self, db, {
             db.query(
-                "SELECT id, in AS from_entry_id, out AS to_entry_id, relationship_type, <string>created_at AS created_at
+                "SELECT meta::id(id) AS id,
+                        meta::id(in) AS from_entry_id,
+                        meta::id(out) AS to_entry_id,
+                        meta::id(relationship_type) AS relationship_type,
+                        <string>created_at AS created_at
                  FROM relates_to
                  WHERE in = $entry OR out = $entry
                  ORDER BY created_at DESC"
@@ -2389,23 +2405,17 @@ impl SurrealDatabase {
             .context("Failed to query relationships")
         })?;
 
-        let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut relationships = Vec::new();
-
-        for obj in results {
-            let from_thing: Thing = serde_json::from_value(obj["from_entry_id"].clone())?;
-            let to_thing: Thing = serde_json::from_value(obj["to_entry_id"].clone())?;
-            let rel_type_thing: Thing = serde_json::from_value(obj["relationship_type"].clone())?;
-            let id_thing: Thing = serde_json::from_value(obj["id"].clone())?;
-
-            relationships.push(Relationship {
-                id: id_thing.id.to_string(),
-                from_entry_id: format!("kn-{}", from_thing.id),
-                to_entry_id: format!("kn-{}", to_thing.id),
-                relationship_type: rel_type_thing.id.to_string(),
-                created_at: obj["created_at"].as_str().unwrap_or_default().to_string(),
-            });
-        }
+        let results: Vec<RelRow> = response.take(0)?;
+        let relationships = results
+            .into_iter()
+            .map(|row| Relationship {
+                id: row.id,
+                from_entry_id: format!("kn-{}", row.from_entry_id),
+                to_entry_id: format!("kn-{}", row.to_entry_id),
+                relationship_type: row.relationship_type,
+                created_at: row.created_at,
+            })
+            .collect();
 
         Ok(relationships)
     }
@@ -2413,6 +2423,23 @@ impl SurrealDatabase {
     /// Delete a relationship by from/to/type triple
     pub fn delete_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<bool> {
         Self::runtime().block_on(self.delete_relationship_async(from, to, rel_type))
+    }
+
+    /// Delete a relationship edge by its record ID (e.g. "abc123" or the raw SurrealDB ID).
+    pub fn delete_relationship_by_id(&self, id: &str) -> Result<bool> {
+        Self::runtime().block_on(self.delete_relationship_by_id_async(id))
+    }
+
+    async fn delete_relationship_by_id_async(&self, id: &str) -> Result<bool> {
+        let mut response = with_db!(self, db, {
+            db.query("DELETE relates_to WHERE meta::id(id) = $id RETURN BEFORE")
+                .bind(("id", id.to_string()))
+                .await
+                .context("Failed to delete relationship by id")
+        })?;
+
+        let deleted: Vec<Value> = response.take(0)?;
+        Ok(!deleted.is_empty())
     }
 
     async fn delete_relationship_async(
@@ -3649,10 +3676,7 @@ impl KnowledgeStore for SurrealDatabase {
     }
 
     fn delete_relationship(&self, id: &str) -> Result<bool> {
-        // SurrealDB delete_relationship takes from/to/type triple, not ID
-        // For now, return false - this method isn't used in current CLI
-        let _ = id;
-        Ok(false)
+        self.delete_relationship_by_id(id)
     }
 
     fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {

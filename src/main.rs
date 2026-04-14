@@ -807,6 +807,10 @@ enum MemoryCommands {
         #[arg(long)]
         owner: Option<String>,
 
+        /// Update session ID (for retrofitting entries written with wrong or missing session linkage)
+        #[arg(long)]
+        session_id: Option<String>,
+
         /// Force dangerous visibility changes (e.g., making blooms public)
         #[arg(long)]
         force: bool,
@@ -2920,7 +2924,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&title)),
                 source_type_id: Some(source_type),
                 entry_type_id: Some(entry_type),
-                session_id,
+                session_id: session_id.clone(),
                 ephemeral,
                 content_type_id: Some(content_type),
                 owner: entry_owner.clone(),
@@ -2943,6 +2947,22 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Insert into database (applicability already set in struct)
             db.upsert_knowledge(&entry)?;
+
+            // Create EXTRACTED_FROM edge when --session-id is provided.
+            // Standard mode stores session_id as a field but the for-session query
+            // traverses the relates_to edge — wire both paths for consistency.
+            if let Some(ref sess_id) = session_id {
+                let session_ref = normalize_id(sess_id);
+                let ctx = crate::store::AgentContext::public_only();
+                if db.get(&session_ref, &ctx)?.is_none() {
+                    eprintln!(
+                        "Warning: Session {} not found - EXTRACTED_FROM edge not created",
+                        session_ref
+                    );
+                } else {
+                    db.add_relationship(&id, &session_ref, "extracted_from")?;
+                }
+            }
 
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
@@ -3029,6 +3049,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             private,
             visibility,
             owner,
+            session_id,
             force,
             json,
         } => {
@@ -3343,6 +3364,16 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 changes.push(format!("owner: {:?} -> {}", entry.owner, new_owner));
                 entry.owner = Some(new_owner.clone());
+            }
+
+            // Update session_id if provided
+            if let Some(ref new_session_id) = session_id {
+                let normalized = normalize_id(new_session_id);
+                changes.push(format!(
+                    "session_id: {:?} -> {}",
+                    entry.session_id, normalized
+                ));
+                entry.session_id = Some(normalized);
             }
 
             // Update timestamp
