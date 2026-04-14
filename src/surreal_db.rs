@@ -2431,15 +2431,34 @@ impl SurrealDatabase {
     }
 
     async fn delete_relationship_by_id_async(&self, id: &str) -> Result<bool> {
-        let mut response = with_db!(self, db, {
-            db.query("DELETE relates_to WHERE meta::id(id) = $id RETURN BEFORE")
+        // SurrealDB's RETURN BEFORE yields Thing-typed fields that serde_json cannot
+        // round-trip. Instead: SELECT with meta::id() to check existence, then DELETE
+        // without a RETURN clause (which is safe to take as Vec<Value> empty).
+        #[derive(Debug, Deserialize)]
+        struct ExistsRow {
+            id: String,
+        }
+
+        let mut check = with_db!(self, db, {
+            db.query("SELECT meta::id(id) AS id FROM relates_to WHERE meta::id(id) = $id LIMIT 1")
+                .bind(("id", id.to_string()))
+                .await
+                .context("Failed to check relationship existence")
+        })?;
+
+        let exists: Vec<ExistsRow> = check.take(0)?;
+        if exists.is_empty() {
+            return Ok(false);
+        }
+
+        with_db!(self, db, {
+            db.query("DELETE relates_to WHERE meta::id(id) = $id")
                 .bind(("id", id.to_string()))
                 .await
                 .context("Failed to delete relationship by id")
         })?;
 
-        let deleted: Vec<Value> = response.take(0)?;
-        Ok(!deleted.is_empty())
+        Ok(true)
     }
 
     async fn delete_relationship_async(
@@ -2455,11 +2474,36 @@ impl SurrealDatabase {
         let to_thing = Thing::from(("knowledge", to_id));
         let rel_type_thing = Thing::from(("relationship_type", rel_type));
 
-        let mut response = with_db!(self, db, {
+        // SurrealDB's RETURN BEFORE yields Thing-typed fields that serde_json cannot
+        // round-trip. Check existence with meta::id() SELECT first, then DELETE without
+        // a RETURN clause to avoid the deserialization error.
+        #[derive(Debug, Deserialize)]
+        struct ExistsRow {
+            id: String,
+        }
+
+        let mut check = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(id) AS id FROM relates_to
+                 WHERE in = $from AND out = $to AND relationship_type = $rel_type
+                 LIMIT 1",
+            )
+            .bind(("from", from_thing.clone()))
+            .bind(("to", to_thing.clone()))
+            .bind(("rel_type", rel_type_thing.clone()))
+            .await
+            .context("Failed to check relationship existence")
+        })?;
+
+        let exists: Vec<ExistsRow> = check.take(0)?;
+        if exists.is_empty() {
+            return Ok(false);
+        }
+
+        with_db!(self, db, {
             db.query(
                 "DELETE relates_to
-                 WHERE in = $from AND out = $to AND relationship_type = $rel_type
-                 RETURN BEFORE",
+                 WHERE in = $from AND out = $to AND relationship_type = $rel_type",
             )
             .bind(("from", from_thing))
             .bind(("to", to_thing))
@@ -2468,8 +2512,7 @@ impl SurrealDatabase {
             .context("Failed to delete relationship")
         })?;
 
-        let deleted: Vec<Value> = response.take(0)?;
-        Ok(!deleted.is_empty())
+        Ok(true)
     }
 
     /// Get facts extracted from a specific session
