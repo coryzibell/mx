@@ -140,6 +140,16 @@ pub trait KnowledgeStore {
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Count entries by category (fast path — single COUNT query, no row hydration).
+    /// Avoids the N+1 pattern of `list_by_category(..)?.len()` which fetches every
+    /// row's full body plus follow-up queries for tags/applicability per entry.
+    fn count_by_category(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<usize>;
+
     /// List all entries
     fn list_all(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
 

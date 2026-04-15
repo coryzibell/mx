@@ -2,3 +2,9 @@
 DELETE knowledge;
 quit;
 exit;
+SELECT count() AS c FROM knowledge WHERE category = category:bloom AND (visibility = 'public') GROUP ALL;
+SELECT count() AS c FROM knowledge WHERE category = category:bloom GROUP ALL;
+SELECT count() AS c FROM knowledge WHERE category = "category:bloom" GROUP ALL;
+SELECT count() AS c FROM knowledge WHERE category = category:bloom AND visibility = 'public' GROUP ALL;
+SELECT visibility FROM knowledge WHERE category = category:bloom LIMIT 3;
+SELECT count() AS c FROM (SELECT id FROM knowledge WHERE category = category:bloom AND visibility = 'public') GROUP ALL;

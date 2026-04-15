@@ -2508,7 +2508,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if json {
                 let mut cat_counts = serde_json::Map::new();
                 for cat in categories {
-                    let count = db.list_by_category(&cat.id, &ctx, &filter)?.len();
+                    let count = db.count_by_category(&cat.id, &ctx, &filter)?;
                     cat_counts.insert(cat.id, serde_json::Value::Number(count.into()));
                 }
                 println!(
@@ -2523,7 +2523,7 @@ fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("Total entries: {}", total);
                 println!();
                 for cat in categories {
-                    let count = db.list_by_category(&cat.id, &ctx, &filter)?.len();
+                    let count = db.count_by_category(&cat.id, &ctx, &filter)?;
                     println!("  {:12} {}", cat.id, count);
                 }
             }
