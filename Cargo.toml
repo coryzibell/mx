@@ -12,7 +12,7 @@ repository = "https://github.com/coryzibell/mx"
 clap = { version = "4", features = ["derive"] }
 
 # SurrealDB
-surrealdb = { version = "2", features = ["kv-surrealkv", "protocol-ws"] }
+surrealdb = { version = "2", features = ["kv-surrealkv", "protocol-ws", "rustls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }

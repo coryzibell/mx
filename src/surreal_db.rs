@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use surrealdb::RecordId as SurrealRecordId;
 use surrealdb::Surreal;
 use surrealdb::engine::local::SurrealKv;
-use surrealdb::engine::remote::ws::{Client as WsClient, Ws};
+use surrealdb::engine::remote::ws::{Client as WsClient, Ws, Wss};
 use surrealdb::opt::auth::{Database, Namespace, Root};
 use surrealdb::sql::{Thing, Value};
 use tokio::runtime::Runtime;
@@ -558,18 +558,36 @@ impl SurrealDatabase {
             eprintln!("[mx] WARNING: Consider using wss:// (TLS) for secure authentication");
         }
 
-        // Strip protocol prefix from URL - surrealdb crate expects just host:port
+        // Strip protocol prefix from URL - surrealdb crate expects just host:port.
+        // We lose the scheme in the sanitized form, so detect it up front to
+        // pick the right engine (plain Ws vs TLS Wss).
+        let is_tls = config.url.starts_with("wss://");
         let sanitized_url = Self::sanitize_ws_url(&config.url);
 
-        // Connect to remote SurrealDB via WebSocket
-        let db = Surreal::new::<Ws>(sanitized_url.as_str())
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
-                    config.url
-                )
-            })?;
+        // Connect to remote SurrealDB via WebSocket. Dispatch on scheme:
+        // `Ws` speaks plain WebSocket; `Wss` is the TLS variant (enabled by
+        // the `rustls` feature on the surrealdb crate). Using the wrong one
+        // fails with a cryptic "HTTP version must be 1.1 or higher" because
+        // the TLS handshake bytes get parsed as HTTP.
+        let db = if is_tls {
+            Surreal::new::<Wss>(sanitized_url.as_str())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                        config.url
+                    )
+                })?
+        } else {
+            Surreal::new::<Ws>(sanitized_url.as_str())
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to connect to SurrealDB at {} (check that server is running and URL is correct)",
+                        config.url
+                    )
+                })?
+        };
 
         // Authenticate with the server
         // If no password is provided, attempt connection without auth (will fail if server requires it)
