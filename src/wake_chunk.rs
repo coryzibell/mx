@@ -1,0 +1,1071 @@
+//! Wake-ritual chunking primitives.
+//!
+//! Splits over-threshold bloom content into presentation-layer chunks so the
+//! wake ritual survives the ~30KB Bash output ceiling. **No schema changes,
+//! no persisted plan** — chunking is a pure deterministic function of
+//! `(content, threshold, boundary rules)`. See `mx-211-wake-chunking-design.md`
+//! for the full design and rationale.
+//!
+//! This module is standalone (PR 1): `compute_chunks`, `extract_salient_phrase`,
+//! and `compare_phrase` are pure functions. No `wake_ritual` or `surreal_db`
+//! integration lives here.
+//!
+//! ## Key guarantees
+//!
+//! - **Lossless reconstitution**: `chunks.concat() == original`
+//!   (property-tested — Risk 2 in the design).
+//! - **UTF-8 safety**: every boundary lands on a char boundary.
+//! - **Code-block integrity**: fenced ``` blocks are never split mid-block.
+//! - **Never-empty phrase**: `extract_salient_phrase` is a total function.
+//! - **Determinism**: same inputs → same output, always.
+
+use std::env;
+
+/// Environment variable override for the chunking threshold.
+///
+/// Wonka measured the Bash output ceiling empirically at ~30KB on 2026-03-25
+/// (fettle#13). We chunk at 28KB to keep headroom under that wall.
+pub const DEFAULT_CHUNK_THRESHOLD: usize = 28_000;
+
+/// Env var that overrides `DEFAULT_CHUNK_THRESHOLD`. Parse failures fall back
+/// to the default silently — operators get observability via chunk-size logs.
+pub const CHUNK_THRESHOLD_ENV: &str = "MX_WAKE_CHUNK_BYTES";
+
+/// Resolve the active chunking threshold. Reads `MX_WAKE_CHUNK_BYTES` lazily
+/// on every call so env changes take effect mid-process (useful for tests
+/// and per-session overrides).
+pub fn chunk_threshold() -> usize {
+    match env::var(CHUNK_THRESHOLD_ENV) {
+        Ok(v) => v
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_CHUNK_THRESHOLD),
+        Err(_) => DEFAULT_CHUNK_THRESHOLD,
+    }
+}
+
+/// A deterministic chunk plan over a specific `&str`.
+///
+/// The plan does not own the content; callers slice the original content with
+/// `chunk()` / `chunk_at()`. This keeps the plan cheap to re-compute on every
+/// `respond`/`skip` call (pure-runtime-projection).
+///
+/// `boundaries[i]` is the byte offset where chunk `i+1` begins (i.e. chunk 0
+/// is `[0, boundaries[0])`, chunk 1 is `[boundaries[0], boundaries[1])`, etc).
+/// Guarantees:
+///
+/// - `boundaries.len() + 1 == total as usize`
+/// - boundaries are strictly increasing
+/// - every boundary falls on a UTF-8 char boundary of the source content
+/// - concatenating all chunks reproduces the original content exactly
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkPlan {
+    /// Total number of chunks. 1 for non-chunked (under-threshold) content.
+    pub total: u8,
+    /// Byte offsets where each chunk after the first begins. `len() == total - 1`.
+    pub boundaries: Vec<usize>,
+    /// Per-chunk oversized flag. `oversized[i] == true` means chunk `i`
+    /// exceeds the threshold because it could not be split safely (typically
+    /// a fenced code block larger than the threshold).
+    pub oversized: Vec<bool>,
+}
+
+impl ChunkPlan {
+    /// Slice chunk `idx` out of `content`. Returns `""` if `idx` is out of
+    /// range (defensive — callers should validate against `total`).
+    pub fn chunk<'a>(&self, content: &'a str, idx: u8) -> &'a str {
+        let (start, end) = self.chunk_range(content, idx);
+        &content[start..end]
+    }
+
+    /// Byte range `[start, end)` for chunk `idx`.
+    pub fn chunk_range(&self, content: &str, idx: u8) -> (usize, usize) {
+        let idx = idx as usize;
+        if idx >= self.total as usize {
+            return (content.len(), content.len());
+        }
+        let start = if idx == 0 {
+            0
+        } else {
+            self.boundaries[idx - 1]
+        };
+        let end = if idx == self.total as usize - 1 {
+            content.len()
+        } else {
+            self.boundaries[idx]
+        };
+        (start, end)
+    }
+
+    /// Is chunk `idx` flagged oversized? (Over-threshold code block, etc.)
+    pub fn is_oversized(&self, idx: u8) -> bool {
+        self.oversized.get(idx as usize).copied().unwrap_or(false)
+    }
+
+    /// Convenience: iterate chunks as `(idx, &str, oversized_flag)` triples.
+    pub fn iter<'a>(&'a self, content: &'a str) -> ChunkPlanIter<'a> {
+        ChunkPlanIter {
+            plan: self,
+            content,
+            idx: 0,
+        }
+    }
+}
+
+pub struct ChunkPlanIter<'a> {
+    plan: &'a ChunkPlan,
+    content: &'a str,
+    idx: u8,
+}
+
+impl<'a> Iterator for ChunkPlanIter<'a> {
+    type Item = (u8, &'a str, bool);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.idx >= self.plan.total {
+            return None;
+        }
+        let idx = self.idx;
+        let chunk = self.plan.chunk(self.content, idx);
+        let flag = self.plan.is_oversized(idx);
+        self.idx += 1;
+        Some((idx, chunk, flag))
+    }
+}
+
+/// Compute a `ChunkPlan` for `content` at the given `threshold`.
+///
+/// Deterministic: same `(content, threshold)` → same plan, always. See module
+/// docs for the guarantees on the returned plan.
+///
+/// ## Algorithm
+///
+/// - Content ≤ threshold → 1 chunk, no boundaries.
+/// - Otherwise, walk forward. At each cursor, look for a break point in the
+///   window `[cursor, cursor+threshold]`, searching *backwards* from the
+///   window end through the preference ladder (see `find_break`). Prefer
+///   later breaks within the window to keep chunks as full as practical.
+/// - If a chunk would have to land inside a fenced code block and no safe
+///   break exists, extend the chunk to the end of the block (may exceed
+///   threshold — flagged `oversized`). This is the documented accepted
+///   limitation for >28KB code blocks.
+pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
+    if content.len() <= threshold {
+        return ChunkPlan {
+            total: 1,
+            boundaries: Vec::new(),
+            oversized: vec![false],
+        };
+    }
+
+    // Pre-compute fence positions so we can reject candidate boundaries inside
+    // code blocks without re-scanning from zero each time.
+    let fences = find_fence_starts(content);
+
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut oversized: Vec<bool> = Vec::new();
+    let mut cursor = 0;
+
+    while content.len() - cursor > threshold {
+        let window_end = cursor + threshold;
+        match find_break(content, cursor, window_end, &fences) {
+            Some(pos) => {
+                // Defensive: find_break must produce a break strictly after
+                // cursor. If it doesn't (e.g. pathological fence interaction),
+                // treat it as a miss and fall through to recovery so we don't
+                // emit an empty or backwards chunk.
+                if pos <= cursor {
+                    let recovery = recover_past_block(content, cursor, window_end, &fences)
+                        .unwrap_or_else(|| safe_utf8_fallback(content, content.len()));
+                    if recovery <= cursor {
+                        oversized.push(true);
+                        break;
+                    }
+                    let chunk_len = recovery - cursor;
+                    boundaries.push(recovery);
+                    oversized.push(chunk_len > threshold);
+                    cursor = recovery;
+                    continue;
+                }
+                let chunk_len = pos - cursor;
+                boundaries.push(pos);
+                // Mark oversized if the chunk exceeds threshold. Should not
+                // happen from the Some branch (find_break caps at window_end)
+                // but we flag defensively so an algorithm regression surfaces
+                // as a flag rather than a silent oversized chunk.
+                oversized.push(chunk_len > threshold);
+                cursor = pos;
+            }
+            None => {
+                // No safe break inside the window — we are stuck inside a code
+                // block or on a huge line. Extend forward to the end of the
+                // blocking code block (if any), then to the nearest safe
+                // break after that, to avoid producing an infinite loop and
+                // to keep the oversized chunk as tight as possible.
+                let recovery = recover_past_block(content, cursor, window_end, &fences)
+                    .unwrap_or_else(|| safe_utf8_fallback(content, content.len()));
+                if recovery <= cursor {
+                    // Absolute pathological case — emit whole remainder.
+                    oversized.push(true);
+                    break;
+                }
+                let chunk_len = recovery - cursor;
+                boundaries.push(recovery);
+                oversized.push(chunk_len > threshold);
+                cursor = recovery;
+            }
+        }
+    }
+
+    // Final chunk covers [cursor, content.len()) and, by construction, is
+    // ≤ threshold in length (unless we broke out of the loop above with
+    // `oversized.push(true); break;` — in which case the final push is the
+    // oversized flag for the tail).
+    if oversized.len() == boundaries.len() {
+        let tail_start = boundaries.last().copied().unwrap_or(0);
+        let tail_len = content.len() - tail_start;
+        oversized.push(tail_len > threshold);
+    }
+
+    let total_u8 = u8::try_from(boundaries.len() + 1).unwrap_or(u8::MAX);
+
+    // Final safety sweep: recompute the oversized flag for every chunk from
+    // its actual byte size. The in-loop pushes should already be correct,
+    // but a dedicated pass is cheap insurance against an edge-case regression
+    // sneaking a ≤-threshold flag through the seams. The chunker is
+    // load-bearing (Risk 2) — defence-in-depth is warranted.
+    let mut recomputed_oversized = Vec::with_capacity(total_u8 as usize);
+    for idx in 0..total_u8 {
+        let i = idx as usize;
+        let start = if i == 0 { 0 } else { boundaries[i - 1] };
+        let end = if i == total_u8 as usize - 1 {
+            content.len()
+        } else {
+            boundaries[i]
+        };
+        let declared = oversized.get(i).copied().unwrap_or(false);
+        let actual = end - start > threshold;
+        recomputed_oversized.push(declared || actual);
+    }
+
+    ChunkPlan {
+        total: total_u8,
+        boundaries,
+        oversized: recomputed_oversized,
+    }
+}
+
+/// Scan forward from `start`, returning byte offsets where each fenced code
+/// block "event" occurs (fence open or fence close — same marker toggles).
+/// We only care about the `\n```` (start-of-line fence) form for block-level
+/// detection; inline backticks in normal prose don't matter.
+fn find_fence_starts(content: &str) -> Vec<usize> {
+    let bytes = content.as_bytes();
+    let mut fences = Vec::new();
+    let mut i = 0;
+    // A fence at offset 0 is valid (file starts with ```).
+    while i < bytes.len() {
+        let at_line_start = i == 0 || bytes[i - 1] == b'\n';
+        if at_line_start && i + 2 < bytes.len() && &bytes[i..i + 3] == b"```" {
+            fences.push(i);
+            // Advance past this fence line to avoid double-matching.
+            match bytes[i..].iter().position(|&b| b == b'\n') {
+                Some(nl) => i += nl + 1,
+                None => break,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    fences
+}
+
+/// Is byte offset `pos` inside a fenced code block (strictly between an
+/// opening and closing fence)?
+fn is_inside_fence(fences: &[usize], pos: usize) -> bool {
+    // Count fence events at offsets < pos. Odd → inside, even → outside.
+    let count = fences.iter().take_while(|&&f| f < pos).count();
+    count % 2 == 1
+}
+
+/// Find the best break offset in `content[start..window_end]` according to the
+/// preference ladder. Searches *backwards* from `window_end` for each tier to
+/// prefer later breaks within the window (keeps chunks full).
+///
+/// Ladder (stop at first match that isn't inside a code fence):
+///
+/// 1. `\n---\n` — horizontal rule. Cleanest semantic break.
+/// 2. `\n## `  — H2 header boundary.
+/// 3. `\n### ` — H3 header boundary.
+/// 4. `\n\n`   — paragraph break.
+/// 5. `\n`     — line break (last-resort semantic-ish).
+/// 6. Deterministic UTF-8-safe byte fallback at `window_end` rounded down.
+///
+/// Returns `None` only if the entire window is trapped inside a code fence
+/// AND the UTF-8 fallback would land inside the fence too. Caller must
+/// recover via `recover_past_block`.
+fn find_break(content: &str, start: usize, window_end: usize, fences: &[usize]) -> Option<usize> {
+    let window_end = window_end.min(content.len());
+    if window_end <= start {
+        return None;
+    }
+
+    // Patterns in preference order. For each, the break offset is the position
+    // of the pattern (the newline), so the break happens *before* the marker.
+    // That keeps the separator (e.g. `## Heading`) at the top of the next chunk.
+    let ladder: &[&[u8]] = &[b"\n---\n", b"\n## ", b"\n### ", b"\n\n", b"\n"];
+
+    for pat in ladder {
+        if let Some(pos) = rfind_in_range(content, start, window_end, pat) {
+            // Break position is at the `\n` itself. We split so the chunk
+            // before the break ends at `\n` (inclusive) and the next chunk
+            // begins at the character after the `\n`.
+            let split = pos + 1; // advance past the leading '\n'
+            if split <= start || split >= window_end {
+                continue;
+            }
+            if !is_inside_fence(fences, split) && content.is_char_boundary(split) {
+                return Some(split);
+            }
+        }
+    }
+
+    // Deterministic UTF-8-safe fallback at window_end.
+    let fallback = safe_utf8_fallback(content, window_end);
+    if fallback > start && !is_inside_fence(fences, fallback) {
+        return Some(fallback);
+    }
+
+    None
+}
+
+/// Find the latest occurrence of `needle` in `content[start..end]`. Returns
+/// the absolute byte offset of the match, or `None`. Used to prefer later
+/// breaks within a window.
+fn rfind_in_range(content: &str, start: usize, end: usize, needle: &[u8]) -> Option<usize> {
+    let end = end.min(content.len());
+    if end <= start || needle.is_empty() || end - start < needle.len() {
+        return None;
+    }
+    let haystack = &content.as_bytes()[start..end];
+    // Manual rfind scan — no_std-friendly, no regex allocations.
+    let n = needle.len();
+    let mut i = haystack.len().saturating_sub(n);
+    loop {
+        if &haystack[i..i + n] == needle {
+            return Some(start + i);
+        }
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+    }
+}
+
+/// Round `pos` down to the nearest UTF-8 char boundary. Panic-free.
+fn safe_utf8_fallback(content: &str, pos: usize) -> usize {
+    let mut p = pos.min(content.len());
+    while p > 0 && !content.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+/// When `find_break` returns None because we're stuck inside a code fence,
+/// extend past the block's closing fence (if we can find one) and then try
+/// to find a clean break in the next window. Returns the recovered break
+/// offset, or `None` to indicate the caller should give up and emit the
+/// remainder as one oversized chunk.
+fn recover_past_block(
+    content: &str,
+    start: usize,
+    window_end: usize,
+    fences: &[usize],
+) -> Option<usize> {
+    // Find the first fence offset > window_end. If we're inside a fence at
+    // window_end, the next fence is the closing fence.
+    let next_fence = *fences.iter().find(|&&f| f > window_end)?;
+    let bytes = content.as_bytes();
+    // Advance to the end of the fence line so the split lands after the
+    // closing ``` line (keeps the whole block in the oversized chunk).
+    let after_fence_line = match bytes[next_fence..].iter().position(|&b| b == b'\n') {
+        Some(nl) => next_fence + nl + 1,
+        None => content.len(),
+    };
+    let safe = safe_utf8_fallback(content, after_fence_line);
+    if safe > start { Some(safe) } else { None }
+}
+
+// ============================================================================
+// extract_salient_phrase — four-tier never-empty cascade
+// ============================================================================
+
+/// Maximum length (in chars, not bytes) for an auto-derived phrase. Keeps the
+/// "type the opening line of the next chunk" move actually typable.
+const PHRASE_MAX_CHARS: usize = 120;
+const SENTENCE_MAX_CHARS: usize = 100;
+const LINE_FALLBACK_MAX_CHARS: usize = 80;
+const SYNTHETIC_PREFIX_CHARS: usize = 40;
+
+/// Extract a salient phrase from a chunk of bloom content. Never returns
+/// empty — even for whitespace-only or empty input, the synthetic fallback
+/// produces a stable, deterministic phrase.
+///
+/// Preference ladder:
+///
+/// 1. First markdown heading in the chunk (`#`, `##`, `###`, etc.). Since
+///    chunk boundaries prefer to split at heading positions, chunks past
+///    index 0 frequently begin with a heading.
+/// 2. First non-empty sentence (split on `. ` or `\n\n`).
+/// 3. First non-empty line, truncated to `LINE_FALLBACK_MAX_CHARS`.
+/// 4. Synthetic: `"Part {chunk_idx+1}/{total} — <prefix>"`. Deterministic
+///    even for empty input (`<prefix>` collapses to empty string).
+///
+/// `chunk_idx` and `total` are only used for the synthetic tier. Passing 0/1
+/// is fine for test fixtures.
+pub fn extract_salient_phrase(content: &str, chunk_idx: u8, total: u8) -> String {
+    if let Some(heading) = first_heading(content) {
+        return cap_chars(heading.trim(), PHRASE_MAX_CHARS);
+    }
+
+    if let Some(sentence) = first_sentence(content) {
+        let s = sentence.trim();
+        if !s.is_empty() {
+            return cap_chars(s, SENTENCE_MAX_CHARS);
+        }
+    }
+
+    if let Some(line) = first_non_empty_line(content) {
+        return cap_chars(line.trim(), LINE_FALLBACK_MAX_CHARS);
+    }
+
+    synthetic_phrase(content, chunk_idx, total)
+}
+
+fn first_heading(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            // Strip leading `#` chars and any single space after them.
+            let stripped = trimmed.trim_start_matches('#');
+            let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
+            if !stripped.trim().is_empty() {
+                return Some(stripped.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_sentence(content: &str) -> Option<String> {
+    // Only fires when there's a real sentence terminator. Without one we fall
+    // through to the line-fallback tier rather than treating an entire blob
+    // as a "sentence" (which caps at 100 chars instead of the tighter 80).
+    let para_end = content.find("\n\n");
+    let sentence_end = content.find(". ").map(|i| i + 1); // keep the period
+    let end = match (para_end, sentence_end) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let end = end?;
+    let trimmed = content[..end].trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn first_non_empty_line(content: &str) -> Option<String> {
+    content
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .map(|l| l.to_string())
+}
+
+fn synthetic_phrase(content: &str, chunk_idx: u8, total: u8) -> String {
+    let prefix: String = content
+        .chars()
+        .take_while(|c| !matches!(c, '\n' | '\r'))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let prefix_capped = cap_chars(prefix.trim(), SYNTHETIC_PREFIX_CHARS);
+    let display_idx = chunk_idx.saturating_add(1);
+    let display_total = total.max(display_idx);
+    if prefix_capped.is_empty() {
+        format!("Part {}/{}", display_idx, display_total)
+    } else {
+        format!("Part {}/{} — {}", display_idx, display_total, prefix_capped)
+    }
+}
+
+/// Truncate `s` to at most `max` chars (not bytes). Appends `…` if truncated.
+/// Truncates at the last word boundary under the cap when possible to avoid
+/// mid-word cuts.
+fn cap_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    // Collect first `max` chars, then back off to the last whitespace so we
+    // don't cut mid-word.
+    let head: String = s.chars().take(max).collect();
+    let cut = match head.rfind(char::is_whitespace) {
+        Some(i) if i >= max / 2 => &head[..i],
+        _ => &head[..],
+    };
+    format!("{}…", cut.trim_end())
+}
+
+// ============================================================================
+// compare_phrase — exact for authored, tolerant for derived
+// ============================================================================
+
+/// Which comparison mode to use. Authored phrases are short, human-curated
+/// distillations and stay exact-match (modulo existing fuzzy_match). Derived
+/// phrases are longer content samples and get softened comparisons (§5.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseMode {
+    Authored,
+    Derived,
+}
+
+/// Comparison outcome. `Exact` and `Tolerant` both mean "accept"; the caller
+/// may log which path matched. `Mismatch` means reject (possibly with hints).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseMatch {
+    /// Inputs match exactly (after trimming whitespace).
+    Exact,
+    /// Inputs match only after mode-specific normalization (Derived mode only).
+    Tolerant,
+    /// No match.
+    Mismatch,
+}
+
+/// Compare a user-typed `input` against a `target` phrase under the given mode.
+///
+/// - `Authored`: case-sensitive, whitespace-trimmed exact compare.
+/// - `Derived`: additionally lowercase, strip trailing sentence punctuation,
+///   collapse internal whitespace runs, normalize smart quotes to straight
+///   quotes. These softenings apply to both sides.
+///
+/// Note: this does NOT replace the existing `engage::fuzzy_match` Levenshtein/
+/// word-overlap path. It's the first-pass decision. Callers should still fall
+/// through to `fuzzy_match` on `Mismatch` so Partial/Close tiers keep working.
+pub fn compare_phrase(input: &str, target: &str, mode: PhraseMode) -> PhraseMatch {
+    let i = input.trim();
+    let t = target.trim();
+    if i == t {
+        return PhraseMatch::Exact;
+    }
+    match mode {
+        PhraseMode::Authored => PhraseMatch::Mismatch,
+        PhraseMode::Derived => {
+            if normalize_derived(i) == normalize_derived(t) {
+                PhraseMatch::Tolerant
+            } else {
+                PhraseMatch::Mismatch
+            }
+        }
+    }
+}
+
+/// The per-mode normalizer applied to derived phrases. Public for testing and
+/// for any future consumer that wants to preview the normalization.
+pub fn normalize_derived(s: &str) -> String {
+    // Lowercase, smart-quote → straight-quote, collapse whitespace runs,
+    // strip trailing sentence punctuation.
+    let lowered = s.to_lowercase();
+    let mut out = String::with_capacity(lowered.len());
+    let mut prev_space = false;
+    for ch in lowered.chars() {
+        let c = match ch {
+            '\u{2018}' | '\u{2019}' | '\u{2032}' => '\'',
+            '\u{201C}' | '\u{201D}' | '\u{2033}' => '"',
+            '\u{2013}' | '\u{2014}' => '-',
+            _ => ch,
+        };
+        if c.is_whitespace() {
+            if !prev_space && !out.is_empty() {
+                out.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        prev_space = false;
+        out.push(c);
+    }
+    // Strip trailing sentence-terminators and ellipsis.
+    while let Some(last) = out.chars().last() {
+        if matches!(last, '.' | '!' | '?' | '…' | ',' | ';' | ':') {
+            out.pop();
+        } else {
+            break;
+        }
+    }
+    out.trim().to_string()
+}
+
+// ============================================================================
+// Tests — unit, property, cascade, tolerance
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- compute_chunks unit tests --------------------------------------------
+
+    #[test]
+    fn below_threshold_is_one_chunk() {
+        let plan = compute_chunks("tiny content", 28_000);
+        assert_eq!(plan.total, 1);
+        assert!(plan.boundaries.is_empty());
+        assert_eq!(plan.chunk("tiny content", 0), "tiny content");
+        assert!(!plan.is_oversized(0));
+    }
+
+    #[test]
+    fn exact_threshold_is_one_chunk() {
+        let content = "a".repeat(100);
+        let plan = compute_chunks(&content, 100);
+        assert_eq!(plan.total, 1);
+    }
+
+    #[test]
+    fn just_over_threshold_chunks_to_size_bound() {
+        // No newlines → deterministic UTF-8 fallback at each window. Every
+        // chunk except possibly the last is ~threshold bytes. Reconstitution
+        // must hold, and no chunk exceeds the threshold.
+        let content = "a".repeat(201);
+        let plan = compute_chunks(&content, 100);
+        assert!(plan.total >= 2);
+        let joined: String = plan
+            .iter(&content)
+            .map(|(_, s, _)| s)
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, content);
+        for (_, chunk, oversized) in plan.iter(&content) {
+            if !oversized {
+                assert!(chunk.len() <= 100, "chunk {} over threshold", chunk.len());
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_rule_preferred_over_paragraph() {
+        // HR at byte 50, paragraph break at byte 70, threshold 100.
+        // Backwards search from window_end=100 hits the HR first? No —
+        // rfind finds the *latest* occurrence, so paragraph-at-70 loses
+        // to HR-at-50 only if HR is strictly preferred (it is, it's tier 1).
+        let mut content = String::new();
+        content.push_str(&"x".repeat(50));
+        content.push_str("\n---\n");
+        content.push_str(&"y".repeat(15));
+        content.push_str("\n\n");
+        content.push_str(&"z".repeat(80));
+        let plan = compute_chunks(&content, 100);
+        assert!(plan.total >= 2);
+        // Tier 1 (HR) should have been chosen → first chunk ends at the `\n`
+        // before `---`, so chunk 0 ends with `\n` at byte 51.
+        let chunk0 = plan.chunk(&content, 0);
+        assert!(
+            chunk0.ends_with('\n'),
+            "chunk 0 should end at HR newline: {:?}",
+            chunk0
+        );
+    }
+
+    #[test]
+    fn falls_through_to_h2_header() {
+        // Only an H2 in the window, no HR.
+        let mut content = String::new();
+        content.push_str(&"x".repeat(50));
+        content.push_str("\n## Section Two\n");
+        content.push_str(&"y".repeat(200));
+        let plan = compute_chunks(&content, 100);
+        assert!(plan.total >= 2);
+        let chunk1 = plan.chunk(&content, 1);
+        assert!(
+            chunk1.starts_with("## Section Two"),
+            "chunk 1 starts with H2: {:?}",
+            &chunk1[..30.min(chunk1.len())]
+        );
+    }
+
+    #[test]
+    fn falls_through_to_paragraph_break() {
+        let mut content = String::new();
+        content.push_str(&"x".repeat(50));
+        content.push_str("\n\n");
+        content.push_str(&"y".repeat(150));
+        let plan = compute_chunks(&content, 100);
+        assert!(plan.total >= 2);
+    }
+
+    #[test]
+    fn no_semantic_breaks_uses_utf8_fallback() {
+        // One long line with no `\n`.
+        let content = "A".repeat(250);
+        let plan = compute_chunks(&content, 100);
+        assert!(plan.total >= 2);
+        // Reconstitution must still hold.
+        let joined: String = plan
+            .iter(&content)
+            .map(|(_, s, _)| s)
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, content);
+    }
+
+    #[test]
+    fn utf8_boundary_safety_emoji() {
+        // Mostly ASCII, with an emoji that *would* straddle byte 100 if we cut naively.
+        let prefix = "a".repeat(98);
+        let mut content = prefix.clone();
+        content.push('\u{1F41F}'); // 4-byte emoji at bytes 98..102
+        content.push_str(&"b".repeat(200));
+        let plan = compute_chunks(&content, 100);
+        // Any boundary must be on a char boundary.
+        for &b in &plan.boundaries {
+            assert!(
+                content.is_char_boundary(b),
+                "boundary {} not on char boundary",
+                b
+            );
+        }
+        // Reconstitution.
+        let joined: String = plan
+            .iter(&content)
+            .map(|(_, s, _)| s)
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, content);
+    }
+
+    #[test]
+    fn code_block_not_split_mid_block() {
+        // Code block spanning well past a natural break point.
+        let mut content = String::new();
+        content.push_str(&"x".repeat(20));
+        content.push_str("\n```rust\n");
+        content.push_str(&"fn a() {}\n".repeat(20)); // ~200 bytes of code
+        content.push_str("```\n");
+        content.push_str(&"y".repeat(300));
+        let threshold = 120;
+        let plan = compute_chunks(&content, threshold);
+        // No boundary should land inside the code block.
+        let fence_open = content.find("```").unwrap();
+        let fence_close = content.rfind("```").unwrap();
+        for &b in &plan.boundaries {
+            assert!(
+                b <= fence_open || b > fence_close,
+                "boundary {} landed inside code block [{}, {}]",
+                b,
+                fence_open,
+                fence_close
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_code_block_flagged() {
+        // A single code block larger than the threshold. We expect the chunk
+        // containing it to be flagged oversized.
+        let mut content = String::new();
+        content.push_str("intro\n\n");
+        content.push_str("```\n");
+        content.push_str(&"A".repeat(500));
+        content.push_str("\n```\n");
+        content.push_str(&"tail".repeat(50));
+        let plan = compute_chunks(&content, 100);
+        assert!(
+            plan.oversized.iter().any(|&f| f),
+            "expected at least one oversized chunk, got {:?}",
+            plan.oversized
+        );
+    }
+
+    #[test]
+    fn env_var_overrides_threshold() {
+        // Save + restore env var so we don't pollute other tests.
+        let prev = env::var(CHUNK_THRESHOLD_ENV).ok();
+
+        unsafe {
+            env::set_var(CHUNK_THRESHOLD_ENV, "50");
+        }
+        assert_eq!(chunk_threshold(), 50);
+
+        unsafe {
+            env::set_var(CHUNK_THRESHOLD_ENV, "not-a-number");
+        }
+        assert_eq!(chunk_threshold(), DEFAULT_CHUNK_THRESHOLD);
+
+        unsafe {
+            env::set_var(CHUNK_THRESHOLD_ENV, "0");
+        }
+        // 0 is rejected (filter n > 0) and we fall back to the default.
+        assert_eq!(chunk_threshold(), DEFAULT_CHUNK_THRESHOLD);
+
+        unsafe {
+            match prev {
+                Some(v) => env::set_var(CHUNK_THRESHOLD_ENV, v),
+                None => env::remove_var(CHUNK_THRESHOLD_ENV),
+            }
+        }
+    }
+
+    // --- extract_salient_phrase unit tests ------------------------------------
+
+    #[test]
+    fn phrase_from_heading_preferred() {
+        let content = "\n## Token semantics\n\nThe token signs (session_id, step).";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Token semantics");
+    }
+
+    #[test]
+    fn phrase_heading_strips_all_hash_levels() {
+        let content = "#### Deep heading\n\nbody";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Deep heading");
+    }
+
+    #[test]
+    fn phrase_from_first_sentence_when_no_heading() {
+        let content = "The wake ritual walks a cascade. It uses chunks now.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "The wake ritual walks a cascade.");
+    }
+
+    #[test]
+    fn phrase_from_first_line_truncated() {
+        // Single giant line, no sentence boundary, no heading. Falls to line
+        // fallback which caps at LINE_FALLBACK_MAX_CHARS.
+        let content = "word ".repeat(50); // ~250 chars, no period
+        let p = extract_salient_phrase(&content, 0, 1);
+        assert!(
+            p.chars().count() <= LINE_FALLBACK_MAX_CHARS + 1,
+            "got {} chars",
+            p.chars().count()
+        );
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn phrase_synthetic_for_empty_input() {
+        let p = extract_salient_phrase("", 0, 3);
+        assert_eq!(p, "Part 1/3");
+    }
+
+    #[test]
+    fn phrase_synthetic_for_whitespace_only() {
+        let p = extract_salient_phrase("   \n\n\n   ", 2, 5);
+        assert_eq!(p, "Part 3/5");
+    }
+
+    #[test]
+    fn phrase_never_empty() {
+        // Sweep a range of pathological inputs — the total-function guarantee.
+        let cases = ["", " ", "\n", "\n\n", "\t\t", "a", ".", "\u{200B}"];
+        for c in cases {
+            let p = extract_salient_phrase(c, 0, 1);
+            assert!(!p.is_empty(), "empty phrase for input {:?}", c);
+        }
+    }
+
+    // --- compare_phrase unit tests --------------------------------------------
+
+    #[test]
+    fn compare_authored_exact_match() {
+        let r = compare_phrase(
+            "Rust is memory-safe",
+            "Rust is memory-safe",
+            PhraseMode::Authored,
+        );
+        assert_eq!(r, PhraseMatch::Exact);
+    }
+
+    #[test]
+    fn compare_authored_case_mismatch_is_reject() {
+        let r = compare_phrase(
+            "rust is memory-safe",
+            "Rust is memory-safe",
+            PhraseMode::Authored,
+        );
+        assert_eq!(r, PhraseMatch::Mismatch);
+    }
+
+    #[test]
+    fn compare_derived_case_tolerant() {
+        let r = compare_phrase("Token semantics", "token semantics", PhraseMode::Derived);
+        assert_eq!(r, PhraseMatch::Tolerant);
+    }
+
+    #[test]
+    fn compare_derived_trailing_punct_stripped() {
+        let r = compare_phrase(
+            "The wake ritual walks a cascade",
+            "The wake ritual walks a cascade.",
+            PhraseMode::Derived,
+        );
+        assert_eq!(r, PhraseMatch::Tolerant);
+    }
+
+    #[test]
+    fn compare_derived_whitespace_collapsed() {
+        let r = compare_phrase("token   semantics", "token semantics", PhraseMode::Derived);
+        assert_eq!(r, PhraseMatch::Tolerant);
+    }
+
+    #[test]
+    fn compare_derived_smart_quotes_normalized() {
+        let r = compare_phrase(
+            "it's \u{201C}alive\u{201D}",
+            "it\u{2019}s \"alive\"",
+            PhraseMode::Derived,
+        );
+        assert_eq!(r, PhraseMatch::Tolerant);
+    }
+
+    #[test]
+    fn compare_derived_mismatch_still_mismatches() {
+        let r = compare_phrase("totally different", "token semantics", PhraseMode::Derived);
+        assert_eq!(r, PhraseMatch::Mismatch);
+    }
+
+    // --- property tests -------------------------------------------------------
+
+    // These are Risk 2 in the design — non-negotiable.
+
+    use proptest::prelude::*;
+
+    fn threshold_strategy() -> impl Strategy<Value = usize> {
+        // Small thresholds stress boundary logic; large thresholds would be
+        // slow without revealing more.
+        prop_oneof![
+            Just(50usize),
+            Just(100usize),
+            Just(256usize),
+            Just(1024usize),
+            Just(4096usize),
+        ]
+    }
+
+    proptest! {
+        // Risk 2 — the load-bearing invariant. If this ever fails we have a
+        // silent-content-corruption bug. `join(chunks) == original`.
+        #[test]
+        fn prop_reconstitution(
+            content in "\\PC{0,8192}", // up to 8KB of any printable + control chars
+            threshold in threshold_strategy(),
+        ) {
+            let plan = compute_chunks(&content, threshold);
+            let joined: String = plan.iter(&content).map(|(_, s, _)| s).collect::<Vec<_>>().join("");
+            prop_assert_eq!(joined, content);
+        }
+
+        #[test]
+        fn prop_all_boundaries_are_char_boundaries(
+            content in "\\PC{0,8192}",
+            threshold in threshold_strategy(),
+        ) {
+            let plan = compute_chunks(&content, threshold);
+            for &b in &plan.boundaries {
+                prop_assert!(content.is_char_boundary(b), "byte {} is not a char boundary", b);
+            }
+        }
+
+        #[test]
+        fn prop_boundaries_strictly_increasing(
+            content in "\\PC{0,8192}",
+            threshold in threshold_strategy(),
+        ) {
+            let plan = compute_chunks(&content, threshold);
+            for pair in plan.boundaries.windows(2) {
+                prop_assert!(pair[0] < pair[1], "non-monotonic boundaries: {:?}", plan.boundaries);
+            }
+        }
+
+        #[test]
+        fn prop_determinism(
+            content in "\\PC{0,4096}",
+            threshold in threshold_strategy(),
+        ) {
+            let a = compute_chunks(&content, threshold);
+            let b = compute_chunks(&content, threshold);
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn prop_chunk_size_bound(
+            content in "\\PC{0,8192}",
+            threshold in threshold_strategy(),
+        ) {
+            // Non-oversized chunks must be ≤ threshold. Oversized chunks are
+            // an accepted limitation (over-threshold code blocks, pathological
+            // fence content) and bounded only by the content length itself —
+            // the contract is "if we couldn't split safely, we flagged it."
+            let plan = compute_chunks(&content, threshold);
+            for (_, chunk, oversized) in plan.iter(&content) {
+                if oversized {
+                    prop_assert!(
+                        chunk.len() <= content.len(),
+                        "oversized chunk larger than input: {} vs {}",
+                        chunk.len(), content.len()
+                    );
+                } else {
+                    prop_assert!(
+                        chunk.len() <= threshold,
+                        "non-oversized chunk {} > threshold {}",
+                        chunk.len(), threshold
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn prop_phrase_never_empty(content in "\\PC{0,4096}", idx in 0u8..10, total in 1u8..10) {
+            let p = extract_salient_phrase(&content, idx, total);
+            prop_assert!(!p.is_empty(), "empty phrase for content len {}", content.len());
+        }
+
+        #[test]
+        fn prop_phrase_deterministic(content in "\\PC{0,4096}") {
+            let a = extract_salient_phrase(&content, 0, 1);
+            let b = extract_salient_phrase(&content, 0, 1);
+            prop_assert_eq!(a, b);
+        }
+
+        #[test]
+        fn prop_compare_derived_tolerant_to_case_and_trailing_punct(
+            word1 in "[a-zA-Z]{2,20}",
+            word2 in "[a-zA-Z]{2,20}",
+        ) {
+            let base = format!("{} {}", word1, word2);
+            let variant = format!("{} {}.", base.to_lowercase(), ""); // lowercase + trailing period
+            let variant = variant.trim().to_string();
+            let r = compare_phrase(&variant, &base, PhraseMode::Derived);
+            prop_assert!(matches!(r, PhraseMatch::Exact | PhraseMatch::Tolerant),
+                "derived compare rejected trivial variant: {:?} vs {:?}", variant, base);
+        }
+
+        #[test]
+        fn prop_compare_same_string_is_exact(s in "[\\PC]{1,64}") {
+            let trimmed = s.trim().to_string();
+            prop_assume!(!trimmed.is_empty());
+            prop_assert_eq!(
+                compare_phrase(&trimmed, &trimmed, PhraseMode::Authored),
+                PhraseMatch::Exact
+            );
+            prop_assert_eq!(
+                compare_phrase(&trimmed, &trimmed, PhraseMode::Derived),
+                PhraseMatch::Exact
+            );
+        }
+    }
+}
