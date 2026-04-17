@@ -1991,7 +1991,10 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
             fn extract_stele_fragment(line: &str) -> &str {
                 // Find the @state token wherever it appears in the line
                 if let Some(pos) = line.find("@state") {
-                    line[pos..].trim_end_matches('*').trim_end_matches('_').trim()
+                    line[pos..]
+                        .trim_end_matches('*')
+                        .trim_end_matches('_')
+                        .trim()
                 } else {
                     line.trim()
                 }
@@ -2026,14 +2029,15 @@ fn handle_state(cmd: StateCommands) -> Result<()> {
 
             // Detect tensor format: @state:<namespace>|... (has colon after @state)
             let stele_fragment = extract_stele_fragment(&raw_line);
-            let is_tensor_format = stele_fragment.starts_with("@state:")
-                && stele_fragment.contains('|');
+            let is_tensor_format =
+                stele_fragment.starts_with("@state:") && stele_fragment.contains('|');
 
             if is_tensor_format {
                 // Decode via tensor path which handles positional numeric values
                 let tensor_schema = load_tensor_schema(schema)?;
-                let tensor = tensor::StateTensor::decode(stele_fragment)
-                    .with_context(|| format!("Failed to decode tensor stele: {}", stele_fragment))?;
+                let tensor = tensor::StateTensor::decode(stele_fragment).with_context(|| {
+                    format!("Failed to decode tensor stele: {}", stele_fragment)
+                })?;
 
                 match format.as_str() {
                     "json" => println!("{}", serde_json::to_string_pretty(&tensor.values)?),
