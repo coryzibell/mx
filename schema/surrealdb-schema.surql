@@ -259,9 +259,20 @@ DEFINE FIELD IF NOT EXISTS remembered_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS needed_help_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS skipped_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS created_at ON wake_session TYPE datetime DEFAULT time::now();
-DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array<int>;
--- Migration: fix existing DBs that defined this as bare TYPE array (SCHEMAFULL drops non-typed elements)
-DEFINE FIELD OVERWRITE selected_phrase_indices ON wake_session TYPE array<int>;
+-- mx#211: chunking cursor + monotonic step counter. current_chunk_index
+-- advances within a chunked bloom before rolling over to the next bloom.
+-- step is the token-signing counter — monotonic across all chunk advances
+-- so tokens survive mid-ritual bloom re-chunking.
+DEFINE FIELD IF NOT EXISTS current_chunk_index ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS step ON wake_session TYPE int DEFAULT 0;
+-- Per-bloom phrase-count metadata (authored_phrase_count + is_phraseless).
+-- `flexible` so the object shape can evolve without schema migration churn.
+DEFINE FIELD IF NOT EXISTS bloom_chunk_meta ON wake_session FLEXIBLE TYPE array<object> DEFAULT [];
+-- Legacy field from the pre-chunking design. Kept in the schema for
+-- backward read compatibility during rollout; no longer written. SurrealDB
+-- will keep any existing values but new sessions leave this empty.
+DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array<int> DEFAULT [];
+DEFINE FIELD OVERWRITE selected_phrase_indices ON wake_session TYPE array<int> DEFAULT [];
 DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
 
 -- =============================================================================

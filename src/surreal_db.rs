@@ -3452,15 +3452,9 @@ impl SurrealDatabase {
         &self,
         session: &crate::wake_token::WakeSession,
     ) -> Result<String> {
-        // Convert selected_phrase_indices to Vec<i64> using -1 as sentinel for None.
-        // SurrealDB SCHEMAFULL with TYPE array<int> drops null/NONE values, so we
-        // use -1 to represent "this bloom has no phrase".
-        let phrase_indices: Vec<i64> = session
-            .selected_phrase_indices
-            .iter()
-            .map(|opt| opt.map(|n| n as i64).unwrap_or(-1))
-            .collect();
-        let phrase_indices_json = serde_json::to_string(&phrase_indices)?;
+        // Serialize bloom_chunk_meta as a JSON array. The schema field is
+        // `flexible array<object>` so SurrealDB will accept arbitrary shape.
+        let bloom_chunk_meta_json = serde_json::to_value(&session.bloom_chunk_meta)?;
         let created_at = chrono::DateTime::from_timestamp(session.created_at, 0)
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339();
@@ -3470,26 +3464,27 @@ impl SurrealDatabase {
                 "CREATE type::thing('wake_session', $session_id) SET
                     bloom_ids = $bloom_ids,
                     current_index = $current_index,
+                    current_chunk_index = $current_chunk_index,
+                    step = $step,
                     attempts_on_current = $attempts_on_current,
                     remembered_count = $remembered_count,
                     needed_help_count = $needed_help_count,
                     skipped_count = $skipped_count,
                     created_at = <datetime>$created_at,
-                    selected_phrase_indices = $selected_phrase_indices
+                    bloom_chunk_meta = $bloom_chunk_meta
                 ",
             )
             .bind(("session_id", session.session_id.clone()))
             .bind(("bloom_ids", session.bloom_ids.clone()))
             .bind(("current_index", session.current_index as i64))
+            .bind(("current_chunk_index", session.current_chunk_index as i64))
+            .bind(("step", session.step as i64))
             .bind(("attempts_on_current", session.attempts_on_current as i64))
             .bind(("remembered_count", session.remembered_count as i64))
             .bind(("needed_help_count", session.needed_help_count as i64))
             .bind(("skipped_count", session.skipped_count as i64))
             .bind(("created_at", normalize_datetime(&created_at)))
-            .bind((
-                "selected_phrase_indices",
-                serde_json::from_str::<serde_json::Value>(&phrase_indices_json)?,
-            ))
+            .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
             .context("Failed to create wake session")
         })?;
@@ -3523,12 +3518,14 @@ impl SurrealDatabase {
                     meta::id(id) AS session_id,
                     bloom_ids,
                     current_index,
+                    current_chunk_index,
+                    step,
                     attempts_on_current,
                     remembered_count,
                     needed_help_count,
                     skipped_count,
                     <int>time::unix(<datetime>created_at) AS created_at,
-                    selected_phrase_indices
+                    bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
             )
             .bind(("session_id", session_id.to_string()))
@@ -3552,6 +3549,8 @@ impl SurrealDatabase {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
         let current_index = obj["current_index"].as_u64().unwrap_or(0) as usize;
+        let current_chunk_index = obj["current_chunk_index"].as_u64().unwrap_or(0) as u8;
+        let step = obj["step"].as_u64().unwrap_or(0) as u32;
         let attempts_on_current = obj["attempts_on_current"].as_u64().unwrap_or(0) as u8;
         let remembered_count = obj["remembered_count"].as_u64().unwrap_or(0) as u32;
         let needed_help_count = obj["needed_help_count"].as_u64().unwrap_or(0) as u32;
@@ -3560,29 +3559,40 @@ impl SurrealDatabase {
             .as_i64()
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-        // Deserialize selected_phrase_indices: array of ints where -1 is sentinel for None.
-        // SurrealDB TYPE array<int> cannot store null/NONE, so -1 represents "no phrase".
-        let selected_phrase_indices: Vec<Option<usize>> = obj["selected_phrase_indices"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .map(|v| match v.as_i64() {
-                Some(-1) | None => None,
-                Some(n) if n >= 0 => Some(n as usize),
-                _ => None,
-            })
-            .collect();
+        // Deserialize bloom_chunk_meta via serde_json. Absent/empty → default
+        // to one meta per bloom_id marking every bloom as phraseless (safe
+        // fallback that keeps the session walkable via skips).
+        let bloom_chunk_meta: Vec<crate::wake_token::BloomChunkMeta> =
+            match obj.get("bloom_chunk_meta") {
+                Some(v) if !v.is_null() => serde_json::from_value(v.clone()).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+        let bloom_chunk_meta = if bloom_chunk_meta.len() == bloom_ids.len() {
+            bloom_chunk_meta
+        } else {
+            // Length mismatch — rebuild default metadata so the session can
+            // at least walk (all phraseless, will drop through skip path).
+            bloom_ids
+                .iter()
+                .map(|_| crate::wake_token::BloomChunkMeta {
+                    authored_phrase_count: 0,
+                    is_phraseless: true,
+                })
+                .collect()
+        };
 
         Ok(Some(crate::wake_token::WakeSession {
             session_id: session_id_str,
             bloom_ids,
             current_index,
+            current_chunk_index,
+            step,
             attempts_on_current,
             remembered_count,
             needed_help_count,
             skipped_count,
             created_at,
-            selected_phrase_indices,
+            bloom_chunk_meta,
         }))
     }
 
@@ -3595,35 +3605,30 @@ impl SurrealDatabase {
         &self,
         session: &crate::wake_token::WakeSession,
     ) -> Result<()> {
-        // Convert selected_phrase_indices to Vec<i64> using -1 as sentinel for None.
-        let phrase_indices: Vec<i64> = session
-            .selected_phrase_indices
-            .iter()
-            .map(|opt| opt.map(|n| n as i64).unwrap_or(-1))
-            .collect();
-        let phrase_indices_json = serde_json::to_string(&phrase_indices)?;
+        let bloom_chunk_meta_json = serde_json::to_value(&session.bloom_chunk_meta)?;
 
         let mut response = with_db!(self, db, {
             db.query(
                 "UPDATE type::thing('wake_session', $session_id) SET
                     current_index = $current_index,
+                    current_chunk_index = $current_chunk_index,
+                    step = $step,
                     attempts_on_current = $attempts_on_current,
                     remembered_count = $remembered_count,
                     needed_help_count = $needed_help_count,
                     skipped_count = $skipped_count,
-                    selected_phrase_indices = $selected_phrase_indices
+                    bloom_chunk_meta = $bloom_chunk_meta
                 ",
             )
             .bind(("session_id", session.session_id.clone()))
             .bind(("current_index", session.current_index as i64))
+            .bind(("current_chunk_index", session.current_chunk_index as i64))
+            .bind(("step", session.step as i64))
             .bind(("attempts_on_current", session.attempts_on_current as i64))
             .bind(("remembered_count", session.remembered_count as i64))
             .bind(("needed_help_count", session.needed_help_count as i64))
             .bind(("skipped_count", session.skipped_count as i64))
-            .bind((
-                "selected_phrase_indices",
-                serde_json::from_str::<serde_json::Value>(&phrase_indices_json)?,
-            ))
+            .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
             .context("Failed to update wake session")
         })?;

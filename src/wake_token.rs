@@ -8,13 +8,15 @@ use crate::store::WakeCascade;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Create a signed wake ritual token: `{session_id}.{current_index}.{truncated_hmac[..16]}`
+/// Create a signed wake ritual token: `{session_id}.{step}.{truncated_hmac[..16]}`.
 ///
-/// State lives server-side in SurrealDB. The token is a compact signed reference
-/// that changes each step, providing integrity (HMAC), anti-replay (step must match),
-/// and progression visibility.
-pub fn create_token(session_id: &str, current_index: usize) -> String {
-    let payload = format!("{}.{}", session_id, current_index);
+/// `step` is a monotonic counter of chunks walked (not bloom index). The wire
+/// format is unchanged from previous versions — the middle segment still parses
+/// as an integer — but the semantics shift to "cumulative chunks walked" so
+/// that mid-ritual bloom edits (which can change chunk counts) don't invalidate
+/// previously-issued tokens. See mx#211 §2.3 / §6.
+pub fn create_token(session_id: &str, step: u32) -> String {
+    let payload = format!("{}.{}", session_id, step);
 
     let key = format!("wake-{}-ritual", session_id);
     let mut mac =
@@ -25,25 +27,23 @@ pub fn create_token(session_id: &str, current_index: usize) -> String {
     format!("{}.{}", payload, &signature[..16])
 }
 
-/// Verify a wake ritual token and extract (session_id, current_index).
+/// Verify a wake ritual token and extract (session_id, step).
 ///
-/// Token format: `{session_id}.{current_index}.{truncated_hmac[..16]}`
-/// Since session_id is a UUID (contains hyphens but no dots), we split on '.'
-/// to get exactly 3 parts.
-pub fn verify_token(token: &str) -> Result<(String, usize), String> {
+/// Token format: `{session_id}.{step}.{truncated_hmac[..16]}`. `step` is the
+/// monotonic chunk counter; see `create_token`.
+pub fn verify_token(token: &str) -> Result<(String, u32), String> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err("Invalid token format".to_string());
     }
 
     let session_id = parts[0];
-    let current_index: usize = parts[1]
+    let step: u32 = parts[1]
         .parse()
-        .map_err(|_| "Invalid current index in token".to_string())?;
+        .map_err(|_| "Invalid step in token".to_string())?;
     let provided_sig = parts[2];
 
-    // Verify HMAC signature
-    let payload = format!("{}.{}", session_id, current_index);
+    let payload = format!("{}.{}", session_id, step);
     let key = format!("wake-{}-ritual", session_id);
     let mut mac =
         HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
@@ -54,7 +54,24 @@ pub fn verify_token(token: &str) -> Result<(String, usize), String> {
         return Err("Invalid token signature".to_string());
     }
 
-    Ok((session_id.to_string(), current_index))
+    Ok((session_id.to_string(), step))
+}
+
+/// Per-bloom chunking metadata stored on the session. Pure-runtime-projection:
+/// the actual chunk plan is recomputed from current content on every
+/// `respond`/`skip` call; this metadata only tracks how many authored phrases
+/// the bloom had (which shapes the authored-vs-derived decision) and whether
+/// the bloom has any phrases at all (P==0 case stays skip-type across all
+/// chunks, per the conservative P==0 decision).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BloomChunkMeta {
+    /// Number of authored wake phrases on this bloom at session start.
+    /// Chunks with `chunk_idx < authored_phrase_count` use the authored phrase
+    /// at that index; chunks beyond it derive a phrase from their own content.
+    pub authored_phrase_count: u8,
+    /// If true, this bloom has zero authored phrases — every chunk emits as
+    /// skip-type (conservative-by-default P==0 decision). Never auto-derived.
+    pub is_phraseless: bool,
 }
 
 /// Server-side wake ritual session state.
@@ -62,29 +79,55 @@ pub fn verify_token(token: &str) -> Result<(String, usize), String> {
 /// Persisted in SurrealDB's `wake_session` table. The CLI passes a compact
 /// signed token (`{session_id}.{step}.{hmac}`) between calls. State is
 /// server-side; the token is just a signed reference with anti-replay.
+///
+/// ## Cursor invariants (Risk 4 in the design)
+///
+/// Two cursors compose a single position:
+///
+/// - `current_index` — which bloom we're on in `bloom_ids`. `0..=bloom_ids.len()`.
+/// - `current_chunk_index` — which chunk within the current bloom. Always
+///   advances to 0 when `current_index` advances. `0..=chunk_plan.total` for
+///   the current bloom's plan.
+///
+/// `step` is the monotonic count of chunks walked. It is independent of
+/// `current_index` / `current_chunk_index` — the latter can drift if bloom
+/// content changes mid-ritual and re-chunks, but `step` always increments by
+/// exactly 1 per chunk advance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WakeSession {
     pub session_id: String,
     pub bloom_ids: Vec<String>,
+    /// Which bloom we're on. 0-indexed; equals `bloom_ids.len()` when the
+    /// ritual is complete.
     pub current_index: usize,
+    /// Which chunk within the current bloom we're on. Resets to 0 when
+    /// `current_index` advances. For non-chunked blooms this stays 0.
+    pub current_chunk_index: u8,
+    /// Monotonic step counter used for token anti-replay. Ticks by 1 on every
+    /// chunk advance (remembered / helped / skipped). Survives bloom
+    /// re-chunking mid-ritual.
+    pub step: u32,
     pub attempts_on_current: u8,
     pub remembered_count: u32,
     pub needed_help_count: u32,
     pub skipped_count: u32,
     pub created_at: i64,
-    /// Selected phrase indices for each bloom (None if bloom has no phrases)
-    pub selected_phrase_indices: Vec<Option<usize>>,
+    /// Per-bloom metadata (1:1 with `bloom_ids`). Replaces the old
+    /// `selected_phrase_indices` representation — we no longer pre-select a
+    /// random phrase, because chunks walk through authored phrases in index
+    /// order and auto-derive beyond that.
+    pub bloom_chunk_meta: Vec<BloomChunkMeta>,
 }
 
 impl WakeSession {
-    /// Create new session from cascade
+    /// Create new session from cascade. Computes per-bloom phrase counts up
+    /// front so the `phrase_for_chunk` selector has deterministic metadata
+    /// to consult, but does NOT pre-compute chunk plans — those are
+    /// re-derived from fresh content on every `respond`/`skip` call.
     pub fn new(cascade: &WakeCascade) -> Self {
-        use rand::Rng;
-
         let mut bloom_ids = Vec::new();
-        let mut selected_phrase_indices = Vec::new();
+        let mut bloom_chunk_meta = Vec::new();
 
-        // Collect blooms and select phrase indices
         for entry in cascade
             .core
             .iter()
@@ -93,27 +136,25 @@ impl WakeSession {
         {
             bloom_ids.push(entry.id.clone());
 
-            // Select random phrase index if bloom has phrases
-            let phrase_idx = if !entry.wake_phrases.is_empty() {
-                Some(rand::rng().random_range(0..entry.wake_phrases.len()))
-            } else if entry.wake_phrase.is_some() {
-                Some(0) // Single wake_phrase maps to index 0
-            } else {
-                None // No phrases
-            };
-            selected_phrase_indices.push(phrase_idx);
+            let authored_phrase_count = authored_phrase_count(entry);
+            bloom_chunk_meta.push(BloomChunkMeta {
+                authored_phrase_count,
+                is_phraseless: authored_phrase_count == 0,
+            });
         }
 
         Self {
             session_id: uuid::Uuid::new_v4().to_string(),
             bloom_ids,
             current_index: 0,
+            current_chunk_index: 0,
+            step: 0,
             attempts_on_current: 0,
             remembered_count: 0,
             needed_help_count: 0,
             skipped_count: 0,
             created_at: chrono::Utc::now().timestamp(),
-            selected_phrase_indices,
+            bloom_chunk_meta,
         }
     }
 
@@ -122,20 +163,18 @@ impl WakeSession {
         self.bloom_ids.get(self.current_index).map(|s| s.as_str())
     }
 
-    /// Get selected phrase index for current bloom
-    pub fn current_phrase_index(&self) -> Option<usize> {
-        self.selected_phrase_indices
-            .get(self.current_index)
-            .and_then(|&idx| idx)
+    /// Per-bloom chunk metadata for the current bloom, if any.
+    pub fn current_meta(&self) -> Option<&BloomChunkMeta> {
+        self.bloom_chunk_meta.get(self.current_index)
     }
 
     /// Total blooms in session
-    pub fn total(&self) -> usize {
+    pub fn total_blooms(&self) -> usize {
         self.bloom_ids.len()
     }
 
-    /// Current position (1-indexed for display)
-    pub fn current_position(&self) -> usize {
+    /// Current bloom position (1-indexed for display)
+    pub fn current_bloom_position(&self) -> usize {
         self.current_index + 1
     }
 
@@ -144,25 +183,80 @@ impl WakeSession {
         self.current_index >= self.bloom_ids.len()
     }
 
-    /// Advance to next bloom (remembered)
-    pub fn advance_remembered(&mut self) {
+    /// Advance past the current chunk. If there are more chunks in this
+    /// bloom (per `bloom_total_chunks`), tick `current_chunk_index`; otherwise
+    /// advance to the next bloom and reset chunk cursor. Always ticks `step`.
+    ///
+    /// Assertion-heavy by design (Risk 4): off-by-one bugs here will serve
+    /// wrong content or stick the ritual.
+    pub fn advance_remembered(&mut self, bloom_total_chunks: u8) {
+        debug_assert!(!self.is_complete(), "advance called on completed session");
+        debug_assert!(
+            (self.current_chunk_index as usize) < bloom_total_chunks.max(1) as usize,
+            "current_chunk_index {} >= bloom_total_chunks {}",
+            self.current_chunk_index,
+            bloom_total_chunks
+        );
         self.remembered_count += 1;
-        self.current_index += 1;
-        self.attempts_on_current = 0;
+        self.step = self.step.saturating_add(1);
+        self.advance_chunk_or_bloom(bloom_total_chunks);
     }
 
-    /// Advance to next bloom (needed help)
-    pub fn advance_helped(&mut self) {
+    /// Advance past the current chunk (needed help path).
+    pub fn advance_helped(&mut self, bloom_total_chunks: u8) {
+        debug_assert!(!self.is_complete());
         self.needed_help_count += 1;
-        self.current_index += 1;
-        self.attempts_on_current = 0;
+        self.step = self.step.saturating_add(1);
+        self.advance_chunk_or_bloom(bloom_total_chunks);
     }
 
-    /// Advance to next bloom (skipped)
-    pub fn advance_skipped(&mut self) {
+    /// Advance past the current chunk (skipped path).
+    pub fn advance_skipped(&mut self, bloom_total_chunks: u8) {
+        debug_assert!(!self.is_complete());
         self.skipped_count += 1;
-        self.current_index += 1;
-        self.attempts_on_current = 0;
+        self.step = self.step.saturating_add(1);
+        self.advance_chunk_or_bloom(bloom_total_chunks);
+    }
+
+    /// Core cursor advance. Pure function of the two cursors + the chunk
+    /// total. Called by the three `advance_*` wrappers above.
+    fn advance_chunk_or_bloom(&mut self, bloom_total_chunks: u8) {
+        let next_chunk = self.current_chunk_index.saturating_add(1);
+        if (next_chunk as usize) < bloom_total_chunks.max(1) as usize {
+            // More chunks in this bloom.
+            self.current_chunk_index = next_chunk;
+            self.attempts_on_current = 0;
+        } else {
+            // Move to the next bloom; reset chunk cursor.
+            self.current_index += 1;
+            self.current_chunk_index = 0;
+            self.attempts_on_current = 0;
+        }
+        debug_assert!(
+            self.current_index <= self.bloom_ids.len(),
+            "current_index {} overshot bloom_ids.len() {}",
+            self.current_index,
+            self.bloom_ids.len()
+        );
+    }
+
+    /// Handle the "content shrank mid-ritual past the cursor" case (§2.2): if
+    /// the recomputed chunk plan has fewer chunks than `current_chunk_index`,
+    /// we clamp and advance to the next bloom. Flagged as `chunk_truncated`
+    /// in the response for observability.
+    ///
+    /// Returns `true` if clamping occurred (caller should set the
+    /// `chunk_truncated` response field).
+    pub fn clamp_if_chunks_shrank(&mut self, bloom_total_chunks: u8) -> bool {
+        let total = bloom_total_chunks.max(1) as usize;
+        if (self.current_chunk_index as usize) >= total {
+            self.current_index += 1;
+            self.current_chunk_index = 0;
+            self.attempts_on_current = 0;
+            true
+        } else {
+            false
+        }
     }
 
     /// Increment attempt counter
@@ -171,7 +265,33 @@ impl WakeSession {
     }
 }
 
-/// JSON output structures
+/// Count of authored wake phrases on an entry (wake_phrases takes priority
+/// over the legacy single `wake_phrase`).
+pub fn authored_phrase_count(entry: &KnowledgeEntry) -> u8 {
+    if !entry.wake_phrases.is_empty() {
+        u8::try_from(entry.wake_phrases.len()).unwrap_or(u8::MAX)
+    } else if entry.wake_phrase.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+/// The authored phrase at the given index, if it exists. Consolidates the
+/// `wake_phrases[idx]` vs legacy `wake_phrase` lookup.
+pub fn authored_phrase_at(entry: &KnowledgeEntry, idx: usize) -> Option<String> {
+    if !entry.wake_phrases.is_empty() {
+        entry.wake_phrases.get(idx).cloned()
+    } else if idx == 0 {
+        entry.wake_phrase.clone()
+    } else {
+        None
+    }
+}
+
+// ============================================================================
+// JSON output structures — strictly additive vs the previous contract
+// ============================================================================
 
 #[derive(Debug, Serialize)]
 pub struct WakeBeginResponse {
@@ -201,6 +321,11 @@ pub struct WakeRespondResponse {
     pub progress: Option<Progress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
+    /// Set to true when a mid-ritual content edit re-derived an auto-derived
+    /// phrase such that the consumer's typed response no longer matches.
+    /// Legible error diagnostic per Risk 9 (§5.5 of the design).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_changed_during_ritual: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +358,24 @@ pub struct BloomPrompt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resonance_type: Option<String>,
     pub wake_phrase_count: usize,
+    /// Present only for chunked blooms. `{index: 1-based, total}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<ChunkRef>,
+    /// `"authored"` | `"derived"` — advisory field so consumers can surface
+    /// that a phrase was sampled from chunk content rather than authored by
+    /// the bloom owner. Absent for non-chunked or phraseless blooms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phrase_source: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ChunkRef {
+    pub index: u8,
+    pub total: u8,
+    /// Present and `true` when the chunk exceeds the chunking threshold
+    /// (typically an un-splittable code block). Documented limitation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oversized: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -244,12 +387,26 @@ pub struct BloomFull {
     pub resonance_type: Option<String>,
     pub all_phrases: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub matched_phrase: Option<String>, // Which phrase was matched/selected
+    pub matched_phrase: Option<String>,
+    /// Chunk metadata for the chunk being returned, if the bloom was chunked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<ChunkRef>,
+    /// `"authored"` | `"derived"` — which phrase type unlocked this chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phrase_source: Option<String>,
+    /// `true` if the session's chunk cursor was clamped forward because the
+    /// bloom shrank past it mid-ritual. Observability for §2.2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_truncated: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Progress {
+    /// 1-indexed count of chunks walked into. Counts chunks, not blooms
+    /// (the unit of progression in the new flow).
     pub current: usize,
+    /// Total chunks across the whole cascade (eager at begin; may drift by
+    /// ≤10% if mid-ritual edits change bloom sizes — see §7.1).
     pub total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remembered: Option<u32>,
@@ -257,6 +414,13 @@ pub struct Progress {
     pub needed_help: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped: Option<u32>,
+    /// 1-indexed bloom counter. Consumers that prefer the old "X of N blooms"
+    /// UX can render this instead of `current`/`total`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bloom_current: Option<usize>,
+    /// Total blooms in the cascade. Stable across the ritual.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bloom_total: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -265,18 +429,31 @@ pub struct Summary {
     pub remembered: u32,
     pub needed_help: u32,
     pub skipped: u32,
+    /// Per-bloom roll-up (chunks remembered/helped/skipped grouped by bloom).
+    /// Populated in PR 3; kept here as an optional field for PR 2 so the
+    /// payload shape doesn't change again between PRs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blooms_complete: Option<Vec<BloomRollup>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_remembered: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_skipped: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_needed_help: Option<u32>,
 }
 
-/// Convert KnowledgeEntry to BloomPrompt
+#[derive(Debug, Serialize)]
+pub struct BloomRollup {
+    pub id: String,
+    pub title: String,
+    pub chunks: String,
+}
+
+/// Convert KnowledgeEntry to BloomPrompt (non-chunked form — PR 2 wires a
+/// chunk-aware builder in the ritual module).
 impl From<&KnowledgeEntry> for BloomPrompt {
     fn from(entry: &KnowledgeEntry) -> Self {
-        let phrase_count = if !entry.wake_phrases.is_empty() {
-            entry.wake_phrases.len()
-        } else if entry.wake_phrase.is_some() {
-            1
-        } else {
-            0
-        };
+        let phrase_count = authored_phrase_count(entry) as usize;
 
         Self {
             id: entry.id.clone(),
@@ -284,11 +461,14 @@ impl From<&KnowledgeEntry> for BloomPrompt {
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
             wake_phrase_count: phrase_count,
+            chunk: None,
+            phrase_source: None,
         }
     }
 }
 
-/// Convert KnowledgeEntry to BloomFull
+/// Convert KnowledgeEntry to BloomFull (non-chunked form — PR 2 wires a
+/// chunk-aware builder in the ritual module).
 impl From<&KnowledgeEntry> for BloomFull {
     fn from(entry: &KnowledgeEntry) -> Self {
         let content = entry
@@ -297,7 +477,6 @@ impl From<&KnowledgeEntry> for BloomFull {
             .or_else(|| entry.summary.clone())
             .unwrap_or_else(|| "(no content)".to_string());
 
-        // Collect all phrases (wake_phrases array takes priority)
         let all_phrases = if !entry.wake_phrases.is_empty() {
             entry.wake_phrases.clone()
         } else if let Some(ref phrase) = entry.wake_phrase {
@@ -312,7 +491,10 @@ impl From<&KnowledgeEntry> for BloomFull {
             resonance: entry.resonance,
             resonance_type: entry.resonance_type.clone(),
             all_phrases,
-            matched_phrase: None, // Not set by default, populated during ritual
+            matched_phrase: None,
+            chunk: None,
+            phrase_source: None,
+            chunk_truncated: None,
         }
     }
 }
