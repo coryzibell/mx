@@ -3589,6 +3589,7 @@ impl SurrealDatabase {
                 .map(|_| crate::wake_token::BloomChunkMeta {
                     authored_phrase_count: 0,
                     is_phraseless: true,
+                    ..Default::default()
                 })
                 .collect()
         };

@@ -32,6 +32,16 @@ impl PhraseSource {
             PhraseSource::Derived => PhraseMode::Derived,
         }
     }
+
+    /// Convert to the persisted tag used for per-bloom counters on the
+    /// session (PR 3 observability). `PhraseSourceTag::None` is only emitted
+    /// by skip paths where no phrase was involved.
+    fn tag(self) -> PhraseSourceTag {
+        match self {
+            PhraseSource::Authored => PhraseSourceTag::Authored,
+            PhraseSource::Derived => PhraseSourceTag::Derived,
+        }
+    }
 }
 
 /// Pick the wake phrase for a specific chunk of a bloom. Authored phrases
@@ -328,7 +338,7 @@ pub fn respond_ritual(
 
     match match_result {
         MatchResult::Exact | MatchResult::Close => {
-            session.advance_remembered(plan.total);
+            session.advance_remembered(plan.total, source.tag());
 
             let match_type = if matches!(match_result, MatchResult::Exact) {
                 "exact"
@@ -377,7 +387,7 @@ pub fn respond_ritual(
             let attempt = session.attempts_on_current;
 
             if attempt >= 3 {
-                session.advance_helped(plan.total);
+                session.advance_helped(plan.total, source.tag());
 
                 let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
 
@@ -574,6 +584,68 @@ fn build_bloom_map_owned(cascade: &WakeCascade) -> HashMap<String, KnowledgeEntr
     map
 }
 
+/// Build the per-bloom roll-up list for `summary.blooms_complete`. One entry
+/// per bloom visited during the ritual, with total chunks + outcome counts
+/// + authored-vs-derived telemetry. PR 3 observability.
+fn build_bloom_rollups(
+    session: &WakeSession,
+    blooms: &HashMap<String, KnowledgeEntry>,
+) -> Vec<BloomRollup> {
+    session
+        .bloom_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, id)| {
+            let meta = session
+                .bloom_chunk_meta
+                .get(idx)
+                .cloned()
+                .unwrap_or_default();
+            let title = blooms
+                .get(id)
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| id.clone());
+            let total_outcomes = meta.remembered_chunks + meta.helped_chunks + meta.skipped_chunks;
+            let chunks_str = if total_outcomes == 0 {
+                "0/0 (not reached)".to_string()
+            } else if meta.remembered_chunks == total_outcomes {
+                format!("{}/{} remembered", meta.remembered_chunks, total_outcomes)
+            } else if meta.skipped_chunks == total_outcomes {
+                format!("{}/{} skipped", meta.skipped_chunks, total_outcomes)
+            } else {
+                // Mixed outcome — show each nonzero counter.
+                let mut parts = Vec::new();
+                if meta.remembered_chunks > 0 {
+                    parts.push(format!("{} remembered", meta.remembered_chunks));
+                }
+                if meta.helped_chunks > 0 {
+                    parts.push(format!("{} helped", meta.helped_chunks));
+                }
+                if meta.skipped_chunks > 0 {
+                    parts.push(format!("{} skipped", meta.skipped_chunks));
+                }
+                format!(
+                    "{}/{}  {}",
+                    total_outcomes,
+                    total_outcomes,
+                    parts.join(", ")
+                )
+            };
+            BloomRollup {
+                id: id.clone(),
+                title,
+                chunks: chunks_str,
+                remembered: meta.remembered_chunks,
+                needed_help: meta.helped_chunks,
+                skipped: meta.skipped_chunks,
+                total: total_outcomes,
+                authored_chunks: meta.authored_chunks,
+                derived_chunks: meta.derived_chunks,
+            }
+        })
+        .collect()
+}
+
 /// Get next bloom prompt and current progress. Handles both in-bloom chunk
 /// advancement (staying on the same bloom) and cross-bloom advancement.
 fn get_next_and_progress(
@@ -605,7 +677,7 @@ fn get_next_and_progress(
             remembered: session.remembered_count,
             needed_help: session.needed_help_count,
             skipped: session.skipped_count,
-            blooms_complete: None, // populated in PR 3
+            blooms_complete: Some(build_bloom_rollups(session, all_blooms)),
             chunks_remembered: Some(session.remembered_count),
             chunks_needed_help: Some(session.needed_help_count),
             chunks_skipped: Some(session.skipped_count),
@@ -847,18 +919,18 @@ mod tests {
     #[test]
     fn session_advance_within_bloom_chunks_ticks_chunk_cursor() {
         let mut session = WakeSession::new(&test_cascade(vec![test_entry()]));
-        session.advance_remembered(3); // 3-chunk bloom, chunk 0 → 1
+        session.advance_remembered(3, PhraseSourceTag::Authored); // 3-chunk bloom, chunk 0 → 1
         assert_eq!(session.current_index, 0);
         assert_eq!(session.current_chunk_index, 1);
         assert_eq!(session.step, 1);
         assert_eq!(session.remembered_count, 1);
 
-        session.advance_remembered(3); // chunk 1 → 2
+        session.advance_remembered(3, PhraseSourceTag::Authored); // chunk 1 → 2
         assert_eq!(session.current_index, 0);
         assert_eq!(session.current_chunk_index, 2);
         assert_eq!(session.step, 2);
 
-        session.advance_remembered(3); // chunk 2 → next bloom
+        session.advance_remembered(3, PhraseSourceTag::Authored); // chunk 2 → next bloom
         assert_eq!(session.current_index, 1);
         assert_eq!(session.current_chunk_index, 0);
         assert_eq!(session.step, 3);
@@ -872,25 +944,34 @@ mod tests {
             test_entry(),
         ]));
         // Bloom 0: 3 chunks
-        session.advance_remembered(3);
-        session.advance_remembered(3);
-        session.advance_remembered(3);
+        session.advance_remembered(3, PhraseSourceTag::Authored);
+        session.advance_remembered(3, PhraseSourceTag::Authored);
+        session.advance_remembered(3, PhraseSourceTag::Derived);
         // Bloom 1: 1 chunk (not chunked)
         session.advance_skipped(1);
         // Bloom 2: 2 chunks
-        session.advance_helped(2);
-        session.advance_helped(2);
+        session.advance_helped(2, PhraseSourceTag::Authored);
+        session.advance_helped(2, PhraseSourceTag::Derived);
         assert_eq!(session.step, 6);
         assert_eq!(session.remembered_count, 3);
         assert_eq!(session.needed_help_count, 2);
         assert_eq!(session.skipped_count, 1);
         assert!(session.is_complete());
+
+        // PR 3 observability: per-bloom counters populated during the walk.
+        assert_eq!(session.bloom_chunk_meta[0].remembered_chunks, 3);
+        assert_eq!(session.bloom_chunk_meta[0].authored_chunks, 2);
+        assert_eq!(session.bloom_chunk_meta[0].derived_chunks, 1);
+        assert_eq!(session.bloom_chunk_meta[1].skipped_chunks, 1);
+        assert_eq!(session.bloom_chunk_meta[2].helped_chunks, 2);
+        assert_eq!(session.bloom_chunk_meta[2].authored_chunks, 1);
+        assert_eq!(session.bloom_chunk_meta[2].derived_chunks, 1);
     }
 
     #[test]
     fn session_non_chunked_bloom_advances_immediately() {
         let mut session = WakeSession::new(&test_cascade(vec![test_entry(), test_entry()]));
-        session.advance_remembered(1); // single-chunk bloom
+        session.advance_remembered(1, PhraseSourceTag::Authored); // single-chunk bloom
         assert_eq!(session.current_index, 1);
         assert_eq!(session.current_chunk_index, 0);
     }
@@ -1050,7 +1131,7 @@ mod tests {
         for expected_chunk in 0..total_chunks {
             assert_eq!(session.current_chunk_index, expected_chunk);
             assert_eq!(session.current_index, 0);
-            session.advance_remembered(total_chunks);
+            session.advance_remembered(total_chunks, PhraseSourceTag::Authored);
         }
         assert!(session.is_complete());
         assert_eq!(session.step, total_chunks as u32);
@@ -1596,5 +1677,140 @@ mod tests {
             "session should be deleted on completion; still present: {:?}",
             store.sessions.borrow().keys().collect::<Vec<_>>()
         );
+    }
+
+    // =====================================================================
+    // PR 3 — summary roll-up & observability tests
+    // =====================================================================
+
+    #[test]
+    fn summary_rollup_all_remembered() {
+        let entry_a = {
+            let mut e = test_entry();
+            e.title = "Alpha".to_string();
+            e.id = "kn-a".to_string();
+            e
+        };
+        let entry_b = {
+            let mut e = test_entry();
+            e.title = "Beta".to_string();
+            e.id = "kn-b".to_string();
+            e
+        };
+
+        let cascade = test_cascade(vec![entry_a.clone(), entry_b.clone()]);
+        let mut session = WakeSession::new(&cascade);
+
+        // Bloom A: 3 chunks, all remembered, all authored phrases.
+        session.advance_remembered(3, PhraseSourceTag::Authored);
+        session.advance_remembered(3, PhraseSourceTag::Authored);
+        session.advance_remembered(3, PhraseSourceTag::Derived);
+        // Bloom B: 1 chunk, remembered.
+        session.advance_remembered(1, PhraseSourceTag::Authored);
+
+        let mut blooms = HashMap::new();
+        blooms.insert(entry_a.id.clone(), entry_a);
+        blooms.insert(entry_b.id.clone(), entry_b);
+
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups.len(), 2);
+
+        assert_eq!(rollups[0].title, "Alpha");
+        assert_eq!(rollups[0].total, 3);
+        assert_eq!(rollups[0].remembered, 3);
+        assert_eq!(rollups[0].authored_chunks, 2);
+        assert_eq!(rollups[0].derived_chunks, 1);
+        assert!(rollups[0].chunks.contains("3/3"));
+        assert!(rollups[0].chunks.contains("remembered"));
+
+        assert_eq!(rollups[1].title, "Beta");
+        assert_eq!(rollups[1].total, 1);
+        assert_eq!(rollups[1].remembered, 1);
+        assert_eq!(rollups[1].authored_chunks, 1);
+        assert_eq!(rollups[1].derived_chunks, 0);
+    }
+
+    #[test]
+    fn summary_rollup_all_skipped() {
+        let mut e = test_entry();
+        e.title = "Phraseless".to_string();
+        let cascade = test_cascade(vec![e.clone()]);
+        let mut session = WakeSession::new(&cascade);
+        session.advance_skipped(2);
+        session.advance_skipped(2);
+
+        let mut blooms = HashMap::new();
+        blooms.insert(e.id.clone(), e);
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups[0].total, 2);
+        assert_eq!(rollups[0].skipped, 2);
+        assert_eq!(rollups[0].authored_chunks, 0);
+        assert_eq!(rollups[0].derived_chunks, 0);
+        assert!(rollups[0].chunks.contains("skipped"));
+    }
+
+    #[test]
+    fn summary_rollup_mixed_outcomes() {
+        let e = test_entry();
+        let cascade = test_cascade(vec![e.clone()]);
+        let mut session = WakeSession::new(&cascade);
+        // 4 chunks: 2 remembered + 1 helped + 1 skipped.
+        session.advance_remembered(4, PhraseSourceTag::Authored);
+        session.advance_remembered(4, PhraseSourceTag::Derived);
+        session.advance_helped(4, PhraseSourceTag::Derived);
+        session.advance_skipped(4);
+
+        let mut blooms = HashMap::new();
+        blooms.insert(e.id.clone(), e);
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups[0].total, 4);
+        assert_eq!(rollups[0].remembered, 2);
+        assert_eq!(rollups[0].needed_help, 1);
+        assert_eq!(rollups[0].skipped, 1);
+        // authored+derived counts only count chunks that had a phrase.
+        assert_eq!(rollups[0].authored_chunks, 1);
+        assert_eq!(rollups[0].derived_chunks, 2);
+    }
+
+    #[test]
+    fn summary_rollup_not_reached_when_zero_events() {
+        let e = test_entry();
+        let cascade = test_cascade(vec![e.clone()]);
+        let session = WakeSession::new(&cascade);
+        let mut blooms = HashMap::new();
+        blooms.insert(e.id.clone(), e);
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups.len(), 1);
+        assert_eq!(rollups[0].total, 0);
+        assert!(rollups[0].chunks.contains("not reached"));
+    }
+
+    #[test]
+    fn summary_rollup_bloom_title_resolves_from_map() {
+        let mut e = test_entry();
+        e.id = "kn-ops".to_string();
+        e.title = "Ops".to_string();
+        let cascade = test_cascade(vec![e.clone()]);
+        let mut session = WakeSession::new(&cascade);
+        session.advance_remembered(1, PhraseSourceTag::Authored);
+
+        let mut blooms = HashMap::new();
+        blooms.insert("kn-ops".to_string(), e);
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups[0].title, "Ops");
+        assert_eq!(rollups[0].id, "kn-ops");
+    }
+
+    #[test]
+    fn summary_rollup_falls_back_to_id_when_bloom_missing() {
+        let e = test_entry();
+        let cascade = test_cascade(vec![e]);
+        let mut session = WakeSession::new(&cascade);
+        session.advance_remembered(1, PhraseSourceTag::Authored);
+
+        // Empty blooms map — title should fall back to the bloom_id.
+        let blooms = HashMap::new();
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups[0].title, rollups[0].id);
     }
 }

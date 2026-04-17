@@ -63,7 +63,17 @@ pub fn verify_token(token: &str) -> Result<(String, u32), String> {
 /// the bloom had (which shapes the authored-vs-derived decision) and whether
 /// the bloom has any phrases at all (P==0 case stays skip-type across all
 /// chunks, per the conservative P==0 decision).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Which phrase flavor resolved a chunk advance. Passed to the `advance_*`
+/// methods so per-bloom authored-vs-derived counters can be bumped in one
+/// place. `None` is for skip paths where no phrase was involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhraseSourceTag {
+    Authored,
+    Derived,
+    None,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BloomChunkMeta {
     /// Number of authored wake phrases on this bloom at session start.
     /// Chunks with `chunk_idx < authored_phrase_count` use the authored phrase
@@ -76,6 +86,25 @@ pub struct BloomChunkMeta {
     /// If true, this bloom has zero authored phrases — every chunk emits as
     /// skip-type (conservative-by-default P==0 decision). Never auto-derived.
     pub is_phraseless: bool,
+    /// Per-bloom event counters, incremented on each chunk advance. Used to
+    /// populate `summary.blooms_complete` roll-up ("3/3 remembered") and the
+    /// authored-vs-derived observability telemetry in the ritual summary.
+    #[serde(default)]
+    pub remembered_chunks: u32,
+    #[serde(default)]
+    pub helped_chunks: u32,
+    #[serde(default)]
+    pub skipped_chunks: u32,
+    /// Count of chunks that matched against an authored phrase (as opposed
+    /// to one derived from the chunk's own content). `authored_chunks +
+    /// derived_chunks <= remembered_chunks + helped_chunks`.
+    #[serde(default)]
+    pub authored_chunks: u32,
+    /// Count of chunks that matched against a derived (sampled) phrase.
+    /// Dog-fooding signal: if this number is high relative to the bloom's
+    /// chunk total, the bloom probably wants more authored phrases.
+    #[serde(default)]
+    pub derived_chunks: u32,
 }
 
 /// Server-side wake ritual session state.
@@ -148,6 +177,7 @@ impl WakeSession {
             bloom_chunk_meta.push(BloomChunkMeta {
                 authored_phrase_count,
                 is_phraseless: authored_phrase_count == 0,
+                ..Default::default()
             });
         }
 
@@ -197,7 +227,11 @@ impl WakeSession {
     ///
     /// Assertion-heavy by design (Risk 4): off-by-one bugs here will serve
     /// wrong content or stick the ritual.
-    pub fn advance_remembered(&mut self, bloom_total_chunks: u16) {
+    ///
+    /// `phrase_source` records which phrase path matched this chunk (authored,
+    /// derived, or none for skips). Used for the per-bloom authored-vs-derived
+    /// counters in the summary roll-up (PR 3 observability).
+    pub fn advance_remembered(&mut self, bloom_total_chunks: u16, phrase_source: PhraseSourceTag) {
         debug_assert!(!self.is_complete(), "advance called on completed session");
         debug_assert!(
             (self.current_chunk_index as usize) < bloom_total_chunks.max(1) as usize,
@@ -206,14 +240,30 @@ impl WakeSession {
             bloom_total_chunks
         );
         self.remembered_count += 1;
+        if let Some(meta) = self.bloom_chunk_meta.get_mut(self.current_index) {
+            meta.remembered_chunks += 1;
+            match phrase_source {
+                PhraseSourceTag::Authored => meta.authored_chunks += 1,
+                PhraseSourceTag::Derived => meta.derived_chunks += 1,
+                PhraseSourceTag::None => {}
+            }
+        }
         self.step = self.step.saturating_add(1);
         self.advance_chunk_or_bloom(bloom_total_chunks);
     }
 
     /// Advance past the current chunk (needed help path).
-    pub fn advance_helped(&mut self, bloom_total_chunks: u16) {
+    pub fn advance_helped(&mut self, bloom_total_chunks: u16, phrase_source: PhraseSourceTag) {
         debug_assert!(!self.is_complete());
         self.needed_help_count += 1;
+        if let Some(meta) = self.bloom_chunk_meta.get_mut(self.current_index) {
+            meta.helped_chunks += 1;
+            match phrase_source {
+                PhraseSourceTag::Authored => meta.authored_chunks += 1,
+                PhraseSourceTag::Derived => meta.derived_chunks += 1,
+                PhraseSourceTag::None => {}
+            }
+        }
         self.step = self.step.saturating_add(1);
         self.advance_chunk_or_bloom(bloom_total_chunks);
     }
@@ -222,6 +272,9 @@ impl WakeSession {
     pub fn advance_skipped(&mut self, bloom_total_chunks: u16) {
         debug_assert!(!self.is_complete());
         self.skipped_count += 1;
+        if let Some(meta) = self.bloom_chunk_meta.get_mut(self.current_index) {
+            meta.skipped_chunks += 1;
+        }
         self.step = self.step.saturating_add(1);
         self.advance_chunk_or_bloom(bloom_total_chunks);
     }
@@ -468,7 +521,19 @@ pub struct Summary {
 pub struct BloomRollup {
     pub id: String,
     pub title: String,
+    /// Human-readable roll-up ("3/3 remembered", "2/3 remembered, 1 skipped").
     pub chunks: String,
+    /// Structured per-outcome counts so downstream consumers (analytics,
+    /// renderers) don't have to parse the string.
+    pub remembered: u32,
+    pub needed_help: u32,
+    pub skipped: u32,
+    pub total: u32,
+    /// Count of chunks this bloom surfaced via authored vs derived phrases.
+    /// Dog-fooding signal: high `derived` / low `authored` suggests the bloom
+    /// should probably get more authored wake_phrases.
+    pub authored_chunks: u32,
+    pub derived_chunks: u32,
 }
 
 /// Convert KnowledgeEntry to BloomPrompt (non-chunked form — PR 2 wires a
