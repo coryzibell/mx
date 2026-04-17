@@ -3549,7 +3549,19 @@ impl SurrealDatabase {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
         let current_index = obj["current_index"].as_u64().unwrap_or(0) as usize;
-        let current_chunk_index = obj["current_chunk_index"].as_u64().unwrap_or(0) as u16;
+        // Diffi flagged the previous `as u64 as u16` pattern as a silent-wrap
+        // footgun — reaching u16::MAX requires ~2000x default-threshold chunks
+        // today but the cast hides the failure mode. `try_from` surfaces an
+        // out-of-range stored value as a deserialization error instead of
+        // quietly producing a wrong cursor value.
+        let raw_chunk_idx = obj["current_chunk_index"].as_u64().unwrap_or(0);
+        let current_chunk_index = u16::try_from(raw_chunk_idx).map_err(|_| {
+            anyhow::anyhow!(
+                "wake_session.current_chunk_index {} exceeds u16::MAX; \
+                 session is corrupt or schema has drifted",
+                raw_chunk_idx
+            )
+        })?;
         let step = obj["step"].as_u64().unwrap_or(0) as u32;
         let attempts_on_current = obj["attempts_on_current"].as_u64().unwrap_or(0) as u8;
         let remembered_count = obj["remembered_count"].as_u64().unwrap_or(0) as u32;

@@ -329,11 +329,25 @@ pub struct WakeRespondResponse {
     pub progress: Option<Progress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
-    /// Set to true when a mid-ritual content edit re-derived an auto-derived
-    /// phrase such that the consumer's typed response no longer matches.
-    /// Legible error diagnostic per Risk 9 (§5.5 of the design).
+    /// Set to `Some(true)` when the consumer's response failed to match a
+    /// phrase that was auto-derived from chunk content (as opposed to an
+    /// authored phrase from the bloom owner).
+    ///
+    /// **Honest semantics:** this field fires on ANY derived-phrase
+    /// mismatch — it does NOT guarantee the bloom content actually changed
+    /// during the ritual. The original design (§10 Risk 9) proposed a
+    /// timestamp-compare (`bloom.updated_at > session.created_at`) to
+    /// distinguish "content genuinely shifted mid-ritual" from "user typed
+    /// the wrong thing"; `KnowledgeEntry.updated_at` is `Option<String>`
+    /// (RFC3339 requiring parsing) so that tighter check is deferred.
+    ///
+    /// Renamed from `content_changed_during_ritual` after Diffi's mx#213
+    /// review called out the name as overpromising. Consumers should treat
+    /// this as an advisory "you guessed a sampled phrase and it didn't
+    /// match — if you edited the bloom mid-ritual, consider a `--begin`
+    /// restart; otherwise just try again." Not a content-change detector.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_changed_during_ritual: Option<bool>,
+    pub derived_phrase_mismatch: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
