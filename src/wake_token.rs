@@ -68,7 +68,11 @@ pub struct BloomChunkMeta {
     /// Number of authored wake phrases on this bloom at session start.
     /// Chunks with `chunk_idx < authored_phrase_count` use the authored phrase
     /// at that index; chunks beyond it derive a phrase from their own content.
-    pub authored_phrase_count: u8,
+    ///
+    /// Widened u8→u16 on rebase onto merged #212 so it can compare directly
+    /// against `chunk_idx: u16` without cross-width casts at every site.
+    /// Realistic values stay ≤10 in practice; the wider type is uniformity.
+    pub authored_phrase_count: u16,
     /// If true, this bloom has zero authored phrases — every chunk emits as
     /// skip-type (conservative-by-default P==0 decision). Never auto-derived.
     pub is_phraseless: bool,
@@ -102,7 +106,11 @@ pub struct WakeSession {
     pub current_index: usize,
     /// Which chunk within the current bloom we're on. Resets to 0 when
     /// `current_index` advances. For non-chunked blooms this stays 0.
-    pub current_chunk_index: u8,
+    ///
+    /// Widened u8→u16 on rebase onto merged #212 — aligns with
+    /// `ChunkPlan.total: u16` so large-bloom-with-low-threshold rituals
+    /// (chunks > 255) address chunks correctly. Typical values remain 0-3.
+    pub current_chunk_index: u16,
     /// Monotonic step counter used for token anti-replay. Ticks by 1 on every
     /// chunk advance (remembered / helped / skipped). Survives bloom
     /// re-chunking mid-ritual.
@@ -189,7 +197,7 @@ impl WakeSession {
     ///
     /// Assertion-heavy by design (Risk 4): off-by-one bugs here will serve
     /// wrong content or stick the ritual.
-    pub fn advance_remembered(&mut self, bloom_total_chunks: u8) {
+    pub fn advance_remembered(&mut self, bloom_total_chunks: u16) {
         debug_assert!(!self.is_complete(), "advance called on completed session");
         debug_assert!(
             (self.current_chunk_index as usize) < bloom_total_chunks.max(1) as usize,
@@ -203,7 +211,7 @@ impl WakeSession {
     }
 
     /// Advance past the current chunk (needed help path).
-    pub fn advance_helped(&mut self, bloom_total_chunks: u8) {
+    pub fn advance_helped(&mut self, bloom_total_chunks: u16) {
         debug_assert!(!self.is_complete());
         self.needed_help_count += 1;
         self.step = self.step.saturating_add(1);
@@ -211,7 +219,7 @@ impl WakeSession {
     }
 
     /// Advance past the current chunk (skipped path).
-    pub fn advance_skipped(&mut self, bloom_total_chunks: u8) {
+    pub fn advance_skipped(&mut self, bloom_total_chunks: u16) {
         debug_assert!(!self.is_complete());
         self.skipped_count += 1;
         self.step = self.step.saturating_add(1);
@@ -220,7 +228,7 @@ impl WakeSession {
 
     /// Core cursor advance. Pure function of the two cursors + the chunk
     /// total. Called by the three `advance_*` wrappers above.
-    fn advance_chunk_or_bloom(&mut self, bloom_total_chunks: u8) {
+    fn advance_chunk_or_bloom(&mut self, bloom_total_chunks: u16) {
         let next_chunk = self.current_chunk_index.saturating_add(1);
         if (next_chunk as usize) < bloom_total_chunks.max(1) as usize {
             // More chunks in this bloom.
@@ -247,7 +255,7 @@ impl WakeSession {
     ///
     /// Returns `true` if clamping occurred (caller should set the
     /// `chunk_truncated` response field).
-    pub fn clamp_if_chunks_shrank(&mut self, bloom_total_chunks: u8) -> bool {
+    pub fn clamp_if_chunks_shrank(&mut self, bloom_total_chunks: u16) -> bool {
         let total = bloom_total_chunks.max(1) as usize;
         if (self.current_chunk_index as usize) >= total {
             self.current_index += 1;
@@ -267,9 +275,9 @@ impl WakeSession {
 
 /// Count of authored wake phrases on an entry (wake_phrases takes priority
 /// over the legacy single `wake_phrase`).
-pub fn authored_phrase_count(entry: &KnowledgeEntry) -> u8 {
+pub fn authored_phrase_count(entry: &KnowledgeEntry) -> u16 {
     if !entry.wake_phrases.is_empty() {
-        u8::try_from(entry.wake_phrases.len()).unwrap_or(u8::MAX)
+        u16::try_from(entry.wake_phrases.len()).unwrap_or(u16::MAX)
     } else if entry.wake_phrase.is_some() {
         1
     } else {
@@ -370,8 +378,8 @@ pub struct BloomPrompt {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ChunkRef {
-    pub index: u8,
-    pub total: u8,
+    pub index: u16,
+    pub total: u16,
     /// Present and `true` when the chunk exceeds the chunking threshold
     /// (typically an un-splittable code block). Documented limitation.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -47,8 +47,8 @@ impl PhraseSource {
 /// get softened comparisons (Derived mode).
 fn phrase_for_chunk(
     entry: &KnowledgeEntry,
-    chunk_idx: u8,
-    chunk_total: u8,
+    chunk_idx: u16,
+    chunk_total: u16,
     chunk_content: &str,
 ) -> Option<(String, PhraseSource)> {
     let authored_count = authored_phrase_count(entry);
@@ -56,7 +56,7 @@ fn phrase_for_chunk(
         // P==0 conservative default — skip-type across all chunks.
         return None;
     }
-    if (chunk_idx as usize) < authored_count as usize
+    if chunk_idx < authored_count
         && let Some(p) = authored_phrase_at(entry, chunk_idx as usize)
     {
         return Some((p, PhraseSource::Authored));
@@ -107,7 +107,7 @@ fn bloom_content(entry: &KnowledgeEntry) -> String {
 /// backward-compatible contract.
 fn build_prompt_for_chunk(
     entry: &KnowledgeEntry,
-    chunk_idx: u8,
+    chunk_idx: u16,
     plan: &ChunkPlan,
     content: &str,
 ) -> BloomPrompt {
@@ -144,7 +144,7 @@ fn build_prompt_for_chunk(
 /// is the critical behavior change in mx#211.
 fn build_full_for_chunk(
     entry: &KnowledgeEntry,
-    chunk_idx: u8,
+    chunk_idx: u16,
     plan: &ChunkPlan,
     content: &str,
     matched_phrase: Option<String>,

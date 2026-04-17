@@ -3549,7 +3549,7 @@ impl SurrealDatabase {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
         let current_index = obj["current_index"].as_u64().unwrap_or(0) as usize;
-        let current_chunk_index = obj["current_chunk_index"].as_u64().unwrap_or(0) as u8;
+        let current_chunk_index = obj["current_chunk_index"].as_u64().unwrap_or(0) as u16;
         let step = obj["step"].as_u64().unwrap_or(0) as u32;
         let attempts_on_current = obj["attempts_on_current"].as_u64().unwrap_or(0) as u8;
         let remembered_count = obj["remembered_count"].as_u64().unwrap_or(0) as u32;
