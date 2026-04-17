@@ -62,7 +62,14 @@ pub fn chunk_threshold() -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkPlan {
     /// Total number of chunks. 1 for non-chunked (under-threshold) content.
-    pub total: u8,
+    ///
+    /// Widened from `u8` to `u16` after Diffi's review of mx#212: at the
+    /// default 28KB threshold a bloom would need ~7MB of content to overflow
+    /// u8, but `MX_WAKE_CHUNK_BYTES=50` on a 15KB bloom reproduced silent
+    /// saturation at 255. `plan.total` is consumed by progress display and
+    /// chunk indexing in PR 2, so a saturated `total` produced wrong UX and
+    /// potentially dropped chunks on the last-chunk branch.
+    pub total: u16,
     /// Byte offsets where each chunk after the first begins. `len() == total - 1`.
     pub boundaries: Vec<usize>,
     /// Per-chunk oversized flag. `oversized[i] == true` means chunk `i`
@@ -74,13 +81,13 @@ pub struct ChunkPlan {
 impl ChunkPlan {
     /// Slice chunk `idx` out of `content`. Returns `""` if `idx` is out of
     /// range (defensive — callers should validate against `total`).
-    pub fn chunk<'a>(&self, content: &'a str, idx: u8) -> &'a str {
+    pub fn chunk<'a>(&self, content: &'a str, idx: u16) -> &'a str {
         let (start, end) = self.chunk_range(content, idx);
         &content[start..end]
     }
 
     /// Byte range `[start, end)` for chunk `idx`.
-    pub fn chunk_range(&self, content: &str, idx: u8) -> (usize, usize) {
+    pub fn chunk_range(&self, content: &str, idx: u16) -> (usize, usize) {
         let idx = idx as usize;
         if idx >= self.total as usize {
             return (content.len(), content.len());
@@ -99,7 +106,7 @@ impl ChunkPlan {
     }
 
     /// Is chunk `idx` flagged oversized? (Over-threshold code block, etc.)
-    pub fn is_oversized(&self, idx: u8) -> bool {
+    pub fn is_oversized(&self, idx: u16) -> bool {
         self.oversized.get(idx as usize).copied().unwrap_or(false)
     }
 
@@ -116,11 +123,11 @@ impl ChunkPlan {
 pub struct ChunkPlanIter<'a> {
     plan: &'a ChunkPlan,
     content: &'a str,
-    idx: u8,
+    idx: u16,
 }
 
 impl<'a> Iterator for ChunkPlanIter<'a> {
-    type Item = (u8, &'a str, bool);
+    type Item = (u16, &'a str, bool);
     fn next(&mut self) -> Option<Self::Item> {
         if self.idx >= self.plan.total {
             return None;
@@ -227,18 +234,25 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
         oversized.push(tail_len > threshold);
     }
 
-    let total_u8 = u8::try_from(boundaries.len() + 1).unwrap_or(u8::MAX);
+    // `total` is u16 — plenty of headroom at the 28KB default (65535 chunks
+    // = ~1.8GB of bloom content) and covers the low-threshold-override
+    // regression Diffi flagged (15KB at threshold=50 needs ~300 chunks).
+    // `try_from` still saturates at u16::MAX for the truly pathological
+    // case; if that ever happens we emit a single mega-tail rather than
+    // corrupting the plan shape, and the oversized-flag sweep below will
+    // mark it appropriately.
+    let total_u16 = u16::try_from(boundaries.len() + 1).unwrap_or(u16::MAX);
 
     // Final safety sweep: recompute the oversized flag for every chunk from
     // its actual byte size. The in-loop pushes should already be correct,
     // but a dedicated pass is cheap insurance against an edge-case regression
     // sneaking a ≤-threshold flag through the seams. The chunker is
     // load-bearing (Risk 2) — defence-in-depth is warranted.
-    let mut recomputed_oversized = Vec::with_capacity(total_u8 as usize);
-    for idx in 0..total_u8 {
+    let mut recomputed_oversized = Vec::with_capacity(total_u16 as usize);
+    for idx in 0..total_u16 {
         let i = idx as usize;
         let start = if i == 0 { 0 } else { boundaries[i - 1] };
-        let end = if i == total_u8 as usize - 1 {
+        let end = if i == total_u16 as usize - 1 {
             content.len()
         } else {
             boundaries[i]
@@ -249,7 +263,7 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
     }
 
     ChunkPlan {
-        total: total_u8,
+        total: total_u16,
         boundaries,
         oversized: recomputed_oversized,
     }
@@ -423,7 +437,7 @@ const SYNTHETIC_PREFIX_CHARS: usize = 40;
 ///
 /// `chunk_idx` and `total` are only used for the synthetic tier. Passing 0/1
 /// is fine for test fixtures.
-pub fn extract_salient_phrase(content: &str, chunk_idx: u8, total: u8) -> String {
+pub fn extract_salient_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
     if let Some(heading) = first_heading(content) {
         return cap_chars(heading.trim(), PHRASE_MAX_CHARS);
     }
@@ -443,11 +457,27 @@ pub fn extract_salient_phrase(content: &str, chunk_idx: u8, total: u8) -> String
 }
 
 fn first_heading(content: &str) -> Option<String> {
+    // Track fenced-code-block state as we walk lines. `\`\`\`` at the start
+    // of a line toggles the in-fence flag; heading detection is suppressed
+    // while we're inside a fence so that prose like a literal `## example`
+    // shown inside a code sample doesn't get picked as the chunk's salient
+    // phrase. Diffi flagged this in mx#212 review — would have produced
+    // phrase collisions when two chunks both quoted a fake heading from
+    // different code blocks.
+    let mut in_fence = false;
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#') {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            // Fence open/close toggle. Both ```lang and bare ``` trigger it.
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if trimmed_start.starts_with('#') {
             // Strip leading `#` chars and any single space after them.
-            let stripped = trimmed.trim_start_matches('#');
+            let stripped = trimmed_start.trim_start_matches('#');
             let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
             if !stripped.trim().is_empty() {
                 return Some(stripped.to_string());
@@ -484,7 +514,7 @@ fn first_non_empty_line(content: &str) -> Option<String> {
         .map(|l| l.to_string())
 }
 
-fn synthetic_phrase(content: &str, chunk_idx: u8, total: u8) -> String {
+fn synthetic_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
     let prefix: String = content
         .chars()
         .take_while(|c| !matches!(c, '\n' | '\r'))
@@ -791,6 +821,50 @@ mod tests {
     }
 
     #[test]
+    fn chunk_count_beyond_u8_is_not_truncated() {
+        // Regression for Diffi's issue #1 on mx#212. Before widening
+        // `ChunkPlan.total` to u16, this configuration produced total=255
+        // (u8 saturated) while boundaries.len() was far higher — plan.total
+        // lied about the chunk count, breaking progress UX and last-chunk
+        // indexing downstream.
+        //
+        // Force ~600 chunks: 15KB content, threshold=25. Well above 255.
+        let threshold = 25;
+        let content = "a".repeat(15_000);
+        let plan = compute_chunks(&content, threshold);
+
+        // The count must be honest: total == boundaries.len() + 1.
+        assert_eq!(
+            plan.total as usize,
+            plan.boundaries.len() + 1,
+            "total {} does not match boundaries.len() + 1 = {}",
+            plan.total,
+            plan.boundaries.len() + 1,
+        );
+        // And must exceed the old u8 saturation point, proving the fix.
+        assert!(
+            plan.total > 255,
+            "expected >255 chunks to exercise the u8-saturation regression, got {}",
+            plan.total
+        );
+
+        // Reconstitution holds across the extended range.
+        let joined: String = plan
+            .iter(&content)
+            .map(|(_, s, _)| s)
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, content);
+
+        // The last chunk is addressable — pre-fix, plan.chunk(content, 254)
+        // would return the tail "chunk 254" but thousands of real bytes
+        // beyond that point would be silently conflated into it.
+        let last_idx = plan.total - 1;
+        let last = plan.chunk(&content, last_idx);
+        assert!(last.len() <= threshold + 8, "last chunk over threshold");
+    }
+
+    #[test]
     fn env_var_overrides_threshold() {
         // Save + restore env var so we don't pollute other tests.
         let prev = env::var(CHUNK_THRESHOLD_ENV).ok();
@@ -876,6 +950,99 @@ mod tests {
             let p = extract_salient_phrase(c, 0, 1);
             assert!(!p.is_empty(), "empty phrase for input {:?}", c);
         }
+    }
+
+    #[test]
+    fn phrase_abbreviation_splits_at_period_space_known_limitation() {
+        // Pinned regression test for the documented (and accepted) limitation
+        // that `first_sentence` splits naively on `". "` and therefore cuts
+        // abbreviations short. This test exists so a future change that
+        // introduces smarter abbrev handling doesn't silently shift behavior
+        // without updating the test. If you're reading this because you just
+        // broke it: consider whether you meant to, and if yes, update the
+        // expected value.
+        //
+        // Known shortened forms that land here today: Dr. Mr. Mrs. Ms. St.
+        // vs. etc. i.e. e.g. — a stop-list pass could improve this. Left as
+        // a follow-up (see mx#212 review reply for scope rationale).
+        let content = "See Dr. Smith for details. He prescribes two aspirin.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "See Dr.");
+    }
+
+    #[test]
+    fn phrase_heading_skips_inside_fenced_code_block() {
+        // Regression for Diffi's issue #2 on mx#212. The prose paragraph has
+        // no real heading; the only `## ...` in the chunk is inside a fenced
+        // block and must NOT be picked as the salient phrase.
+        let content = "Intro paragraph without a heading. More prose here.\n\n\
+             ```markdown\n\
+             ## fake heading in code\n\
+             more code lines\n\
+             ```\n\
+             trailing prose line.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert!(
+            !p.contains("fake heading in code"),
+            "heading extractor descended into fenced block: {:?}",
+            p
+        );
+        // With no real heading, we expect the first sentence of the prose.
+        assert!(
+            p.starts_with("Intro paragraph"),
+            "expected first-sentence fallback, got {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn phrase_heading_after_fenced_block_is_picked() {
+        // A real heading that appears *after* a code block should still be
+        // picked. Verifies the fence toggle closes properly.
+        let content = "Intro prose.\n\n\
+             ```rust\n\
+             // ## not a heading\n\
+             fn x() {}\n\
+             ```\n\n\
+             ## Real Heading\n\n\
+             body text.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Real Heading");
+    }
+
+    #[test]
+    fn phrase_heading_between_two_fenced_blocks_is_picked() {
+        // Fence open → fence close → real heading → fence open → fence close.
+        // Must pick the real heading sandwiched between the two blocks.
+        let content = "\
+            ```\n\
+            ## fake one\n\
+            ```\n\n\
+            ## Real Heading\n\n\
+            body\n\n\
+            ```\n\
+            ## fake two\n\
+            ```\n";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Real Heading");
+    }
+
+    #[test]
+    fn phrase_pure_fenced_chunk_has_no_extractable_heading() {
+        // Chunk is nothing but a fenced block containing a fake heading.
+        // Heading tier must skip; we fall through to sentence/line/synthetic.
+        let content = "\
+            ```markdown\n\
+            ## fake heading inside code\n\
+            more code\n\
+            ```\n";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert!(
+            !p.contains("fake heading inside code"),
+            "fence-only chunk returned fake heading: {:?}",
+            p
+        );
+        assert!(!p.is_empty());
     }
 
     // --- compare_phrase unit tests --------------------------------------------
@@ -1029,7 +1196,7 @@ mod tests {
         }
 
         #[test]
-        fn prop_phrase_never_empty(content in "\\PC{0,4096}", idx in 0u8..10, total in 1u8..10) {
+        fn prop_phrase_never_empty(content in "\\PC{0,4096}", idx in 0u16..10, total in 1u16..10) {
             let p = extract_salient_phrase(&content, idx, total);
             prop_assert!(!p.is_empty(), "empty phrase for content len {}", content.len());
         }
