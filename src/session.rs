@@ -187,7 +187,7 @@ pub fn find_most_recent_session() -> Result<PathBuf> {
     }
 
     // Sort by modification time (most recent first)
-    sessions.sort_by(|a, b| b.1.cmp(&a.1));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.1));
 
     Ok(sessions[0].0.clone())
 }

@@ -170,7 +170,7 @@ pub fn list_sessions(all: bool, json: bool) -> Result<()> {
     }
 
     // Sort by archived_at (most recent first)
-    archives.sort_by(|a, b| b.manifest.archived_at.cmp(&a.manifest.archived_at));
+    archives.sort_by_key(|a| std::cmp::Reverse(a.manifest.archived_at));
 
     // Filter incremental archives unless --all
     if !all {
@@ -192,7 +192,7 @@ pub fn list_sessions(all: bool, json: bool) -> Result<()> {
         }
 
         archives = latest_map.into_values().collect();
-        archives.sort_by(|a, b| b.manifest.archived_at.cmp(&a.manifest.archived_at));
+        archives.sort_by_key(|a| std::cmp::Reverse(a.manifest.archived_at));
     }
 
     if json {

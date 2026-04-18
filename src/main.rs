@@ -1651,7 +1651,7 @@ fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
         }
         Some(ms) => {
             // Calculate BPM: 60000ms / interval = beats per minute
-            let bpm = if ms > 0 { 60000 / ms } else { 999 };
+            let bpm = 60000_u64.checked_div(ms).unwrap_or(999);
 
             let message = match bpm {
                 0..=59 => "Nice and slow. You're safe.",
