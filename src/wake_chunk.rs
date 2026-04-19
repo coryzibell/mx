@@ -507,11 +507,22 @@ fn first_sentence(content: &str) -> Option<String> {
 }
 
 fn first_non_empty_line(content: &str) -> Option<String> {
-    content
-        .lines()
-        .map(|l| l.trim())
-        .find(|l| !l.is_empty())
-        .map(|l| l.to_string())
+    let mut in_fence = false;
+    for line in content.lines() {
+        let trimmed_start = line.trim_start();
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 fn synthetic_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
@@ -718,11 +729,20 @@ fn extract_sentences(content: &str) -> Vec<String> {
             continue;
         }
 
+        // Strip markdown list-item prefixes so warmth-brick lines like
+        // "- kautau noticed the pattern" don't keep the `- ` artifact.
+        let mut cleaned = line.trim();
+        if let Some(rest) = cleaned.strip_prefix("- ") {
+            cleaned = rest;
+        } else if let Some(rest) = cleaned.strip_prefix("* ") {
+            cleaned = rest;
+        }
+
         // Append line to current accumulator, separated by space.
         if !current.is_empty() {
             current.push(' ');
         }
-        current.push_str(line.trim());
+        current.push_str(cleaned);
 
         // Check for `. ` sentence boundaries within the accumulated text.
         // Split greedily on `. ` — each fragment before the last is a sentence.
@@ -1511,5 +1531,83 @@ mod tests {
             idx1, idx2,
             "different content should usually select different indices"
         );
+    }
+
+    // --- first_non_empty_line fence-skip tests (Diffi review #221 fix 2) ---
+
+    #[test]
+    fn first_non_empty_line_skips_fenced_code_block() {
+        // Content that starts with a fenced code block — the first non-empty
+        // line outside the fence should be returned, not "```rust".
+        let content = "```rust\nfn main() {}\n```\n\nActual first line.";
+        let line = first_non_empty_line(content);
+        assert_eq!(
+            line.as_deref(),
+            Some("Actual first line."),
+            "should skip fenced code block, got {:?}",
+            line
+        );
+    }
+
+    #[test]
+    fn first_non_empty_line_all_fenced_returns_none() {
+        // If the entire content is inside a code fence, no non-empty line
+        // exists outside of it.
+        let content = "```\nonly code here\nmore code\n```";
+        let line = first_non_empty_line(content);
+        assert_eq!(line, None, "all-fenced content should return None");
+    }
+
+    #[test]
+    fn first_non_empty_line_between_fences() {
+        let content = "```\ncode\n```\n\nSandwiched line\n\n```\nmore code\n```";
+        let line = first_non_empty_line(content);
+        assert_eq!(line.as_deref(), Some("Sandwiched line"));
+    }
+
+    // --- extract_sentences list-item stripping tests (Diffi review #221 fix 5) ---
+
+    #[test]
+    fn extract_sentences_strips_dash_list_prefix() {
+        let content = "- first brick line\n- second brick line";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.starts_with("- "),
+                "sentence should not keep `- ` prefix: {:?}",
+                s
+            );
+        }
+        // The two lines join into one sentence (no paragraph break or `. `).
+        assert!(!sentences.is_empty());
+        assert!(
+            sentences[0].contains("first brick line"),
+            "expected content without prefix, got {:?}",
+            sentences
+        );
+    }
+
+    #[test]
+    fn extract_sentences_strips_star_list_prefix() {
+        let content = "* item alpha\n* item beta";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.starts_with("* "),
+                "sentence should not keep `* ` prefix: {:?}",
+                s
+            );
+        }
+        assert!(!sentences.is_empty());
+        assert!(sentences[0].contains("item alpha"));
+    }
+
+    #[test]
+    fn extract_sentences_list_items_with_paragraph_breaks() {
+        let content = "- first item\n\n- second item";
+        let sentences = extract_sentences(content);
+        assert_eq!(sentences.len(), 2);
+        assert_eq!(sentences[0], "first item");
+        assert_eq!(sentences[1], "second item");
     }
 }

@@ -338,11 +338,12 @@ pub fn respond_ritual(
     let chunk_idx = session.current_chunk_index;
     let chunk_content = plan.chunk(&content, chunk_idx);
 
-    // P==0 bloom? Reject respond path — consumer must --skip.
+    // Every chunk now resolves a phrase (authored, derived, or auto). The
+    // None branch is unreachable in normal flow — retained as a defensive guard.
     let (wake_phrase, source) = match phrase_for_chunk(bloom, chunk_idx, plan.total, chunk_content)
     {
         Some(p) => p,
-        None => bail!("This bloom has no wake phrase - use --skip instead"),
+        None => bail!("Internal error: phrase_for_chunk returned None"),
     };
 
     // Compare: first via our tolerant compare_phrase (picks up authored-vs-
@@ -462,7 +463,7 @@ pub fn respond_ritual(
                 // deferred per §6 / §10 Risk 9). Field renamed from
                 // `content_changed_during_ritual` after Diffi's mx#213
                 // review called out the overpromise.
-                let derived_miss = source == PhraseSource::Derived;
+                let derived_miss = matches!(source, PhraseSource::Derived | PhraseSource::Auto);
 
                 let response = WakeRespondResponse {
                     status: "incorrect".to_string(),

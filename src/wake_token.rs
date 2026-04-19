@@ -541,7 +541,9 @@ pub struct BloomRollup {
     /// Count of chunks this bloom surfaced via authored vs derived phrases.
     /// Dog-fooding signal: high `derived` / low `authored` suggests the bloom
     /// should probably get more authored wake_phrases.
+    #[serde(skip_serializing_if = "is_zero")]
     pub authored_chunks: u32,
+    #[serde(skip_serializing_if = "is_zero")]
     pub derived_chunks: u32,
     /// Count of chunks that used auto-generated phrases (mx#218). High count
     /// means the bloom has no authored phrases and needs them.
