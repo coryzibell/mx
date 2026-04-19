@@ -726,16 +726,12 @@ fn extract_sentences(content: &str) -> Vec<String> {
 
         // Check for `. ` sentence boundaries within the accumulated text.
         // Split greedily on `. ` — each fragment before the last is a sentence.
-        loop {
-            if let Some(pos) = current.find(". ") {
-                let sentence = current[..=pos].trim().to_string(); // include the period
-                if !sentence.is_empty() {
-                    sentences.push(sentence);
-                }
-                current = current[pos + 2..].to_string();
-            } else {
-                break;
+        while let Some(pos) = current.find(". ") {
+            let sentence = current[..=pos].trim().to_string(); // include the period
+            if !sentence.is_empty() {
+                sentences.push(sentence);
             }
+            current = current[pos + 2..].to_string();
         }
     }
 
