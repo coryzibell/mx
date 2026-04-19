@@ -6,16 +6,21 @@ use crate::knowledge::KnowledgeEntry;
 use crate::store::{AgentContext, KnowledgeStore, WakeCascade};
 use crate::wake_chunk::{
     ChunkPlan, PhraseMatch, PhraseMode, chunk_threshold, compare_phrase, compute_chunks,
-    extract_salient_phrase,
+    extract_auto_phrase, extract_salient_phrase,
 };
 use crate::wake_token::*;
 
-/// Which phrase source unlocked a chunk — authored by the bloom owner, or
-/// auto-derived from the chunk's own content (§5 of the mx#211 design).
+/// Which phrase source unlocked a chunk — authored by the bloom owner,
+/// auto-derived from the chunk's own content (§5 of the mx#211 design),
+/// or auto-generated for a phraseless bloom (mx#218).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PhraseSource {
     Authored,
     Derived,
+    /// Auto-generated phrase for a chunk that has neither authored nor derived
+    /// phrases. Extracted from the chunk's content via `extract_auto_phrase`
+    /// (mx#218). Uses the same tolerant matching as Derived phrases.
+    Auto,
 }
 
 impl PhraseSource {
@@ -23,13 +28,16 @@ impl PhraseSource {
         match self {
             PhraseSource::Authored => "authored",
             PhraseSource::Derived => "derived",
+            PhraseSource::Auto => "auto",
         }
     }
 
     fn mode(self) -> PhraseMode {
         match self {
             PhraseSource::Authored => PhraseMode::Authored,
-            PhraseSource::Derived => PhraseMode::Derived,
+            // Auto phrases use the same tolerant comparison as derived —
+            // case-insensitive, trailing punct stripped, whitespace collapsed.
+            PhraseSource::Derived | PhraseSource::Auto => PhraseMode::Derived,
         }
     }
 
@@ -40,6 +48,7 @@ impl PhraseSource {
         match self {
             PhraseSource::Authored => PhraseSourceTag::Authored,
             PhraseSource::Derived => PhraseSourceTag::Derived,
+            PhraseSource::Auto => PhraseSourceTag::Auto,
         }
     }
 }
@@ -48,13 +57,15 @@ impl PhraseSource {
 /// win when available at the given index; beyond the authored count we
 /// auto-derive from the chunk's own content (§5.2).
 ///
-/// **P==0 semantics:** for blooms with zero authored phrases we return `None`
-/// — those blooms stay skip-type across every chunk (conservative default
-/// per the P==0 decision). Never auto-derive for phraseless blooms.
+/// **P==0 semantics (mx#218):** for blooms with zero authored phrases we
+/// auto-generate a phrase from the chunk's content via `extract_auto_phrase`.
+/// This ensures every chunk in every bloom has a phrase — the 3-attempt +
+/// reveal engagement flow applies universally. No bloom can be `--skip`'d
+/// without engagement.
 ///
 /// Returns `(phrase, source)`. `source` drives the comparison tolerance:
-/// authored phrases get exact-compare (Authored mode) while derived phrases
-/// get softened comparisons (Derived mode).
+/// authored phrases get exact-compare (Authored mode) while derived and
+/// auto phrases get softened comparisons (Derived mode).
 fn phrase_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
@@ -63,8 +74,11 @@ fn phrase_for_chunk(
 ) -> Option<(String, PhraseSource)> {
     let authored_count = authored_phrase_count(entry);
     if authored_count == 0 {
-        // P==0 conservative default — skip-type across all chunks.
-        return None;
+        // P==0: auto-generate a phrase from the chunk's content (mx#218).
+        // Uses `extract_auto_phrase` which has a title fallback tier,
+        // guaranteeing a non-empty phrase even for empty content.
+        let phrase = extract_auto_phrase(chunk_content, &entry.title);
+        return Some((phrase, PhraseSource::Auto));
     }
     if chunk_idx < authored_count
         && let Some(p) = authored_phrase_at(entry, chunk_idx as usize)
@@ -122,6 +136,23 @@ fn build_prompt_for_chunk(
     content: &str,
 ) -> BloomPrompt {
     let mut prompt = BloomPrompt::from(entry);
+
+    // Determine phrase source for this chunk. After mx#218 every chunk has a
+    // phrase — authored, derived, or auto — so this always returns Some.
+    let chunk_content = if plan.total > 1 {
+        plan.chunk(content, chunk_idx)
+    } else {
+        content
+    };
+    if let Some((_, source)) = phrase_for_chunk(entry, chunk_idx, plan.total, chunk_content) {
+        prompt.phrase_source = Some(source.as_str().to_string());
+        // Auto-phrased chunks report wake_phrase_count=1 so the consumer
+        // knows a phrase exists and --respond is required (mx#218).
+        if source == PhraseSource::Auto {
+            prompt.wake_phrase_count = 1;
+        }
+    }
+
     if plan.total > 1 {
         prompt.title = format!("{} (Part {}/{})", entry.title, chunk_idx + 1, plan.total);
         prompt.chunk = Some(ChunkRef {
@@ -133,18 +164,6 @@ fn build_prompt_for_chunk(
                 None
             },
         });
-        // Indicate authored-vs-derived only when there's a phrase for the
-        // chunk. P==0 blooms skip; non-P==0 blooms expose the source.
-        let chunk_content = plan.chunk(content, chunk_idx);
-        if let Some((_, source)) = phrase_for_chunk(entry, chunk_idx, plan.total, chunk_content) {
-            prompt.phrase_source = Some(source.as_str().to_string());
-        }
-    } else {
-        // Single-chunk bloom — still surface phrase_source if applicable so
-        // consumers have a uniform signal regardless of chunking.
-        if authored_phrase_count(entry) > 0 {
-            prompt.phrase_source = Some(PhraseSource::Authored.as_str().to_string());
-        }
     }
     prompt
 }
@@ -512,22 +531,27 @@ pub fn skip_ritual(
     let plan = compute_chunks(&content, chunk_threshold());
     let chunk_truncated = session.clamp_if_chunks_shrank(plan.total);
 
-    // Gate: skip is only valid for phraseless blooms (mx#216). If the bloom
-    // has any wake phrases (authored, legacy, or derived-eligible), reject
-    // with a structured error. The consumer must use --respond instead.
-    if !chunk_truncated && authored_phrase_count(bloom) > 0 {
-        let response = WakeErrorResponse {
-            status: "error".to_string(),
-            error: "skip_requires_phraseless_bloom".to_string(),
-            message: "This chunk has a wake phrase and cannot be skipped. Attempt a guess — three incorrect attempts will reveal the content. Priming requires engagement.".to_string(),
-            expected_id: Some(expected_id),
-        };
-        return Ok(serde_json::to_string(&response)?);
+    // Gate: skip is rejected for ALL blooms that have a phrase (mx#218
+    // extends mx#216). After auto-phrase generation, every chunk has a phrase
+    // — authored, derived, or auto — so --skip is only valid when
+    // chunk_truncated (content shrank past cursor). Consumers must use
+    // --respond; 3 incorrect attempts reveal the content. Priming requires
+    // engagement.
+    if !chunk_truncated {
+        let chunk_content = plan.chunk(&content, session.current_chunk_index);
+        if phrase_for_chunk(bloom, session.current_chunk_index, plan.total, chunk_content).is_some()
+        {
+            let response = WakeErrorResponse {
+                status: "error".to_string(),
+                error: "skip_requires_phraseless_bloom".to_string(),
+                message: "This chunk has a wake phrase and cannot be skipped. Attempt a guess — three incorrect attempts will reveal the content. Priming requires engagement.".to_string(),
+                expected_id: Some(expected_id),
+            };
+            return Ok(serde_json::to_string(&response)?);
+        }
     }
 
     // Skip advances past exactly one chunk (not the whole bloom if chunked).
-    // For P==0 blooms the consumer calls --skip K times to walk through all K
-    // chunks — expected behavior per §5.9.
     let chunk_idx = session.current_chunk_index;
     session.advance_skipped(plan.total);
 
@@ -654,6 +678,7 @@ fn build_bloom_rollups(
                 total: total_outcomes,
                 authored_chunks: meta.authored_chunks,
                 derived_chunks: meta.derived_chunks,
+                auto_chunks: meta.auto_chunks,
             }
         })
         .collect()
@@ -891,10 +916,16 @@ mod tests {
     }
 
     #[test]
-    fn phrase_for_chunk_phraseless_returns_none() {
+    fn phrase_for_chunk_phraseless_returns_auto() {
+        // mx#218: P==0 blooms now get auto-generated phrases instead of None.
         let e = entry_with_phrases(vec![]);
-        assert!(phrase_for_chunk(&e, 0, 3, "content").is_none());
-        assert!(phrase_for_chunk(&e, 2, 3, "content").is_none());
+        let (p0, src0) = phrase_for_chunk(&e, 0, 3, "content").unwrap();
+        assert!(!p0.is_empty());
+        assert_eq!(src0, PhraseSource::Auto);
+
+        let (p2, src2) = phrase_for_chunk(&e, 2, 3, "## A heading\n\nbody").unwrap();
+        assert_eq!(p2, "A heading");
+        assert_eq!(src2, PhraseSource::Auto);
     }
 
     #[test]
@@ -1111,20 +1142,18 @@ mod tests {
     }
 
     #[test]
-    fn phraseless_large_bloom_returns_none_for_every_chunk() {
-        // P==0: all chunks are skip-type per the conservative default.
+    fn phraseless_large_bloom_returns_auto_for_every_chunk() {
+        // mx#218: P==0 blooms now get auto-generated phrases for every chunk.
         let entry = make_large_bloom(90_000, vec![]);
         let content = bloom_content(&entry);
         let plan = compute_chunks(&content, 28_000);
         assert!(plan.total >= 3);
         for idx in 0..plan.total {
             let chunk = plan.chunk(&content, idx);
-            let result = phrase_for_chunk(&entry, idx, plan.total, chunk);
-            assert!(
-                result.is_none(),
-                "P==0 bloom should never auto-derive phrases (chunk {})",
-                idx
-            );
+            let (phrase, source) = phrase_for_chunk(&entry, idx, plan.total, chunk)
+                .expect("P==0 bloom should have auto-phrase for every chunk");
+            assert!(!phrase.is_empty(), "auto-phrase must not be empty (chunk {})", idx);
+            assert_eq!(source, PhraseSource::Auto, "P==0 bloom should use Auto source (chunk {})", idx);
         }
     }
 
@@ -1587,23 +1616,21 @@ mod tests {
         );
     }
 
-    /// Diffi's issue #2 (mx#213): P==0 repeated-skip walkthrough on an
-    /// oversized phraseless bloom. Builds a bloom large enough to split
-    /// into ≥3 chunks, with zero authored phrases, and walks the whole
-    /// thing via repeated `skip_ritual` calls. Asserts:
+    /// mx#218: P==0 bloom with auto-phrases walks via the 3-attempt + reveal
+    /// flow. Builds a bloom large enough to split into >=3 chunks, with zero
+    /// authored phrases. After mx#218, every chunk gets an auto-generated
+    /// phrase. Walking through with wrong guesses must trigger the hint flow
+    /// and eventual reveal (3 failures).
     ///
-    /// - Every chunk emits as skip-type (no phrase attempted).
-    /// - `BloomPrompt.phrase_source` is None on every prompt (P==0 blooms
-    ///   don't expose authored/derived).
-    /// - `BloomPrompt.wake_phrase_count` is 0 on every prompt.
-    /// - Each skip advances the chunk cursor; after N skips for an
-    ///   N-chunk bloom, the ritual completes.
-    /// - Summary reports `skipped == total_chunks`.
+    /// Asserts:
+    /// - `BloomPrompt.phrase_source` is `"auto"` on every prompt.
+    /// - `BloomPrompt.wake_phrase_count` is 1 on every prompt.
+    /// - --skip is rejected (auto-phrase means engagement is required).
+    /// - 3 wrong guesses reveals the content.
+    /// - Summary reports `needed_help == total_chunks`.
     #[test]
-    fn integration_phraseless_oversized_bloom_walks_via_repeated_skips() {
+    fn integration_phraseless_bloom_walks_via_auto_phrase_engagement() {
         let store = MockStore::new();
-        // P==0: vec![] — zero authored phrases. Conservative default
-        // must keep every chunk skip-typed.
         let bloom = make_large_bloom(72_000, vec![]);
         let bloom_id = bloom.id.clone();
         store
@@ -1614,77 +1641,59 @@ mod tests {
         let cascade = test_cascade(vec![bloom.clone()]);
         let ctx = AgentContext::public_only();
 
-        // Begin. Expect P==0 marker visible on prompt (wake_phrase_count=0,
-        // phrase_source None).
+        // Begin. Expect auto-phrase markers on the prompt.
         let begin_json: serde_json::Value =
             serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
         let total_chunks = begin_json["progress"]["total"].as_u64().unwrap() as u16;
-        assert!(total_chunks >= 3, "need ≥3 chunks; got {}", total_chunks);
+        assert!(total_chunks >= 3, "need >=3 chunks; got {}", total_chunks);
         assert_eq!(
-            begin_json["prompt"]["wake_phrase_count"], 0,
-            "P==0 bloom prompt must declare zero phrases"
+            begin_json["prompt"]["wake_phrase_count"], 1,
+            "auto-phrased bloom must declare 1 phrase"
         );
-        assert!(
-            begin_json["prompt"].get("phrase_source").is_none()
-                || begin_json["prompt"]["phrase_source"].is_null(),
-            "P==0 bloom prompt must not advertise phrase_source; got {:?}",
-            begin_json["prompt"].get("phrase_source")
+        assert_eq!(
+            begin_json["prompt"]["phrase_source"], "auto",
+            "auto-phrased bloom must expose phrase_source='auto'"
         );
 
-        // Walk every chunk via --skip. On each response, assert the flow
-        // stays in skip-mode (no hint, no phrase compare attempted).
+        // Attempt to skip — must be rejected (mx#218 + mx#216 combined).
         let mut token = token_from_response(&begin_json);
-        for chunk_walked in 0..total_chunks {
-            let skip_json: serde_json::Value =
-                serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap())
-                    .unwrap();
-            assert_eq!(skip_json["status"], "skipped");
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap())
+                .unwrap();
+        assert_eq!(skip_json["status"], "error");
+        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
 
-            // Skip responses never include a hint field (hints come from
-            // the authored-phrase retry flow). Catches accidental regression
-            // where skip might start suggesting phrases.
-            assert!(
-                skip_json.get("hint").is_none() || skip_json["hint"].is_null(),
-                "skip response must not carry hint; got {:?}",
-                skip_json.get("hint")
-            );
+        // Walk every chunk via 3 wrong guesses → reveal.
+        for _chunk_walked in 0..total_chunks {
+            // 3 wrong guesses.
+            for attempt in 0..3 {
+                let resp_json: serde_json::Value = serde_json::from_str(
+                    &respond_ritual(&store, &ctx, &bloom_id, "totally wrong guess", &token)
+                        .unwrap(),
+                )
+                .unwrap();
 
-            // On all but the last chunk, the `next` prompt must also be
-            // P==0 / skip-compatible.
-            if chunk_walked + 1 < total_chunks {
-                let next = &skip_json["next"];
-                assert!(!next.is_null(), "expected next prompt before completion");
-                assert_eq!(
-                    next["wake_phrase_count"], 0,
-                    "next chunk in P==0 bloom must stay wake_phrase_count=0"
-                );
-                assert!(
-                    next.get("phrase_source").is_none() || next["phrase_source"].is_null(),
-                    "P==0 next prompt must not expose phrase_source"
-                );
+                if attempt < 2 {
+                    assert_eq!(resp_json["status"], "incorrect");
+                    assert!(resp_json.get("hint").is_some());
+                    token = token_from_response(&resp_json);
+                } else {
+                    // 3rd failure → revealed.
+                    assert_eq!(
+                        resp_json["status"], "revealed",
+                        "expected reveal after 3 failures; got {:?}",
+                        resp_json["status"]
+                    );
+                    assert_eq!(
+                        resp_json["bloom"]["phrase_source"], "auto",
+                        "revealed bloom should carry phrase_source='auto'"
+                    );
+                    token = token_from_response(&resp_json);
+                }
             }
-
-            token = token_from_response(&skip_json);
         }
 
-        // After N skips for an N-chunk bloom, ritual completes. Summary
-        // must report total == skipped.
-        {
-            let final_json: serde_json::Value = serde_json::from_str(
-                &skip_ritual(&store, &ctx, &bloom_id, &token)
-                    .err()
-                    .map(|e| format!(r#"{{"error":{:?}}}"#, e.to_string()))
-                    .unwrap_or_else(|| {
-                        // If we ran exactly total_chunks skips above, the
-                        // ritual is already complete. A subsequent skip
-                        // would fail; we don't call it — we check the
-                        // session was deleted instead.
-                        String::new()
-                    }),
-            )
-            .unwrap_or(serde_json::json!({}));
-            let _ = final_json;
-        }
+        // After all chunks are revealed, ritual is complete.
         assert!(
             store.sessions.borrow().is_empty(),
             "session should be deleted on completion; still present: {:?}",
@@ -1896,8 +1905,9 @@ mod tests {
     }
 
     #[test]
-    fn skip_accepts_phraseless_bloom() {
-        // Regression guard: phraseless blooms must still skip normally.
+    fn skip_rejects_phraseless_bloom_with_auto_phrase() {
+        // mx#218: phraseless blooms now have auto-generated phrases and
+        // cannot be skipped. The consumer must use --respond instead.
         let store = MockStore::new();
         let bloom = test_entry(); // no wake_phrases, no wake_phrase
         let bloom_id = bloom.id.clone();
@@ -1916,10 +1926,11 @@ mod tests {
         let skip_json: serde_json::Value =
             serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
         assert_eq!(
-            skip_json["status"], "skipped",
-            "phraseless bloom should skip normally; got {:?}",
+            skip_json["status"], "error",
+            "auto-phrased bloom should reject skip; got {:?}",
             skip_json["status"]
         );
+        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
     }
 
     #[test]
@@ -1955,5 +1966,201 @@ mod tests {
             "original token should still work after skip rejection; got {:?}",
             resp_json["status"]
         );
+    }
+
+    // =====================================================================
+    // mx#218 — auto-phrase integration tests
+    // =====================================================================
+
+    /// Test 9: begin_ritual on a phraseless bloom produces a prompt with
+    /// `wake_phrase_count: 1` and `phrase_source: "auto"`.
+    #[test]
+    fn begin_ritual_auto_phrases_for_phraseless_bloom() {
+        let store = MockStore::new();
+        let bloom = test_entry(); // no wake_phrases, no wake_phrase
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+
+        assert_eq!(
+            begin_json["prompt"]["wake_phrase_count"], 1,
+            "auto-phrased bloom must declare wake_phrase_count=1; got {:?}",
+            begin_json["prompt"]["wake_phrase_count"]
+        );
+        assert_eq!(
+            begin_json["prompt"]["phrase_source"], "auto",
+            "auto-phrased bloom must declare phrase_source='auto'; got {:?}",
+            begin_json["prompt"]["phrase_source"]
+        );
+    }
+
+    /// Test 10: correct guess against an auto-generated phrase returns
+    /// `status: "remembered"`.
+    #[test]
+    fn respond_ritual_accepts_auto_phrase() {
+        let store = MockStore::new();
+        let mut bloom = test_entry();
+        bloom.body = Some("## The Discovery\n\nBody text here.".to_string());
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        // The auto-phrase for this content should be "The Discovery" (heading tier).
+        let resp_json: serde_json::Value = serde_json::from_str(
+            &respond_ritual(&store, &ctx, &bloom_id, "The Discovery", &token).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resp_json["status"], "remembered",
+            "correct auto-phrase guess should be accepted; got {:?}",
+            resp_json["status"]
+        );
+        assert_eq!(resp_json["bloom"]["phrase_source"], "auto");
+    }
+
+    /// Test 11: 3 wrong guesses against an auto-phrase → `status: "revealed"`.
+    #[test]
+    fn respond_ritual_reveals_auto_phrase_after_3_failures() {
+        let store = MockStore::new();
+        let mut bloom = test_entry();
+        bloom.body = Some("## Hidden Knowledge\n\nSecret content.".to_string());
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let mut token = token_from_response(&begin_json);
+
+        // 3 wrong guesses.
+        for attempt in 0..3 {
+            let resp_json: serde_json::Value = serde_json::from_str(
+                &respond_ritual(&store, &ctx, &bloom_id, "wrong guess", &token).unwrap(),
+            )
+            .unwrap();
+            if attempt < 2 {
+                assert_eq!(resp_json["status"], "incorrect");
+            } else {
+                assert_eq!(
+                    resp_json["status"], "revealed",
+                    "3rd failure should reveal; got {:?}",
+                    resp_json["status"]
+                );
+                assert_eq!(resp_json["bloom"]["phrase_source"], "auto");
+                assert!(
+                    resp_json["bloom"]["matched_phrase"].is_string(),
+                    "revealed bloom should include the matched_phrase"
+                );
+            }
+            token = token_from_response(&resp_json);
+        }
+    }
+
+    /// Test 12: --skip on an auto-phrased bloom returns error (combines
+    /// mx#218 auto-phrase with mx#216 skip guard).
+    #[test]
+    fn skip_rejected_for_auto_phrase_bloom() {
+        let store = MockStore::new();
+        let bloom = test_entry(); // P==0, gets auto-phrase
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+        assert_eq!(
+            skip_json["status"], "error",
+            "auto-phrased bloom must not be skippable; got {:?}",
+            skip_json["status"]
+        );
+        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
+
+        // Session state must be unchanged — still at step 0.
+        let sessions = store.sessions.borrow();
+        let sess = sessions.values().next().unwrap();
+        assert_eq!(sess.step, 0);
+        assert_eq!(sess.skipped_count, 0);
+    }
+
+    /// mx#218: auto-phrased blooms use tolerant matching (case-insensitive,
+    /// trailing punct stripped, whitespace collapsed) — same as derived.
+    #[test]
+    fn respond_ritual_auto_phrase_tolerant_match() {
+        let store = MockStore::new();
+        let mut bloom = test_entry();
+        bloom.body = Some("## The Discovery\n\nBody text here.".to_string());
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        // Case-insensitive guess should work (tolerant match).
+        let resp_json: serde_json::Value = serde_json::from_str(
+            &respond_ritual(&store, &ctx, &bloom_id, "the discovery", &token).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resp_json["status"], "remembered",
+            "case-insensitive auto-phrase guess should be accepted; got {:?}",
+            resp_json["status"]
+        );
+    }
+
+    /// mx#218: auto_chunks counter in the session rollup tracks auto-phrased
+    /// chunk outcomes.
+    #[test]
+    fn auto_phrase_bloom_rollup_tracks_auto_chunks() {
+        let e = test_entry();
+        let cascade = test_cascade(vec![e.clone()]);
+        let mut session = WakeSession::new(&cascade);
+
+        // Walk through as if it were auto-phrased (PhraseSourceTag::Auto).
+        session.advance_remembered(1, PhraseSourceTag::Auto);
+
+        let mut blooms = HashMap::new();
+        blooms.insert(e.id.clone(), e);
+        let rollups = build_bloom_rollups(&session, &blooms);
+        assert_eq!(rollups[0].auto_chunks, 1);
+        assert_eq!(rollups[0].authored_chunks, 0);
+        assert_eq!(rollups[0].derived_chunks, 0);
+        assert_eq!(rollups[0].remembered, 1);
     }
 }

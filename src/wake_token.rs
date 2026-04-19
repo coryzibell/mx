@@ -70,6 +70,8 @@ pub fn verify_token(token: &str) -> Result<(String, u32), String> {
 pub enum PhraseSourceTag {
     Authored,
     Derived,
+    /// Auto-generated phrase for a phraseless bloom (mx#218).
+    Auto,
     None,
 }
 
@@ -105,6 +107,11 @@ pub struct BloomChunkMeta {
     /// chunk total, the bloom probably wants more authored phrases.
     #[serde(default)]
     pub derived_chunks: u32,
+    /// Count of chunks that matched against an auto-generated phrase (mx#218).
+    /// These are phraseless blooms where the phrase was extracted from content.
+    /// High count signals the bloom needs authored wake phrases.
+    #[serde(default)]
+    pub auto_chunks: u32,
 }
 
 /// Server-side wake ritual session state.
@@ -245,6 +252,7 @@ impl WakeSession {
             match phrase_source {
                 PhraseSourceTag::Authored => meta.authored_chunks += 1,
                 PhraseSourceTag::Derived => meta.derived_chunks += 1,
+                PhraseSourceTag::Auto => meta.auto_chunks += 1,
                 PhraseSourceTag::None => {}
             }
         }
@@ -261,6 +269,7 @@ impl WakeSession {
             match phrase_source {
                 PhraseSourceTag::Authored => meta.authored_chunks += 1,
                 PhraseSourceTag::Derived => meta.derived_chunks += 1,
+                PhraseSourceTag::Auto => meta.auto_chunks += 1,
                 PhraseSourceTag::None => {}
             }
         }
@@ -534,6 +543,15 @@ pub struct BloomRollup {
     /// should probably get more authored wake_phrases.
     pub authored_chunks: u32,
     pub derived_chunks: u32,
+    /// Count of chunks that used auto-generated phrases (mx#218). High count
+    /// means the bloom has no authored phrases and needs them.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub auto_chunks: u32,
+}
+
+/// Helper for `#[serde(skip_serializing_if)]` on u32 fields that default to 0.
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 /// Convert KnowledgeEntry to BloomPrompt (non-chunked form — PR 2 wires a
