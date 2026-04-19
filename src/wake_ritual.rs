@@ -539,7 +539,13 @@ pub fn skip_ritual(
     // engagement.
     if !chunk_truncated {
         let chunk_content = plan.chunk(&content, session.current_chunk_index);
-        if phrase_for_chunk(bloom, session.current_chunk_index, plan.total, chunk_content).is_some()
+        if phrase_for_chunk(
+            bloom,
+            session.current_chunk_index,
+            plan.total,
+            chunk_content,
+        )
+        .is_some()
         {
             let response = WakeErrorResponse {
                 status: "error".to_string(),
@@ -1152,8 +1158,17 @@ mod tests {
             let chunk = plan.chunk(&content, idx);
             let (phrase, source) = phrase_for_chunk(&entry, idx, plan.total, chunk)
                 .expect("P==0 bloom should have auto-phrase for every chunk");
-            assert!(!phrase.is_empty(), "auto-phrase must not be empty (chunk {})", idx);
-            assert_eq!(source, PhraseSource::Auto, "P==0 bloom should use Auto source (chunk {})", idx);
+            assert!(
+                !phrase.is_empty(),
+                "auto-phrase must not be empty (chunk {})",
+                idx
+            );
+            assert_eq!(
+                source,
+                PhraseSource::Auto,
+                "P==0 bloom should use Auto source (chunk {})",
+                idx
+            );
         }
     }
 
@@ -1658,8 +1673,7 @@ mod tests {
         // Attempt to skip — must be rejected (mx#218 + mx#216 combined).
         let mut token = token_from_response(&begin_json);
         let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap())
-                .unwrap();
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
         assert_eq!(skip_json["status"], "error");
         assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
 

@@ -1452,7 +1452,10 @@ mod tests {
         let p_b = extract_auto_phrase(content_b, "B");
         // They CAN be the same index by coincidence, but the phrases themselves
         // will differ because the content differs.
-        assert_ne!(p_a, p_b, "different content should produce different phrases");
+        assert_ne!(
+            p_a, p_b,
+            "different content should produce different phrases"
+        );
     }
 
     // --- extract_sentences unit tests ---
@@ -1461,7 +1464,11 @@ mod tests {
     fn extract_sentences_basic() {
         let content = "First sentence. Second sentence. Third.";
         let sentences = extract_sentences(content);
-        assert!(sentences.len() >= 2, "expected >=2 sentences, got {:?}", sentences);
+        assert!(
+            sentences.len() >= 2,
+            "expected >=2 sentences, got {:?}",
+            sentences
+        );
         assert!(sentences[0].contains("First sentence."));
     }
 
@@ -1504,6 +1511,9 @@ mod tests {
         let idx2 = select_sentence_index(&sentences, "content beta");
         // With 10 choices and different seeds, these should differ.
         // Not a hard guarantee but very likely with this hash function.
-        assert_ne!(idx1, idx2, "different content should usually select different indices");
+        assert_ne!(
+            idx1, idx2,
+            "different content should usually select different indices"
+        );
     }
 }
