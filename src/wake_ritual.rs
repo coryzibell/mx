@@ -532,6 +532,31 @@ pub fn skip_ritual(
     let plan = compute_chunks(&content, chunk_threshold());
     let chunk_truncated = session.clamp_if_chunks_shrank(plan.total);
 
+    // mx#220: if chunks shrank past our cursor, early-return with a response
+    // reflecting the NEW cursor position — same pattern as respond_ritual's
+    // chunk_truncated path. Without this, the code below would continue with
+    // stale bloom/plan/content from the OLD cursor position.
+    if chunk_truncated {
+        let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
+        if session.is_complete() {
+            db.delete_wake_session(&session_id)?;
+        } else {
+            db.update_wake_session(&session)?;
+        }
+        let bloom_full =
+            build_full_for_chunk(bloom, 0, &plan, &content, None, None, chunk_truncated);
+        let new_token = create_token(&session_id, session.step);
+        let response = WakeSkipResponse {
+            status: "chunk_truncated".to_string(),
+            bloom: bloom_full,
+            session: new_token,
+            next,
+            progress: Some(progress),
+            summary,
+        };
+        return Ok(serde_json::to_string(&response)?);
+    }
+
     // Gate: skip is rejected for ALL blooms that have a phrase (mx#218
     // extends mx#216). After auto-phrase generation, every chunk has a phrase
     // — authored, derived, or auto — so --skip is only valid when
@@ -2177,5 +2202,183 @@ mod tests {
         assert_eq!(rollups[0].authored_chunks, 0);
         assert_eq!(rollups[0].derived_chunks, 0);
         assert_eq!(rollups[0].remembered, 1);
+    }
+
+    // =====================================================================
+    // mx#220 — skip_ritual chunk_truncated early-return tests
+    //
+    // When chunks shrink mid-ritual during a skip, skip_ritual must
+    // early-return with a response reflecting the NEW cursor position,
+    // not continue processing with stale bloom/plan/content from the
+    // old position.
+    // =====================================================================
+
+    /// mx#220 test 1: when chunks shrink mid-ritual during skip, the
+    /// response should reflect the new cursor position (next bloom's
+    /// prompt), not stale data from the old bloom.
+    #[test]
+    fn skip_chunk_truncated_returns_correct_next_bloom() {
+        let store = MockStore::new();
+
+        // Bloom A: large, will be shrunk mid-ritual.
+        let mut bloom_a = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        bloom_a.id = "kn-a".to_string();
+        bloom_a.title = "Bloom A".to_string();
+
+        // Bloom B: small, is the next bloom after A.
+        let mut bloom_b = test_entry();
+        bloom_b.id = "kn-b".to_string();
+        bloom_b.title = "Bloom B".to_string();
+        bloom_b.body = Some("## B Content\n\nThis is bloom B.".to_string());
+        bloom_b.wake_phrases = vec!["bravo".to_string()];
+
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_a.id.clone(), bloom_a.clone());
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_b.id.clone(), bloom_b.clone());
+
+        let cascade = test_cascade(vec![bloom_a.clone(), bloom_b.clone()]);
+        let ctx = AgentContext::public_only();
+
+        // Begin ritual. Walk chunks 0 and 1 of bloom A via respond.
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let total_chunks_start = begin_json["progress"]["total"].as_u64().unwrap() as u16;
+        assert!(total_chunks_start >= 3, "bloom A needs >=3 chunks");
+        let mut token = token_from_response(&begin_json);
+
+        for phrase in ["alpha", "beta"] {
+            let resp: serde_json::Value = serde_json::from_str(
+                &respond_ritual(&store, &ctx, "kn-a", phrase, &token).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resp["status"], "remembered");
+            token = token_from_response(&resp);
+        }
+
+        // Confirm cursor is at bloom A, chunk 2.
+        {
+            let sessions = store.sessions.borrow();
+            let sess = sessions.values().next().unwrap();
+            assert_eq!(sess.current_index, 0);
+            assert_eq!(sess.current_chunk_index, 2);
+        }
+
+        // Shrink bloom A to 1 chunk — cursor at chunk 2 is now past new total.
+        store.mutate_bloom("kn-a", |entry| {
+            entry.body = Some("tiny content now".to_string());
+        });
+
+        // The skip guard would normally reject this (bloom A has phrases), but
+        // chunk_truncated fires BEFORE the guard and early-returns. This is
+        // the mx#220 fix — skip_ritual's chunk_truncated path.
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, "kn-a", &token).unwrap()).unwrap();
+
+        // Must get chunk_truncated status (not "skipped" or "error").
+        assert_eq!(
+            skip_json["status"], "chunk_truncated",
+            "skip_ritual should early-return with chunk_truncated; got {:?}",
+            skip_json["status"]
+        );
+        assert_eq!(
+            skip_json["bloom"]["chunk_truncated"],
+            serde_json::Value::Bool(true),
+        );
+
+        // The `next` prompt must reference bloom B, not stale bloom A data.
+        let next_prompt = &skip_json["next"];
+        assert!(
+            next_prompt.is_object(),
+            "chunk_truncated should have a next prompt for bloom B"
+        );
+        assert!(
+            next_prompt["title"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Bloom B"),
+            "next prompt title should reference Bloom B; got {:?}",
+            next_prompt["title"]
+        );
+
+        // Session should still be active (bloom B remains).
+        assert!(
+            !store.sessions.borrow().is_empty(),
+            "session should still exist — bloom B hasn't been walked"
+        );
+    }
+
+    /// mx#220 test 2: verify the response content/bloom data comes from
+    /// the NEW position, not the old bloom. Specifically, the bloom_full
+    /// in the chunk_truncated response should NOT contain stale chunk
+    /// content from the old (pre-shrink) position.
+    #[test]
+    fn skip_chunk_truncated_does_not_use_stale_content() {
+        let store = MockStore::new();
+
+        // Single-bloom scenario: bloom shrinks, ritual completes.
+        let mut bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        bloom.id = "kn-stale".to_string();
+        bloom.title = "Stale Test".to_string();
+        let bloom_id = bloom.id.clone();
+
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom.clone()]);
+        let ctx = AgentContext::public_only();
+
+        // Begin + walk chunks 0 and 1.
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let mut token = token_from_response(&begin_json);
+
+        for phrase in ["alpha", "beta"] {
+            let resp: serde_json::Value = serde_json::from_str(
+                &respond_ritual(&store, &ctx, &bloom_id, phrase, &token).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resp["status"], "remembered");
+            token = token_from_response(&resp);
+        }
+
+        // Shrink the bloom. The NEW content is entirely different.
+        let new_body = "completely different content after shrink";
+        store.mutate_bloom(&bloom_id, |entry| {
+            entry.body = Some(new_body.to_string());
+        });
+
+        // skip_ritual triggers chunk_truncated.
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+
+        assert_eq!(skip_json["status"], "chunk_truncated");
+
+        // The bloom payload content should reflect the NEW (shrunk) content,
+        // not stale chunk data from the old large bloom.
+        let bloom_content_returned = skip_json["bloom"]["content"]
+            .as_str()
+            .expect("bloom should have content field");
+        assert_eq!(
+            bloom_content_returned, new_body,
+            "bloom content should be the NEW shrunk content, not stale data; got {:?}",
+            bloom_content_returned
+        );
+
+        // Single bloom + clamp → ritual complete. Summary present, session deleted.
+        assert!(
+            skip_json.get("summary").is_some(),
+            "ritual should be complete after single bloom shrinks"
+        );
+        assert!(
+            store.sessions.borrow().is_empty(),
+            "session should be deleted on completion"
+        );
     }
 }
