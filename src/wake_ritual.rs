@@ -512,6 +512,19 @@ pub fn skip_ritual(
     let plan = compute_chunks(&content, chunk_threshold());
     let chunk_truncated = session.clamp_if_chunks_shrank(plan.total);
 
+    // Gate: skip is only valid for phraseless blooms (mx#216). If the bloom
+    // has any wake phrases (authored, legacy, or derived-eligible), reject
+    // with a structured error. The consumer must use --respond instead.
+    if !chunk_truncated && authored_phrase_count(bloom) > 0 {
+        let response = WakeErrorResponse {
+            status: "error".to_string(),
+            error: "skip_requires_phraseless_bloom".to_string(),
+            message: "This chunk has a wake phrase and cannot be skipped. Attempt a guess — three incorrect attempts will reveal the content. Priming requires engagement.".to_string(),
+            expected_id: Some(expected_id),
+        };
+        return Ok(serde_json::to_string(&response)?);
+    }
+
     // Skip advances past exactly one chunk (not the whole bloom if chunked).
     // For P==0 blooms the consumer calls --skip K times to walk through all K
     // chunks — expected behavior per §5.9.
@@ -1812,5 +1825,135 @@ mod tests {
         let blooms = HashMap::new();
         let rollups = build_bloom_rollups(&session, &blooms);
         assert_eq!(rollups[0].title, rollups[0].id);
+    }
+
+    // =====================================================================
+    // mx#216 — skip guard: --skip restricted to phraseless blooms
+    // =====================================================================
+
+    #[test]
+    fn skip_rejects_bloom_with_wake_phrases_array() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha", "beta"]);
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        // Attempt to skip a bloom that has wake_phrases — must be rejected.
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+        assert_eq!(skip_json["status"], "error");
+        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
+        assert_eq!(skip_json["expected_id"], bloom_id);
+
+        // Session state must be unchanged — still at step 0, bloom 0, chunk 0.
+        let sessions = store.sessions.borrow();
+        let sess = sessions.values().next().unwrap();
+        assert_eq!(sess.step, 0);
+        assert_eq!(sess.current_index, 0);
+        assert_eq!(sess.current_chunk_index, 0);
+        assert_eq!(sess.skipped_count, 0);
+    }
+
+    #[test]
+    fn skip_rejects_bloom_with_legacy_wake_phrase() {
+        let store = MockStore::new();
+        let mut bloom = test_entry();
+        bloom.wake_phrase = Some("legacy secret".to_string());
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        // Legacy wake_phrase (singular) should also trigger the guard.
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+        assert_eq!(skip_json["status"], "error");
+        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
+
+        // Session state unchanged.
+        let sessions = store.sessions.borrow();
+        let sess = sessions.values().next().unwrap();
+        assert_eq!(sess.step, 0);
+        assert_eq!(sess.skipped_count, 0);
+    }
+
+    #[test]
+    fn skip_accepts_phraseless_bloom() {
+        // Regression guard: phraseless blooms must still skip normally.
+        let store = MockStore::new();
+        let bloom = test_entry(); // no wake_phrases, no wake_phrase
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+        assert_eq!(
+            skip_json["status"], "skipped",
+            "phraseless bloom should skip normally; got {:?}",
+            skip_json["status"]
+        );
+    }
+
+    #[test]
+    fn skip_rejection_does_not_rotate_token() {
+        // After a skip rejection, the same token must still work for --respond.
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store
+            .blooms
+            .borrow_mut()
+            .insert(bloom_id.clone(), bloom.clone());
+
+        let cascade = test_cascade(vec![bloom]);
+        let ctx = AgentContext::public_only();
+
+        let begin_json: serde_json::Value =
+            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
+        let token = token_from_response(&begin_json);
+
+        // Skip is rejected — no token rotation.
+        let skip_json: serde_json::Value =
+            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+        assert_eq!(skip_json["status"], "error");
+
+        // Same token works for --respond with the correct phrase.
+        let resp_json: serde_json::Value = serde_json::from_str(
+            &respond_ritual(&store, &ctx, &bloom_id, "alpha", &token).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            resp_json["status"], "remembered",
+            "original token should still work after skip rejection; got {:?}",
+            resp_json["status"]
+        );
     }
 }
