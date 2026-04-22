@@ -15,7 +15,7 @@ pub mod yaml;
 use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::SyncCommands;
+use crate::cli::SyncCommands;
 
 /// Default sync cache directory for a repo.
 /// Delegates to `crate::paths::sync_cache_dir`; kept for sub-module convenience.
