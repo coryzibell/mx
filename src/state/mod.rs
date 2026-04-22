@@ -10,7 +10,7 @@ mod schema;
 
 // Re-export the full public API to preserve `crate::state::Type` paths.
 #[allow(unused_imports)]
-pub use legacy::{interactive_capture, parse_wake_preference, EmotionalState, TowardState};
+pub use legacy::{EmotionalState, TowardState, interactive_capture, parse_wake_preference};
 pub use loader::{load_default_schema, load_schema, parse_wake_preference_dynamic};
 #[allow(unused_imports)]
 pub use schema::{
