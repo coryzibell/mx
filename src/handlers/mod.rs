@@ -8,13 +8,13 @@ pub(crate) use state::handle_state;
 use anyhow::{Context, Result, bail};
 
 use crate::cli::*;
+use crate::codex;
 use crate::commit;
 use crate::convert;
 use crate::display::*;
+use crate::github;
 use crate::session;
 use crate::sync;
-use crate::codex;
-use crate::github;
 
 pub(crate) fn handle_pr(cmd: PrCommands) -> Result<()> {
     match cmd {

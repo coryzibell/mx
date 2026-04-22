@@ -5,7 +5,7 @@ use crate::index::IndexConfig;
 use crate::store;
 use crate::types;
 
-use super::{parse_frontmatter, AgentFrontmatter};
+use super::{AgentFrontmatter, parse_frontmatter};
 
 pub(crate) fn handle_agents(cmd: AgentsCommands, config: &IndexConfig) -> Result<()> {
     let db = store::create_store(&config.db_path)?;
@@ -473,7 +473,10 @@ pub(crate) fn handle_session_types(cmd: SessionTypesCommands, config: &IndexConf
     Ok(())
 }
 
-pub(crate) fn handle_relationship_types(cmd: RelationshipTypesCommands, config: &IndexConfig) -> Result<()> {
+pub(crate) fn handle_relationship_types(
+    cmd: RelationshipTypesCommands,
+    config: &IndexConfig,
+) -> Result<()> {
     let db = store::create_store(&config.db_path)?;
 
     match cmd {
