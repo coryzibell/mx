@@ -228,7 +228,9 @@ impl SurrealDatabase {
     }
 
     /// Build visibility filter for privacy-aware queries
-    pub(super) fn build_visibility_filter(ctx: &crate::store::AgentContext) -> (String, Option<String>) {
+    pub(super) fn build_visibility_filter(
+        ctx: &crate::store::AgentContext,
+    ) -> (String, Option<String>) {
         if ctx.include_private {
             if let Some(ref agent) = ctx.agent_id {
                 (
@@ -836,7 +838,10 @@ impl SurrealDatabase {
     }
 
     /// Helper: Convert SurrealDB query result to KnowledgeEntry
-    pub(super) async fn value_to_knowledge_entry(&self, obj: serde_json::Value) -> Result<KnowledgeEntry> {
+    pub(super) async fn value_to_knowledge_entry(
+        &self,
+        obj: serde_json::Value,
+    ) -> Result<KnowledgeEntry> {
         // Extract ID from string (queries use meta::id(id) AS id)
         let id_str = obj["id"].as_str().unwrap_or_default();
         let id = format!("kn-{}", id_str);
