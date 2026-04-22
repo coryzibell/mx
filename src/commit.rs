@@ -108,8 +108,7 @@ pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
             .map_err(|e| anyhow::anyhow!("Dictionary '{}' not found: {}", dict_name, e))?
     } else {
         // Backward compat: no dict in footer, fall back to auto-detection
-        let matches =
-            base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let matches = base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
         if matches.is_empty() {
             bail!("Could not detect dictionary for encoded text");
         }
