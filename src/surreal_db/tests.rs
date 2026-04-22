@@ -101,11 +101,7 @@ fn test_upsert_agent_with_datetime() {
 // - Session linkage
 // =========================================================================
 
-fn make_test_entry(
-    id: &str,
-    resonance: i32,
-    decay_rate: f64,
-) -> crate::knowledge::KnowledgeEntry {
+fn make_test_entry(id: &str, resonance: i32, decay_rate: f64) -> crate::knowledge::KnowledgeEntry {
     use chrono::Utc;
     let now = Utc::now().to_rfc3339();
 
