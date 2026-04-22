@@ -90,26 +90,35 @@ fn encode_compress_with_registry(
 /// Decode and decompress text that was encoded with encode_compress
 /// Footer format: [hash_algo:dict|compress_algo:dict]
 pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
-    use base_d::{CompressionAlgorithm, decode, decompress};
+    use base_d::{CompressionAlgorithm, DictionaryRegistry, decode, decompress};
 
     let encoded = encoded.trim();
 
-    // Parse footer to get compression algorithm
+    // Parse footer to get compression algorithm and body dictionary name
     let compress_algo = parse_compress_algo(footer);
+    let body_dict_name = parse_body_dict(footer);
 
-    // Auto-detect dictionary and decode
-    let matches = base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
-
-    if matches.is_empty() {
-        bail!("Could not detect dictionary for encoded text");
-    }
-
-    // DictionaryMatch includes the dictionary itself
-    let dict = &matches[0].dictionary;
+    // Look up dictionary by name from footer, fall back to auto-detection
+    // for old commits that may lack a proper footer
+    let dict = if let Some(ref dict_name) = body_dict_name {
+        let registry = DictionaryRegistry::load_default()
+            .map_err(|e| anyhow::anyhow!("Failed to load dictionary registry: {}", e))?;
+        registry
+            .dictionary(dict_name)
+            .map_err(|e| anyhow::anyhow!("Dictionary '{}' not found: {}", dict_name, e))?
+    } else {
+        // Backward compat: no dict in footer, fall back to auto-detection
+        let matches =
+            base_d::detect_dictionary(encoded).map_err(|e| anyhow::anyhow!("{}", e))?;
+        if matches.is_empty() {
+            bail!("Could not detect dictionary for encoded text");
+        }
+        matches[0].dictionary.clone()
+    };
 
     // Decode
     let decoded_bytes =
-        decode(encoded, dict).map_err(|e| anyhow::anyhow!("Decode failed: {}", e))?;
+        decode(encoded, &dict).map_err(|e| anyhow::anyhow!("Decode failed: {}", e))?;
 
     // Decompress if we have a compression algorithm
     let final_bytes = if let Some(algo) = compress_algo {
@@ -149,6 +158,32 @@ fn parse_compress_algo(footer: &str) -> Option<String> {
     let algo = &after_pipe[..colon_pos];
 
     Some(algo.to_string())
+}
+
+/// Parse body dictionary name from footer
+/// Footer format: [hash_algo:title_dict|compress_algo:body_dict]
+fn parse_body_dict(footer: &str) -> Option<String> {
+    let footer = footer.trim();
+    if !footer.starts_with('[') || !footer.contains('|') {
+        return None;
+    }
+
+    // Extract the part after |
+    let pipe_pos = footer.find('|')?;
+    let after_pipe = &footer[pipe_pos + 1..];
+
+    // Get the body dict name (after the colon, before the closing bracket)
+    let colon_pos = after_pipe.find(':')?;
+    let after_colon = &after_pipe[colon_pos + 1..];
+
+    // Strip trailing ']' and anything after (e.g., newline + "whoa.")
+    let dict_name = after_colon.trim_end_matches(']').split(']').next()?;
+
+    if dict_name.is_empty() {
+        return None;
+    }
+
+    Some(dict_name.to_string())
 }
 
 /// Create a git commit with the given message
@@ -692,5 +727,67 @@ mod tests {
         assert!(!out.ends_with('\n'));
         let out_v = format_encoded_commit(&encoded, true);
         assert!(!out_v.ends_with('\n'));
+    }
+
+    // --- parse_body_dict ---
+
+    #[test]
+    fn test_parse_body_dict_standard_footer() {
+        assert_eq!(
+            parse_body_dict("[sha384:base62|lzma:uuencode]"),
+            Some("uuencode".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_body_dict_base58_variant() {
+        assert_eq!(
+            parse_body_dict("[sha256:base64|gzip:base58ripple]"),
+            Some("base58ripple".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_body_dict_dejavu_footer() {
+        // Footer may have trailing content after ']' on next lines
+        assert_eq!(
+            parse_body_dict("[sha384:base62|lzma:base62]\nwhoa."),
+            Some("base62".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_body_dict_no_footer() {
+        assert_eq!(parse_body_dict("not a footer"), None);
+    }
+
+    #[test]
+    fn test_parse_body_dict_empty() {
+        assert_eq!(parse_body_dict(""), None);
+    }
+
+    #[test]
+    fn test_parse_body_dict_no_pipe() {
+        assert_eq!(parse_body_dict("[sha384:base62]"), None);
+    }
+
+    #[test]
+    fn test_parse_body_dict_no_colon_after_pipe() {
+        assert_eq!(parse_body_dict("[sha384:base62|lzma]"), None);
+    }
+
+    // --- parse_compress_algo ---
+
+    #[test]
+    fn test_parse_compress_algo_standard() {
+        assert_eq!(
+            parse_compress_algo("[sha384:base62|lzma:uuencode]"),
+            Some("lzma".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_compress_algo_none() {
+        assert_eq!(parse_compress_algo("not a footer"), None);
     }
 }
