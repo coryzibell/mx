@@ -25,12 +25,10 @@ mod wake_token;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use cli::*;
 use crate::index::{
     IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
 };
-
-
+use cli::*;
 
 /// Apply in-memory field presence filters to a list of entries
 fn apply_entry_filters(
