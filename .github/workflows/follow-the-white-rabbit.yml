@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@main
+    uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@v1
     with:
       needs-openssl: false
       # ONNX Runtime doesn't provide prebuilt binaries for musl or FreeBSD targets

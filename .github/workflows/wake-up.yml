@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   ci:
-    uses: coryzibell/nebuchadnezzar/.github/workflows/wake-up.yml@main
+    uses: coryzibell/nebuchadnezzar/.github/workflows/wake-up.yml@v1
     with:
       needs-openssl: false
     secrets:
