@@ -176,7 +176,7 @@ fn parse_body_dict(footer: &str) -> Option<String> {
     let after_colon = &after_pipe[colon_pos + 1..];
 
     // Strip trailing ']' and anything after (e.g., newline + "whoa.")
-    let dict_name = after_colon.trim_end_matches(']').split(']').next()?;
+    let dict_name = after_colon.split(']').next()?;
 
     if dict_name.is_empty() {
         return None;
