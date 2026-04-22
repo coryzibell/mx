@@ -395,24 +395,6 @@ pub(super) fn get_base_archive_name(name: &str) -> String {
     name.to_string()
 }
 
-fn find_archive_by_id(codex_dir: &Path, id: &str) -> Result<PathBuf> {
-    for entry in fs::read_dir(codex_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if !path.is_dir() {
-            continue;
-        }
-
-        let name = path.file_name().unwrap().to_string_lossy();
-        if name.contains(id) {
-            return Ok(path);
-        }
-    }
-
-    anyhow::bail!("Archive not found for id: {}", id)
-}
-
 pub(super) fn get_codex_dir() -> Result<PathBuf> {
     Ok(crate::paths::codex_dir())
 }
