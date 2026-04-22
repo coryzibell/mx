@@ -3,8 +3,8 @@ use chrono::Utc;
 use surrealdb::sql::Thing;
 
 use crate::types::{
-    Agent, ApplicabilityType, Category, ContentType, EntryType, Project, RelationshipType,
-    Session, SessionType, SourceType,
+    Agent, ApplicabilityType, Category, ContentType, EntryType, Project, RelationshipType, Session,
+    SessionType, SourceType,
 };
 
 use super::connection::normalize_datetime;

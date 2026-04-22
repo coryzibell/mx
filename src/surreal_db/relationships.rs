@@ -266,7 +266,10 @@ impl SurrealDatabase {
         Self::runtime().block_on(self.get_applicability_for_entry_async(entry_id))
     }
 
-    pub(super) async fn get_applicability_for_entry_async(&self, entry_id: &str) -> Result<Vec<String>> {
+    pub(super) async fn get_applicability_for_entry_async(
+        &self,
+        entry_id: &str,
+    ) -> Result<Vec<String>> {
         let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id);
         let entry_thing = Thing::from(("knowledge", id_part));
 
