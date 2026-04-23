@@ -42,7 +42,11 @@ impl std::fmt::Display for KvError {
         match self {
             KvError::KeyNotFound(key) => write!(f, "Unknown key: {}", key),
             KvError::TypeMismatch { key, expected, got } => {
-                write!(f, "Type mismatch: key '{}' is {}, not {}", key, got, expected)
+                write!(
+                    f,
+                    "Type mismatch: key '{}' is {}, not {}",
+                    key, got, expected
+                )
             }
             KvError::SchemaMissing(path) => {
                 write!(f, "Schema file not found: {}", path.display())
@@ -331,8 +335,7 @@ impl KvStore {
             Some(v) => Ok(v),
             None => Err(KvError::KeyNotFound(format!(
                 "{} (has no data yet, type: {})",
-                key,
-                def.value_type
+                key, def.value_type
             ))),
         }
     }
@@ -351,11 +354,9 @@ impl KvStore {
                 );
             }
             ValueType::Counter => {
-                let v: i64 = value
-                    .parse()
-                    .map_err(|_| {
-                        KvError::Other(anyhow::anyhow!("Invalid counter value: {}", value))
-                    })?;
+                let v: i64 = value.parse().map_err(|_| {
+                    KvError::Other(anyhow::anyhow!("Invalid counter value: {}", value))
+                })?;
                 let v = Self::clamp(v, def.min, def.max);
                 self.data
                     .entries
@@ -461,7 +462,12 @@ impl KvStore {
     }
 
     /// Push with an explicit timestamp (used by tests).
-    pub fn push_with_ts(&mut self, key: &str, value: &str, ts: DateTime<Utc>) -> Result<(), KvError> {
+    pub fn push_with_ts(
+        &mut self,
+        key: &str,
+        value: &str,
+        ts: DateTime<Utc>,
+    ) -> Result<(), KvError> {
         let def = self.key_def(key)?.clone();
 
         match def.value_type {
