@@ -20,23 +20,21 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
     };
 
     match cmd {
-        KvCommands::Get { key } => {
-            match store.get(&key) {
-                Ok(val) => {
-                    println!("{}", kv::format_value(val));
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("has no data yet") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) => Err(e),
+        KvCommands::Get { key } => match store.get(&key) {
+            Ok(val) => {
+                println!("{}", kv::format_value(val));
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("has no data yet") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) => Err(e),
+        },
 
         KvCommands::Set {
             key,
@@ -69,124 +67,112 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
             }
         }
 
-        KvCommands::Inc { key, by } => {
-            match store.inc(&key, by) {
-                Ok(val) => {
-                    store.save()?;
-                    println!("{}", val);
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+        KvCommands::Inc { key, by } => match store.inc(&key, by) {
+            Ok(val) => {
+                store.save()?;
+                println!("{}", val);
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
-        KvCommands::Dec { key, by } => {
-            match store.dec(&key, by) {
-                Ok(val) => {
-                    store.save()?;
-                    println!("{}", val);
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+        KvCommands::Dec { key, by } => match store.dec(&key, by) {
+            Ok(val) => {
+                store.save()?;
+                println!("{}", val);
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
-        KvCommands::Push { key, value } => {
-            match store.push(&key, &value) {
-                Ok(()) => {
-                    store.save()?;
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+        KvCommands::Push { key, value } => match store.push(&key, &value) {
+            Ok(()) => {
+                store.save()?;
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
-        KvCommands::Pop { key } => {
-            match store.pop(&key) {
-                Ok(Some(val)) => {
-                    store.save()?;
-                    println!("{}", val);
-                    Ok(kv::EXIT_OK)
-                }
-                Ok(None) => {
-                    store.save()?;
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+        KvCommands::Pop { key } => match store.pop(&key) {
+            Ok(Some(val)) => {
+                store.save()?;
+                println!("{}", val);
+                Ok(kv::EXIT_OK)
             }
-        }
+            Ok(None) => {
+                store.save()?;
+                Ok(kv::EXIT_OK)
+            }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
-        KvCommands::Last { key, count } => {
-            match store.last(&key, count) {
-                Ok(items) => {
-                    for item in &items {
-                        println!("{}", item);
-                    }
-                    Ok(kv::EXIT_OK)
+        KvCommands::Last { key, count } => match store.last(&key, count) {
+            Ok(items) => {
+                for item in &items {
+                    println!("{}", item);
                 }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
-        KvCommands::Since { key, timeref } => {
-            match store.since(&key, &timeref) {
-                Ok(entries) => {
-                    for entry in &entries {
-                        println!("{} ({})", entry.value, entry.ts);
-                    }
-                    Ok(kv::EXIT_OK)
+        KvCommands::Since { key, timeref } => match store.since(&key, &timeref) {
+            Ok(entries) => {
+                for entry in &entries {
+                    println!("{} ({})", entry.value, entry.ts);
                 }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) if e.to_string().contains("Type mismatch") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_TYPE_MISMATCH)
+            }
+            Err(e) => Err(e),
+        },
 
         KvCommands::Dump { format } => {
             match format.as_str() {
@@ -200,19 +186,17 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
             Ok(kv::EXIT_OK)
         }
 
-        KvCommands::Reset { key } => {
-            match store.reset(&key) {
-                Ok(()) => {
-                    store.save()?;
-                    Ok(kv::EXIT_OK)
-                }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) => Err(e),
+        KvCommands::Reset { key } => match store.reset(&key) {
+            Ok(()) => {
+                store.save()?;
+                Ok(kv::EXIT_OK)
             }
-        }
+            Err(e) if e.to_string().contains("Unknown key") => {
+                eprintln!("{}", e);
+                Ok(kv::EXIT_KEY_NOT_FOUND)
+            }
+            Err(e) => Err(e),
+        },
 
         KvCommands::Keys => {
             let keys = store.keys();

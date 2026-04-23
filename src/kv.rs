@@ -96,21 +96,11 @@ pub struct DataFile {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum DataValue {
-    Counter {
-        value: i64,
-    },
-    String {
-        value: String,
-    },
-    History {
-        entries: Vec<HistoryEntry>,
-    },
-    State {
-        fields: BTreeMap<String, String>,
-    },
-    List {
-        items: Vec<String>,
-    },
+    Counter { value: i64 },
+    String { value: String },
+    History { entries: Vec<HistoryEntry> },
+    State { fields: BTreeMap<String, String> },
+    List { items: Vec<String> },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -193,8 +183,7 @@ impl KvStore {
     pub fn save(&mut self) -> Result<()> {
         self.data.updated = Utc::now().to_rfc3339();
 
-        let json = serde_json::to_string_pretty(&self.data)
-            .context("Failed to serialize data")?;
+        let json = serde_json::to_string_pretty(&self.data).context("Failed to serialize data")?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.data_path.parent() {
@@ -202,10 +191,9 @@ impl KvStore {
                 .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
-        let tmp_path = self.data_path.with_extension(format!(
-            "tmp.{}",
-            std::process::id()
-        ));
+        let tmp_path = self
+            .data_path
+            .with_extension(format!("tmp.{}", std::process::id()));
 
         {
             let mut f = fs::File::create(&tmp_path)
@@ -270,17 +258,11 @@ impl KvStore {
                 let fields = def
                     .fields
                     .as_ref()
-                    .map(|fs| {
-                        fs.iter()
-                            .map(|f| (f.clone(), String::new()))
-                            .collect()
-                    })
+                    .map(|fs| fs.iter().map(|f| (f.clone(), String::new())).collect())
                     .unwrap_or_default();
                 DataValue::State { fields }
             }
-            ValueType::List => DataValue::List {
-                items: Vec::new(),
-            },
+            ValueType::List => DataValue::List { items: Vec::new() },
         }
     }
 
@@ -303,11 +285,12 @@ impl KvStore {
 
         match def.value_type {
             ValueType::String => {
-                self.data
-                    .entries
-                    .insert(key.to_string(), DataValue::String {
+                self.data.entries.insert(
+                    key.to_string(),
+                    DataValue::String {
                         value: value.to_string(),
-                    });
+                    },
+                );
             }
             ValueType::Counter => {
                 let v: i64 = value
@@ -831,9 +814,7 @@ max_entries = 5
     #[test]
     fn state_set_field() {
         let (mut store, _dir) = setup_store(test_schema());
-        store
-            .set("tensor", "0.75", Some("temperature"))
-            .unwrap();
+        store.set("tensor", "0.75", Some("temperature")).unwrap();
         store.set("tensor", "0.30", Some("entropy")).unwrap();
         match store.get("tensor").unwrap() {
             DataValue::State { fields } => {
@@ -1051,9 +1032,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.inc("warmth", 42).unwrap();
         store.set("current_mood", "calm", None).unwrap();
-        store
-            .set("tensor", "0.55", Some("temperature"))
-            .unwrap();
+        store.set("tensor", "0.55", Some("temperature")).unwrap();
         store.set("tensor", "0.35", Some("entropy")).unwrap();
         store.set("tensor", "0.70", Some("agency")).unwrap();
         store.push("tags", "focus").unwrap();
