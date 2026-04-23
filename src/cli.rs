@@ -1514,6 +1514,15 @@ pub enum ContentTypesCommands {
     },
 }
 
+/// Output format for `kv dump`.
+#[derive(Clone, Debug, ValueEnum)]
+pub enum DumpFormat {
+    /// JSON (default)
+    Json,
+    /// Compact key=value format
+    Compact,
+}
+
 #[derive(Subcommand)]
 pub enum KvCommands {
     /// Get the current value for a key
@@ -1591,8 +1600,8 @@ pub enum KvCommands {
     /// Dump all state
     Dump {
         /// Output format: compact or json
-        #[arg(long, default_value = "json")]
-        format: String,
+        #[arg(long, default_value = "json", value_enum)]
+        format: DumpFormat,
     },
 
     /// Reset a key to its schema default

@@ -22,6 +22,52 @@ pub const EXIT_TYPE_MISMATCH: i32 = 2;
 pub const EXIT_SCHEMA_MISSING: i32 = 3;
 
 // ---------------------------------------------------------------------------
+// Typed errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum KvError {
+    KeyNotFound(String),
+    TypeMismatch {
+        key: String,
+        expected: String,
+        got: String,
+    },
+    SchemaMissing(PathBuf),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for KvError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KvError::KeyNotFound(key) => write!(f, "Unknown key: {}", key),
+            KvError::TypeMismatch { key, expected, got } => {
+                write!(f, "Type mismatch: key '{}' is {}, not {}", key, got, expected)
+            }
+            KvError::SchemaMissing(path) => {
+                write!(f, "Schema file not found: {}", path.display())
+            }
+            KvError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for KvError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            KvError::Other(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<anyhow::Error> for KvError {
+    fn from(e: anyhow::Error) -> Self {
+        KvError::Other(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Schema types (parsed from TOML)
 // ---------------------------------------------------------------------------
 
@@ -149,8 +195,10 @@ impl KvStore {
         let agent = std::env::var("MX_CURRENT_AGENT")
             .with_context(|| "MX_CURRENT_AGENT environment variable is required")?;
 
-        let default_schema = Self::default_schema_path(&agent);
-        let default_data = Self::default_data_path(&agent);
+        let default_schema = Self::default_schema_path(&agent)
+            .with_context(|| "Could not determine home directory for schema path")?;
+        let default_data = Self::default_data_path(&agent)
+            .with_context(|| "Could not determine home directory for data path")?;
 
         let schema_path = std::env::var("MX_KV_SCHEMA")
             .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
@@ -160,23 +208,30 @@ impl KvStore {
             .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
             .unwrap_or(default_data);
 
-        Self::load(&schema_path, &data_path)
+        let mut store = Self::load(&schema_path, &data_path)?;
+
+        // Populate _schema field from agent name if empty (SHOULD-FIX 5)
+        if store.data.schema_id.is_empty() {
+            store.data.schema_id = agent.clone();
+        }
+
+        Ok(store)
     }
 
-    fn default_schema_path(agent: &str) -> PathBuf {
-        dirs::home_dir()
-            .expect("Could not determine home directory")
+    fn default_schema_path(agent: &str) -> Result<PathBuf> {
+        Ok(dirs::home_dir()
+            .context("Could not determine home directory")?
             .join(".crewu")
             .join("kv")
-            .join(format!("{}.schema.toml", agent))
+            .join(format!("{}.schema.toml", agent)))
     }
 
-    fn default_data_path(agent: &str) -> PathBuf {
-        dirs::home_dir()
-            .expect("Could not determine home directory")
+    fn default_data_path(agent: &str) -> Result<PathBuf> {
+        Ok(dirs::home_dir()
+            .context("Could not determine home directory")?
             .join(".crewu")
             .join("kv")
-            .join(format!("{}.data.json", agent))
+            .join(format!("{}.data.json", agent)))
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
@@ -217,22 +272,21 @@ impl KvStore {
     // Schema helpers
     // -----------------------------------------------------------------------
 
-    fn key_def(&self, key: &str) -> Result<&KeyDef> {
+    fn key_def(&self, key: &str) -> Result<&KeyDef, KvError> {
         self.schema
             .keys
             .get(key)
-            .ok_or_else(|| anyhow::anyhow!("Unknown key: {}", key))
+            .ok_or_else(|| KvError::KeyNotFound(key.to_string()))
     }
 
-    fn assert_type(&self, key: &str, expected: ValueType) -> Result<&KeyDef> {
+    fn assert_type(&self, key: &str, expected: ValueType) -> Result<&KeyDef, KvError> {
         let def = self.key_def(key)?;
         if def.value_type != expected {
-            bail!(
-                "Type mismatch: key '{}' is {}, not {}",
-                key,
-                def.value_type,
-                expected
-            );
+            return Err(KvError::TypeMismatch {
+                key: key.to_string(),
+                expected: expected.to_string(),
+                got: def.value_type.to_string(),
+            });
         }
         Ok(def)
     }
@@ -271,16 +325,20 @@ impl KvStore {
     // -----------------------------------------------------------------------
 
     /// Get the current value for a key.
-    pub fn get(&self, key: &str) -> Result<&DataValue> {
+    pub fn get(&self, key: &str) -> Result<&DataValue, KvError> {
         let def = self.key_def(key)?;
         match self.data.entries.get(key) {
             Some(v) => Ok(v),
-            None => bail!("Key '{}' has no data yet (type: {})", key, def.value_type),
+            None => Err(KvError::KeyNotFound(format!(
+                "{} (has no data yet, type: {})",
+                key,
+                def.value_type
+            ))),
         }
     }
 
     /// Set a string or counter value, or set a field on a state type.
-    pub fn set(&mut self, key: &str, value: &str, field: Option<&str>) -> Result<()> {
+    pub fn set(&mut self, key: &str, value: &str, field: Option<&str>) -> Result<(), KvError> {
         let def = self.key_def(key)?.clone();
 
         match def.value_type {
@@ -295,7 +353,9 @@ impl KvStore {
             ValueType::Counter => {
                 let v: i64 = value
                     .parse()
-                    .with_context(|| format!("Invalid counter value: {}", value))?;
+                    .map_err(|_| {
+                        KvError::Other(anyhow::anyhow!("Invalid counter value: {}", value))
+                    })?;
                 let v = Self::clamp(v, def.min, def.max);
                 self.data
                     .entries
@@ -303,22 +363,22 @@ impl KvStore {
             }
             ValueType::State => {
                 let field_name = field.ok_or_else(|| {
-                    anyhow::anyhow!(
+                    KvError::Other(anyhow::anyhow!(
                         "State type requires field name: mx kv set {} <field> <value>",
                         key
-                    )
+                    ))
                 })?;
 
                 // Validate field name against schema
                 if let Some(ref schema_fields) = def.fields
                     && !schema_fields.contains(&field_name.to_string())
                 {
-                    bail!(
+                    return Err(KvError::Other(anyhow::anyhow!(
                         "Unknown field '{}' for key '{}'. Valid fields: {}",
                         field_name,
                         key,
                         schema_fields.join(", ")
-                    );
+                    )));
                 }
 
                 let entry = self
@@ -331,21 +391,28 @@ impl KvStore {
                     DataValue::State { fields } => {
                         fields.insert(field_name.to_string(), value.to_string());
                     }
-                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                    _ => {
+                        return Err(KvError::Other(anyhow::anyhow!(
+                            "Data corruption: key '{}' has wrong runtime type",
+                            key
+                        )));
+                    }
                 }
             }
-            _ => bail!(
-                "Type mismatch: 'set' not supported for {} (key '{}')",
-                def.value_type,
-                key
-            ),
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "string, counter, or state".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
         }
 
         Ok(())
     }
 
     /// Increment a counter. Clamps to min/max, never errors on bounds.
-    pub fn inc(&mut self, key: &str, by: i64) -> Result<i64> {
+    pub fn inc(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
 
         let entry = self
@@ -359,12 +426,15 @@ impl KvStore {
                 *value = Self::clamp(value.saturating_add(by), def.min, def.max);
                 Ok(*value)
             }
-            _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+            _ => Err(KvError::Other(anyhow::anyhow!(
+                "Data corruption: key '{}' has wrong runtime type",
+                key
+            ))),
         }
     }
 
     /// Decrement a counter. Clamps to min/max, never errors on bounds.
-    pub fn dec(&mut self, key: &str, by: i64) -> Result<i64> {
+    pub fn dec(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
 
         let entry = self
@@ -378,17 +448,20 @@ impl KvStore {
                 *value = Self::clamp(value.saturating_sub(by), def.min, def.max);
                 Ok(*value)
             }
-            _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+            _ => Err(KvError::Other(anyhow::anyhow!(
+                "Data corruption: key '{}' has wrong runtime type",
+                key
+            ))),
         }
     }
 
     /// Push a value onto a history (with auto-timestamp) or list.
-    pub fn push(&mut self, key: &str, value: &str) -> Result<()> {
+    pub fn push(&mut self, key: &str, value: &str) -> Result<(), KvError> {
         self.push_with_ts(key, value, Utc::now())
     }
 
     /// Push with an explicit timestamp (used by tests).
-    pub fn push_with_ts(&mut self, key: &str, value: &str, ts: DateTime<Utc>) -> Result<()> {
+    pub fn push_with_ts(&mut self, key: &str, value: &str, ts: DateTime<Utc>) -> Result<(), KvError> {
         let def = self.key_def(key)?.clone();
 
         match def.value_type {
@@ -413,7 +486,12 @@ impl KvStore {
                             entries.truncate(max);
                         }
                     }
-                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                    _ => {
+                        return Err(KvError::Other(anyhow::anyhow!(
+                            "Data corruption: key '{}' has wrong runtime type",
+                            key
+                        )));
+                    }
                 }
             }
             ValueType::List => {
@@ -426,39 +504,49 @@ impl KvStore {
                 match entry {
                     DataValue::List { items } => {
                         items.push(value.to_string());
-                        // Drop oldest at max_entries
-                        if let Some(max) = def.max_entries {
-                            while items.len() > max {
-                                items.remove(0);
-                            }
+                        // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
+                        if let Some(max) = def.max_entries
+                            && items.len() > max
+                        {
+                            items.drain(0..items.len() - max);
                         }
                     }
-                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                    _ => {
+                        return Err(KvError::Other(anyhow::anyhow!(
+                            "Data corruption: key '{}' has wrong runtime type",
+                            key
+                        )));
+                    }
                 }
             }
-            _ => bail!(
-                "Type mismatch: 'push' not supported for {} (key '{}')",
-                def.value_type,
-                key
-            ),
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
         }
 
         Ok(())
     }
 
     /// Pop the last item from a list. History is append-only.
-    pub fn pop(&mut self, key: &str) -> Result<Option<String>> {
+    pub fn pop(&mut self, key: &str) -> Result<Option<String>, KvError> {
         self.assert_type(key, ValueType::List)?;
 
         match self.data.entries.get_mut(key) {
             Some(DataValue::List { items }) => Ok(items.pop()),
-            Some(_) => bail!("Data corruption: key '{}' has wrong runtime type", key),
+            Some(_) => Err(KvError::Other(anyhow::anyhow!(
+                "Data corruption: key '{}' has wrong runtime type",
+                key
+            ))),
             None => Ok(None),
         }
     }
 
     /// Get the last N entries from a history or list.
-    pub fn last(&self, key: &str, count: usize) -> Result<Vec<String>> {
+    pub fn last(&self, key: &str, count: usize) -> Result<Vec<String>, KvError> {
         let def = self.key_def(key)?;
 
         match def.value_type {
@@ -483,19 +571,19 @@ impl KvStore {
                 }
                 _ => Ok(vec![]),
             },
-            _ => bail!(
-                "Type mismatch: 'last' not supported for {} (key '{}')",
-                def.value_type,
-                key
-            ),
+            _ => Err(KvError::TypeMismatch {
+                key: key.to_string(),
+                expected: "history or list".to_string(),
+                got: def.value_type.to_string(),
+            }),
         }
     }
 
     /// Get history entries since a given time reference.
-    pub fn since(&self, key: &str, timeref: &str) -> Result<Vec<&HistoryEntry>> {
+    pub fn since(&self, key: &str, timeref: &str) -> Result<Vec<&HistoryEntry>, KvError> {
         self.assert_type(key, ValueType::History)?;
 
-        let cutoff = parse_timeref(timeref)?;
+        let cutoff = parse_timeref(timeref).map_err(KvError::Other)?;
 
         match self.data.entries.get(key) {
             Some(DataValue::History { entries }) => Ok(entries
@@ -511,7 +599,7 @@ impl KvStore {
     }
 
     /// Reset a key to its schema default.
-    pub fn reset(&mut self, key: &str) -> Result<()> {
+    pub fn reset(&mut self, key: &str) -> Result<(), KvError> {
         let def = self.key_def(key)?.clone();
         self.data
             .entries

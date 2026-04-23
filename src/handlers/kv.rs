@@ -2,8 +2,32 @@
 
 use anyhow::Result;
 
-use crate::cli::KvCommands;
-use crate::kv::{self, KvStore};
+use crate::cli::{DumpFormat, KvCommands};
+use crate::kv::{self, KvError, KvStore};
+
+/// Map a KvError to the appropriate exit code.
+fn exit_code_for(err: &KvError) -> Option<i32> {
+    match err {
+        KvError::KeyNotFound(_) => Some(kv::EXIT_KEY_NOT_FOUND),
+        KvError::TypeMismatch { .. } => Some(kv::EXIT_TYPE_MISMATCH),
+        KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
+        KvError::Other(_) => None,
+    }
+}
+
+/// Handle a KvError: print to stderr and return exit code, or propagate as anyhow.
+fn handle_kv_err(err: KvError) -> Result<i32> {
+    match exit_code_for(&err) {
+        Some(code) => {
+            eprintln!("{}", err);
+            Ok(code)
+        }
+        None => match err {
+            KvError::Other(e) => Err(e),
+            _ => unreachable!(),
+        },
+    }
+}
 
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
 pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
@@ -25,15 +49,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 println!("{}", kv::format_value(val));
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("has no data yet") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Set {
@@ -55,15 +71,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                     store.save()?;
                     Ok(kv::EXIT_OK)
                 }
-                Err(e) if e.to_string().contains("Unknown key") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_KEY_NOT_FOUND)
-                }
-                Err(e) if e.to_string().contains("Type mismatch") => {
-                    eprintln!("{}", e);
-                    Ok(kv::EXIT_TYPE_MISMATCH)
-                }
-                Err(e) => Err(e),
+                Err(e) => handle_kv_err(e),
             }
         }
 
@@ -73,15 +81,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 println!("{}", val);
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Dec { key, by } => match store.dec(&key, by) {
@@ -90,15 +90,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 println!("{}", val);
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Push { key, value } => match store.push(&key, &value) {
@@ -106,15 +98,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 store.save()?;
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Pop { key } => match store.pop(&key) {
@@ -124,18 +108,10 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 Ok(kv::EXIT_OK)
             }
             Ok(None) => {
-                store.save()?;
+                // Nothing was popped — skip save, nothing changed
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Last { key, count } => match store.last(&key, count) {
@@ -145,15 +121,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 }
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Since { key, timeref } => match store.since(&key, &timeref) {
@@ -163,23 +131,15 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 }
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) if e.to_string().contains("Type mismatch") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_TYPE_MISMATCH)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Dump { format } => {
-            match format.as_str() {
-                "compact" => {
+            match format {
+                DumpFormat::Compact => {
                     println!("{}", store.dump_compact());
                 }
-                _ => {
+                DumpFormat::Json => {
                     println!("{}", store.dump_json()?);
                 }
             }
@@ -191,11 +151,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
                 store.save()?;
                 Ok(kv::EXIT_OK)
             }
-            Err(e) if e.to_string().contains("Unknown key") => {
-                eprintln!("{}", e);
-                Ok(kv::EXIT_KEY_NOT_FOUND)
-            }
-            Err(e) => Err(e),
+            Err(e) => handle_kv_err(e),
         },
 
         KvCommands::Keys => {
