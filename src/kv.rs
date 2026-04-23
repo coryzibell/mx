@@ -310,15 +310,15 @@ impl KvStore {
                 })?;
 
                 // Validate field name against schema
-                if let Some(ref schema_fields) = def.fields {
-                    if !schema_fields.contains(&field_name.to_string()) {
-                        bail!(
-                            "Unknown field '{}' for key '{}'. Valid fields: {}",
-                            field_name,
-                            key,
-                            schema_fields.join(", ")
-                        );
-                    }
+                if let Some(ref schema_fields) = def.fields
+                    && !schema_fields.contains(&field_name.to_string())
+                {
+                    bail!(
+                        "Unknown field '{}' for key '{}'. Valid fields: {}",
+                        field_name,
+                        key,
+                        schema_fields.join(", ")
+                    );
                 }
 
                 let entry = self
