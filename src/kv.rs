@@ -1,0 +1,1177 @@
+//! Lightweight local KV store for fast agent state.
+//!
+//! Backed by a TOML schema file and a JSON data file. All writes are atomic
+//! (serialize to tmp, fsync, rename). No networking, no database.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write as IoWrite;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Exit codes
+// ---------------------------------------------------------------------------
+
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_KEY_NOT_FOUND: i32 = 1;
+pub const EXIT_TYPE_MISMATCH: i32 = 2;
+pub const EXIT_SCHEMA_MISSING: i32 = 3;
+
+// ---------------------------------------------------------------------------
+// Schema types (parsed from TOML)
+// ---------------------------------------------------------------------------
+
+/// Top-level schema definition.
+#[derive(Debug, Deserialize)]
+pub struct Schema {
+    pub keys: BTreeMap<String, KeyDef>,
+}
+
+/// Definition of a single key in the schema.
+#[derive(Debug, Deserialize, Clone)]
+pub struct KeyDef {
+    #[serde(rename = "type")]
+    pub value_type: ValueType,
+
+    #[serde(default)]
+    pub min: Option<i64>,
+
+    #[serde(default)]
+    pub max: Option<i64>,
+
+    #[serde(default)]
+    pub default: Option<String>,
+
+    #[serde(default)]
+    pub max_entries: Option<usize>,
+
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueType {
+    Counter,
+    History,
+    State,
+    String,
+    List,
+}
+
+impl std::fmt::Display for ValueType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValueType::Counter => write!(f, "counter"),
+            ValueType::History => write!(f, "history"),
+            ValueType::State => write!(f, "state"),
+            ValueType::String => write!(f, "string"),
+            ValueType::List => write!(f, "list"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Data types (persisted as JSON)
+// ---------------------------------------------------------------------------
+
+/// Top-level data file.
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct DataFile {
+    #[serde(rename = "_schema")]
+    pub schema_id: String,
+
+    #[serde(rename = "_updated")]
+    pub updated: String,
+
+    #[serde(flatten)]
+    pub entries: BTreeMap<String, DataValue>,
+}
+
+/// A single stored value.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum DataValue {
+    Counter {
+        value: i64,
+    },
+    String {
+        value: String,
+    },
+    History {
+        entries: Vec<HistoryEntry>,
+    },
+    State {
+        fields: BTreeMap<String, String>,
+    },
+    List {
+        items: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct HistoryEntry {
+    pub value: String,
+    pub ts: String,
+}
+
+// ---------------------------------------------------------------------------
+// KV Store
+// ---------------------------------------------------------------------------
+
+pub struct KvStore {
+    pub schema: Schema,
+    pub data: DataFile,
+    pub data_path: PathBuf,
+}
+
+impl KvStore {
+    /// Load schema and data from the given paths. Creates data file with defaults
+    /// if it doesn't exist.
+    pub fn load(schema_path: &Path, data_path: &Path) -> Result<Self> {
+        let schema_str = fs::read_to_string(schema_path)
+            .with_context(|| format!("Failed to read schema: {}", schema_path.display()))?;
+        let schema: Schema = toml::from_str(&schema_str)
+            .with_context(|| format!("Failed to parse schema: {}", schema_path.display()))?;
+
+        let data = if data_path.exists() {
+            let data_str = fs::read_to_string(data_path)
+                .with_context(|| format!("Failed to read data: {}", data_path.display()))?;
+            serde_json::from_str(&data_str)
+                .with_context(|| format!("Failed to parse data: {}", data_path.display()))?
+        } else {
+            DataFile::default()
+        };
+
+        Ok(KvStore {
+            schema,
+            data,
+            data_path: data_path.to_path_buf(),
+        })
+    }
+
+    /// Load from environment variables. Resolves {agent} placeholder.
+    pub fn from_env() -> Result<Self> {
+        let agent = std::env::var("MX_CURRENT_AGENT")
+            .with_context(|| "MX_CURRENT_AGENT environment variable is required")?;
+
+        let default_schema = Self::default_schema_path(&agent);
+        let default_data = Self::default_data_path(&agent);
+
+        let schema_path = std::env::var("MX_KV_SCHEMA")
+            .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
+            .unwrap_or(default_schema);
+
+        let data_path = std::env::var("MX_KV_DATA")
+            .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
+            .unwrap_or(default_data);
+
+        Self::load(&schema_path, &data_path)
+    }
+
+    fn default_schema_path(agent: &str) -> PathBuf {
+        dirs::home_dir()
+            .expect("Could not determine home directory")
+            .join(".crewu")
+            .join("kv")
+            .join(format!("{}.schema.toml", agent))
+    }
+
+    fn default_data_path(agent: &str) -> PathBuf {
+        dirs::home_dir()
+            .expect("Could not determine home directory")
+            .join(".crewu")
+            .join("kv")
+            .join(format!("{}.data.json", agent))
+    }
+
+    /// Atomic write: serialize to tmp, fsync, rename.
+    pub fn save(&mut self) -> Result<()> {
+        self.data.updated = Utc::now().to_rfc3339();
+
+        let json = serde_json::to_string_pretty(&self.data)
+            .context("Failed to serialize data")?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = self.data_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+
+        let tmp_path = self.data_path.with_extension(format!(
+            "tmp.{}",
+            std::process::id()
+        ));
+
+        {
+            let mut f = fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        fs::rename(&tmp_path, &self.data_path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                self.data_path.display()
+            )
+        })?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Schema helpers
+    // -----------------------------------------------------------------------
+
+    fn key_def(&self, key: &str) -> Result<&KeyDef> {
+        self.schema
+            .keys
+            .get(key)
+            .ok_or_else(|| anyhow::anyhow!("Unknown key: {}", key))
+    }
+
+    fn assert_type(&self, key: &str, expected: ValueType) -> Result<&KeyDef> {
+        let def = self.key_def(key)?;
+        if def.value_type != expected {
+            bail!(
+                "Type mismatch: key '{}' is {}, not {}",
+                key,
+                def.value_type,
+                expected
+            );
+        }
+        Ok(def)
+    }
+
+    /// Get the default DataValue for a key based on its schema definition.
+    fn default_value(def: &KeyDef) -> DataValue {
+        match def.value_type {
+            ValueType::Counter => {
+                let default_val: i64 = def
+                    .default
+                    .as_ref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                DataValue::Counter { value: default_val }
+            }
+            ValueType::String => DataValue::String {
+                value: def.default.clone().unwrap_or_default(),
+            },
+            ValueType::History => DataValue::History {
+                entries: Vec::new(),
+            },
+            ValueType::State => {
+                let fields = def
+                    .fields
+                    .as_ref()
+                    .map(|fs| {
+                        fs.iter()
+                            .map(|f| (f.clone(), String::new()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                DataValue::State { fields }
+            }
+            ValueType::List => DataValue::List {
+                items: Vec::new(),
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Operations
+    // -----------------------------------------------------------------------
+
+    /// Get the current value for a key.
+    pub fn get(&self, key: &str) -> Result<&DataValue> {
+        let def = self.key_def(key)?;
+        match self.data.entries.get(key) {
+            Some(v) => Ok(v),
+            None => bail!("Key '{}' has no data yet (type: {})", key, def.value_type),
+        }
+    }
+
+    /// Set a string or counter value, or set a field on a state type.
+    pub fn set(&mut self, key: &str, value: &str, field: Option<&str>) -> Result<()> {
+        let def = self.key_def(key)?.clone();
+
+        match def.value_type {
+            ValueType::String => {
+                self.data
+                    .entries
+                    .insert(key.to_string(), DataValue::String {
+                        value: value.to_string(),
+                    });
+            }
+            ValueType::Counter => {
+                let v: i64 = value
+                    .parse()
+                    .with_context(|| format!("Invalid counter value: {}", value))?;
+                let v = Self::clamp(v, def.min, def.max);
+                self.data
+                    .entries
+                    .insert(key.to_string(), DataValue::Counter { value: v });
+            }
+            ValueType::State => {
+                let field_name = field.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "State type requires field name: mx kv set {} <field> <value>",
+                        key
+                    )
+                })?;
+
+                // Validate field name against schema
+                if let Some(ref schema_fields) = def.fields {
+                    if !schema_fields.contains(&field_name.to_string()) {
+                        bail!(
+                            "Unknown field '{}' for key '{}'. Valid fields: {}",
+                            field_name,
+                            key,
+                            schema_fields.join(", ")
+                        );
+                    }
+                }
+
+                let entry = self
+                    .data
+                    .entries
+                    .entry(key.to_string())
+                    .or_insert_with(|| Self::default_value(&def));
+
+                match entry {
+                    DataValue::State { fields } => {
+                        fields.insert(field_name.to_string(), value.to_string());
+                    }
+                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                }
+            }
+            _ => bail!(
+                "Type mismatch: 'set' not supported for {} (key '{}')",
+                def.value_type,
+                key
+            ),
+        }
+
+        Ok(())
+    }
+
+    /// Increment a counter. Clamps to min/max, never errors on bounds.
+    pub fn inc(&mut self, key: &str, by: i64) -> Result<i64> {
+        let def = self.assert_type(key, ValueType::Counter)?.clone();
+
+        let entry = self
+            .data
+            .entries
+            .entry(key.to_string())
+            .or_insert_with(|| Self::default_value(&def));
+
+        match entry {
+            DataValue::Counter { value } => {
+                *value = Self::clamp(value.saturating_add(by), def.min, def.max);
+                Ok(*value)
+            }
+            _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+        }
+    }
+
+    /// Decrement a counter. Clamps to min/max, never errors on bounds.
+    pub fn dec(&mut self, key: &str, by: i64) -> Result<i64> {
+        let def = self.assert_type(key, ValueType::Counter)?.clone();
+
+        let entry = self
+            .data
+            .entries
+            .entry(key.to_string())
+            .or_insert_with(|| Self::default_value(&def));
+
+        match entry {
+            DataValue::Counter { value } => {
+                *value = Self::clamp(value.saturating_sub(by), def.min, def.max);
+                Ok(*value)
+            }
+            _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+        }
+    }
+
+    /// Push a value onto a history (with auto-timestamp) or list.
+    pub fn push(&mut self, key: &str, value: &str) -> Result<()> {
+        self.push_with_ts(key, value, Utc::now())
+    }
+
+    /// Push with an explicit timestamp (used by tests).
+    pub fn push_with_ts(&mut self, key: &str, value: &str, ts: DateTime<Utc>) -> Result<()> {
+        let def = self.key_def(key)?.clone();
+
+        match def.value_type {
+            ValueType::History => {
+                let entry = self
+                    .data
+                    .entries
+                    .entry(key.to_string())
+                    .or_insert_with(|| Self::default_value(&def));
+
+                match entry {
+                    DataValue::History { entries } => {
+                        entries.insert(
+                            0,
+                            HistoryEntry {
+                                value: value.to_string(),
+                                ts: ts.to_rfc3339(),
+                            },
+                        );
+                        // Drop oldest at max_entries
+                        if let Some(max) = def.max_entries {
+                            entries.truncate(max);
+                        }
+                    }
+                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                }
+            }
+            ValueType::List => {
+                let entry = self
+                    .data
+                    .entries
+                    .entry(key.to_string())
+                    .or_insert_with(|| Self::default_value(&def));
+
+                match entry {
+                    DataValue::List { items } => {
+                        items.push(value.to_string());
+                        // Drop oldest at max_entries
+                        if let Some(max) = def.max_entries {
+                            while items.len() > max {
+                                items.remove(0);
+                            }
+                        }
+                    }
+                    _ => bail!("Data corruption: key '{}' has wrong runtime type", key),
+                }
+            }
+            _ => bail!(
+                "Type mismatch: 'push' not supported for {} (key '{}')",
+                def.value_type,
+                key
+            ),
+        }
+
+        Ok(())
+    }
+
+    /// Pop the last item from a list. History is append-only.
+    pub fn pop(&mut self, key: &str) -> Result<Option<String>> {
+        self.assert_type(key, ValueType::List)?;
+
+        match self.data.entries.get_mut(key) {
+            Some(DataValue::List { items }) => Ok(items.pop()),
+            Some(_) => bail!("Data corruption: key '{}' has wrong runtime type", key),
+            None => Ok(None),
+        }
+    }
+
+    /// Get the last N entries from a history or list.
+    pub fn last(&self, key: &str, count: usize) -> Result<Vec<String>> {
+        let def = self.key_def(key)?;
+
+        match def.value_type {
+            ValueType::History => match self.data.entries.get(key) {
+                Some(DataValue::History { entries }) => Ok(entries
+                    .iter()
+                    .take(count)
+                    .map(|e| {
+                        if count == 1 {
+                            e.value.clone()
+                        } else {
+                            format!("{} ({})", e.value, e.ts)
+                        }
+                    })
+                    .collect()),
+                _ => Ok(vec![]),
+            },
+            ValueType::List => match self.data.entries.get(key) {
+                Some(DataValue::List { items }) => {
+                    let start = items.len().saturating_sub(count);
+                    Ok(items[start..].to_vec())
+                }
+                _ => Ok(vec![]),
+            },
+            _ => bail!(
+                "Type mismatch: 'last' not supported for {} (key '{}')",
+                def.value_type,
+                key
+            ),
+        }
+    }
+
+    /// Get history entries since a given time reference.
+    pub fn since(&self, key: &str, timeref: &str) -> Result<Vec<&HistoryEntry>> {
+        self.assert_type(key, ValueType::History)?;
+
+        let cutoff = parse_timeref(timeref)?;
+
+        match self.data.entries.get(key) {
+            Some(DataValue::History { entries }) => Ok(entries
+                .iter()
+                .filter(|e| {
+                    DateTime::parse_from_rfc3339(&e.ts)
+                        .map(|t| t >= cutoff)
+                        .unwrap_or(false)
+                })
+                .collect()),
+            _ => Ok(vec![]),
+        }
+    }
+
+    /// Reset a key to its schema default.
+    pub fn reset(&mut self, key: &str) -> Result<()> {
+        let def = self.key_def(key)?.clone();
+        self.data
+            .entries
+            .insert(key.to_string(), Self::default_value(&def));
+        Ok(())
+    }
+
+    /// List all keys with their types.
+    pub fn keys(&self) -> Vec<(&str, ValueType)> {
+        self.schema
+            .keys
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.value_type))
+            .collect()
+    }
+
+    /// Dump all state as JSON.
+    pub fn dump_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self.data).context("Failed to serialize data")
+    }
+
+    /// Dump all state in compact format for wake integration.
+    pub fn dump_compact(&self) -> String {
+        let mut parts = Vec::new();
+
+        for (key, def) in &self.schema.keys {
+            let part = match self.data.entries.get(key) {
+                Some(val) => format_compact(key, val, def),
+                None => format_compact(key, &Self::default_value(def), def),
+            };
+            parts.push(part);
+        }
+
+        parts.join(" ")
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn clamp(value: i64, min: Option<i64>, max: Option<i64>) -> i64 {
+        let mut v = value;
+        if let Some(lo) = min {
+            v = v.max(lo);
+        }
+        if let Some(hi) = max {
+            v = v.min(hi);
+        }
+        v
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compact format
+// ---------------------------------------------------------------------------
+
+fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
+    match value {
+        DataValue::Counter { value } => format!("{}={}", key, value),
+        DataValue::String { value } => format!("{}={}", key, value),
+        DataValue::History { entries } => {
+            let items: Vec<String> = entries
+                .iter()
+                .map(|e| {
+                    let time_part = DateTime::parse_from_rfc3339(&e.ts)
+                        .map(|t| t.format("%H:%M").to_string())
+                        .unwrap_or_else(|_| "??:??".to_string());
+                    format!("{}@{}", e.value, time_part)
+                })
+                .collect();
+            format!("{}=[{}]", key, items.join(","))
+        }
+        DataValue::State { fields } => {
+            // Values only, ordered by schema field order
+            let values: Vec<String> = def
+                .fields
+                .as_ref()
+                .map(|schema_fields| {
+                    schema_fields
+                        .iter()
+                        .map(|f| fields.get(f).cloned().unwrap_or_default())
+                        .collect()
+                })
+                .unwrap_or_else(|| fields.values().cloned().collect());
+            format!("{}={{{}}}", key, values.join(","))
+        }
+        DataValue::List { items } => {
+            format!("{}=[{}]", key, items.join(","))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relative time parser
+// ---------------------------------------------------------------------------
+
+/// Parse a time reference: either ISO-8601 or relative (1h, 7d, 2w, 30m).
+pub fn parse_timeref(timeref: &str) -> Result<DateTime<Utc>> {
+    // Try ISO-8601 first
+    if let Ok(dt) = DateTime::parse_from_rfc3339(timeref) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    // Try relative time
+    parse_relative_time(timeref)
+}
+
+/// Parse a relative time string like "1h", "7d", "2w", "30m".
+pub fn parse_relative_time(s: &str) -> Result<DateTime<Utc>> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("Empty time reference");
+    }
+
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: i64 = num_str
+        .parse()
+        .with_context(|| format!("Invalid number in time reference: '{}'", s))?;
+
+    let duration = match unit {
+        "m" => chrono::Duration::minutes(num),
+        "h" => chrono::Duration::hours(num),
+        "d" => chrono::Duration::days(num),
+        "w" => chrono::Duration::weeks(num),
+        _ => bail!(
+            "Unknown time unit '{}' in '{}'. Use m (minutes), h (hours), d (days), w (weeks)",
+            unit,
+            s
+        ),
+    };
+
+    Ok(Utc::now() - duration)
+}
+
+// ---------------------------------------------------------------------------
+// Display helpers (for CLI output)
+// ---------------------------------------------------------------------------
+
+/// Format a DataValue for human-readable CLI output.
+pub fn format_value(value: &DataValue) -> String {
+    match value {
+        DataValue::Counter { value } => value.to_string(),
+        DataValue::String { value } => value.clone(),
+        DataValue::History { entries } => {
+            serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string())
+        }
+        DataValue::State { fields } => {
+            serde_json::to_string_pretty(fields).unwrap_or_else(|_| "{}".to_string())
+        }
+        DataValue::List { items } => {
+            serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as IoWrite;
+    use tempfile::TempDir;
+
+    fn test_schema() -> &'static str {
+        r#"
+[keys.warmth]
+type = "counter"
+min = 0
+default = "0"
+
+[keys.capped]
+type = "counter"
+min = 0
+max = 100
+default = "50"
+
+[keys.flavor_history]
+type = "history"
+max_entries = 3
+
+[keys.tensor]
+type = "state"
+fields = ["temperature", "entropy", "agency"]
+
+[keys.current_mood]
+type = "string"
+default = "neutral"
+
+[keys.tags]
+type = "list"
+max_entries = 5
+"#
+    }
+
+    fn setup_store(schema_toml: &str) -> (KvStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(schema_toml.as_bytes()).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+        (store, dir)
+    }
+
+    // -- Schema parsing --
+
+    #[test]
+    fn parse_schema_all_types() {
+        let (store, _dir) = setup_store(test_schema());
+        assert_eq!(store.schema.keys.len(), 6);
+        assert_eq!(store.schema.keys["warmth"].value_type, ValueType::Counter);
+        assert_eq!(
+            store.schema.keys["flavor_history"].value_type,
+            ValueType::History
+        );
+        assert_eq!(store.schema.keys["tensor"].value_type, ValueType::State);
+        assert_eq!(
+            store.schema.keys["current_mood"].value_type,
+            ValueType::String
+        );
+        assert_eq!(store.schema.keys["tags"].value_type, ValueType::List);
+    }
+
+    #[test]
+    fn parse_schema_counter_constraints() {
+        let (store, _dir) = setup_store(test_schema());
+        let warmth = &store.schema.keys["warmth"];
+        assert_eq!(warmth.min, Some(0));
+        assert_eq!(warmth.max, None);
+
+        let capped = &store.schema.keys["capped"];
+        assert_eq!(capped.min, Some(0));
+        assert_eq!(capped.max, Some(100));
+        assert_eq!(capped.default.as_deref(), Some("50"));
+    }
+
+    #[test]
+    fn parse_schema_state_fields() {
+        let (store, _dir) = setup_store(test_schema());
+        let tensor = &store.schema.keys["tensor"];
+        assert_eq!(
+            tensor.fields.as_ref().unwrap(),
+            &["temperature", "entropy", "agency"]
+        );
+    }
+
+    // -- Counter operations --
+
+    #[test]
+    fn counter_inc_dec() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert_eq!(store.inc("warmth", 1).unwrap(), 1);
+        assert_eq!(store.inc("warmth", 5).unwrap(), 6);
+        assert_eq!(store.dec("warmth", 2).unwrap(), 4);
+    }
+
+    #[test]
+    fn counter_clamp_min() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // warmth has min=0, default=0
+        assert_eq!(store.dec("warmth", 100).unwrap(), 0);
+    }
+
+    #[test]
+    fn counter_clamp_max() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // capped has min=0, max=100, default=50
+        assert_eq!(store.inc("capped", 1).unwrap(), 51);
+        assert_eq!(store.inc("capped", 100).unwrap(), 100);
+    }
+
+    #[test]
+    fn counter_set_and_clamp() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("capped", "200", None).unwrap();
+        match store.get("capped").unwrap() {
+            DataValue::Counter { value } => assert_eq!(*value, 100),
+            _ => panic!("Expected counter"),
+        }
+    }
+
+    // -- String operations --
+
+    #[test]
+    fn string_set_get() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("current_mood", "elated", None).unwrap();
+        match store.get("current_mood").unwrap() {
+            DataValue::String { value } => assert_eq!(value, "elated"),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    // -- State operations --
+
+    #[test]
+    fn state_set_field() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .set("tensor", "0.75", Some("temperature"))
+            .unwrap();
+        store.set("tensor", "0.30", Some("entropy")).unwrap();
+        match store.get("tensor").unwrap() {
+            DataValue::State { fields } => {
+                assert_eq!(fields["temperature"], "0.75");
+                assert_eq!(fields["entropy"], "0.30");
+            }
+            _ => panic!("Expected state"),
+        }
+    }
+
+    #[test]
+    fn state_rejects_unknown_field() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set("tensor", "0.5", Some("nonexistent"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown field"));
+    }
+
+    #[test]
+    fn state_requires_field_name() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set("tensor", "0.5", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("field name"));
+    }
+
+    // -- History operations --
+
+    #[test]
+    fn history_push_and_last() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store.push("flavor_history", "lapsang").unwrap();
+
+        let last = store.last("flavor_history", 1).unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0], "lapsang");
+
+        let last2 = store.last("flavor_history", 2).unwrap();
+        assert_eq!(last2.len(), 2);
+    }
+
+    #[test]
+    fn history_max_entries_overflow() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // max_entries = 3
+        store.push("flavor_history", "a").unwrap();
+        store.push("flavor_history", "b").unwrap();
+        store.push("flavor_history", "c").unwrap();
+        store.push("flavor_history", "d").unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries } => {
+                assert_eq!(entries.len(), 3);
+                assert_eq!(entries[0].value, "d"); // newest first
+                assert_eq!(entries[2].value, "b"); // oldest kept
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn history_since() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let old_time = Utc::now() - chrono::Duration::hours(3);
+        let new_time = Utc::now() - chrono::Duration::minutes(10);
+
+        store
+            .push_with_ts("flavor_history", "old_one", old_time)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "new_one", new_time)
+            .unwrap();
+
+        let results = store.since("flavor_history", "1h").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, "new_one");
+    }
+
+    // -- List operations --
+
+    #[test]
+    fn list_push_pop_last() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        let last = store.last("tags", 2).unwrap();
+        assert_eq!(last, vec!["beta", "gamma"]);
+
+        let popped = store.pop("tags").unwrap();
+        assert_eq!(popped, Some("gamma".to_string()));
+    }
+
+    #[test]
+    fn list_max_entries_overflow() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // max_entries = 5
+        for i in 0..8 {
+            store.push("tags", &format!("item_{}", i)).unwrap();
+        }
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 5);
+                assert_eq!(items[0], "item_3"); // oldest kept
+                assert_eq!(items[4], "item_7"); // newest
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    // -- Type mismatch --
+
+    #[test]
+    fn type_mismatch_inc_on_string() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.inc("current_mood", 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn type_mismatch_push_on_counter() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("warmth", "value");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn type_mismatch_pop_on_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.pop("flavor_history");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn type_mismatch_since_on_list() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.since("tags", "1h");
+        assert!(result.is_err());
+    }
+
+    // -- Unknown key --
+
+    #[test]
+    fn unknown_key_rejected() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.get("nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown key"));
+    }
+
+    // -- Reset --
+
+    #[test]
+    fn reset_counter() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.inc("warmth", 42).unwrap();
+        store.reset("warmth").unwrap();
+        match store.get("warmth").unwrap() {
+            DataValue::Counter { value } => assert_eq!(*value, 0),
+            _ => panic!("Expected counter"),
+        }
+    }
+
+    #[test]
+    fn reset_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "test").unwrap();
+        store.reset("flavor_history").unwrap();
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries } => assert!(entries.is_empty()),
+            _ => panic!("Expected history"),
+        }
+    }
+
+    // -- Keys listing --
+
+    #[test]
+    fn keys_lists_all() {
+        let (store, _dir) = setup_store(test_schema());
+        let keys = store.keys();
+        assert_eq!(keys.len(), 6);
+    }
+
+    // -- Atomic write --
+
+    #[test]
+    fn atomic_write_round_trip() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.data.schema_id = "test".to_string();
+        store.inc("warmth", 7).unwrap();
+        store.set("current_mood", "happy", None).unwrap();
+        store.push("flavor_history", "earl grey").unwrap();
+        store.save().unwrap();
+
+        // Reload and verify
+        let data_str = fs::read_to_string(&store.data_path).unwrap();
+        let reloaded: DataFile = serde_json::from_str(&data_str).unwrap();
+        assert_eq!(reloaded.schema_id, "test");
+        match &reloaded.entries["warmth"] {
+            DataValue::Counter { value } => assert_eq!(*value, 7),
+            _ => panic!("Expected counter"),
+        }
+    }
+
+    // -- Compact dump --
+
+    #[test]
+    fn compact_dump_format() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.inc("warmth", 42).unwrap();
+        store.set("current_mood", "calm", None).unwrap();
+        store
+            .set("tensor", "0.55", Some("temperature"))
+            .unwrap();
+        store.set("tensor", "0.35", Some("entropy")).unwrap();
+        store.set("tensor", "0.70", Some("agency")).unwrap();
+        store.push("tags", "focus").unwrap();
+        store.push("tags", "rust").unwrap();
+
+        let compact = store.dump_compact();
+
+        assert!(compact.contains("warmth=42"));
+        assert!(compact.contains("current_mood=calm"));
+        assert!(compact.contains("tensor={0.55,0.35,0.70}"));
+        assert!(compact.contains("tags=[focus,rust]"));
+    }
+
+    #[test]
+    fn compact_dump_counter_default() {
+        let (store, _dir) = setup_store(test_schema());
+        let compact = store.dump_compact();
+        // Defaults when no data set
+        assert!(compact.contains("warmth=0"));
+        assert!(compact.contains("capped=50"));
+    }
+
+    #[test]
+    fn compact_dump_history_with_times() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T19:13:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store
+            .push_with_ts("flavor_history", "bergamot", ts)
+            .unwrap();
+
+        let compact = store.dump_compact();
+        assert!(compact.contains("flavor_history=[bergamot@19:13]"));
+    }
+
+    // -- Relative time parser --
+
+    #[test]
+    fn parse_relative_minutes() {
+        let result = parse_relative_time("30m").unwrap();
+        let diff = Utc::now() - result;
+        // Should be approximately 30 minutes
+        assert!(diff.num_minutes() >= 29 && diff.num_minutes() <= 31);
+    }
+
+    #[test]
+    fn parse_relative_hours() {
+        let result = parse_relative_time("2h").unwrap();
+        let diff = Utc::now() - result;
+        assert!(diff.num_hours() >= 1 && diff.num_hours() <= 3);
+    }
+
+    #[test]
+    fn parse_relative_days() {
+        let result = parse_relative_time("7d").unwrap();
+        let diff = Utc::now() - result;
+        assert!(diff.num_days() >= 6 && diff.num_days() <= 8);
+    }
+
+    #[test]
+    fn parse_relative_weeks() {
+        let result = parse_relative_time("2w").unwrap();
+        let diff = Utc::now() - result;
+        assert!(diff.num_weeks() >= 1 && diff.num_weeks() <= 3);
+    }
+
+    #[test]
+    fn parse_relative_invalid_unit() {
+        assert!(parse_relative_time("5x").is_err());
+    }
+
+    #[test]
+    fn parse_relative_invalid_number() {
+        assert!(parse_relative_time("abch").is_err());
+    }
+
+    #[test]
+    fn parse_relative_empty() {
+        assert!(parse_relative_time("").is_err());
+    }
+
+    #[test]
+    fn parse_timeref_iso8601() {
+        let result = parse_timeref("2026-04-22T19:13:00Z").unwrap();
+        assert_eq!(result.year(), 2026);
+    }
+
+    #[test]
+    fn parse_timeref_relative_fallback() {
+        let result = parse_timeref("1h").unwrap();
+        let diff = Utc::now() - result;
+        assert!(diff.num_hours() >= 0 && diff.num_hours() <= 2);
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn inc_by_custom_amount() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert_eq!(store.inc("warmth", 10).unwrap(), 10);
+        assert_eq!(store.dec("warmth", 3).unwrap(), 7);
+    }
+
+    #[test]
+    fn last_on_empty_returns_empty() {
+        let (store, _dir) = setup_store(test_schema());
+        let last = store.last("flavor_history", 5).unwrap();
+        assert!(last.is_empty());
+    }
+
+    #[test]
+    fn pop_on_empty_returns_none() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let popped = store.pop("tags").unwrap();
+        assert!(popped.is_none());
+    }
+
+    use chrono::Datelike as _;
+}

@@ -13,6 +13,7 @@ mod handlers;
 mod helpers;
 mod index;
 mod knowledge;
+mod kv;
 pub mod paths;
 mod session;
 mod state;
@@ -76,6 +77,13 @@ fn main() -> Result<()> {
         Commands::Heartbeat { since, reset } => handle_heartbeat(since, reset),
         Commands::Log { count, full, args } => handle_log(count, full, args),
         Commands::State { command } => handle_state(command),
+        Commands::Kv { command } => {
+            let code = handle_kv(command)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
     }
 }
 

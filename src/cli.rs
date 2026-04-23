@@ -127,6 +127,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: StateCommands,
     },
+
+    /// Local key-value store for fast agent state
+    Kv {
+        #[command(subcommand)]
+        command: KvCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1506,6 +1512,97 @@ pub enum ContentTypesCommands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum KvCommands {
+    /// Get the current value for a key
+    Get {
+        /// Key name
+        key: String,
+    },
+
+    /// Set a value (string/counter), or set a field on a state type
+    Set {
+        /// Key name
+        key: String,
+
+        /// Value to set (for string/counter), or field name (for state type)
+        value: String,
+
+        /// Field value (only for state type: mx kv set <key> <field> <value>)
+        field_value: Option<String>,
+    },
+
+    /// Increment a counter
+    Inc {
+        /// Key name
+        key: String,
+
+        /// Amount to increment by (default: 1)
+        #[arg(long, default_value = "1")]
+        by: i64,
+    },
+
+    /// Decrement a counter
+    Dec {
+        /// Key name
+        key: String,
+
+        /// Amount to decrement by (default: 1)
+        #[arg(long, default_value = "1")]
+        by: i64,
+    },
+
+    /// Push a value onto a history or list
+    Push {
+        /// Key name
+        key: String,
+
+        /// Value to push
+        value: String,
+    },
+
+    /// Pop the last value from a list
+    Pop {
+        /// Key name
+        key: String,
+    },
+
+    /// Get the last N entries from a history or list
+    Last {
+        /// Key name
+        key: String,
+
+        /// Number of entries (default: 1)
+        #[arg(long, default_value = "1")]
+        count: usize,
+    },
+
+    /// Get history entries since a time reference (ISO-8601 or relative: 1h, 7d, 2w, 30m)
+    Since {
+        /// Key name
+        key: String,
+
+        /// Time reference (e.g., "1h", "7d", "2w", "30m", or ISO-8601)
+        timeref: String,
+    },
+
+    /// Dump all state
+    Dump {
+        /// Output format: compact or json
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+
+    /// Reset a key to its schema default
+    Reset {
+        /// Key name
+        key: String,
+    },
+
+    /// List all defined keys with their types
+    Keys,
 }
 
 #[derive(Subcommand)]
