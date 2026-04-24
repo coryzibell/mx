@@ -154,6 +154,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         match &e {
                             KvError::TypeMismatch { .. } => {
                                 // Allow falling through to memory-only set
+                                eprintln!("Warning: value not set (type does not support set); memory pointer updated");
                             }
                             _ => return handle_kv_err(e),
                         }
