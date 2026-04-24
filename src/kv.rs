@@ -152,9 +152,21 @@ pub struct DataFile {
 pub enum DataValue {
     Counter { value: i64 },
     String { value: String },
-    History { entries: Vec<HistoryEntry> },
-    State { fields: BTreeMap<String, String> },
-    List { items: Vec<ListEntry> },
+    History {
+        entries: Vec<HistoryEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+    },
+    State {
+        fields: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+    },
+    List {
+        items: Vec<ListEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        memory: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -174,9 +186,21 @@ enum RawListItem {
 #[serde(untagged)]
 enum DataValueDe {
     Counter { value: i64 },
-    History { entries: Vec<HistoryEntry> },
-    State { fields: BTreeMap<String, String> },
-    List { items: Vec<RawListItem> },
+    History {
+        entries: Vec<HistoryEntry>,
+        #[serde(default)]
+        memory: Option<String>,
+    },
+    State {
+        fields: BTreeMap<String, String>,
+        #[serde(default)]
+        memory: Option<String>,
+    },
+    List {
+        items: Vec<RawListItem>,
+        #[serde(default)]
+        memory: Option<String>,
+    },
     // String must be last in untagged — it's the broadest match
     String { value: String },
 }
@@ -190,7 +214,7 @@ impl<'de> Deserialize<'de> for DataValue {
         Ok(match raw {
             DataValueDe::Counter { value } => DataValue::Counter { value },
             DataValueDe::String { value } => DataValue::String { value },
-            DataValueDe::History { entries } => {
+            DataValueDe::History { entries, memory } => {
                 // Back-fill IDs for history entries loaded with id=0 (old data)
                 let mut max_id = entries.iter().map(|e| e.id).max().unwrap_or(0);
                 let entries = entries
@@ -203,10 +227,10 @@ impl<'de> Deserialize<'de> for DataValue {
                         e
                     })
                     .collect();
-                DataValue::History { entries }
+                DataValue::History { entries, memory }
             }
-            DataValueDe::State { fields } => DataValue::State { fields },
-            DataValueDe::List { items } => {
+            DataValueDe::State { fields, memory } => DataValue::State { fields, memory },
+            DataValueDe::List { items, memory } => {
                 let mut next_id = 0u64;
                 let entries: Vec<ListEntry> = items
                     .into_iter()
@@ -227,7 +251,7 @@ impl<'de> Deserialize<'de> for DataValue {
                         }
                     })
                     .collect();
-                DataValue::List { items: entries }
+                DataValue::List { items: entries, memory }
             }
         })
     }
@@ -421,6 +445,7 @@ impl KvStore {
             },
             ValueType::History => DataValue::History {
                 entries: Vec::new(),
+                memory: None,
             },
             ValueType::State => {
                 let fields = def
@@ -428,9 +453,9 @@ impl KvStore {
                     .as_ref()
                     .map(|fs| fs.iter().map(|f| (f.clone(), String::new())).collect())
                     .unwrap_or_default();
-                DataValue::State { fields }
+                DataValue::State { fields, memory: None }
             }
-            ValueType::List => DataValue::List { items: Vec::new() },
+            ValueType::List => DataValue::List { items: Vec::new(), memory: None },
         }
     }
 
@@ -499,7 +524,7 @@ impl KvStore {
                     .or_insert_with(|| Self::default_value(&def));
 
                 match entry {
-                    DataValue::State { fields } => {
+                    DataValue::State { fields, .. } => {
                         fields.insert(field_name.to_string(), value.to_string());
                     }
                     _ => {
@@ -589,7 +614,7 @@ impl KvStore {
                     .or_insert_with(|| Self::default_value(&def));
 
                 match entry {
-                    DataValue::History { entries } => {
+                    DataValue::History { entries, .. } => {
                         let next_id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
                         entries.insert(
                             0,
@@ -620,7 +645,7 @@ impl KvStore {
                     .or_insert_with(|| Self::default_value(&def));
 
                 match entry {
-                    DataValue::List { items } => {
+                    DataValue::List { items, .. } => {
                         let next_id = items.iter().map(|e| e.id).max().unwrap_or(0) + 1;
                         items.push(ListEntry {
                             id: next_id,
@@ -659,7 +684,7 @@ impl KvStore {
         self.assert_type(key, ValueType::List)?;
 
         match self.data.entries.get_mut(key) {
-            Some(DataValue::List { items }) => Ok(items.pop()),
+            Some(DataValue::List { items, .. }) => Ok(items.pop()),
             Some(_) => Err(KvError::Other(anyhow::anyhow!(
                 "Data corruption: key '{}' has wrong runtime type",
                 key
@@ -674,7 +699,7 @@ impl KvStore {
 
         match def.value_type {
             ValueType::History => match self.data.entries.get(key) {
-                Some(DataValue::History { entries }) => Ok(entries
+                Some(DataValue::History { entries, .. }) => Ok(entries
                     .iter()
                     .take(count)
                     .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
@@ -682,7 +707,7 @@ impl KvStore {
                 _ => Ok(vec![]),
             },
             ValueType::List => match self.data.entries.get(key) {
-                Some(DataValue::List { items }) => {
+                Some(DataValue::List { items, .. }) => {
                     let start = items.len().saturating_sub(count);
                     Ok(items[start..]
                         .iter()
@@ -712,7 +737,7 @@ impl KvStore {
         let cutoff = parse_timeref(timeref).map_err(KvError::Other)?;
 
         match self.data.entries.get(key) {
-            Some(DataValue::History { entries }) => Ok(entries
+            Some(DataValue::History { entries, .. }) => Ok(entries
                 .iter()
                 .filter(|e| {
                     DateTime::parse_from_rfc3339(&e.ts)
@@ -760,7 +785,7 @@ impl KvStore {
         let mut removed = Vec::new();
 
         match self.data.entries.get_mut(key) {
-            Some(DataValue::History { entries }) => {
+            Some(DataValue::History { entries, .. }) => {
                 if let Some(id) = by_id {
                     if let Some(pos) = entries.iter().position(|e| e.id == id) {
                         removed.push(entries.remove(pos).value);
@@ -778,7 +803,7 @@ impl KvStore {
                     });
                 }
             }
-            Some(DataValue::List { items }) => {
+            Some(DataValue::List { items, .. }) => {
                 if let Some(id) = by_id {
                     if let Some(pos) = items.iter().position(|e| e.id == id) {
                         removed.push(items.remove(pos).value);
@@ -820,7 +845,7 @@ impl KvStore {
         let mut hits = Vec::new();
 
         match self.data.entries.get(key) {
-            Some(DataValue::History { entries }) => {
+            Some(DataValue::History { entries, .. }) => {
                 for e in entries {
                     if e.value.to_lowercase().contains(&query_lower) {
                         hits.push(SearchHit {
@@ -831,7 +856,7 @@ impl KvStore {
                     }
                 }
             }
-            Some(DataValue::List { items }) => {
+            Some(DataValue::List { items, .. }) => {
                 for e in items {
                     if e.value.to_lowercase().contains(&query_lower) {
                         hits.push(SearchHit {
@@ -867,7 +892,7 @@ impl KvStore {
         let mut latest_ts: Option<String> = None;
 
         match self.data.entries.get(key) {
-            Some(DataValue::History { entries }) => {
+            Some(DataValue::History { entries, .. }) => {
                 for e in entries {
                     let matches = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
@@ -881,7 +906,7 @@ impl KvStore {
                     }
                 }
             }
-            Some(DataValue::List { items }) => {
+            Some(DataValue::List { items, .. }) => {
                 for e in items {
                     let matches = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
@@ -933,6 +958,64 @@ impl KvStore {
     }
 
     // -----------------------------------------------------------------------
+    // Memory pointer operations
+    // -----------------------------------------------------------------------
+
+    /// Set the memory pointer (kn- reference) on a history, list, or state key.
+    /// Pass `None` to clear the pointer.
+    pub fn set_memory(&mut self, key: &str, memory: Option<String>) -> Result<(), KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List | ValueType::State => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history, list, or state".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        let def = def.clone();
+        let entry = self
+            .data
+            .entries
+            .entry(key.to_string())
+            .or_insert_with(|| Self::default_value(&def));
+
+        // Normalize empty string to None (clearing the link)
+        let memory = memory.filter(|s| !s.is_empty());
+
+        match entry {
+            DataValue::History { memory: mem, .. } => *mem = memory,
+            DataValue::List { memory: mem, .. } => *mem = memory,
+            DataValue::State { memory: mem, .. } => *mem = memory,
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    /// Get the memory pointer for a key, if set.
+    pub fn get_memory(&self, key: &str) -> Result<Option<&str>, KvError> {
+        self.key_def(key)?; // validate key exists in schema
+
+        match self.data.entries.get(key) {
+            Some(DataValue::History { memory, .. }) => Ok(memory.as_deref()),
+            Some(DataValue::List { memory, .. }) => Ok(memory.as_deref()),
+            Some(DataValue::State { memory, .. }) => Ok(memory.as_deref()),
+            Some(DataValue::Counter { .. } | DataValue::String { .. }) => {
+                Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history, list, or state".to_string(),
+                    got: "counter or string".to_string(),
+                })
+            }
+            None => Ok(None),
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
@@ -956,7 +1039,7 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
     match value {
         DataValue::Counter { value } => format!("{}={}", key, value),
         DataValue::String { value } => format!("{}={}", key, value),
-        DataValue::History { entries } => {
+        DataValue::History { entries, memory, .. } => {
             let items: Vec<String> = entries
                 .iter()
                 .map(|e| {
@@ -966,9 +1049,13 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
                     format!("{}@{}", e.value, time_part)
                 })
                 .collect();
-            format!("{}=[{}]", key, items.join(","))
+            let base = format!("{}=[{}]", key, items.join(","));
+            match memory {
+                Some(m) if !m.is_empty() => format!("{}({})", base, m),
+                _ => base,
+            }
         }
-        DataValue::State { fields } => {
+        DataValue::State { fields, memory, .. } => {
             // Values only, ordered by schema field order
             let values: Vec<String> = def
                 .fields
@@ -980,9 +1067,13 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
                         .collect()
                 })
                 .unwrap_or_else(|| fields.values().cloned().collect());
-            format!("{}={{{}}}", key, values.join(","))
+            let base = format!("{}={{{}}}", key, values.join(","));
+            match memory {
+                Some(m) if !m.is_empty() => format!("{}({})", base, m),
+                _ => base,
+            }
         }
-        DataValue::List { items } => {
+        DataValue::List { items, memory, .. } => {
             let formatted: Vec<String> = items
                 .iter()
                 .map(|e| {
@@ -996,7 +1087,11 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
                     }
                 })
                 .collect();
-            format!("{}=[{}]", key, formatted.join(","))
+            let base = format!("{}=[{}]", key, formatted.join(","));
+            match memory {
+                Some(m) if !m.is_empty() => format!("{}({})", base, m),
+                _ => base,
+            }
         }
     }
 }
@@ -1052,15 +1147,15 @@ pub fn format_value(value: &DataValue) -> String {
     match value {
         DataValue::Counter { value } => value.to_string(),
         DataValue::String { value } => value.clone(),
-        DataValue::History { entries } => entries
+        DataValue::History { entries, .. } => entries
             .iter()
             .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
             .collect::<Vec<_>>()
             .join("\n"),
-        DataValue::State { fields } => {
+        DataValue::State { fields, .. } => {
             serde_json::to_string_pretty(fields).unwrap_or_else(|_| "{}".to_string())
         }
-        DataValue::List { items } => items
+        DataValue::List { items, .. } => items
             .iter()
             .map(|e| {
                 if e.ts.is_empty() {
@@ -1224,7 +1319,7 @@ max_entries = 5
         store.set("tensor", "0.75", Some("temperature")).unwrap();
         store.set("tensor", "0.30", Some("entropy")).unwrap();
         match store.get("tensor").unwrap() {
-            DataValue::State { fields } => {
+            DataValue::State { fields, .. } => {
                 assert_eq!(fields["temperature"], "0.75");
                 assert_eq!(fields["entropy"], "0.30");
             }
@@ -1275,7 +1370,7 @@ max_entries = 5
         store.push("flavor_history", "d").unwrap();
 
         match store.get("flavor_history").unwrap() {
-            DataValue::History { entries } => {
+            DataValue::History { entries, .. } => {
                 assert_eq!(entries.len(), 3);
                 assert_eq!(entries[0].value, "d"); // newest first
                 assert_eq!(entries[2].value, "b"); // oldest kept
@@ -1332,7 +1427,7 @@ max_entries = 5
             store.push("tags", &format!("item_{}", i)).unwrap();
         }
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 5);
                 assert_eq!(items[0].value, "item_3"); // oldest kept
                 assert_eq!(items[4].value, "item_7"); // newest
@@ -1403,7 +1498,7 @@ max_entries = 5
         store.push("flavor_history", "test").unwrap();
         store.reset("flavor_history").unwrap();
         match store.get("flavor_history").unwrap() {
-            DataValue::History { entries } => assert!(entries.is_empty()),
+            DataValue::History { entries, .. } => assert!(entries.is_empty()),
             _ => panic!("Expected history"),
         }
     }
@@ -1587,7 +1682,7 @@ max_entries = 5
 
         // alpha-2 should still be there
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0].value, "beta");
                 assert_eq!(items[1].value, "alpha-2");
@@ -1607,7 +1702,7 @@ max_entries = 5
         assert_eq!(result.removed.len(), 2);
 
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0].value, "beta");
             }
@@ -1624,7 +1719,7 @@ max_entries = 5
 
         // Get the ID of "beta"
         let beta_id = match store.get("tags").unwrap() {
-            DataValue::List { items } => items[1].id,
+            DataValue::List { items, .. } => items[1].id,
             _ => panic!("Expected list"),
         };
 
@@ -1646,7 +1741,7 @@ max_entries = 5
         assert_eq!(result.removed.len(), 1);
 
         match store.get("flavor_history").unwrap() {
-            DataValue::History { entries } => {
+            DataValue::History { entries, .. } => {
                 assert_eq!(entries.len(), 2);
             }
             _ => panic!("Expected history"),
@@ -1802,7 +1897,7 @@ max_entries = 5
         store.push("flavor_history", "c").unwrap();
 
         match store.get("flavor_history").unwrap() {
-            DataValue::History { entries } => {
+            DataValue::History { entries, .. } => {
                 // Each push should get a unique ID
                 let ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
                 assert_eq!(ids.len(), 3);
@@ -1824,7 +1919,7 @@ max_entries = 5
         store.push("tags", "c").unwrap();
 
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items[0].id, 1);
                 assert_eq!(items[1].id, 2);
                 assert_eq!(items[2].id, 3);
@@ -1847,7 +1942,7 @@ max_entries = 5
         store.push("tags", "d").unwrap();
 
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0].id, 1); // a
                 assert_eq!(items[1].id, 3); // c
@@ -1879,7 +1974,7 @@ max_entries = 5
         let store = KvStore::load(&schema_path, &data_path).unwrap();
 
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0].value, "alpha");
                 assert_eq!(items[1].value, "beta");
@@ -1919,7 +2014,7 @@ max_entries = 5
         let store = KvStore::load(&schema_path, &data_path).unwrap();
 
         match store.get("flavor_history").unwrap() {
-            DataValue::History { entries } => {
+            DataValue::History { entries, .. } => {
                 assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0].value, "bergamot");
                 // Should have auto-assigned IDs
@@ -1943,7 +2038,7 @@ max_entries = 5
         store.push_with_ts("tags", "focus", ts).unwrap();
 
         match store.get("tags").unwrap() {
-            DataValue::List { items } => {
+            DataValue::List { items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert!(items[0].ts.contains("2026-04-22"));
                 assert_eq!(items[0].value, "focus");
@@ -1996,4 +2091,304 @@ max_entries = 5
     }
 
     use chrono::Datelike as _;
+
+    // -- Memory pointer operations --
+
+    #[test]
+    fn set_get_memory_on_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+
+        // Initially no memory pointer
+        assert_eq!(store.get_memory("flavor_history").unwrap(), None);
+
+        // Set a memory pointer
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+
+        // Verify it persists through save/reload
+        store.data.schema_id = "test".to_string();
+        store.save().unwrap();
+        let data_str = fs::read_to_string(&store.data_path).unwrap();
+        assert!(data_str.contains("kn-abc123"));
+    }
+
+    #[test]
+    fn set_get_memory_on_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+
+        store
+            .set_memory("tags", Some("kn-def456".to_string()))
+            .unwrap();
+        assert_eq!(store.get_memory("tags").unwrap(), Some("kn-def456"));
+    }
+
+    #[test]
+    fn set_get_memory_on_state() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("tensor", "0.5", Some("temperature")).unwrap();
+
+        store
+            .set_memory("tensor", Some("kn-789ghi".to_string()))
+            .unwrap();
+        assert_eq!(store.get_memory("tensor").unwrap(), Some("kn-789ghi"));
+    }
+
+    #[test]
+    fn set_memory_on_counter_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_memory("warmth", Some("kn-abc".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn set_memory_on_string_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_memory("current_mood", Some("kn-abc".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn get_memory_on_counter_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.inc("warmth", 1).unwrap();
+        let result = store.get_memory("warmth");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn clear_memory_with_empty_string() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+
+        // Set then clear
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+
+        // Clear with empty string
+        store
+            .set_memory("flavor_history", Some("".to_string()))
+            .unwrap();
+        assert_eq!(store.get_memory("flavor_history").unwrap(), None);
+    }
+
+    #[test]
+    fn clear_memory_with_none() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+
+        store
+            .set_memory("tags", Some("kn-abc123".to_string()))
+            .unwrap();
+        store.set_memory("tags", None).unwrap();
+        assert_eq!(store.get_memory("tags").unwrap(), None);
+    }
+
+    #[test]
+    fn memory_not_serialized_when_none() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store.data.schema_id = "test".to_string();
+        store.save().unwrap();
+
+        let data_str = fs::read_to_string(&store.data_path).unwrap();
+        // "memory" should NOT appear in JSON when it's None
+        assert!(!data_str.contains("\"memory\""));
+    }
+
+    #[test]
+    fn backward_compat_old_data_without_memory() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Old-format data file without memory field
+        let old_data = r#"{
+            "_schema": "test",
+            "_updated": "2026-04-20T00:00:00Z",
+            "flavor_history": {
+                "entries": [
+                    {"id": 1, "value": "bergamot", "ts": "2026-04-22T19:13:00Z"}
+                ]
+            },
+            "tags": {
+                "items": [
+                    {"id": 1, "value": "focus", "ts": "2026-04-22T10:30:00Z"}
+                ]
+            },
+            "tensor": {
+                "fields": {"temperature": "0.55", "entropy": "0.35", "agency": "0.70"}
+            }
+        }"#;
+        fs::write(&data_path, old_data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+
+        // All should deserialize cleanly with no memory pointer
+        assert_eq!(store.get_memory("flavor_history").unwrap(), None);
+        assert_eq!(store.get_memory("tags").unwrap(), None);
+        assert_eq!(store.get_memory("tensor").unwrap(), None);
+
+        // Data should still be accessible
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].value, "bergamot");
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn backward_compat_data_with_memory() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Data file WITH memory field
+        let data = r#"{
+            "_schema": "test",
+            "_updated": "2026-04-20T00:00:00Z",
+            "flavor_history": {
+                "entries": [
+                    {"id": 1, "value": "bergamot", "ts": "2026-04-22T19:13:00Z"}
+                ],
+                "memory": "kn-abc123"
+            },
+            "tags": {
+                "items": [
+                    {"id": 1, "value": "focus", "ts": "2026-04-22T10:30:00Z"}
+                ],
+                "memory": "kn-def456"
+            }
+        }"#;
+        fs::write(&data_path, data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+        assert_eq!(store.get_memory("tags").unwrap(), Some("kn-def456"));
+    }
+
+    // -- Compact dump with memory pointers --
+
+    #[test]
+    fn compact_dump_with_memory_pointer() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T19:13:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store
+            .push_with_ts("flavor_history", "bergamot", ts)
+            .unwrap();
+        store
+            .set_memory("flavor_history", Some("kn-def456".to_string()))
+            .unwrap();
+
+        store.set("tensor", "0.55", Some("temperature")).unwrap();
+        store.set("tensor", "0.35", Some("entropy")).unwrap();
+        store.set("tensor", "0.70", Some("agency")).unwrap();
+        store
+            .set_memory("tensor", Some("kn-789ghi".to_string()))
+            .unwrap();
+
+        let compact = store.dump_compact();
+        assert!(compact.contains("flavor_history=[bergamot@19:13](kn-def456)"));
+        assert!(compact.contains("tensor={0.55,0.35,0.70}(kn-789ghi)"));
+    }
+
+    #[test]
+    fn compact_dump_without_memory_pointer() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T19:13:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store
+            .push_with_ts("flavor_history", "bergamot", ts)
+            .unwrap();
+        // No memory pointer set
+
+        let compact = store.dump_compact();
+        assert!(compact.contains("flavor_history=[bergamot@19:13]"));
+        // Should NOT contain parenthetical
+        assert!(!compact.contains("flavor_history=[bergamot@19:13]("));
+    }
+
+    #[test]
+    fn set_memory_on_nonexistent_data_creates_default() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // No data for flavor_history yet, but set memory should initialize it
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+
+        // Should have created default empty history
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => assert!(entries.is_empty()),
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn memory_survives_push() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+
+        // Push another entry
+        store.push("flavor_history", "lapsang").unwrap();
+
+        // Memory pointer should still be set
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+    }
+
+    #[test]
+    fn memory_survives_reset() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+
+        // Reset clears data to default — memory pointer should be cleared too
+        store.reset("flavor_history").unwrap();
+
+        // After reset, memory is gone (default_value has memory: None)
+        assert_eq!(store.get_memory("flavor_history").unwrap(), None);
+    }
 }

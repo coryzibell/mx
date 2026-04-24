@@ -1529,6 +1529,10 @@ pub enum KvCommands {
     Get {
         /// Key name
         key: String,
+
+        /// Resolve and display linked memory entry (kn- reference)
+        #[arg(long)]
+        memory: bool,
     },
 
     /// Set a value (string/counter), or set a field on a state type
@@ -1537,10 +1541,14 @@ pub enum KvCommands {
         key: String,
 
         /// Value to set (for string/counter), or field name (for state type)
-        value: String,
+        value: Option<String>,
 
         /// Field value (only for state type: mx kv set <key> <field> <value>)
         field_value: Option<String>,
+
+        /// Link a memory entry (kn- ID) to this key, or "" to clear
+        #[arg(long)]
+        memory: Option<String>,
     },
 
     /// Increment a counter
@@ -1586,6 +1594,10 @@ pub enum KvCommands {
         /// Number of entries (default: 1)
         #[arg(long, default_value = "1")]
         count: usize,
+
+        /// Resolve and display linked memory entry (kn- reference)
+        #[arg(long)]
+        memory: bool,
     },
 
     /// Get history entries since a time reference (ISO-8601 or relative: 1h, 7d, 2w, 30m)
@@ -1595,6 +1607,10 @@ pub enum KvCommands {
 
         /// Time reference (e.g., "1h", "7d", "2w", "30m", or ISO-8601)
         timeref: String,
+
+        /// Resolve and display linked memory entry (kn- reference)
+        #[arg(long)]
+        memory: bool,
     },
 
     /// Dump all state
@@ -1602,6 +1618,10 @@ pub enum KvCommands {
         /// Output format: compact or json
         #[arg(long, default_value = "json", value_enum)]
         format: DumpFormat,
+
+        /// Resolve and display linked memory entries (kn- references)
+        #[arg(long)]
+        memory: bool,
     },
 
     /// Reset a key to its schema default
@@ -1634,6 +1654,10 @@ pub enum KvCommands {
 
         /// Search query (case-insensitive substring)
         query: String,
+
+        /// Resolve and display linked memory entry (kn- reference)
+        #[arg(long)]
+        memory: bool,
     },
 
     /// Count entries in a list/history, optionally filtered

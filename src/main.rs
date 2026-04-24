@@ -78,7 +78,7 @@ fn main() -> Result<()> {
         Commands::Log { count, full, args } => handle_log(count, full, args),
         Commands::State { command } => handle_state(command),
         Commands::Kv { command } => {
-            let code = handle_kv(command)?;
+            let code = handle_kv(command, cli.verbose)?;
             if code != 0 {
                 std::process::exit(code);
             }
