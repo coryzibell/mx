@@ -60,6 +60,9 @@ lazy_static = "1"
 # Temporary directories
 tempfile = "3"
 
+# CommonMark parser (fence-aware heading extraction — mx#215)
+pulldown-cmark = { version = "0.13", default-features = false }
+
 # Terminal colors
 colored = "2"
 

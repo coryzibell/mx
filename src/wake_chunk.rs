@@ -457,31 +457,35 @@ pub fn extract_salient_phrase(content: &str, chunk_idx: u16, total: u16) -> Stri
 }
 
 fn first_heading(content: &str) -> Option<String> {
-    // Track fenced-code-block state as we walk lines. `\`\`\`` at the start
-    // of a line toggles the in-fence flag; heading detection is suppressed
-    // while we're inside a fence so that prose like a literal `## example`
-    // shown inside a code sample doesn't get picked as the chunk's salient
-    // phrase. Diffi flagged this in mx#212 review — would have produced
-    // phrase collisions when two chunks both quoted a fake heading from
-    // different code blocks.
-    let mut in_fence = false;
-    for line in content.lines() {
-        let trimmed_start = line.trim_start();
-        if trimmed_start.starts_with("```") {
-            // Fence open/close toggle. Both ```lang and bare ``` trigger it.
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        if trimmed_start.starts_with('#') {
-            // Strip leading `#` chars and any single space after them.
-            let stripped = trimmed_start.trim_start_matches('#');
-            let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
-            if !stripped.trim().is_empty() {
-                return Some(stripped.to_string());
+    // Use pulldown-cmark to walk the CommonMark AST instead of naive
+    // line-prefix scanning. This correctly handles all fence variants:
+    // quadruple-backtick fences, tilde fences, indented code blocks, etc.
+    // Fixes mx#215 — the old `starts_with("```")` toggle broke for
+    // quadruple-backtick fences where inner triple backticks flipped the
+    // fence state incorrectly.
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+    let parser = Parser::new(content);
+    let mut in_heading = false;
+    let mut heading_text = String::new();
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { .. }) => {
+                in_heading = true;
+                heading_text.clear();
             }
+            Event::End(TagEnd::Heading(_)) => {
+                let trimmed = heading_text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
+                in_heading = false;
+            }
+            Event::Text(ref text) | Event::Code(ref text) if in_heading => {
+                heading_text.push_str(text);
+            }
+            _ => {}
         }
     }
     None
@@ -507,14 +511,26 @@ fn first_sentence(content: &str) -> Option<String> {
 }
 
 fn first_non_empty_line(content: &str) -> Option<String> {
-    let mut in_fence = false;
+    let mut fence_marker: Option<(char, usize)> = None; // (char, run_length) of opening fence
     for line in content.lines() {
         let trimmed_start = line.trim_start();
-        if trimmed_start.starts_with("```") {
-            in_fence = !in_fence;
+        if let Some(marker) = detect_fence_marker(trimmed_start) {
+            match fence_marker {
+                None => {
+                    // Opening a new fence.
+                    fence_marker = Some(marker);
+                }
+                Some((open_ch, open_len)) => {
+                    // Only close if same char and at least as many repetitions.
+                    if marker.0 == open_ch && marker.1 >= open_len {
+                        fence_marker = None;
+                    }
+                    // Otherwise it's content inside the fence — skip.
+                }
+            }
             continue;
         }
-        if in_fence {
+        if fence_marker.is_some() {
             continue;
         }
         let trimmed = line.trim();
@@ -523,6 +539,33 @@ fn first_non_empty_line(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Detect whether `trimmed_line` (already left-trimmed) is a CommonMark
+/// fenced code block marker. Returns `Some((char, run_length))` for the
+/// fence character (`` ` `` or `~`) and the number of consecutive
+/// occurrences, or `None` if this is not a fence marker.
+///
+/// CommonMark rules:
+/// - At least 3 consecutive backticks or tildes at the start of a line.
+/// - The closing fence must use the same character and be at least as long
+///   as the opening fence.
+/// - Backtick fences may have an info string after the run; tilde fences
+///   may too. The closing fence must not contain content after the run
+///   (except whitespace), but we don't enforce that here — we're just
+///   detecting whether a line *starts* a fence. Callers track open/close
+///   state via the `(char, run_length)` tuple.
+fn detect_fence_marker(trimmed_line: &str) -> Option<(char, usize)> {
+    let first = trimmed_line.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let run_len = trimmed_line.chars().take_while(|&c| c == first).count();
+    if run_len >= 3 {
+        Some((first, run_len))
+    } else {
+        None
+    }
 }
 
 fn synthetic_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
@@ -707,15 +750,24 @@ pub fn extract_auto_phrase(content: &str, title: &str) -> String {
 fn extract_sentences(content: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
-    let mut in_fence = false;
+    let mut fence_marker: Option<(char, usize)> = None;
 
     for line in content.lines() {
         let trimmed_start = line.trim_start();
-        if trimmed_start.starts_with("```") {
-            in_fence = !in_fence;
+        if let Some(marker) = detect_fence_marker(trimmed_start) {
+            match fence_marker {
+                None => {
+                    fence_marker = Some(marker);
+                }
+                Some((open_ch, open_len)) => {
+                    if marker.0 == open_ch && marker.1 >= open_len {
+                        fence_marker = None;
+                    }
+                }
+            }
             continue;
         }
-        if in_fence {
+        if fence_marker.is_some() {
             continue;
         }
 
@@ -1178,6 +1230,150 @@ mod tests {
             p
         );
         assert!(!p.is_empty());
+    }
+
+    // --- mx#215 CommonMark fence edge-case tests --------------------------------
+
+    #[test]
+    fn heading_quadruple_backtick_fence_ignores_inner_triple() {
+        // The bug: quadruple-backtick fences contain inner triple backticks
+        // that the naive `starts_with("```")` toggle treated as fence
+        // close/open, causing a fake heading inside the block to be picked.
+        let content = "\
+````markdown
+Here is how you write a fenced block:
+
+```
+## This heading is inside the inner fence
+```
+
+And that's it.
+````
+
+## Real Heading After Quad Fence
+
+Body text.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(
+            p, "Real Heading After Quad Fence",
+            "should skip heading inside quadruple-backtick fence, got {:?}",
+            p
+        );
+    }
+
+    #[test]
+    fn heading_tilde_fence_ignored() {
+        // Tilde fences are valid CommonMark but were never handled by the
+        // old `starts_with("```")` check.
+        let content = "\
+~~~
+## Heading inside tilde fence
+~~~
+
+## Real Tilde Heading
+
+Body.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Real Tilde Heading");
+    }
+
+    #[test]
+    fn heading_inside_code_block_at_all_levels_ignored() {
+        let content = "\
+```
+# H1 fake
+## H2 fake
+### H3 fake
+#### H4 fake
+```
+
+### Real H3 Heading
+
+Content.";
+        let p = extract_salient_phrase(content, 0, 1);
+        assert_eq!(p, "Real H3 Heading");
+    }
+
+    #[test]
+    fn no_heading_returns_none_from_first_heading() {
+        let content = "Just some text without any heading markers.";
+        assert!(first_heading(content).is_none());
+    }
+
+    #[test]
+    fn heading_levels_h1_through_h6() {
+        assert_eq!(first_heading("# H1").unwrap(), "H1");
+        assert_eq!(first_heading("## H2").unwrap(), "H2");
+        assert_eq!(first_heading("### H3").unwrap(), "H3");
+        assert_eq!(first_heading("#### H4").unwrap(), "H4");
+        assert_eq!(first_heading("##### H5").unwrap(), "H5");
+        assert_eq!(first_heading("###### H6").unwrap(), "H6");
+    }
+
+    #[test]
+    fn first_non_empty_line_quadruple_fence() {
+        // first_non_empty_line should also handle quad fences correctly.
+        let content = "\
+````
+## fake heading
+```
+inner triple
+```
+````
+
+Actual first line.";
+        let line = first_non_empty_line(content);
+        assert_eq!(
+            line.as_deref(),
+            Some("Actual first line."),
+            "first_non_empty_line should handle quad fences, got {:?}",
+            line
+        );
+    }
+
+    #[test]
+    fn extract_sentences_quadruple_fence() {
+        // extract_sentences should also handle quad fences correctly.
+        let content = "\
+````
+Fake sentence inside quad fence. Another fake.
+```
+More fake inside inner triple.
+```
+````
+
+Real sentence outside. Another real one.";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.contains("Fake sentence"),
+                "extract_sentences should skip quad-fenced content, got {:?}",
+                s
+            );
+        }
+        assert!(
+            sentences.iter().any(|s| s.contains("Real sentence")),
+            "should find real sentence outside fence, got {:?}",
+            sentences
+        );
+    }
+
+    #[test]
+    fn extract_sentences_tilde_fence() {
+        let content = "\
+~~~
+Fake sentence inside tilde fence.
+~~~
+
+Real tilde sentence.";
+        let sentences = extract_sentences(content);
+        for s in &sentences {
+            assert!(
+                !s.contains("Fake sentence"),
+                "should skip tilde-fenced content, got {:?}",
+                s
+            );
+        }
     }
 
     // --- compare_phrase unit tests --------------------------------------------
