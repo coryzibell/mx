@@ -167,7 +167,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
             // Must have either value or id
             if value.is_none() && id.is_none() {
                 eprintln!("Error: provide either a value substring or --id");
-                return Ok(kv::EXIT_TYPE_MISMATCH);
+                return Ok(kv::EXIT_KEY_NOT_FOUND);
             }
             match store.remove(&key, value.as_deref(), id, all) {
                 Ok(result) => {
