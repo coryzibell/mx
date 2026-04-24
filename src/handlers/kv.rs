@@ -310,11 +310,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
-        KvCommands::Search {
-            key,
-            query,
-            memory,
-        } => match store.search(&key, &query) {
+        KvCommands::Search { key, query, memory } => match store.search(&key, &query) {
             Ok(hits) => {
                 if hits.is_empty() {
                     eprintln!("No matching entries");

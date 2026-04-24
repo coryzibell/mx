@@ -150,8 +150,12 @@ pub struct DataFile {
 #[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum DataValue {
-    Counter { value: i64 },
-    String { value: String },
+    Counter {
+        value: i64,
+    },
+    String {
+        value: String,
+    },
     History {
         entries: Vec<HistoryEntry>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,7 +189,9 @@ enum RawListItem {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum DataValueDe {
-    Counter { value: i64 },
+    Counter {
+        value: i64,
+    },
     History {
         entries: Vec<HistoryEntry>,
         #[serde(default)]
@@ -202,7 +208,9 @@ enum DataValueDe {
         memory: Option<String>,
     },
     // String must be last in untagged — it's the broadest match
-    String { value: String },
+    String {
+        value: String,
+    },
 }
 
 impl<'de> Deserialize<'de> for DataValue {
@@ -251,7 +259,10 @@ impl<'de> Deserialize<'de> for DataValue {
                         }
                     })
                     .collect();
-                DataValue::List { items: entries, memory }
+                DataValue::List {
+                    items: entries,
+                    memory,
+                }
             }
         })
     }
@@ -453,9 +464,15 @@ impl KvStore {
                     .as_ref()
                     .map(|fs| fs.iter().map(|f| (f.clone(), String::new())).collect())
                     .unwrap_or_default();
-                DataValue::State { fields, memory: None }
+                DataValue::State {
+                    fields,
+                    memory: None,
+                }
             }
-            ValueType::List => DataValue::List { items: Vec::new(), memory: None },
+            ValueType::List => DataValue::List {
+                items: Vec::new(),
+                memory: None,
+            },
         }
     }
 
@@ -1039,7 +1056,9 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
     match value {
         DataValue::Counter { value } => format!("{}={}", key, value),
         DataValue::String { value } => format!("{}={}", key, value),
-        DataValue::History { entries, memory, .. } => {
+        DataValue::History {
+            entries, memory, ..
+        } => {
             let items: Vec<String> = entries
                 .iter()
                 .map(|e| {
