@@ -1610,6 +1610,41 @@ pub enum KvCommands {
         key: String,
     },
 
+    /// Remove an entry by value or ID from a list/history
+    Remove {
+        /// Key name
+        key: String,
+
+        /// Value substring to match (omit if using --id)
+        value: Option<String>,
+
+        /// Remove by entry ID
+        #[arg(long)]
+        id: Option<u64>,
+
+        /// Remove all matches (default: first match only)
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Search entries in a list/history by substring
+    Search {
+        /// Key name
+        key: String,
+
+        /// Search query (case-insensitive substring)
+        query: String,
+    },
+
+    /// Count entries in a list/history, optionally filtered
+    Count {
+        /// Key name
+        key: String,
+
+        /// Count only entries matching this substring
+        value: Option<String>,
+    },
+
     /// List all defined keys with their types
     Keys,
 }

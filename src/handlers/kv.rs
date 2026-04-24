@@ -102,9 +102,13 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
         },
 
         KvCommands::Pop { key } => match store.pop(&key) {
-            Ok(Some(val)) => {
+            Ok(Some(entry)) => {
                 store.save()?;
-                println!("{}", val);
+                if entry.ts.is_empty() {
+                    println!("{}: {}", entry.id, entry.value);
+                } else {
+                    println!("{}: {} ({})", entry.id, entry.value, entry.ts);
+                }
                 Ok(kv::EXIT_OK)
             }
             Ok(None) => {
@@ -127,7 +131,7 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
         KvCommands::Since { key, timeref } => match store.since(&key, &timeref) {
             Ok(entries) => {
                 for entry in &entries {
-                    println!("{} ({})", entry.value, entry.ts);
+                    println!("{}: {} ({})", entry.id, entry.value, entry.ts);
                 }
                 Ok(kv::EXIT_OK)
             }
@@ -149,6 +153,64 @@ pub(crate) fn handle_kv(cmd: KvCommands) -> Result<i32> {
         KvCommands::Reset { key } => match store.reset(&key) {
             Ok(()) => {
                 store.save()?;
+                Ok(kv::EXIT_OK)
+            }
+            Err(e) => handle_kv_err(e),
+        },
+
+        KvCommands::Remove {
+            key,
+            value,
+            id,
+            all,
+        } => {
+            // Must have either value or id
+            if value.is_none() && id.is_none() {
+                eprintln!("Error: provide either a value substring or --id");
+                return Ok(kv::EXIT_TYPE_MISMATCH);
+            }
+            match store.remove(&key, value.as_deref(), id, all) {
+                Ok(result) => {
+                    if result.removed.is_empty() {
+                        eprintln!("No matching entries found");
+                        Ok(kv::EXIT_KEY_NOT_FOUND)
+                    } else {
+                        for val in &result.removed {
+                            println!("Removed: {}", val);
+                        }
+                        store.save()?;
+                        Ok(kv::EXIT_OK)
+                    }
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
+        KvCommands::Search { key, query } => match store.search(&key, &query) {
+            Ok(hits) => {
+                if hits.is_empty() {
+                    eprintln!("No matching entries");
+                    Ok(kv::EXIT_OK)
+                } else {
+                    for hit in &hits {
+                        if hit.ts.is_empty() {
+                            println!("{}: {}", hit.id, hit.value);
+                        } else {
+                            println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+                        }
+                    }
+                    Ok(kv::EXIT_OK)
+                }
+            }
+            Err(e) => handle_kv_err(e),
+        },
+
+        KvCommands::Count { key, value } => match store.count(&key, value.as_deref()) {
+            Ok(result) => {
+                match result.latest_ts {
+                    Some(ts) => println!("{} (latest: {})", result.total, ts),
+                    None => println!("{}", result.total),
+                }
                 Ok(kv::EXIT_OK)
             }
             Err(e) => handle_kv_err(e),

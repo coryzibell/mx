@@ -143,20 +143,130 @@ pub struct DataFile {
 }
 
 /// A single stored value.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+///
+/// Deserialization note: we use a custom Deserialize impl to handle backward
+/// compatibility for lists (old format: `items: ["a","b"]`, new format:
+/// `items: [{id,value,ts}, ...]`) and for history entries that may lack `id`.
+#[derive(Debug, Serialize, Clone)]
 #[serde(untagged)]
 pub enum DataValue {
     Counter { value: i64 },
     String { value: String },
     History { entries: Vec<HistoryEntry> },
     State { fields: BTreeMap<String, String> },
-    List { items: Vec<String> },
+    List { items: Vec<ListEntry> },
+}
+
+// ---------------------------------------------------------------------------
+// Backward-compatible deserialization
+// ---------------------------------------------------------------------------
+
+/// Intermediate type that can accept either old bare-string lists or new ListEntry lists.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawListItem {
+    Entry(ListEntry),
+    Bare(String),
+}
+
+/// Mirror of DataValue for deserialization, with backward compat glue.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DataValueDe {
+    Counter { value: i64 },
+    History { entries: Vec<HistoryEntry> },
+    State { fields: BTreeMap<String, String> },
+    List { items: Vec<RawListItem> },
+    // String must be last in untagged — it's the broadest match
+    String { value: String },
+}
+
+impl<'de> Deserialize<'de> for DataValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = DataValueDe::deserialize(deserializer)?;
+        Ok(match raw {
+            DataValueDe::Counter { value } => DataValue::Counter { value },
+            DataValueDe::String { value } => DataValue::String { value },
+            DataValueDe::History { entries } => {
+                // Back-fill IDs for history entries loaded with id=0 (old data)
+                let mut max_id = entries.iter().map(|e| e.id).max().unwrap_or(0);
+                let entries = entries
+                    .into_iter()
+                    .map(|mut e| {
+                        if e.id == 0 {
+                            max_id += 1;
+                            e.id = max_id;
+                        }
+                        e
+                    })
+                    .collect();
+                DataValue::History { entries }
+            }
+            DataValueDe::State { fields } => DataValue::State { fields },
+            DataValueDe::List { items } => {
+                let mut next_id = 0u64;
+                let entries: Vec<ListEntry> = items
+                    .into_iter()
+                    .map(|item| match item {
+                        RawListItem::Entry(e) => {
+                            if e.id >= next_id {
+                                next_id = e.id + 1;
+                            }
+                            e
+                        }
+                        RawListItem::Bare(s) => {
+                            next_id += 1;
+                            ListEntry {
+                                id: next_id,
+                                value: s,
+                                ts: String::new(),
+                            }
+                        }
+                    })
+                    .collect();
+                DataValue::List { items: entries }
+            }
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
+    #[serde(default)]
+    pub id: u64,
     pub value: String,
     pub ts: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ListEntry {
+    pub id: u64,
+    pub value: String,
+    pub ts: String,
+}
+
+/// Remove result for the CLI layer to format output.
+#[derive(Debug)]
+pub struct RemoveResult {
+    pub removed: Vec<String>,
+}
+
+/// Search result entry.
+#[derive(Debug)]
+pub struct SearchHit {
+    pub id: u64,
+    pub value: String,
+    pub ts: String,
+}
+
+/// Count result.
+#[derive(Debug)]
+pub struct CountResult {
+    pub total: usize,
+    pub latest_ts: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -480,9 +590,11 @@ impl KvStore {
 
                 match entry {
                     DataValue::History { entries } => {
+                        let next_id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
                         entries.insert(
                             0,
                             HistoryEntry {
+                                id: next_id,
                                 value: value.to_string(),
                                 ts: ts.to_rfc3339(),
                             },
@@ -509,7 +621,12 @@ impl KvStore {
 
                 match entry {
                     DataValue::List { items } => {
-                        items.push(value.to_string());
+                        let next_id = items.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                        items.push(ListEntry {
+                            id: next_id,
+                            value: value.to_string(),
+                            ts: ts.to_rfc3339(),
+                        });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
                             && items.len() > max
@@ -538,7 +655,7 @@ impl KvStore {
     }
 
     /// Pop the last item from a list. History is append-only.
-    pub fn pop(&mut self, key: &str) -> Result<Option<String>, KvError> {
+    pub fn pop(&mut self, key: &str) -> Result<Option<ListEntry>, KvError> {
         self.assert_type(key, ValueType::List)?;
 
         match self.data.entries.get_mut(key) {
@@ -551,7 +668,7 @@ impl KvStore {
         }
     }
 
-    /// Get the last N entries from a history or list.
+    /// Get the last N entries from a history or list, formatted with IDs and timestamps.
     pub fn last(&self, key: &str, count: usize) -> Result<Vec<String>, KvError> {
         let def = self.key_def(key)?;
 
@@ -560,20 +677,23 @@ impl KvStore {
                 Some(DataValue::History { entries }) => Ok(entries
                     .iter()
                     .take(count)
-                    .map(|e| {
-                        if count == 1 {
-                            e.value.clone()
-                        } else {
-                            format!("{} ({})", e.value, e.ts)
-                        }
-                    })
+                    .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
                     .collect()),
                 _ => Ok(vec![]),
             },
             ValueType::List => match self.data.entries.get(key) {
                 Some(DataValue::List { items }) => {
                     let start = items.len().saturating_sub(count);
-                    Ok(items[start..].to_vec())
+                    Ok(items[start..]
+                        .iter()
+                        .map(|e| {
+                            if e.ts.is_empty() {
+                                format!("{}: {}", e.id, e.value)
+                            } else {
+                                format!("{}: {} ({})", e.id, e.value, e.ts)
+                            }
+                        })
+                        .collect())
                 }
                 _ => Ok(vec![]),
             },
@@ -611,6 +731,180 @@ impl KvStore {
             .entries
             .insert(key.to_string(), Self::default_value(&def));
         Ok(())
+    }
+
+    /// Remove entries from a list or history by value substring or by ID.
+    ///
+    /// - `by_id`: if Some, remove the entry with that ID (ignores `value` and `all`).
+    /// - `value`: substring match (case-insensitive).
+    /// - `all`: if true, remove all matches; otherwise remove only the first match.
+    pub fn remove(
+        &mut self,
+        key: &str,
+        value: Option<&str>,
+        by_id: Option<u64>,
+        all: bool,
+    ) -> Result<RemoveResult, KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        let mut removed = Vec::new();
+
+        match self.data.entries.get_mut(key) {
+            Some(DataValue::History { entries }) => {
+                if let Some(id) = by_id {
+                    if let Some(pos) = entries.iter().position(|e| e.id == id) {
+                        removed.push(entries.remove(pos).value);
+                    }
+                } else if let Some(query) = value {
+                    let query_lower = query.to_lowercase();
+                    let mut found_first = false;
+                    entries.retain(|e| {
+                        if e.value.to_lowercase().contains(&query_lower)
+                            && (all || !found_first)
+                        {
+                            found_first = true;
+                            removed.push(e.value.clone());
+                            return false;
+                        }
+                        true
+                    });
+                }
+            }
+            Some(DataValue::List { items }) => {
+                if let Some(id) = by_id {
+                    if let Some(pos) = items.iter().position(|e| e.id == id) {
+                        removed.push(items.remove(pos).value);
+                    }
+                } else if let Some(query) = value {
+                    let query_lower = query.to_lowercase();
+                    let mut found_first = false;
+                    items.retain(|e| {
+                        if e.value.to_lowercase().contains(&query_lower)
+                            && (all || !found_first)
+                        {
+                            found_first = true;
+                            removed.push(e.value.clone());
+                            return false;
+                        }
+                        true
+                    });
+                }
+            }
+            _ => {} // no data yet, nothing to remove
+        }
+
+        Ok(RemoveResult { removed })
+    }
+
+    /// Search entries in a list or history by case-insensitive substring.
+    pub fn search(&self, key: &str, query: &str) -> Result<Vec<SearchHit>, KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        let query_lower = query.to_lowercase();
+        let mut hits = Vec::new();
+
+        match self.data.entries.get(key) {
+            Some(DataValue::History { entries }) => {
+                for e in entries {
+                    if e.value.to_lowercase().contains(&query_lower) {
+                        hits.push(SearchHit {
+                            id: e.id,
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                        });
+                    }
+                }
+            }
+            Some(DataValue::List { items }) => {
+                for e in items {
+                    if e.value.to_lowercase().contains(&query_lower) {
+                        hits.push(SearchHit {
+                            id: e.id,
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(hits)
+    }
+
+    /// Count entries in a list or history, optionally filtered by substring.
+    pub fn count(&self, key: &str, value: Option<&str>) -> Result<CountResult, KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        let query_lower = value.map(|v| v.to_lowercase());
+        let mut total = 0usize;
+        let mut latest_ts: Option<String> = None;
+
+        match self.data.entries.get(key) {
+            Some(DataValue::History { entries }) => {
+                for e in entries {
+                    let matches = match &query_lower {
+                        Some(q) => e.value.to_lowercase().contains(q),
+                        None => true,
+                    };
+                    if matches {
+                        total += 1;
+                        if latest_ts.is_none() || e.ts > *latest_ts.as_ref().unwrap() {
+                            latest_ts = Some(e.ts.clone());
+                        }
+                    }
+                }
+            }
+            Some(DataValue::List { items }) => {
+                for e in items {
+                    let matches = match &query_lower {
+                        Some(q) => e.value.to_lowercase().contains(q),
+                        None => true,
+                    };
+                    if matches {
+                        total += 1;
+                        if !e.ts.is_empty()
+                            && (latest_ts.is_none() || e.ts > *latest_ts.as_ref().unwrap())
+                        {
+                            latest_ts = Some(e.ts.clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(CountResult { total, latest_ts })
     }
 
     /// List all keys with their types.
@@ -693,7 +987,20 @@ fn format_compact(key: &str, value: &DataValue, def: &KeyDef) -> String {
             format!("{}={{{}}}", key, values.join(","))
         }
         DataValue::List { items } => {
-            format!("{}=[{}]", key, items.join(","))
+            let formatted: Vec<String> = items
+                .iter()
+                .map(|e| {
+                    if e.ts.is_empty() {
+                        e.value.clone()
+                    } else {
+                        let time_part = DateTime::parse_from_rfc3339(&e.ts)
+                            .map(|t| t.format("%H:%M").to_string())
+                            .unwrap_or_else(|_| "??:??".to_string());
+                        format!("{}@{}", e.value, time_part)
+                    }
+                })
+                .collect();
+            format!("{}=[{}]", key, formatted.join(","))
         }
     }
 }
@@ -749,15 +1056,25 @@ pub fn format_value(value: &DataValue) -> String {
     match value {
         DataValue::Counter { value } => value.to_string(),
         DataValue::String { value } => value.clone(),
-        DataValue::History { entries } => {
-            serde_json::to_string_pretty(entries).unwrap_or_else(|_| "[]".to_string())
-        }
+        DataValue::History { entries } => entries
+            .iter()
+            .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
+            .collect::<Vec<_>>()
+            .join("\n"),
         DataValue::State { fields } => {
             serde_json::to_string_pretty(fields).unwrap_or_else(|_| "{}".to_string())
         }
-        DataValue::List { items } => {
-            serde_json::to_string_pretty(items).unwrap_or_else(|_| "[]".to_string())
-        }
+        DataValue::List { items } => items
+            .iter()
+            .map(|e| {
+                if e.ts.is_empty() {
+                    format!("{}: {}", e.id, e.value)
+                } else {
+                    format!("{}: {} ({})", e.id, e.value, e.ts)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
@@ -945,7 +1262,8 @@ max_entries = 5
 
         let last = store.last("flavor_history", 1).unwrap();
         assert_eq!(last.len(), 1);
-        assert_eq!(last[0], "lapsang");
+        // last now includes id and ts
+        assert!(last[0].contains("lapsang"));
 
         let last2 = store.last("flavor_history", 2).unwrap();
         assert_eq!(last2.len(), 2);
@@ -965,6 +1283,8 @@ max_entries = 5
                 assert_eq!(entries.len(), 3);
                 assert_eq!(entries[0].value, "d"); // newest first
                 assert_eq!(entries[2].value, "b"); // oldest kept
+                // IDs should be assigned
+                assert!(entries[0].id > 0);
             }
             _ => panic!("Expected history"),
         }
@@ -999,10 +1319,13 @@ max_entries = 5
         store.push("tags", "gamma").unwrap();
 
         let last = store.last("tags", 2).unwrap();
-        assert_eq!(last, vec!["beta", "gamma"]);
+        assert_eq!(last.len(), 2);
+        assert!(last[0].contains("beta"));
+        assert!(last[1].contains("gamma"));
 
         let popped = store.pop("tags").unwrap();
-        assert_eq!(popped, Some("gamma".to_string()));
+        assert!(popped.is_some());
+        assert_eq!(popped.unwrap().value, "gamma");
     }
 
     #[test]
@@ -1015,8 +1338,8 @@ max_entries = 5
         match store.get("tags").unwrap() {
             DataValue::List { items } => {
                 assert_eq!(items.len(), 5);
-                assert_eq!(items[0], "item_3"); // oldest kept
-                assert_eq!(items[4], "item_7"); // newest
+                assert_eq!(items[0].value, "item_3"); // oldest kept
+                assert_eq!(items[4].value, "item_7"); // newest
             }
             _ => panic!("Expected list"),
         }
@@ -1129,15 +1452,19 @@ max_entries = 5
         store.set("tensor", "0.55", Some("temperature")).unwrap();
         store.set("tensor", "0.35", Some("entropy")).unwrap();
         store.set("tensor", "0.70", Some("agency")).unwrap();
-        store.push("tags", "focus").unwrap();
-        store.push("tags", "rust").unwrap();
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store.push_with_ts("tags", "focus", ts).unwrap();
+        store.push_with_ts("tags", "rust", ts).unwrap();
 
         let compact = store.dump_compact();
 
         assert!(compact.contains("warmth=42"));
         assert!(compact.contains("current_mood=calm"));
         assert!(compact.contains("tensor={0.55,0.35,0.70}"));
-        assert!(compact.contains("tags=[focus,rust]"));
+        assert!(compact.contains("tags=[focus@10:30,rust@10:30]"));
     }
 
     #[test]
@@ -1241,9 +1568,435 @@ max_entries = 5
 
     #[test]
     fn pop_on_empty_returns_none() {
-        let (mut store, _dir) = setup_store(test_schema());
+        let (store, _dir) = setup_store(test_schema());
+        // Don't push anything — pop should be None on empty
+        // Need mutable for pop
+        let mut store = store;
         let popped = store.pop("tags").unwrap();
         assert!(popped.is_none());
+    }
+
+    // -- Remove operations --
+
+    #[test]
+    fn remove_list_by_value_first_match() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "alpha-2").unwrap();
+
+        let result = store.remove("tags", Some("alpha"), None, false).unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0], "alpha");
+
+        // alpha-2 should still be there
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].value, "beta");
+                assert_eq!(items[1].value, "alpha-2");
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn remove_list_by_value_all_matches() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "alpha-2").unwrap();
+
+        let result = store.remove("tags", Some("alpha"), None, true).unwrap();
+        assert_eq!(result.removed.len(), 2);
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].value, "beta");
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn remove_list_by_id() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        // Get the ID of "beta"
+        let beta_id = match store.get("tags").unwrap() {
+            DataValue::List { items } => items[1].id,
+            _ => panic!("Expected list"),
+        };
+
+        let result = store.remove("tags", None, Some(beta_id), false).unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0], "beta");
+    }
+
+    #[test]
+    fn remove_history_by_value() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store.push("flavor_history", "lapsang").unwrap();
+        store.push("flavor_history", "bergamot vanilla").unwrap();
+
+        let result = store
+            .remove("flavor_history", Some("bergamot"), None, false)
+            .unwrap();
+        assert_eq!(result.removed.len(), 1);
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries } => {
+                assert_eq!(entries.len(), 2);
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn remove_case_insensitive() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "Alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+
+        let result = store.remove("tags", Some("alpha"), None, false).unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0], "Alpha");
+    }
+
+    #[test]
+    fn remove_type_mismatch() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.remove("warmth", Some("x"), None, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    // -- Search operations --
+
+    #[test]
+    fn search_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "rust-lang").unwrap();
+        store.push("tags", "focus").unwrap();
+        store.push("tags", "rust-tools").unwrap();
+
+        let hits = store.search("tags", "rust").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].value, "rust-lang");
+        assert_eq!(hits[1].value, "rust-tools");
+    }
+
+    #[test]
+    fn search_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store.push("flavor_history", "lapsang").unwrap();
+        store.push("flavor_history", "bergamot vanilla").unwrap();
+
+        let hits = store.search("flavor_history", "bergamot").unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn search_case_insensitive() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "Rust").unwrap();
+        store.push("tags", "RUST-tools").unwrap();
+        store.push("tags", "python").unwrap();
+
+        let hits = store.search("tags", "rust").unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn search_no_matches() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+
+        let hits = store.search("tags", "zzz").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_type_mismatch() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.search("warmth", "x");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    // -- Count operations --
+
+    #[test]
+    fn count_list_total() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "a").unwrap();
+        store.push("tags", "b").unwrap();
+        store.push("tags", "c").unwrap();
+
+        let result = store.count("tags", None).unwrap();
+        assert_eq!(result.total, 3);
+    }
+
+    #[test]
+    fn count_list_filtered() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "rust-lang").unwrap();
+        store.push("tags", "focus").unwrap();
+        store.push("tags", "rust-tools").unwrap();
+
+        let result = store.count("tags", Some("rust")).unwrap();
+        assert_eq!(result.total, 2);
+    }
+
+    #[test]
+    fn count_history_with_latest() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let ts1 = DateTime::parse_from_rfc3339("2026-04-20T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts2 = DateTime::parse_from_rfc3339("2026-04-22T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "bergamot", ts1)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "bergamot vanilla", ts2)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "lapsang", ts1)
+            .unwrap();
+
+        let result = store.count("flavor_history", Some("bergamot")).unwrap();
+        assert_eq!(result.total, 2);
+        assert!(result.latest_ts.is_some());
+        assert!(result.latest_ts.unwrap().contains("2026-04-22"));
+    }
+
+    #[test]
+    fn count_empty() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.count("tags", None).unwrap();
+        assert_eq!(result.total, 0);
+        assert!(result.latest_ts.is_none());
+    }
+
+    #[test]
+    fn count_type_mismatch() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.count("warmth", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    // -- ID assignment --
+
+    #[test]
+    fn history_ids_auto_increment() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "a").unwrap();
+        store.push("flavor_history", "b").unwrap();
+        store.push("flavor_history", "c").unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries } => {
+                // Each push should get a unique ID
+                let ids: Vec<u64> = entries.iter().map(|e| e.id).collect();
+                assert_eq!(ids.len(), 3);
+                // All unique
+                let mut unique = ids.clone();
+                unique.sort();
+                unique.dedup();
+                assert_eq!(unique.len(), 3);
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn list_ids_auto_increment() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "a").unwrap();
+        store.push("tags", "b").unwrap();
+        store.push("tags", "c").unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items[0].id, 1);
+                assert_eq!(items[1].id, 2);
+                assert_eq!(items[2].id, 3);
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn list_ids_stable_after_remove() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "a").unwrap();
+        store.push("tags", "b").unwrap();
+        store.push("tags", "c").unwrap();
+
+        // Remove "b"
+        store.remove("tags", Some("b"), None, false).unwrap();
+
+        // Push "d" — should get id=4, not reuse id=2
+        store.push("tags", "d").unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].id, 1); // a
+                assert_eq!(items[1].id, 3); // c
+                assert_eq!(items[2].id, 4); // d
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    // -- Backward compatibility --
+
+    #[test]
+    fn deserialize_old_bare_string_list() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Write old-format data file with bare string list
+        let old_data = r#"{
+            "_schema": "test",
+            "_updated": "2026-04-20T00:00:00Z",
+            "tags": { "items": ["alpha", "beta", "gamma"] }
+        }"#;
+        fs::write(&data_path, old_data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].value, "alpha");
+                assert_eq!(items[1].value, "beta");
+                assert_eq!(items[2].value, "gamma");
+                // Should have auto-assigned IDs
+                assert!(items[0].id > 0);
+                assert!(items[1].id > items[0].id);
+                // Timestamps should be empty (placeholder)
+                assert!(items[0].ts.is_empty());
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn deserialize_old_history_without_id() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Write old-format data file with history entries lacking id
+        let old_data = r#"{
+            "_schema": "test",
+            "_updated": "2026-04-20T00:00:00Z",
+            "flavor_history": {
+                "entries": [
+                    {"value": "bergamot", "ts": "2026-04-22T19:13:00Z"},
+                    {"value": "lapsang", "ts": "2026-04-21T10:00:00Z"}
+                ]
+            }
+        }"#;
+        fs::write(&data_path, old_data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].value, "bergamot");
+                // Should have auto-assigned IDs
+                assert!(entries[0].id > 0);
+                assert!(entries[1].id > 0);
+                assert_ne!(entries[0].id, entries[1].id);
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    // -- ListEntry timestamps --
+
+    #[test]
+    fn list_push_assigns_timestamp() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store.push_with_ts("tags", "focus", ts).unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items } => {
+                assert_eq!(items.len(), 1);
+                assert!(items[0].ts.contains("2026-04-22"));
+                assert_eq!(items[0].value, "focus");
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    // -- format_value output --
+
+    #[test]
+    fn format_value_list_shows_ids_and_timestamps() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store.push_with_ts("tags", "focus", ts).unwrap();
+        store.push_with_ts("tags", "rust", ts).unwrap();
+
+        let output = format_value(store.get("tags").unwrap());
+        assert!(output.contains("1: focus"));
+        assert!(output.contains("2: rust"));
+        assert!(output.contains("2026-04-22"));
+    }
+
+    #[test]
+    fn format_value_history_shows_ids() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+
+        let output = format_value(store.get("flavor_history").unwrap());
+        // Should contain "N: bergamot (timestamp)"
+        assert!(output.contains("bergamot"));
+        assert!(output.contains(":"));
+    }
+
+    // -- compact dump with list timestamps --
+
+    #[test]
+    fn compact_dump_list_with_times() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let ts = DateTime::parse_from_rfc3339("2026-04-22T14:15:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        store.push_with_ts("tags", "dsi-panel", ts).unwrap();
+        store.push_with_ts("tags", "anytype", ts).unwrap();
+
+        let compact = store.dump_compact();
+        assert!(compact.contains("tags=[dsi-panel@14:15,anytype@14:15]"));
     }
 
     use chrono::Datelike as _;
