@@ -769,9 +769,7 @@ impl KvStore {
                     let query_lower = query.to_lowercase();
                     let mut found_first = false;
                     entries.retain(|e| {
-                        if e.value.to_lowercase().contains(&query_lower)
-                            && (all || !found_first)
-                        {
+                        if e.value.to_lowercase().contains(&query_lower) && (all || !found_first) {
                             found_first = true;
                             removed.push(e.value.clone());
                             return false;
@@ -789,9 +787,7 @@ impl KvStore {
                     let query_lower = query.to_lowercase();
                     let mut found_first = false;
                     items.retain(|e| {
-                        if e.value.to_lowercase().contains(&query_lower)
-                            && (all || !found_first)
-                        {
+                        if e.value.to_lowercase().contains(&query_lower) && (all || !found_first) {
                             found_first = true;
                             removed.push(e.value.clone());
                             return false;
