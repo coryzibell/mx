@@ -96,6 +96,13 @@ fn encode_compress_with_registry(
 /// (for actual decompression) and `is_known_compress_algo` (for footer
 /// validation in `is_footer_line`) consult this set; lifting it here
 /// keeps the vocabulary from drifting between the two call sites.
+///
+/// Note: the names tracked here mirror what `base_d::CompressionAlgorithm::as_str()`
+/// emits, NOT the broader set that `base_d::CompressionAlgorithm::from_str` accepts
+/// as aliases (e.g. `zst`, `br`, `snap`, `xz`). The encoder always serializes
+/// canonical names, so the validator only needs to recognize those. If `base_d`
+/// ever changes which name it emits, update this map; the walking test
+/// `is_footer_line_accepts_each_known_algo` will catch a mismatch loudly.
 pub(crate) fn compression_algo_from_str(s: &str) -> Option<base_d::CompressionAlgorithm> {
     use base_d::CompressionAlgorithm;
     match s.to_lowercase().as_str() {
