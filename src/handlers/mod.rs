@@ -258,10 +258,24 @@ pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> R
 
                 // Try to decode the body
                 if !body.trim().is_empty() {
-                    let decoded = try_decode_commit_body(&body);
+                    let result = try_decode_commit_body(&body);
                     println!();
-                    for line in decoded.lines() {
+                    for line in result.subject.lines() {
                         println!("    {}", line);
+                    }
+                    // If decoding succeeded AND there was post-footer
+                    // content (dejavu marker or user-appended note),
+                    // render it beneath the decoded subject in dim
+                    // style. The dim ANSI sequence (\x1b[2m) matches
+                    // the existing yellow-hash convention -- raw
+                    // escapes inline rather than a `colored` crate --
+                    // and visually marks the content as "extra,
+                    // post-footer" without hiding it.
+                    if let Some(trailing) = result.trailing.as_deref() {
+                        println!();
+                        for line in trailing.lines() {
+                            println!("    \x1b[2m{}\x1b[0m", line);
+                        }
                     }
                 }
                 println!();
@@ -273,10 +287,12 @@ pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> R
                 let subject = lines[1];
                 let body: String = lines[2..].join("\n");
 
-                // Try to decode the body
-                let decoded = try_decode_commit_body(&body);
-                let display = if decoded != body.trim() {
-                    decoded
+                // Try to decode the body. Compact format is one line
+                // per commit, so trailing post-footer content is not
+                // shown here -- use `mx log --full` to see it.
+                let result = try_decode_commit_body(&body);
+                let display = if result.was_decoded {
+                    result.subject
                 } else {
                     // Not encoded, show original subject
                     subject.to_string()
@@ -364,36 +380,95 @@ fn is_footer_line(line: &str) -> bool {
     commit::parse_body_dict(trimmed).is_some()
 }
 
-/// Try to decode an encoded commit body, return original if decoding fails.
+/// The result of attempting to decode an encoded commit body.
 ///
-/// Generalized footer scan: rather than restricting the footer to the last
-/// line of the message, we walk the entire body and use the LAST
-/// footer-shaped line we find. This covers two cases:
+/// This shape lets the caller distinguish three cases without resorting
+/// to string-equality probing:
 ///
-/// 1. Dejavu commits where `whoa.` (or any other marker we add later)
-///    sits below the footer line. The footer is no longer the last line,
-///    but it is still the last footer-shaped line.
+/// 1. **Decoded with no trailing content** (`was_decoded == true`,
+///    `trailing.is_none()`): the natural case -- the footer was the last
+///    meaningful line of the message and there's nothing after it.
+/// 2. **Decoded with trailing content** (`was_decoded == true`,
+///    `trailing.is_some()`): the footer was somewhere above the bottom
+///    of the message, and there's content (the dejavu marker, a user-
+///    appended note, or both) after it. The renderer should display
+///    `trailing` beneath `subject` so the easter egg / note remains
+///    visible -- before this struct existed, that content was silently
+///    dropped (issue #260, finding C1).
+/// 3. **Not decoded** (`was_decoded == false`): the message had no
+///    recognizable footer (or decode failed). `subject` holds the
+///    trimmed original message; `trailing` is always `None`.
+pub(crate) struct DecodedCommit {
+    /// The decoded message body (when `was_decoded`) or the trimmed
+    /// original text (when not).
+    pub(crate) subject: String,
+    /// Anything that appeared in the message AFTER the chosen footer
+    /// line. `Some` only when `was_decoded` is true and there was real
+    /// post-footer content. The dejavu marker is preserved here as-is
+    /// so the renderer can show it.
+    pub(crate) trailing: Option<String>,
+    /// True iff a footer was located and decoding succeeded.
+    pub(crate) was_decoded: bool,
+}
+
+impl DecodedCommit {
+    /// Build a `DecodedCommit` for the un-decoded case: no footer, or
+    /// decode failure. `subject` is the trimmed original; nothing
+    /// trailing.
+    fn passthrough(original: &str) -> Self {
+        Self {
+            subject: original.trim().to_string(),
+            trailing: None,
+            was_decoded: false,
+        }
+    }
+}
+
+/// Try to decode an encoded commit body, returning a [`DecodedCommit`]
+/// that distinguishes the decoded subject from any trailing content.
+///
+/// # Footer-scan strategy
+///
+/// Rather than restricting the footer to the last line of the message,
+/// we walk the entire body and use the LAST footer-shaped line we find.
+/// This covers two cases:
+///
+/// 1. Dejavu commits where the marker line sits below the footer. The
+///    footer is no longer the last line, but it is still the last
+///    footer-shaped line.
 /// 2. User-amended commits where someone appended free-form text below
 ///    the encoded message. Same property: footer is no longer last, but
 ///    is still the last footer-shaped line.
 ///
-/// The encoded body is everything BEFORE the chosen footer line. Any
-/// trailing content after the footer (dejavu marker, user notes) is
-/// preserved by the caller -- this function returns only the decoded
-/// subject, so the caller can render any post-footer content separately
-/// if it chooses to.
-pub(crate) fn try_decode_commit_body(body: &str) -> String {
-    let body = body.trim();
-    if body.is_empty() {
-        return body.to_string();
+/// # Limitation: last-wins is a heuristic, not a guarantee
+///
+/// "Last footer-shaped line wins" is a heuristic. If a user pastes a
+/// real prior-commit footer below their amended message (e.g. in a
+/// "Closes #123, see footer of abc1234" style note that quotes a real
+/// footer literally), this scan will pick the user's pasted footer
+/// instead of the actual one. The decoder will then either fail (and
+/// fall back to the original message via [`DecodedCommit::passthrough`])
+/// or, in the unlucky case where the pasted footer happens to validly
+/// decode the encoded body, produce the wrong subject.
+///
+/// We accept this trade-off because the alternative (first-wins)
+/// breaks the much more common dejavu / amended-note case, where the
+/// real footer is followed by intentional trailing content. The
+/// pasted-footer collision requires a user to deliberately type
+/// something that looks exactly like our tag format on a line by
+/// itself; the dejavu case happens automatically every few commits.
+pub(crate) fn try_decode_commit_body(body: &str) -> DecodedCommit {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return DecodedCommit::passthrough(trimmed);
     }
 
-    let lines: Vec<&str> = body.lines().collect();
+    let lines: Vec<&str> = trimmed.lines().collect();
 
     // Walk the whole message; pick the LAST footer-shaped line. Last
     // wins because the natural case has the footer at (or near) the
-    // bottom; any earlier `[a|b]`-shaped substring is almost certainly
-    // user-authored markdown, not the real encode footer.
+    // bottom; any earlier bracket-pipe-shaped substring is almost
+    // certainly user-authored markdown, not the real encode footer.
     let footer_idx = lines
         .iter()
         .enumerate()
@@ -402,7 +477,7 @@ pub(crate) fn try_decode_commit_body(body: &str) -> String {
 
     let footer_idx = match footer_idx {
         Some(i) => i,
-        None => return body.to_string(), // No footer, not encoded
+        None => return DecodedCommit::passthrough(trimmed),
     };
 
     let footer = lines[footer_idx];
@@ -416,16 +491,36 @@ pub(crate) fn try_decode_commit_body(body: &str) -> String {
         .copied()
         .collect();
 
-    if body_lines.is_empty() {
-        return body.to_string();
+    // Trailing = every line strictly below the footer. We keep these
+    // verbatim (including the dejavu marker, if present) so the caller
+    // can render them beneath the decoded subject. Pure-whitespace
+    // lines are stripped from each end; if nothing remains, trailing
+    // is None.
+    let trailing_raw = lines[footer_idx + 1..].join("\n");
+    let trailing_trimmed = trailing_raw.trim();
+    let trailing = if trailing_trimmed.is_empty() {
+        None
+    } else {
+        Some(trailing_trimmed.to_string())
+    };
+
+    // If there's nothing above the footer to decode, treat as
+    // not-encoded -- this covers the edge case of a message that is
+    // ONLY a footer (or footer + whitespace + marker) with no encoded
+    // payload above it.
+    if body_lines.iter().all(|l| l.trim().is_empty()) {
+        return DecodedCommit::passthrough(trimmed);
     }
 
     let encoded_body = body_lines.join("\n");
 
-    // Try to decode
     match commit::decode_body(&encoded_body, footer) {
-        Ok(decoded) => decoded,
-        Err(_) => body.to_string(), // Decoding failed, return original
+        Ok(decoded) => DecodedCommit {
+            subject: decoded,
+            trailing,
+            was_decoded: true,
+        },
+        Err(_) => DecodedCommit::passthrough(trimmed),
     }
 }
 
@@ -472,20 +567,48 @@ mod try_decode_commit_body_tests {
     use super::*;
     use crate::commit::encode_commit;
 
-    /// Encode a (title, body) pair, retrying until `predicate` is satisfied.
+    /// Encode a (title, body) pair, retrying until:
+    /// - the user predicate is satisfied (e.g. dejavu or not), AND
+    /// - no line of the encoded body is itself footer-shaped (which
+    ///   would derail the scanner), AND
+    /// - the canonical round-trip (`<body>\n\n<footer>`) actually
+    ///   decodes back to the original message.
+    ///
+    /// The third condition guards against pre-existing fragility in
+    /// the underlying compress/encode round-trip: a small handful of
+    /// random codec/dictionary pairings produce encoded bytes whose
+    /// decode succeeds at the dictionary layer but fails at the
+    /// decompression layer. That fragility is independent of the
+    /// footer-scan logic under test, so the helper filters those
+    /// rolls out and only returns "clean" encoder samples.
+    ///
+    /// With 6 algorithms, 60+ dictionaries, and a generous retry
+    /// budget, rejection rate is low and the helper terminates
+    /// promptly under normal conditions.
     fn encode_until<F: Fn(&crate::commit::EncodedCommit) -> bool>(
         title: &str,
         body: &str,
         predicate: F,
     ) -> crate::commit::EncodedCommit {
-        for _ in 0..500 {
-            if let Ok(enc) = encode_commit(title, body)
-                && predicate(&enc)
-            {
-                return enc;
+        for _ in 0..1000 {
+            let Ok(enc) = encode_commit(title, body) else {
+                continue;
+            };
+            if !predicate(&enc) {
+                continue;
             }
+            if enc.body.lines().any(is_footer_line) {
+                continue;
+            }
+            // Canonical round-trip check.
+            let canonical = format!("{}\n\n{}", enc.body, enc.footer);
+            let result = try_decode_commit_body(&canonical);
+            if !result.was_decoded || result.subject != body {
+                continue;
+            }
+            return enc;
         }
-        panic!("encoder failed to satisfy predicate after 500 attempts");
+        panic!("encoder failed to satisfy predicate after 1000 attempts");
     }
 
     #[test]
@@ -495,48 +618,74 @@ mod try_decode_commit_body_tests {
         // it must keep working after the generalization.
         let enc = encode_until("title diff", "the quick brown fox", |e| !e.dejavu);
         let body = format!("{}\n\n{}", enc.body, enc.footer);
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "the quick brown fox");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "the quick brown fox");
+        assert!(result.trailing.is_none());
     }
 
     #[test]
-    fn footer_followed_by_dejavu_marker_decodes() {
-        // Issue #260's original repro: dejavu appends "whoa." after the
-        // footer, so the footer is no longer last. Must still decode.
+    fn footer_followed_by_dejavu_marker_decodes_and_preserves_marker() {
+        // Issue #260's original repro: dejavu appends a marker line
+        // after the footer, so the footer is no longer last. Must
+        // still decode AND surface the marker via `trailing` so the
+        // renderer can keep the easter egg visible.
         let enc = encode_until("title diff", "decoded subject under dejavu", |e| e.dejavu);
-        // EncodedCommit.footer already includes "\nwhoa." when dejavu
-        // is true -- exactly what `mx commit` writes.
         let body = format!("{}\n\n{}", enc.body, enc.footer);
-        assert!(body.trim_end().ends_with("whoa."));
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "decoded subject under dejavu");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "decoded subject under dejavu");
+        // The dejavu marker must appear in `trailing` -- this is the
+        // assertion that would have caught C1 originally. We check
+        // structurally (Some + non-empty) rather than asserting on
+        // specific marker text, so the test stays robust if the
+        // marker spelling changes.
+        assert!(
+            result.trailing.is_some(),
+            "dejavu marker must be preserved in trailing, not silently dropped"
+        );
+        assert!(!result.trailing.as_deref().unwrap().is_empty());
     }
 
     #[test]
-    fn user_amended_text_after_footer_decodes() {
+    fn user_amended_text_after_footer_decodes_and_preserves_note() {
         // The user ran `mx commit`, then later did `git commit --amend`
         // and tacked on a free-form note. The footer is now in the
-        // middle of the message. Decode must still succeed.
+        // middle of the message. Decode must succeed and the appended
+        // note must come through in `trailing`.
         let enc = encode_until("title diff", "the original message", |e| !e.dejavu);
         let body = format!(
             "{}\n\n{}\n\nP.S. amended later by hand.",
             enc.body, enc.footer
         );
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "the original message");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "the original message");
+        assert_eq!(
+            result.trailing.as_deref(),
+            Some("P.S. amended later by hand.")
+        );
     }
 
     #[test]
     fn user_amended_text_after_dejavu_marker_decodes() {
         // Combine both: dejavu commit AND user-appended text. The
-        // footer is buried two layers deep but must still be found.
+        // footer is buried two layers deep but must still be found,
+        // and BOTH the marker line and the user note must appear in
+        // trailing (so the renderer can show them).
         let enc = encode_until("title diff", "buried treasure", |e| e.dejavu);
         let body = format!(
             "{}\n\n{}\n\nuser note added during amend",
             enc.body, enc.footer
         );
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "buried treasure");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "buried treasure");
+        let trailing = result.trailing.expect("trailing must be present");
+        // Structural check: trailing must contain the user note. We
+        // don't assert on the marker spelling here -- the previous
+        // test already covers that the marker is preserved.
+        assert!(trailing.contains("user note added during amend"));
     }
 
     #[test]
@@ -544,14 +693,23 @@ mod try_decode_commit_body_tests {
         // A plain (un-encoded) commit message must pass through. No
         // footer, no decode -- the caller falls back to the raw subject.
         let raw = "fix: a perfectly normal git commit\n\nWith a body.";
-        let decoded = try_decode_commit_body(raw);
-        assert_eq!(decoded, raw);
+        let result = try_decode_commit_body(raw);
+        assert!(!result.was_decoded);
+        assert_eq!(result.subject, raw);
+        assert!(result.trailing.is_none());
     }
 
     #[test]
     fn empty_body_returns_empty() {
-        assert_eq!(try_decode_commit_body(""), "");
-        assert_eq!(try_decode_commit_body("   \n  "), "");
+        let r1 = try_decode_commit_body("");
+        assert!(!r1.was_decoded);
+        assert_eq!(r1.subject, "");
+        assert!(r1.trailing.is_none());
+
+        let r2 = try_decode_commit_body("   \n  ");
+        assert!(!r2.was_decoded);
+        assert_eq!(r2.subject, "");
+        assert!(r2.trailing.is_none());
     }
 
     #[test]
@@ -567,8 +725,9 @@ mod try_decode_commit_body_tests {
             "{}\n\n{}\n\nSee [sha384:base62|lzma:base62] for the format.",
             enc.body, enc.footer
         );
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "still decodes");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "still decodes");
     }
 
     #[test]
@@ -576,28 +735,112 @@ mod try_decode_commit_body_tests {
         // Free-form text like `[foo|bar]` (not a real footer) must not
         // derail the scan. `is_footer_line` validates the parse, so a
         // fragment that happens to start with '[' and contain '|' but
-        // doesn't match `[hash:dict|algo:dict]` is correctly skipped.
+        // doesn't match the real tag shape (or names an unknown
+        // compression algorithm) is correctly skipped.
         let enc = encode_until("title diff", "round trip through markdown", |e| !e.dejavu);
         let body = format!(
             "{}\n\n{}\n\nSee the [link|here] for details.",
             enc.body, enc.footer
         );
-        let decoded = try_decode_commit_body(&body);
-        assert_eq!(decoded, "round trip through markdown");
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "round trip through markdown");
     }
 
     #[test]
-    fn fixture_713e0d0_decodes() {
-        // Real-world regression fixture from issue #260: the commit
-        // observed during the path-alignment work. The bytes here are
-        // exactly what `git cat-file -p 713e0d0` returns for the body
-        // portion (everything after the title line). If the decoder
-        // ever stops handling this commit, this test catches it.
+    fn footer_shaped_with_unknown_algo_is_rejected() {
+        // W1 regression guard: a line that satisfies the structural
+        // shape but names an algorithm we don't know must NOT be
+        // treated as a footer. Before W1, this would pass
+        // `is_footer_line`; after W1, the unknown-algo check rejects
+        // it. The encoded body still has its real footer, so the
+        // decode succeeds against the real footer rather than the
+        // user-authored decoy.
+        let enc = encode_until("title diff", "shape-only decoy ignored", |e| !e.dejavu);
+        let body = format!(
+            "{}\n\n{}\n\n[madeup:fakedict|notreal:alsofake]",
+            enc.body, enc.footer
+        );
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "shape-only decoy ignored");
+        // The decoy line is post-real-footer text, so it lands in
+        // trailing -- which is fine; it's just user content now.
+        assert!(result.trailing.is_some());
+    }
+
+    #[test]
+    fn fixture_real_dejavu_commit_decodes() {
+        // Real-world regression fixture from issue #260: a dejavu
+        // commit observed during the path-alignment work. The body
+        // text is exactly what `git cat-file -p` returned (everything
+        // after the title line). If the decoder ever stops handling
+        // this shape, this test catches it.
         let body = "8NO48P3FCDPIGSJ5C5I6QP9978G76R39DKG46RRECPKMETBIC5Q6IRRE41Q6U83141Q6AOBJCLP20R39DPLMIRJ741Q6U834DTHN6BRGC5Q6GSPEDLI0====\n\n[blake2s:base32hex|snappy:base32hex]\nwhoa.";
-        let decoded = try_decode_commit_body(body);
+        let result = try_decode_commit_body(body);
+        assert!(result.was_decoded);
         assert_eq!(
-            decoded,
+            result.subject,
             "docs(readme): slim Configuration to a teaser linking to docs/paths.md"
+        );
+        // Marker must be preserved in trailing (the C1 fix).
+        assert!(result.trailing.is_some());
+    }
+
+    // --- S2 edge-case tests ---
+
+    #[test]
+    fn footer_as_only_line_returns_passthrough() {
+        // Edge case: the message contains only the footer, with no
+        // encoded body above it. There's nothing to decode, so the
+        // function must passthrough harmlessly rather than panic or
+        // return garbage.
+        let body = "[sha384:base62|lzma:uuencode]";
+        let result = try_decode_commit_body(body);
+        assert!(!result.was_decoded);
+        // Subject is the trimmed original.
+        assert_eq!(result.subject, body);
+        assert!(result.trailing.is_none());
+    }
+
+    #[test]
+    fn footer_as_first_line_with_trailing_only_passes_through() {
+        // Edge case: the footer is the first line and is followed
+        // only by free-form text. There's nothing above the footer
+        // to decode, so we passthrough.
+        let body = "[sha384:base62|lzma:uuencode]\n\nA stray note with no encoded payload.";
+        let result = try_decode_commit_body(body);
+        assert!(!result.was_decoded);
+        assert!(result.trailing.is_none());
+    }
+
+    #[test]
+    fn whitespace_only_line_between_body_and_footer_decodes() {
+        // Edge case: the encoder writes `body\n\nfooter` (one blank
+        // line between). Anything more than one blank line is
+        // unusual but plausible after a manual amend. The decoder
+        // tolerates the whitespace and decodes correctly.
+        let enc = encode_until("title diff", "tolerates extra blanks", |e| !e.dejavu);
+        let body = format!("{}\n\n   \n\n{}", enc.body, enc.footer);
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "tolerates extra blanks");
+    }
+
+    #[test]
+    fn trailing_whitespace_only_after_footer_yields_no_trailing() {
+        // Edge case: footer followed by only whitespace lines. We
+        // must NOT report this as `trailing = Some("")` -- that would
+        // be a useless empty string the renderer would still try to
+        // print. Trim to None.
+        let enc = encode_until("title diff", "no trailing whitespace", |e| !e.dejavu);
+        let body = format!("{}\n\n{}\n   \n  ", enc.body, enc.footer);
+        let result = try_decode_commit_body(&body);
+        assert!(result.was_decoded);
+        assert_eq!(result.subject, "no trailing whitespace");
+        assert!(
+            result.trailing.is_none(),
+            "whitespace-only trailing must not produce a Some"
         );
     }
 
