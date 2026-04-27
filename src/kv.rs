@@ -7,14 +7,44 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Per-process flag so the legacy `~/.crewu/kv/` warning prints at most once,
+/// even if both schema and data fall back to the legacy location.
+static LEGACY_KV_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
+
+/// The single legacy-fallback warning copy. Lives here so the schema and data
+/// resolvers cannot drift apart.
+const LEGACY_KV_WARNING: &str =
+    "note: reading kv from `~/.crewu/kv/` -- this default is moving to \
+     `$MX_HOME/kv/` in a future release. Move your files or set \
+     `MX_KV_SCHEMA` / `MX_KV_DATA`.";
+
 // ---------------------------------------------------------------------------
 // Path resolution
 // ---------------------------------------------------------------------------
+
+/// Pure decision: should the consolidated legacy-warning be emitted now?
+///
+/// Returns true exactly once across the lifetime of the supplied `gate`,
+/// and only when at least one of the resolvers reported a legacy fallback.
+/// Lifting this out of `from_env` keeps the dedupe logic unit-testable
+/// without touching process-global stderr or env vars.
+pub(crate) fn should_emit_legacy_kv_warning(
+    schema_warn: bool,
+    data_warn: bool,
+    gate: &OnceLock<()>,
+) -> bool {
+    if !(schema_warn || data_warn) {
+        return false;
+    }
+    // `set` returns Ok the first time, Err every time after.
+    gate.set(()).is_ok()
+}
 
 /// Pure path-resolution helper for kv schema/data files.
 ///
@@ -397,8 +427,15 @@ impl KvStore {
         let agent = std::env::var("MX_CURRENT_AGENT")
             .with_context(|| "MX_CURRENT_AGENT environment variable is required")?;
 
-        let schema_path = Self::resolve_schema_path(&agent);
-        let data_path = Self::resolve_data_path(&agent);
+        let (schema_path, schema_warn) = Self::resolve_schema_path(&agent);
+        let (data_path, data_warn) = Self::resolve_data_path(&agent);
+
+        // Single, consolidated stderr note when either resolver fell back to
+        // the legacy `~/.crewu/kv/` location -- gated on a per-process
+        // OnceLock so a single command never emits the warning twice.
+        if should_emit_legacy_kv_warning(schema_warn, data_warn, &LEGACY_KV_WARNING_EMITTED) {
+            eprintln!("{}", LEGACY_KV_WARNING);
+        }
 
         let mut store = Self::load(&schema_path, &data_path)?;
 
@@ -410,60 +447,30 @@ impl KvStore {
         Ok(store)
     }
 
-    /// Resolve the schema path for an agent, applying env override and the
-    /// legacy `~/.crewu/kv/` fallback.
-    fn resolve_schema_path(agent: &str) -> PathBuf {
-        if let Ok(p) = std::env::var("MX_KV_SCHEMA") {
-            return PathBuf::from(p.replace("{agent}", agent));
-        }
-
-        let new_path = crate::paths::kv_schema_path(agent);
-        if new_path.exists() {
-            return new_path;
-        }
-
-        // TODO(kv-path-migration): remove this fallback after one release cycle.
-        if let Some(legacy) = crate::paths::legacy_crewu_kv_schema_path(agent)
-            && legacy.exists()
-        {
-            eprintln!(
-                "note: reading kv from `~/.crewu/kv/` -- \
-                 this default is moving to `~/.mx/kv/` in a future release. \
-                 Move your files or set `MX_KV_SCHEMA` / `MX_KV_DATA`."
-            );
-            return legacy;
-        }
-
-        // Neither exists -- return the new default so downstream errors point
-        // users at the canonical location.
-        new_path
+    /// Resolve the schema path for an agent, delegating to the testable
+    /// `resolve_kv_path_with` seam. Returns `(path, should_warn)` where
+    /// `should_warn` is true only if the legacy `~/.crewu/kv/` location was
+    /// used as a soft fallback.
+    fn resolve_schema_path(agent: &str) -> (PathBuf, bool) {
+        resolve_kv_path_with(
+            std::env::var("MX_KV_SCHEMA").ok().as_deref(),
+            agent,
+            crate::paths::kv_schema_path(agent),
+            crate::paths::legacy_crewu_kv_schema_path(agent),
+        )
     }
 
-    /// Resolve the data path for an agent, applying env override and the
-    /// legacy `~/.crewu/kv/` fallback.
-    fn resolve_data_path(agent: &str) -> PathBuf {
-        if let Ok(p) = std::env::var("MX_KV_DATA") {
-            return PathBuf::from(p.replace("{agent}", agent));
-        }
-
-        let new_path = crate::paths::kv_data_path(agent);
-        if new_path.exists() {
-            return new_path;
-        }
-
-        // TODO(kv-path-migration): remove this fallback after one release cycle.
-        if let Some(legacy) = crate::paths::legacy_crewu_kv_data_path(agent)
-            && legacy.exists()
-        {
-            eprintln!(
-                "note: reading kv from `~/.crewu/kv/` -- \
-                 this default is moving to `~/.mx/kv/` in a future release. \
-                 Move your files or set `MX_KV_SCHEMA` / `MX_KV_DATA`."
-            );
-            return legacy;
-        }
-
-        new_path
+    /// Resolve the data path for an agent, delegating to the testable
+    /// `resolve_kv_path_with` seam. Returns `(path, should_warn)` where
+    /// `should_warn` is true only if the legacy `~/.crewu/kv/` location was
+    /// used as a soft fallback.
+    fn resolve_data_path(agent: &str) -> (PathBuf, bool) {
+        resolve_kv_path_with(
+            std::env::var("MX_KV_DATA").ok().as_deref(),
+            agent,
+            crate::paths::kv_data_path(agent),
+            crate::paths::legacy_crewu_kv_data_path(agent),
+        )
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
@@ -2554,5 +2561,153 @@ max_entries = 5
         let (path, warn) = resolve_kv_path_with(Some(""), "smith", new_path.clone(), None);
         assert_eq!(path, new_path);
         assert!(!warn);
+    }
+
+    // -----------------------------------------------------------------
+    // should_emit_legacy_kv_warning -- dedupe gate (Critical 2 fix)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn legacy_warning_silent_when_no_fallback() {
+        let gate = std::sync::OnceLock::new();
+        assert!(!should_emit_legacy_kv_warning(false, false, &gate));
+        // gate must remain unset so a later real fallback still warns
+        assert!(gate.get().is_none());
+    }
+
+    #[test]
+    fn legacy_warning_fires_once_when_only_schema_warns() {
+        let gate = std::sync::OnceLock::new();
+        assert!(should_emit_legacy_kv_warning(true, false, &gate));
+        assert!(!should_emit_legacy_kv_warning(true, false, &gate));
+    }
+
+    #[test]
+    fn legacy_warning_fires_once_when_only_data_warns() {
+        let gate = std::sync::OnceLock::new();
+        assert!(should_emit_legacy_kv_warning(false, true, &gate));
+        assert!(!should_emit_legacy_kv_warning(false, true, &gate));
+    }
+
+    #[test]
+    fn legacy_warning_fires_once_when_both_warn() {
+        // Models the Critical-2 scenario: both schema and data legacy-fallback
+        // in a single `from_env` call -- user must see ONE warning, not two.
+        let gate = std::sync::OnceLock::new();
+        assert!(should_emit_legacy_kv_warning(true, true, &gate));
+        // Subsequent calls (e.g. another resolver in the same process) stay quiet.
+        assert!(!should_emit_legacy_kv_warning(true, true, &gate));
+        assert!(!should_emit_legacy_kv_warning(false, true, &gate));
+        assert!(!should_emit_legacy_kv_warning(true, false, &gate));
+    }
+
+    // -----------------------------------------------------------------
+    // Production resolvers -- exercise the actual code path that ships
+    // (Critical 1 fix). These touch env vars so they share a mutex.
+    // -----------------------------------------------------------------
+
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard: sets an env var on construction, restores on drop.
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: tests serialize on ENV_LOCK before constructing guards.
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            Self { key, prior }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: see above.
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests serialize on ENV_LOCK; this runs while guard is held.
+            unsafe {
+                match &self.prior {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_resolve_schema_path_honors_env_with_agent_substitution() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MX_KV_SCHEMA", "/tmp/explicit/{agent}.toml");
+        let (path, warn) = KvStore::resolve_schema_path("smith");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/explicit/smith.toml"));
+        assert!(!warn);
+    }
+
+    #[test]
+    fn production_resolve_data_path_honors_env_with_agent_substitution() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MX_KV_DATA", "/tmp/explicit/{agent}.json");
+        let (path, warn) = KvStore::resolve_data_path("smith");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/explicit/smith.json"));
+        assert!(!warn);
+    }
+
+    #[test]
+    fn production_resolve_schema_path_empty_env_is_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MX_KV_SCHEMA", "");
+        // Empty env -> resolver should NOT return PathBuf::from("") -- it
+        // should fall through to the default-derived path.
+        let (path, _warn) = KvStore::resolve_schema_path("smith");
+        assert_ne!(path, std::path::PathBuf::from(""));
+        assert!(
+            path.ends_with("kv/schema/smith.toml")
+                || path.to_string_lossy().contains(".crewu"),
+            "expected derived path, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn production_resolve_data_path_empty_env_is_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::set("MX_KV_DATA", "");
+        let (path, _warn) = KvStore::resolve_data_path("smith");
+        assert_ne!(path, std::path::PathBuf::from(""));
+        assert!(
+            path.ends_with("kv/data/smith.json")
+                || path.to_string_lossy().contains(".crewu"),
+            "expected derived path, got: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn production_resolve_schema_path_returns_default_when_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset("MX_KV_SCHEMA");
+        let (path, _warn) = KvStore::resolve_schema_path("smith");
+        // Either the new $MX_HOME default OR the legacy fallback (if it
+        // happens to exist on the test host). Both are acceptable -- we just
+        // verify the resolver doesn't panic and produces a sensible path.
+        assert!(
+            path.ends_with("kv/schema/smith.toml")
+                || path.to_string_lossy().ends_with("smith.schema.toml"),
+            "unexpected default path: {}",
+            path.display()
+        );
     }
 }
