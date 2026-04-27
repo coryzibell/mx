@@ -87,10 +87,40 @@ fn encode_compress_with_registry(
     ))
 }
 
+/// Map a compression-algorithm name (as it appears in the footer) to the
+/// `base_d::CompressionAlgorithm` enum. Returns `None` if the name is not
+/// in our known vocabulary.
+///
+/// This is the single source of truth for which compression names are
+/// considered "real" footer compression algorithms. Both `decode_body`
+/// (for actual decompression) and `is_known_compress_algo` (for footer
+/// validation in `is_footer_line`) consult this set; lifting it here
+/// keeps the vocabulary from drifting between the two call sites.
+pub(crate) fn compression_algo_from_str(s: &str) -> Option<base_d::CompressionAlgorithm> {
+    use base_d::CompressionAlgorithm;
+    match s.to_lowercase().as_str() {
+        "lzma" => Some(CompressionAlgorithm::Lzma),
+        "zstd" => Some(CompressionAlgorithm::Zstd),
+        "brotli" => Some(CompressionAlgorithm::Brotli),
+        "gzip" | "gz" => Some(CompressionAlgorithm::Gzip),
+        "lz4" => Some(CompressionAlgorithm::Lz4),
+        "snappy" => Some(CompressionAlgorithm::Snappy),
+        _ => None,
+    }
+}
+
+/// Returns true if `s` names a compression algorithm we recognize as
+/// belonging to a real footer. Used by `is_footer_line` (in handlers) to
+/// distinguish a real footer from any user-authored bracket-pipe text
+/// that happens to satisfy the structural shape.
+pub(crate) fn is_known_compress_algo(s: &str) -> bool {
+    compression_algo_from_str(s).is_some()
+}
+
 /// Decode and decompress text that was encoded with encode_compress
 /// Footer format: [hash_algo:dict|compress_algo:dict]
 pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
-    use base_d::{CompressionAlgorithm, DictionaryRegistry, decode, decompress};
+    use base_d::{DictionaryRegistry, decode, decompress};
 
     let encoded = encoded.trim();
 
@@ -121,14 +151,9 @@ pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
 
     // Decompress if we have a compression algorithm
     let final_bytes = if let Some(algo) = compress_algo {
-        let compression_algo = match algo.to_lowercase().as_str() {
-            "lzma" => CompressionAlgorithm::Lzma,
-            "zstd" => CompressionAlgorithm::Zstd,
-            "brotli" => CompressionAlgorithm::Brotli,
-            "gzip" | "gz" => CompressionAlgorithm::Gzip,
-            "lz4" => CompressionAlgorithm::Lz4,
-            "snappy" => CompressionAlgorithm::Snappy,
-            _ => return String::from_utf8(decoded_bytes).context("Not valid UTF-8"),
+        let compression_algo = match compression_algo_from_str(&algo) {
+            Some(a) => a,
+            None => return String::from_utf8(decoded_bytes).context("Not valid UTF-8"),
         };
         decompress(&decoded_bytes, compression_algo)
             .map_err(|e| anyhow::anyhow!("Decompression failed: {}", e))?
@@ -788,5 +813,37 @@ mod tests {
     #[test]
     fn test_parse_compress_algo_none() {
         assert_eq!(parse_compress_algo("not a footer"), None);
+    }
+
+    // --- is_known_compress_algo / compression_algo_from_str ---
+
+    #[test]
+    fn test_is_known_compress_algo_accepts_canonical() {
+        // The canonical vocabulary the encoder actually emits.
+        for name in ["lzma", "zstd", "brotli", "gzip", "lz4", "snappy"] {
+            assert!(
+                is_known_compress_algo(name),
+                "expected {} to be a known algo",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_known_compress_algo_accepts_gz_alias() {
+        assert!(is_known_compress_algo("gz"));
+    }
+
+    #[test]
+    fn test_is_known_compress_algo_is_case_insensitive() {
+        assert!(is_known_compress_algo("LZMA"));
+        assert!(is_known_compress_algo("Zstd"));
+    }
+
+    #[test]
+    fn test_is_known_compress_algo_rejects_unknown() {
+        assert!(!is_known_compress_algo("notreal"));
+        assert!(!is_known_compress_algo(""));
+        assert!(!is_known_compress_algo("anything"));
     }
 }

@@ -344,12 +344,24 @@ pub(crate) fn handle_heartbeat(since: Option<u64>, reset: bool) -> Result<()> {
 }
 
 /// A line is "footer-shaped" if it parses as the `[hash:dict|algo:dict]`
-/// tag we emit during encode. We validate the parse rather than just
-/// `starts_with('[')` because user-authored text in markdown can easily
-/// contain `[...|...]` fragments that aren't real footers.
+/// tag we emit during encode AND the compression-algorithm slot names a
+/// real algorithm from our known vocabulary.
+///
+/// The structural parse alone (`parse_compress_algo` + `parse_body_dict`)
+/// is not enough -- a user-authored line of the form
+/// `[anything:anything|anything:anything]` would satisfy it. By also
+/// requiring the algorithm slot to be a known algorithm
+/// (`commit::is_known_compress_algo`), we catch real footers without
+/// false-positiving on bracket-pipe text the user happens to write.
 fn is_footer_line(line: &str) -> bool {
     let trimmed = line.trim();
-    commit::parse_body_dict(trimmed).is_some() && commit::parse_compress_algo(trimmed).is_some()
+    let Some(algo) = commit::parse_compress_algo(trimmed) else {
+        return false;
+    };
+    if !commit::is_known_compress_algo(&algo) {
+        return false;
+    }
+    commit::parse_body_dict(trimmed).is_some()
 }
 
 /// Try to decode an encoded commit body, return original if decoding fails.
@@ -614,5 +626,30 @@ mod try_decode_commit_body_tests {
     #[test]
     fn is_footer_line_rejects_empty() {
         assert!(!is_footer_line(""));
+    }
+
+    #[test]
+    fn is_footer_line_rejects_unknown_compress_algo() {
+        // W1: structural shape alone is not enough. A line that
+        // satisfies `[a:b|c:d]` but where `c` is not a real
+        // compression algorithm must be rejected.
+        assert!(!is_footer_line("[sha384:base62|notarealalgo:uuencode]"));
+        assert!(!is_footer_line("[anything:anything|anything:anything]"));
+    }
+
+    #[test]
+    fn is_footer_line_accepts_each_known_algo() {
+        // Spot-check that the vocabulary lift in commit.rs covers all
+        // algorithms the encoder is allowed to choose. If a new algo
+        // is added to the encoder without updating
+        // `is_known_compress_algo`, this test fails.
+        for algo in ["lzma", "zstd", "brotli", "gzip", "gz", "lz4", "snappy"] {
+            let line = format!("[sha384:base62|{}:uuencode]", algo);
+            assert!(
+                is_footer_line(&line),
+                "is_footer_line must accept known algo {}",
+                algo
+            );
+        }
     }
 }
