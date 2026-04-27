@@ -78,20 +78,21 @@ argument is classified as a path or an ID by a simple heuristic, then looked
 up:
 
 - **Bare ID** (e.g. `--schema tensor`): the loader tries
-  `state/schemas/{id}.yaml` first, then `state/schemas/{id}.json`. The `.yml`
-  extension is **not** tried for bare-ID lookup (though it is recognized when
-  listing available schemas).
+  `state/schemas/{id}.yaml` first, then `state/schemas/{id}.yml`, then
+  `state/schemas/{id}.json`. The first file that exists wins; if none exist,
+  the lookup fails with a "schema not found" error.
 - **Direct path** (e.g. `--schema /tmp/foo.json`): the file is loaded
   directly. Any extension is accepted; the parser tries YAML first and falls
   back to JSON based on file contents, not the extension.
 
-**Edge case (path-vs-ID heuristic):** the argument is treated as a file path
-if it contains a `/` **or** any `.` character. Otherwise it's treated as a
-bare ID. This means `--schema my.schema` is treated as a *path* (because it
-contains a dot), not an ID lookup -- and will fail with a "file not found"
-error rather than searching `state/schemas/`. To force ID lookup, use a name
-without dots; to force path lookup of a name that happens to contain a slash
-or a dot, pass the explicit path.
+The argument is classified as a path if it contains a `/` **or** ends with
+`.yaml`, `.yml`, or `.json`; otherwise it is classified as a bare ID. A dot
+elsewhere in the name is irrelevant -- only those three suffixes flip the
+classification. So `--schema my.schema` is treated as an **ID** (no slash,
+no recognized extension) and, if no matching file exists under
+`state/schemas/`, fails with a "schema not found" error. To force a path
+lookup of a dotted name without one of the recognized extensions, prefix it
+with `./` (e.g. `--schema ./my.schema`) -- the slash flips it to path mode.
 
 There is no env-var override for the schema choice anymore -- the old
 `MX_STATE_SCHEMA` was replaced by the CLI flag. (See
