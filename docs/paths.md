@@ -319,11 +319,14 @@ Two rules:
 1. Do not call `dirs::home_dir()` outside `src/paths.rs`. If you need a
    home-relative path, add a helper to `paths.rs` and call it from your module.
    `paths.rs` itself is the *only* legitimate caller of `dirs::home_dir()` in
-   the tree -- today, only to compute the `~/.mx/` default for `mx_home()`. If
-   a future helper needs to point at a path owned by another tool (a sibling
-   read-only location like `~/.claude/`), it belongs in `paths.rs` too, so
-   this rule remains absolute everywhere else. Do not "fix" the existing call
-   for consistency -- it is the carve-out.
+   the tree. It uses it for: `mx_home()` (the `~/.mx/` default),
+   `legacy_crewu_kv_schema_path` and `legacy_crewu_kv_data_path` (the legacy
+   fallbacks for the kv migration), and `claude_projects_dir` /
+   `claude_config_path` (read-only locations owned by another tool, Claude).
+   Anything new that needs `home_dir()` -- including helpers for paths owned
+   by other tools -- belongs in `paths.rs` too, so this rule stays absolute
+   everywhere else. Do not "fix" the existing calls for consistency; they are
+   the carve-out.
 2. Do not read `MX_*` env vars in handlers if a path helper already encapsulates
    that override. Add the env-var read inside the helper instead, behind the
    `_with` seam.
