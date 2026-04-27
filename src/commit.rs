@@ -141,7 +141,7 @@ pub fn decode_body(encoded: &str, footer: &str) -> Result<String> {
 
 /// Parse compression algorithm from footer
 /// Footer format: [hash_algo:dict|compress_algo:dict]
-fn parse_compress_algo(footer: &str) -> Option<String> {
+pub(crate) fn parse_compress_algo(footer: &str) -> Option<String> {
     // Look for pattern like [sha384:base62|lzma:uuencode]
     let footer = footer.trim();
     if !footer.starts_with('[') || !footer.contains('|') {
@@ -161,7 +161,7 @@ fn parse_compress_algo(footer: &str) -> Option<String> {
 
 /// Parse body dictionary name from footer
 /// Footer format: [hash_algo:title_dict|compress_algo:body_dict]
-fn parse_body_dict(footer: &str) -> Option<String> {
+pub(crate) fn parse_body_dict(footer: &str) -> Option<String> {
     let footer = footer.trim();
     if !footer.starts_with('[') || !footer.contains('|') {
         return None;
