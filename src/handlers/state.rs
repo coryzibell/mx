@@ -11,6 +11,14 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
     // Helper to load tensor schema by ID or path. The `--schema` argument
     // accepts either a schema ID (looked up under `$MX_HOME/state/schemas/`)
     // or a direct path to a YAML/JSON schema file.
+    //
+    // Path-vs-ID heuristic: IDs may legitimately contain dots (e.g.
+    // "acme.tensor"), so a bare dot is NOT enough to flip the classification
+    // to "path". The argument is treated as a path only when it contains a
+    // slash OR ends with a recognized schema extension (.yaml/.yml/.json).
+    // Edge case: `--schema my.schema` (no slash, no recognized extension)
+    // is classified as an ID and routed to `load_by_id` -- callers who mean
+    // a relative file should use `./my.schema` or include the extension.
     let load_tensor_schema = |schema_arg: Option<String>| -> Result<tensor::TensorSchema> {
         match schema_arg {
             Some(s)

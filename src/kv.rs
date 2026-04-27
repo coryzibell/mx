@@ -19,8 +19,7 @@ static LEGACY_KV_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
 
 /// The single legacy-fallback warning copy. Lives here so the schema and data
 /// resolvers cannot drift apart.
-const LEGACY_KV_WARNING: &str =
-    "note: reading kv from `~/.crewu/kv/` -- this default is moving to \
+const LEGACY_KV_WARNING: &str = "note: reading kv from `~/.crewu/kv/` -- this default is moving to \
      `$MX_HOME/kv/` in a future release. Move your files or set \
      `MX_KV_SCHEMA` / `MX_KV_DATA`.";
 
@@ -2670,13 +2669,16 @@ max_entries = 5
         let _lock = ENV_LOCK.lock().unwrap();
         let _g = EnvGuard::set("MX_KV_SCHEMA", "");
         // Empty env -> resolver should NOT return PathBuf::from("") -- it
-        // should fall through to the default-derived path.
+        // should fall through to the default-derived path. The exact path
+        // depends on which file (if any) exists on the test host -- so we
+        // assert against the canonical helpers, not string literals.
         let (path, _warn) = KvStore::resolve_schema_path("smith");
         assert_ne!(path, std::path::PathBuf::from(""));
+        let new_default = crate::paths::kv_schema_path("smith");
+        let legacy = crate::paths::legacy_crewu_kv_schema_path("smith");
         assert!(
-            path.ends_with("kv/schema/smith.toml")
-                || path.to_string_lossy().contains(".crewu"),
-            "expected derived path, got: {}",
+            path == new_default || legacy.as_ref() == Some(&path),
+            "expected one of the derived paths, got: {}",
             path.display()
         );
     }
@@ -2687,10 +2689,11 @@ max_entries = 5
         let _g = EnvGuard::set("MX_KV_DATA", "");
         let (path, _warn) = KvStore::resolve_data_path("smith");
         assert_ne!(path, std::path::PathBuf::from(""));
+        let new_default = crate::paths::kv_data_path("smith");
+        let legacy = crate::paths::legacy_crewu_kv_data_path("smith");
         assert!(
-            path.ends_with("kv/data/smith.json")
-                || path.to_string_lossy().contains(".crewu"),
-            "expected derived path, got: {}",
+            path == new_default || legacy.as_ref() == Some(&path),
+            "expected one of the derived paths, got: {}",
             path.display()
         );
     }
@@ -2701,11 +2704,13 @@ max_entries = 5
         let _g = EnvGuard::unset("MX_KV_SCHEMA");
         let (path, _warn) = KvStore::resolve_schema_path("smith");
         // Either the new $MX_HOME default OR the legacy fallback (if it
-        // happens to exist on the test host). Both are acceptable -- we just
-        // verify the resolver doesn't panic and produces a sensible path.
+        // happens to exist on the test host). Both are acceptable -- we
+        // assert against the canonical helpers so this test never hardcodes
+        // a string literal that the path-alignment grep guards forbid.
+        let new_default = crate::paths::kv_schema_path("smith");
+        let legacy = crate::paths::legacy_crewu_kv_schema_path("smith");
         assert!(
-            path.ends_with("kv/schema/smith.toml")
-                || path.to_string_lossy().ends_with("smith.schema.toml"),
+            path == new_default || legacy.as_ref() == Some(&path),
             "unexpected default path: {}",
             path.display()
         );

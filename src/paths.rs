@@ -49,17 +49,19 @@ pub(crate) fn legacy_memory_path_set(env_val: Option<&str>) -> bool {
     env_val.map(|v| !v.is_empty()).unwrap_or(false)
 }
 
-/// Emit a startup note to stderr when MX_HOME is not explicitly configured.
-pub fn emit_mx_home_note() {
-    if std::env::var("MX_HOME").map_or(true, |v| v.is_empty()) {
-        eprintln!(
-            "note: Using default {}. Set MX_HOME to customize.",
-            mx_home().display()
-        );
-    }
-
-    // TODO(memory-path-rename-note): remove this detection+warning after one
-    // release cycle.
+/// Emit a one-line stderr note when the deprecated `MX_MEMORY_PATH`
+/// environment variable is set, telling the user it was renamed to
+/// `MX_SURREAL_ROOT`.
+///
+/// This is the only startup note: the previous "Using default $MX_HOME"
+/// message was removed because it fired on every invocation for users who
+/// hadn't customized anything (i.e. most users) and wasn't part of the
+/// decision-9 spec. A future verbose-path-debugging mode would belong on
+/// its own ticket.
+///
+/// TODO(memory-path-rename-note): remove this detection+warning after one
+/// release cycle.
+pub fn emit_legacy_memory_path_note() {
     if legacy_memory_path_set(std::env::var("MX_MEMORY_PATH").ok().as_deref()) {
         eprintln!(
             "note: `MX_MEMORY_PATH` is no longer used. \
@@ -179,11 +181,18 @@ pub fn memory_seed_knowledge_dir() -> PathBuf {
     mx_home().join("memory").join("seed").join("knowledge")
 }
 
+/// Pure resolution of the legacy agents directory layout. Takes `home`
+/// explicitly so tests don't need to touch process state -- mirrors the
+/// `surreal_root_with` / `fastembed_cache_dir_with` pattern.
+fn legacy_agents_dir_with(home: &Path) -> PathBuf {
+    home.join("agents")
+}
+
 /// Legacy `$MX_HOME/agents/` -- soft fallback only.
 ///
 /// TODO(memory-seed-agents-migration): remove after one release cycle.
 pub fn legacy_agents_dir() -> PathBuf {
-    mx_home().join("agents")
+    legacy_agents_dir_with(mx_home())
 }
 
 /// Legacy `$MX_HOME/memory/index.jsonl` -- soft fallback only.
@@ -413,6 +422,20 @@ mod tests {
         assert!(memory_seed_agents_dir().ends_with("memory/seed/agents"));
         assert!(memory_seed_knowledge_dir().starts_with(home));
         assert!(memory_seed_knowledge_dir().ends_with("memory/seed/knowledge"));
+    }
+
+    #[test]
+    fn legacy_agents_dir_with_uses_supplied_home() {
+        let home = PathBuf::from("/tmp/some-test-home");
+        let r = legacy_agents_dir_with(&home);
+        assert_eq!(r, home.join("agents"));
+    }
+
+    #[test]
+    fn legacy_agents_dir_public_wrapper_matches_seam() {
+        // The public wrapper should produce the same path as calling the
+        // _with helper against the cached mx_home().
+        assert_eq!(legacy_agents_dir(), legacy_agents_dir_with(mx_home()));
     }
 
     // ---------------------------------------------------------------------

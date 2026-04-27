@@ -145,7 +145,16 @@ pub(crate) fn seed_agents(db: &dyn store::KnowledgeStore, path: Option<String>) 
     }
 
     if !agents_dir.exists() {
-        bail!("Agents seed directory does not exist: {:?}", agents_dir);
+        // The resolver guarantees `legacy.exists()` when it returns the
+        // legacy path (and warns), so reaching here means BOTH the new
+        // canonical location and the legacy fallback are absent. Surface
+        // both candidates so the user knows where to create the directory.
+        bail!(
+            "Agents seed directory does not exist. Neither `{}` (canonical) \
+             nor `{}` (legacy) was found -- create one or pass --path / set MX_HOME.",
+            new_dir.display(),
+            legacy.display(),
+        );
     }
 
     let entries = fs::read_dir(&agents_dir)
@@ -215,13 +224,13 @@ pub(crate) fn seed_agents(db: &dyn store::KnowledgeStore, path: Option<String>) 
 ///
 /// TODO(memory-seed-knowledge-migration): drop the legacy branch after one
 /// release cycle.
-pub(crate) enum SeedKnowledgeSource {
+enum SeedKnowledgeSource {
     Single(std::path::PathBuf),
     Many(Vec<std::path::PathBuf>),
     Empty,
 }
 
-pub(crate) fn resolve_seed_knowledge_with(
+fn resolve_seed_knowledge_with(
     explicit: Option<String>,
     new_dir: &std::path::Path,
     legacy: &std::path::Path,

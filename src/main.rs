@@ -32,7 +32,7 @@ use cli::*;
 use handlers::*;
 
 fn main() -> Result<()> {
-    paths::emit_mx_home_note();
+    paths::emit_legacy_memory_path_note();
 
     let cli = Cli::parse();
 

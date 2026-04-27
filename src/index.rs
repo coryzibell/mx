@@ -9,7 +9,8 @@ use crate::store::KnowledgeStore;
 /// Index configuration
 ///
 /// `db_path` defaults to `paths::surreal_root()` which honors `MX_SURREAL_ROOT`.
-/// The legacy `MX_MEMORY_PATH` variable was renamed (see `emit_mx_home_note`).
+/// The legacy `MX_MEMORY_PATH` variable was renamed (see
+/// `emit_legacy_memory_path_note`).
 pub struct IndexConfig {
     pub db_path: std::path::PathBuf,
 }
