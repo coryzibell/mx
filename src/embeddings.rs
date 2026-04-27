@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use std::path::PathBuf;
 
 /// Trait for embedding providers
 pub trait EmbeddingProvider: Send + Sync {
@@ -26,10 +25,9 @@ pub struct FastEmbedProvider {
 
 impl FastEmbedProvider {
     pub fn new() -> Result<Self> {
-        // Use ~/.cache/fastembed instead of polluting working directories
-        let cache_dir = dirs::cache_dir()
-            .map(|d| d.join("fastembed"))
-            .unwrap_or_else(|| PathBuf::from(".fastembed_cache"));
+        // Default: $XDG_CACHE_HOME/fastembed (shared with other tools).
+        // If MX_ISOLATE_FASTEMBED is set: $MX_HOME/memory/embed.
+        let cache_dir = crate::paths::fastembed_cache_dir();
 
         let model = TextEmbedding::try_new(
             InitOptions::new(EmbeddingModel::BGEBaseENV15)

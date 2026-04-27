@@ -400,8 +400,7 @@ pub(super) fn get_codex_dir() -> Result<PathBuf> {
 }
 
 fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    let projects_dir = home.join(".claude").join("projects");
+    let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
         anyhow::bail!("Claude projects directory not found");

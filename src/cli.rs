@@ -185,7 +185,7 @@ pub enum StateCommands {
         #[arg(short, long, conflicts_with = "values")]
         file: Option<String>,
 
-        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        /// Schema ID or path (defaults to "tensor")
         #[arg(short, long)]
         schema: Option<String>,
 
@@ -207,7 +207,7 @@ pub enum StateCommands {
         /// Encoded tensor string (e.g., "@state:crewu|0.3|0.2|...")
         input: Option<String>,
 
-        /// Schema ID (inferred from input if not specified)
+        /// Schema ID or path (inferred from input if not specified)
         #[arg(short, long)]
         schema: Option<String>,
 
@@ -225,7 +225,7 @@ pub enum StateCommands {
 
     /// List moods for a schema
     Moods {
-        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        /// Schema ID or path (defaults to "tensor")
         #[arg(short, long)]
         schema: Option<String>,
 
@@ -239,53 +239,13 @@ pub enum StateCommands {
 
     /// Show schema information (dimensions, moods)
     Info {
-        /// Schema ID (defaults to MX_STATE_SCHEMA or "crewu")
+        /// Schema ID or path (defaults to "tensor")
         #[arg(short, long)]
         schema: Option<String>,
 
         /// Output as JSON
         #[arg(long)]
         json: bool,
-    },
-
-    // === Legacy commands (backward compatibility) ===
-    /// [Legacy] Encode using mode-based mapping
-    #[command(hide = true)]
-    LegacyEncode {
-        /// Discrete mode name (soft, play, build, etc.)
-        #[arg(short, long)]
-        mode: Option<String>,
-
-        /// Interactive mode - prompts for each dimension
-        #[arg(short, long)]
-        interactive: bool,
-
-        /// Output format: stele (default), json, human
-        #[arg(short, long, default_value = "stele")]
-        format: String,
-
-        /// Schema path
-        #[arg(long)]
-        schema: Option<String>,
-    },
-
-    /// [Legacy] Parse wake preference from session-bootstrap
-    #[command(hide = true)]
-    Parse {
-        /// Path to session-bootstrap.md file
-        #[arg(short, long)]
-        file: Option<String>,
-
-        /// Raw preference string to parse
-        preference: Option<String>,
-
-        /// Output format: human (default), json, stele, mode
-        #[arg(short = 'F', long, default_value = "human")]
-        format: String,
-
-        /// Schema path
-        #[arg(long)]
-        schema: Option<String>,
     },
 }
 
@@ -428,8 +388,20 @@ pub enum RecentSortOrder {
 
 #[derive(Subcommand)]
 pub enum MemoryCommands {
-    /// Rebuild the knowledge index
+    /// Removed -- see follow-up for markdown ingest plans
+    ///
+    /// The export-then-edit-then-rebuild flow has no users on this codebase.
+    /// A doctor command (`mx doctor memory rebuild`) covers the
+    /// "export-wipe-reimport" recovery use case in a follow-up.
+    /// TODO(legacy-state-cleanup): remove command stub after one release cycle.
+    #[command(hide = true)]
     Rebuild,
+
+    /// Seed memory from on-disk artifacts (agents, knowledge, ...)
+    Seed {
+        #[command(subcommand)]
+        command: MemorySeedCommands,
+    },
 
     /// Search knowledge entries
     Search {
@@ -502,9 +474,12 @@ pub enum MemoryCommands {
         json: bool,
     },
 
-    /// Import entries from JSONL file
+    /// [Removed] Import entries from JSONL file. Use `mx memory seed knowledge` instead.
+    ///
+    /// TODO(legacy-state-cleanup): remove stub after one release cycle.
+    #[command(hide = true)]
     Import {
-        /// Path to JSONL file (defaults to memory/index.jsonl)
+        /// Path to JSONL file
         path: Option<String>,
     },
 
@@ -1283,6 +1258,31 @@ pub enum CodexCommands {
 }
 
 #[derive(Subcommand)]
+pub enum MemorySeedCommands {
+    /// Seed agents from markdown files with YAML frontmatter
+    ///
+    /// Default location: `$MX_HOME/memory/seed/agents/`.
+    /// Soft fallback: `$MX_HOME/agents/` (legacy) -- emits stderr warning.
+    /// TODO(memory-seed-agents-migration): remove fallback after one release cycle.
+    Agents {
+        /// Path to agents directory (defaults to $MX_HOME/memory/seed/agents/)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+
+    /// Seed knowledge from JSONL files
+    ///
+    /// With no path: scans `$MX_HOME/memory/seed/knowledge/*.jsonl` and
+    /// imports every file. With a path: imports just that file.
+    /// Soft fallback: `$MX_HOME/memory/index.jsonl` (legacy) -- emits stderr warning.
+    /// TODO(memory-seed-knowledge-migration): remove fallback after one release cycle.
+    Knowledge {
+        /// Path to a single .jsonl file (omit to scan the seed dir)
+        path: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum AgentsCommands {
     /// List all agents
     List {
@@ -1312,8 +1312,13 @@ pub enum AgentsCommands {
     },
 
     /// Seed agents from markdown files with YAML frontmatter
+    ///
+    /// Removed in favor of `mx memory seed agents`. This stub remains
+    /// only so misuse prints a helpful pointer.
+    /// TODO(legacy-state-cleanup): remove after one release cycle.
+    #[command(hide = true)]
     Seed {
-        /// Path to agents directory (defaults to $MX_HOME/agents/)
+        /// Path to agents directory (defaults to $MX_HOME/memory/seed/agents/)
         #[arg(short, long)]
         path: Option<String>,
     },

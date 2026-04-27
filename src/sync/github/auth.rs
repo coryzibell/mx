@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 
 /// Claude configuration file structure (partial)
 #[derive(Debug, Deserialize)]
@@ -27,13 +26,6 @@ struct McpServer {
     env: HashMap<String, String>,
 }
 
-/// Path to Claude configuration file
-fn claude_config_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".claude.json")
-}
-
 /// Read GitHub token from ~/.claude.json
 ///
 /// Searches through all projects for a GitHub MCP server configuration
@@ -46,7 +38,7 @@ fn claude_config_path() -> PathBuf {
 /// - File cannot be parsed as JSON
 /// - No GitHub token is found in any project
 pub fn get_github_token() -> Result<String> {
-    let config_path = claude_config_path();
+    let config_path = crate::paths::claude_config_path();
 
     let content = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read {}", config_path.display()))?;
@@ -77,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_config_path() {
-        let path = claude_config_path();
+        let path = crate::paths::claude_config_path();
         assert!(path.ends_with(".claude.json"));
     }
 

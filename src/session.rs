@@ -138,8 +138,7 @@ pub fn export_session(path: Option<String>, output: Option<String>) -> Result<()
 }
 
 pub fn find_most_recent_session() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    let projects_dir = home.join(".claude").join("projects");
+    let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
         anyhow::bail!("Claude projects directory not found: {:?}", projects_dir);

@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 
 use crate::cli::*;
-use crate::state;
 use crate::tensor;
 
 /// Handle emotional state tensor commands
@@ -9,10 +8,17 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
     use std::io::{self, Read as IoRead};
     use std::path::PathBuf;
 
-    // Helper to load tensor schema by ID or path
+    // Helper to load tensor schema by ID or path. The `--schema` argument
+    // accepts either a schema ID (looked up under `$MX_HOME/state/schemas/`)
+    // or a direct path to a YAML/JSON schema file.
     let load_tensor_schema = |schema_arg: Option<String>| -> Result<tensor::TensorSchema> {
         match schema_arg {
-            Some(s) if s.contains('/') || s.contains('.') => {
+            Some(s)
+                if s.contains('/')
+                    || s.ends_with(".yaml")
+                    || s.ends_with(".yml")
+                    || s.ends_with(".json") =>
+            {
                 // Looks like a path
                 tensor::TensorSchema::load(&PathBuf::from(s))
             }
@@ -21,16 +27,8 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
         }
     };
 
-    // Helper to load legacy state schema
-    let load_legacy_schema = |custom_path: Option<String>| -> Result<state::StateSchema> {
-        match custom_path {
-            Some(p) => state::load_schema(&PathBuf::from(p)),
-            None => state::load_default_schema(),
-        }
-    };
-
     match cmd {
-        // === NEW TENSOR-BASED COMMANDS ===
+        // === TENSOR-BASED COMMANDS ===
         StateCommands::Encode {
             values,
             dimensions,
@@ -165,7 +163,8 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&schema_list)?);
             } else if schemas.is_empty() {
-                println!("No schemas found (checked $MX_HOME/schemas/)");
+                let dir = crate::paths::state_schemas_dir();
+                println!("No schemas found (checked {})", dir.display());
                 println!("\nCreate a schema file (YAML or JSON) to get started.");
             } else {
                 println!("Available schemas:\n");
@@ -276,129 +275,6 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
                         "  {:12} - {} (tol: {:.2})",
                         name, mood.description, mood.tolerance
                     );
-                }
-            }
-        }
-
-        // === LEGACY COMMANDS (backward compatibility) ===
-        StateCommands::LegacyEncode {
-            mode,
-            interactive,
-            format,
-            schema,
-        } => {
-            let schema = load_legacy_schema(schema)?;
-
-            let dynamic_state = if interactive {
-                state::DynamicState::interactive_capture(&schema)?
-            } else if let Some(mode_name) = mode {
-                state::DynamicState::from_mode(&mode_name, &schema)?
-            } else {
-                state::DynamicState::from_mode("default", &schema)?
-            };
-
-            match format.as_str() {
-                "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
-                "human" => println!("{}", dynamic_state.describe(&schema)),
-                _ => println!("{}", dynamic_state.encode_stele(&schema)),
-            }
-        }
-
-        StateCommands::Parse {
-            file,
-            preference,
-            format,
-            schema,
-        } => {
-            // Strip leading markdown bold markers (**/__) so "**Wake State:** ..."
-            // matches the same as plain "Wake State: ...".  Only used in the predicate;
-            // the original line is kept for value extraction.
-            fn strip_md_bold(line: &str) -> &str {
-                line.trim_start()
-                    .trim_start_matches("**")
-                    .trim_start_matches("__")
-                    .trim_start()
-            }
-
-            // Extract the @state:... fragment from a matched line, stripping any
-            // leading label ("Wake State:", "**Wake State:**", etc.) and trailing
-            // markdown bold close ("**") that pocket inserts around the label.
-            fn extract_stele_fragment(line: &str) -> &str {
-                // Find the @state token wherever it appears in the line
-                if let Some(pos) = line.find("@state") {
-                    line[pos..]
-                        .trim_end_matches('*')
-                        .trim_end_matches('_')
-                        .trim()
-                } else {
-                    line.trim()
-                }
-            }
-
-            let legacy_schema = load_legacy_schema(schema.clone())?;
-
-            let raw_line = if let Some(pref) = preference {
-                pref
-            } else {
-                let path = file.unwrap_or_else(|| {
-                    crate::paths::swap_dir()
-                        .join("session-bootstrap.md")
-                        .to_string_lossy()
-                        .to_string()
-                });
-
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("Failed to read file: {}", path))?;
-
-                content
-                    .lines()
-                    .find(|line| {
-                        let stripped = strip_md_bold(line);
-                        stripped.starts_with("Wake Preference:")
-                            || stripped.starts_with("Wake State:")
-                            || stripped.starts_with(&legacy_schema.stele.header)
-                    })
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| String::from("default"))
-            };
-
-            // Detect tensor format: @state:<namespace>|... (has colon after @state)
-            let stele_fragment = extract_stele_fragment(&raw_line);
-            let is_tensor_format =
-                stele_fragment.starts_with("@state:") && stele_fragment.contains('|');
-
-            if is_tensor_format {
-                // Decode via tensor path which handles positional numeric values
-                let tensor_schema = load_tensor_schema(schema)?;
-                let tensor = tensor::StateTensor::decode(stele_fragment).with_context(|| {
-                    format!("Failed to decode tensor stele: {}", stele_fragment)
-                })?;
-
-                match format.as_str() {
-                    "json" => println!("{}", serde_json::to_string_pretty(&tensor.values)?),
-                    "stele" => println!("{}", tensor.encode()),
-                    _ => {
-                        println!("Parsed: {}", stele_fragment);
-                        println!();
-                        println!("{}", tensor.describe(&tensor_schema));
-                    }
-                }
-            } else {
-                // Legacy path: mode names or rune-prefixed stele
-                let dynamic_state =
-                    state::parse_wake_preference_dynamic(&raw_line, &legacy_schema)?;
-
-                match format.as_str() {
-                    "json" => println!("{}", serde_json::to_string_pretty(&dynamic_state)?),
-                    "stele" => println!("{}", dynamic_state.encode_stele(&legacy_schema)),
-                    "mode" => {
-                        println!("Mode calculation not yet implemented for DynamicState");
-                    }
-                    _ => {
-                        println!("Parsed: {}", raw_line.trim());
-                        println!();
-                        println!("{}", dynamic_state.describe(&legacy_schema));
-                    }
                 }
             }
         }

@@ -101,24 +101,17 @@ impl TensorSchema {
             .with_context(|| format!("Failed to parse schema: {:?}", path))
     }
 
-    /// Load schema by ID from standard locations
+    /// Load schema by ID from `$MX_HOME/state/schemas/`.
     pub fn load_by_id(schema_id: &str) -> Result<Self> {
-        // Check env var first
-        if let Ok(schema_path) = std::env::var("MX_STATE_SCHEMA") {
-            let path = std::path::PathBuf::from(&schema_path);
-            if path.exists() {
-                let schema = Self::load(&path)?;
-                if schema.id == schema_id {
-                    return Ok(schema);
-                }
-            }
-        }
-
-        // Check $MX_HOME/schemas/{id}.yaml
-        let schemas_dir = crate::paths::schemas_dir();
+        let schemas_dir = crate::paths::state_schemas_dir();
         let yaml_path = schemas_dir.join(format!("{}.yaml", schema_id));
         if yaml_path.exists() {
             return Self::load(&yaml_path);
+        }
+
+        let yml_path = schemas_dir.join(format!("{}.yml", schema_id));
+        if yml_path.exists() {
+            return Self::load(&yml_path);
         }
 
         let json_path = schemas_dir.join(format!("{}.json", schema_id));
@@ -133,25 +126,20 @@ impl TensorSchema {
         )
     }
 
-    /// Load default schema (from MX_STATE_SCHEMA or crewu)
+    /// Load the default schema.
+    ///
+    /// Default schema ID is `tensor`. Override with `--schema {id|path}`
+    /// at the CLI level (this method itself takes no arguments and is the
+    /// fall-through used when no flag is supplied).
     pub fn load_default() -> Result<Self> {
-        // Check MX_STATE_SCHEMA env var
-        if let Ok(schema_path) = std::env::var("MX_STATE_SCHEMA") {
-            let path = std::path::PathBuf::from(&schema_path);
-            if path.exists() {
-                return Self::load(&path);
-            }
-        }
-
-        // Try crewu as default
-        Self::load_by_id("crewu")
+        Self::load_by_id("tensor")
     }
 
-    /// List available schemas in $MX_HOME/schemas/
+    /// List available schemas in `$MX_HOME/state/schemas/`.
     pub fn list_available() -> Result<Vec<String>> {
         let mut schemas = Vec::new();
 
-        let schemas_dir = crate::paths::schemas_dir();
+        let schemas_dir = crate::paths::state_schemas_dir();
         if schemas_dir.exists() {
             for entry in fs::read_dir(&schemas_dir)? {
                 let entry = entry?;

@@ -5,9 +5,7 @@ use crate::content_ops;
 use crate::display::*;
 use crate::engage;
 use crate::helpers::*;
-use crate::index::{
-    IndexConfig, export_csv, export_jsonl, export_markdown, import_jsonl, rebuild_index,
-};
+use crate::index::{IndexConfig, export_csv, export_jsonl, export_markdown};
 use crate::knowledge;
 use crate::store;
 use crate::wake_ritual;
@@ -19,10 +17,25 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
     match cmd {
         MemoryCommands::Rebuild => {
-            println!("Rebuilding Memory index...");
-            let stats = rebuild_index(&config)?;
-            println!("{}", stats);
+            // TODO(legacy-state-cleanup): remove this stub after one release cycle.
+            bail!(
+                "`mx memory rebuild` was removed -- the export-then-edit-then-rebuild \
+                 flow has no users on this codebase. See the markdown-ingest follow-up \
+                 issue for plans, and the `mx doctor memory rebuild` follow-up for \
+                 export-wipe-reimport recovery."
+            );
         }
+
+        MemoryCommands::Seed { command } => match command {
+            MemorySeedCommands::Agents { path } => {
+                let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+                super::metadata::seed_agents(db.as_ref(), path)?;
+            }
+            MemorySeedCommands::Knowledge { path } => {
+                let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+                super::metadata::seed_knowledge(db.as_ref(), path)?;
+            }
+        },
 
         MemoryCommands::Search {
             query,
@@ -318,13 +331,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::Import { path } => {
-            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
-            let import_path = path
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| config.jsonl_path.clone());
-
-            let count = import_jsonl(db.as_ref(), &import_path)?;
-            println!("Imported {} entries from {:?}", count, import_path);
+            // TODO(legacy-state-cleanup): remove stub after one release cycle.
+            let _ = path;
+            bail!(
+                "`mx memory import` was renamed to `mx memory seed knowledge`. \
+                 The default seed location moved from `$MX_HOME/memory/index.jsonl` \
+                 to `$MX_HOME/memory/seed/knowledge/*.jsonl` (the legacy file is \
+                 still read with a warning for one release)."
+            );
         }
 
         MemoryCommands::Add {

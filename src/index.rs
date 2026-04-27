@@ -2,90 +2,24 @@ use anyhow::{Context, Result};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
-use walkdir::WalkDir;
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::KnowledgeStore;
 
 /// Index configuration
+///
+/// `db_path` defaults to `paths::surreal_root()` which honors `MX_SURREAL_ROOT`.
+/// The legacy `MX_MEMORY_PATH` variable was renamed (see `emit_mx_home_note`).
 pub struct IndexConfig {
-    pub memory_root: std::path::PathBuf,
     pub db_path: std::path::PathBuf,
-    pub jsonl_path: std::path::PathBuf,
-    pub excluded_dirs: Vec<String>,
 }
 
 impl Default for IndexConfig {
     fn default() -> Self {
-        let base = std::env::var("MX_MEMORY_PATH")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| crate::paths::mx_home().to_path_buf());
-
         Self {
-            memory_root: base.join("memory"),
-            db_path: base.join("memory").join("knowledge.surreal"),
-            jsonl_path: base.join("memory").join("index.jsonl"),
-            excluded_dirs: vec!["future".to_string()],
+            db_path: crate::paths::surreal_root(),
         }
     }
-}
-
-/// Rebuild the entire index from memory markdown files
-pub fn rebuild_index(config: &IndexConfig) -> Result<IndexStats> {
-    // Ensure db directory exists
-    if let Some(parent) = config.db_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let db = crate::store::create_store(&config.db_path)?;
-    let mut stats = IndexStats::default();
-
-    // Walk memory directory
-    for entry in WalkDir::new(&config.memory_root)
-        .into_iter()
-        .filter_entry(|e| !is_excluded(e, &config.excluded_dirs))
-    {
-        let entry = entry?;
-        let path = entry.path();
-
-        // Only process markdown files
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-
-        // Skip index.jsonl and other non-knowledge files
-        if path.file_name().and_then(|n| n.to_str()) == Some("index.jsonl") {
-            continue;
-        }
-
-        match KnowledgeEntry::from_markdown(path, &config.memory_root) {
-            Ok(entry) => {
-                db.upsert_knowledge(&entry)?;
-                stats.indexed += 1;
-            }
-            Err(e) => {
-                eprintln!("Warning: Failed to parse {:?}: {}", path, e);
-                stats.errors += 1;
-            }
-        }
-    }
-
-    stats.total = db.count()?;
-
-    Ok(stats)
-}
-
-/// Check if directory should be excluded
-fn is_excluded(entry: &walkdir::DirEntry, excluded: &[String]) -> bool {
-    if !entry.file_type().is_dir() {
-        return false;
-    }
-
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| excluded.contains(&s.to_string()))
-        .unwrap_or(false)
 }
 
 /// Export database to markdown directory structure
@@ -338,21 +272,4 @@ pub fn import_jsonl(db: &dyn KnowledgeStore, path: &Path) -> Result<usize> {
     }
 
     Ok(count)
-}
-
-#[derive(Debug, Default)]
-pub struct IndexStats {
-    pub indexed: usize,
-    pub errors: usize,
-    pub total: usize,
-}
-
-impl std::fmt::Display for IndexStats {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Indexed {} files ({} errors), {} total entries",
-            self.indexed, self.errors, self.total
-        )
-    }
 }

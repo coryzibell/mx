@@ -13,6 +13,49 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
+// Path resolution
+// ---------------------------------------------------------------------------
+
+/// Pure path-resolution helper for kv schema/data files.
+///
+/// Returns `(resolved_path, should_warn)`. `should_warn` is true only when
+/// the legacy `~/.crewu/kv/` location is being used as a soft fallback.
+///
+/// Resolution order:
+/// 1. Env override (with `{agent}` placeholder substitution); empty value
+///    is treated as unset
+/// 2. New `$MX_HOME/kv/...` location (if file exists)
+/// 3. Legacy `~/.crewu/kv/...` (if file exists) -- emits warning
+/// 4. Otherwise, return the new location (so error messages point at the
+///    canonical place)
+///
+/// TODO(kv-path-migration): drop the legacy fallback after one release cycle.
+pub(crate) fn resolve_kv_path_with(
+    env_val: Option<&str>,
+    agent: &str,
+    new_default: PathBuf,
+    legacy: Option<PathBuf>,
+) -> (PathBuf, bool) {
+    if let Some(p) = env_val
+        && !p.is_empty()
+    {
+        return (PathBuf::from(p.replace("{agent}", agent)), false);
+    }
+
+    if new_default.exists() {
+        return (new_default, false);
+    }
+
+    if let Some(legacy) = legacy
+        && legacy.exists()
+    {
+        return (legacy, true);
+    }
+
+    (new_default, false)
+}
+
+// ---------------------------------------------------------------------------
 // Exit codes
 // ---------------------------------------------------------------------------
 
@@ -340,22 +383,22 @@ impl KvStore {
     }
 
     /// Load from environment variables. Resolves {agent} placeholder.
+    ///
+    /// Resolution order for schema:
+    /// 1. `MX_KV_SCHEMA` env var (with `{agent}` placeholder substitution)
+    /// 2. `$MX_HOME/kv/schema/{agent}.toml` (new default)
+    /// 3. Soft fallback: `~/.crewu/kv/{agent}.schema.toml` (legacy, with stderr note)
+    ///
+    /// Same shape for data via `MX_KV_DATA` and `~/.crewu/kv/{agent}.data.json`.
+    ///
+    /// TODO(kv-path-migration): remove the `~/.crewu/kv/` fallback after one
+    /// release cycle.
     pub fn from_env() -> Result<Self> {
         let agent = std::env::var("MX_CURRENT_AGENT")
             .with_context(|| "MX_CURRENT_AGENT environment variable is required")?;
 
-        let default_schema = Self::default_schema_path(&agent)
-            .with_context(|| "Could not determine home directory for schema path")?;
-        let default_data = Self::default_data_path(&agent)
-            .with_context(|| "Could not determine home directory for data path")?;
-
-        let schema_path = std::env::var("MX_KV_SCHEMA")
-            .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
-            .unwrap_or(default_schema);
-
-        let data_path = std::env::var("MX_KV_DATA")
-            .map(|s| PathBuf::from(s.replace("{agent}", &agent)))
-            .unwrap_or(default_data);
+        let schema_path = Self::resolve_schema_path(&agent);
+        let data_path = Self::resolve_data_path(&agent);
 
         let mut store = Self::load(&schema_path, &data_path)?;
 
@@ -367,20 +410,60 @@ impl KvStore {
         Ok(store)
     }
 
-    fn default_schema_path(agent: &str) -> Result<PathBuf> {
-        Ok(dirs::home_dir()
-            .context("Could not determine home directory")?
-            .join(".crewu")
-            .join("kv")
-            .join(format!("{}.schema.toml", agent)))
+    /// Resolve the schema path for an agent, applying env override and the
+    /// legacy `~/.crewu/kv/` fallback.
+    fn resolve_schema_path(agent: &str) -> PathBuf {
+        if let Ok(p) = std::env::var("MX_KV_SCHEMA") {
+            return PathBuf::from(p.replace("{agent}", agent));
+        }
+
+        let new_path = crate::paths::kv_schema_path(agent);
+        if new_path.exists() {
+            return new_path;
+        }
+
+        // TODO(kv-path-migration): remove this fallback after one release cycle.
+        if let Some(legacy) = crate::paths::legacy_crewu_kv_schema_path(agent)
+            && legacy.exists()
+        {
+            eprintln!(
+                "note: reading kv from `~/.crewu/kv/` -- \
+                 this default is moving to `~/.mx/kv/` in a future release. \
+                 Move your files or set `MX_KV_SCHEMA` / `MX_KV_DATA`."
+            );
+            return legacy;
+        }
+
+        // Neither exists -- return the new default so downstream errors point
+        // users at the canonical location.
+        new_path
     }
 
-    fn default_data_path(agent: &str) -> Result<PathBuf> {
-        Ok(dirs::home_dir()
-            .context("Could not determine home directory")?
-            .join(".crewu")
-            .join("kv")
-            .join(format!("{}.data.json", agent)))
+    /// Resolve the data path for an agent, applying env override and the
+    /// legacy `~/.crewu/kv/` fallback.
+    fn resolve_data_path(agent: &str) -> PathBuf {
+        if let Ok(p) = std::env::var("MX_KV_DATA") {
+            return PathBuf::from(p.replace("{agent}", agent));
+        }
+
+        let new_path = crate::paths::kv_data_path(agent);
+        if new_path.exists() {
+            return new_path;
+        }
+
+        // TODO(kv-path-migration): remove this fallback after one release cycle.
+        if let Some(legacy) = crate::paths::legacy_crewu_kv_data_path(agent)
+            && legacy.exists()
+        {
+            eprintln!(
+                "note: reading kv from `~/.crewu/kv/` -- \
+                 this default is moving to `~/.mx/kv/` in a future release. \
+                 Move your files or set `MX_KV_SCHEMA` / `MX_KV_DATA`."
+            );
+            return legacy;
+        }
+
+        new_path
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
@@ -2409,5 +2492,67 @@ max_entries = 5
 
         // After reset, memory is gone (default_value has memory: None)
         assert_eq!(store.get_memory("flavor_history").unwrap(), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Migration: ~/.crewu/kv -> $MX_HOME/kv (decision 1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn kv_path_env_override_wins() {
+        let (path, warn) = resolve_kv_path_with(
+            Some("/explicit/{agent}.toml"),
+            "smith",
+            std::path::PathBuf::from("/new/smith.toml"),
+            Some(std::path::PathBuf::from("/legacy/smith.toml")),
+        );
+        assert_eq!(path, std::path::PathBuf::from("/explicit/smith.toml"));
+        assert!(!warn);
+    }
+
+    #[test]
+    fn kv_path_uses_new_default_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("new.toml");
+        std::fs::write(&new_path, "").unwrap();
+        let legacy = dir.path().join("legacy.toml");
+        std::fs::write(&legacy, "").unwrap();
+
+        let (path, warn) = resolve_kv_path_with(None, "smith", new_path.clone(), Some(legacy));
+        assert_eq!(path, new_path);
+        assert!(!warn);
+    }
+
+    #[test]
+    fn kv_path_falls_back_to_legacy_with_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("missing.toml"); // doesn't exist
+        let legacy = dir.path().join("legacy.toml");
+        std::fs::write(&legacy, "").unwrap();
+
+        let (path, warn) = resolve_kv_path_with(None, "smith", new_path, Some(legacy.clone()));
+        assert_eq!(path, legacy);
+        assert!(warn, "warning MUST fire on legacy fallback");
+    }
+
+    #[test]
+    fn kv_path_returns_new_default_when_neither_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("missing.toml");
+        let legacy = dir.path().join("also-missing.toml");
+
+        let (path, warn) = resolve_kv_path_with(None, "smith", new_path.clone(), Some(legacy));
+        assert_eq!(path, new_path);
+        assert!(!warn);
+    }
+
+    #[test]
+    fn kv_path_empty_env_treated_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        let new_path = dir.path().join("new.toml");
+        std::fs::write(&new_path, "").unwrap();
+        let (path, warn) = resolve_kv_path_with(Some(""), "smith", new_path.clone(), None);
+        assert_eq!(path, new_path);
+        assert!(!warn);
     }
 }

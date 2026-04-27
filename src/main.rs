@@ -16,7 +16,6 @@ mod knowledge;
 mod kv;
 pub mod paths;
 mod session;
-mod state;
 mod store;
 mod surreal_db;
 mod sync;
