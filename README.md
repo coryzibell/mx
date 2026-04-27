@@ -144,17 +144,46 @@ Use `mx log` to read commits. Use `git log` if you enjoy puzzles.
 
 ## Configuration
 
+Filesystem layout (everything lives under `$MX_HOME`, default `~/.mx/`):
+
+```
+~/.mx/
+├── kv/
+│   ├── schema/{agent}.toml     # override MX_KV_SCHEMA
+│   └── data/{agent}.json       # override MX_KV_DATA
+├── state/
+│   └── schemas/{id}.yaml       # default ID: "tensor"; CLI --schema flag
+├── memory/
+│   ├── surreal/                # override MX_SURREAL_ROOT
+│   ├── embed/                  # only when MX_ISOLATE_FASTEMBED is set
+│   └── seed/
+│       ├── agents/             # for `mx memory seed agents`
+│       └── knowledge/          # for `mx memory seed knowledge`
+├── codex/                      # override MX_CODEX_PATH
+├── cache/sync/{owner-repo}/
+├── artifacts/
+└── swap/
+```
+
 Key environment variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `MX_MEMORY_PATH` | Override default SurrealDB storage path |
+| `MX_HOME` | Base directory (default `~/.mx/`) -- the only filesystem root |
 | `MX_CURRENT_AGENT` | Active agent identity (required for `memory wake`, used as default for `--source-agent`) |
+| `MX_SURREAL_ROOT` | Override SurrealDB storage root (default `$MX_HOME/memory/surreal/`) |
 | `MX_SURREAL_MODE` | SurrealDB connection mode (`embedded` or `network`) |
-| `MX_CODEX_PATH` | Override default codex archive storage path |
-| `MX_STATE_SCHEMA` | Default tensor schema ID (defaults to `crewu`) |
+| `MX_CODEX_PATH` | Override codex archive storage path (default `$MX_HOME/codex/`) |
+| `MX_KV_SCHEMA` | Override kv schema path (supports `{agent}` placeholder) |
+| `MX_KV_DATA` | Override kv data path (supports `{agent}` placeholder) |
+| `MX_ISOLATE_FASTEMBED` | When set, store fastembed model cache under `$MX_HOME/memory/embed/` instead of the shared XDG cache |
 | `MX_USER_NAME` | Display name for user in codex transcripts |
 | `MX_ASSISTANT_NAME` | Display name for assistant in codex transcripts |
+
+Removed in favor of CLI flags / renames:
+
+- `MX_MEMORY_PATH` -- renamed to `MX_SURREAL_ROOT`. Setting the old variable now emits a one-line stderr note (will be dropped after one release cycle).
+- `MX_STATE_SCHEMA` -- replaced by the `--schema {id|path}` flag on `mx state` subcommands; the default schema ID is now `tensor` (was `crewu`).
 
 ## Further Documentation
 
