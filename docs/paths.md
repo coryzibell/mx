@@ -69,12 +69,29 @@ which is substituted with the active agent name at resolution time.
 
 ### `state/schemas/`
 
-YAML schemas for the emotional-state tensor system used by `mx state`. The
-default schema ID is `tensor`, resolving to `state/schemas/tensor.yaml`.
+YAML (or JSON) schemas for the emotional-state tensor system used by
+`mx state`. The default schema ID is `tensor`, resolving to
+`state/schemas/tensor.yaml`.
 
 Pick a different schema with `mx state ... --schema {id|path}`. The flag
-accepts a bare ID (looked up under `state/schemas/`) or any direct path that
-contains a slash or ends in `.yaml`/`.yml`/`.json`.
+argument is classified as a path or an ID by a simple heuristic, then looked
+up:
+
+- **Bare ID** (e.g. `--schema tensor`): the loader tries
+  `state/schemas/{id}.yaml` first, then `state/schemas/{id}.json`. The `.yml`
+  extension is **not** tried for bare-ID lookup (though it is recognized when
+  listing available schemas).
+- **Direct path** (e.g. `--schema /tmp/foo.json`): the file is loaded
+  directly. Any extension is accepted; the parser tries YAML first and falls
+  back to JSON based on file contents, not the extension.
+
+**Edge case (path-vs-ID heuristic):** the argument is treated as a file path
+if it contains a `/` **or** any `.` character. Otherwise it's treated as a
+bare ID. This means `--schema my.schema` is treated as a *path* (because it
+contains a dot), not an ID lookup -- and will fail with a "file not found"
+error rather than searching `state/schemas/`. To force ID lookup, use a name
+without dots; to force path lookup of a name that happens to contain a slash
+or a dot, pass the explicit path.
 
 There is no env-var override for the schema choice anymore -- the old
 `MX_STATE_SCHEMA` was replaced by the CLI flag. (See
@@ -136,9 +153,19 @@ anything you want to keep.
 | `MX_KV_DATA` | path template | `$MX_HOME/kv/data/{agent}.json` | KV data file; `{agent}` placeholder substituted |
 | `MX_ISOLATE_FASTEMBED` | boolean flag | unset | When non-empty, redirects FastEmbed cache from XDG to `$MX_HOME/memory/embed/` |
 
-Empty-string env values are treated as unset. The boolean flag is "on" for any
-non-empty value (`1`, `true`, `yes` -- it doesn't parse, it just checks for
-non-emptiness).
+Empty-string values for the path overrides in this table (`MX_HOME`,
+`MX_SURREAL_ROOT`, `MX_CODEX_PATH`, `MX_KV_SCHEMA`, `MX_KV_DATA`,
+`MX_ISOLATE_FASTEMBED`) are treated as unset and fall back to the default.
+
+The same is **not** uniformly true of other `MX_*` env vars. In particular,
+the [SurrealDB connection vars](#env-surreal) below do not all filter empty
+strings: setting `MX_SURREAL_USER=""` produces an empty username, not the
+default `root`. Among the connection vars only `MX_SURREAL_PASS` /
+`MX_SURREAL_PASS_FILE` are empty-filtered. To restore a default, **leave the
+variable unset entirely** rather than setting it to an empty string.
+
+The boolean flag (`MX_ISOLATE_FASTEMBED`) is "on" for any non-empty value
+(`1`, `true`, `yes` -- it doesn't parse, it just checks for non-emptiness).
 
 <a id="env-surreal"></a>
 ### SurrealDB connection
@@ -176,8 +203,8 @@ App rather than via your personal `gh` token.
 | Variable | Type | Default | Purpose |
 |---|---|---|---|
 | `MX_CURRENT_AGENT` | string | unset | Active agent identity. Required for `mx memory wake` and any command that reads/writes per-agent KV. Also the default for `--source-agent` on `mx memory add` |
-| `MX_USER_NAME` | string | derived | Display name for "user" turns in codex transcripts |
-| `MX_ASSISTANT_NAME` | string | derived | Display name for "assistant" turns in codex transcripts |
+| `MX_USER_NAME` | string | `git config user.name`, else `"User"` | Display name for "user" turns in codex transcripts. Resolution order: env var > git config > literal `"User"` |
+| `MX_ASSISTANT_NAME` | string | `"Orchestrator"` | Display name for "assistant" turns in codex transcripts. No git fallback -- the default is the literal string `Orchestrator` |
 
 ### Tuning
 
@@ -203,7 +230,7 @@ you what moved. **No data is lost. The warnings are informative, not errors.**
 |---|---|---|
 | `~/.crewu/kv/{agent}.schema.toml`, `~/.crewu/kv/{agent}.data.json` | `$MX_HOME/kv/schema/{agent}.toml`, `$MX_HOME/kv/data/{agent}.json` | Read-only fallback; consolidated stderr note fires once per process |
 | `$MX_HOME/agents/` (agent seed `*.md`) | `$MX_HOME/memory/seed/agents/` | Read-only fallback; stderr note when used |
-| `$MX_HOME/memory/index.jsonl` (knowledge seed) | `$MX_HOME/memory/seed/knowledge/*.jsonl` | Read-only fallback; stderr note when used |
+| `$MX_HOME/memory/index.jsonl` (knowledge seed) | `$MX_HOME/memory/seed/knowledge/*.jsonl` | Read-only fallback. This is a *shape* change, not a rename: the old location was a single hardcoded file (`index.jsonl`); the new location is a directory scanned for every `*.jsonl` it finds. Stderr note when the legacy file is read |
 | `MX_MEMORY_PATH` env var | `MX_SURREAL_ROOT` env var | Old var **not honored**; setting it just triggers a rename note |
 
 To silence the warnings, move the files (or rename the env var). The fallbacks
@@ -254,12 +281,19 @@ export MX_ISOLATE_FASTEMBED=1
 # Models will now download into $MX_HOME/memory/embed/
 ```
 
-Encode a tensor against a non-default state schema:
+Encode a tensor. The first form uses the default `tensor` schema; the second
+points at an explicit schema file:
 
 ```bash
-mx state encode --schema crewu --dimensions "temp=0.8 entropy=0.75 agency=0.4"
+mx state encode --dimensions "temp=0.8 entropy=0.75 agency=0.4"
 mx state encode --schema /tmp/myschema.yaml -d "temp=0.5"
 ```
+
+To target a non-default schema by ID, drop a YAML file at
+`$MX_HOME/state/schemas/{id}.yaml` and pass `--schema {id}`. The bare-ID
+form is what the lookup helper handles; for an absolute or relative file
+path, just pass the path directly (see
+[`state/schemas/`](#stateschemas) for the path-vs-ID heuristic).
 
 Point SurrealDB at a remote network instance:
 
