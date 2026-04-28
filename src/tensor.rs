@@ -3,12 +3,11 @@
 //! Implements the tensor encoding system designed by Schemnya.
 //! Values-first: encode dimensional values -> derive nearest mood label.
 //!
-//! The crewu schema defines 5 dimensions:
-//! - temperature (ᚣ): cold/precise <-> warm/playful
-//! - entropy (ᚤ): ordered/focused <-> chaotic/wild
-//! - agency (ᚡ): receptive/yielding <-> active/driving
-//! - connection (ᚢ): distant/separate <-> close/merged
-//! - weight (ᚠ): light/floating <-> heavy/grounded
+//! Schemas are user-authored YAML files; the default `tensor` schema ships
+//! with six dimensions (entropy, agency, temperature, verbosity, skepticism,
+//! humor) and self-seeds at `$MX_HOME/state/schemas/tensor.yaml` on first
+//! `mx state` invocation. See `schema/state/schemas/tensor.yaml` for the
+//! shipped content.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -53,10 +52,13 @@ fn ensure_schema_seeded_at(path: &Path, content: &str) -> Result<bool> {
 /// No-op when the user has authored (or a previous run has seeded) a file at
 /// `paths::tensor_schema_path("tensor")`. The file's existence is the signal:
 /// once present, content is preserved untouched on subsequent runs.
-fn ensure_default_schema_seeded() -> Result<()> {
+///
+/// Returns `Ok(true)` when this invocation actually performed the first-run
+/// seed, `Ok(false)` when an existing file was preserved. Callers may use
+/// this to log "first-run seed performed" without re-stat'ing the path.
+fn ensure_default_schema_seeded() -> Result<bool> {
     let path = crate::paths::tensor_schema_path(DEFAULT_TENSOR_SCHEMA_ID);
-    ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML)?;
-    Ok(())
+    ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML)
 }
 
 /// A dimension definition in a tensor schema
@@ -157,7 +159,7 @@ impl TensorSchema {
         // canonical path. Only seeds for the default id -- other schemas remain
         // user-authored.
         if schema_id == DEFAULT_TENSOR_SCHEMA_ID {
-            ensure_default_schema_seeded()?;
+            let _seeded = ensure_default_schema_seeded()?;
         }
 
         let yaml_path = crate::paths::tensor_schema_path(schema_id);
@@ -632,6 +634,24 @@ pub fn guided_capture(schema: &TensorSchema) -> Result<StateTensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_yaml_matches_disk_source() {
+        // The compiled-in `DEFAULT_TENSOR_SCHEMA_YAML` is `include_str!` of
+        // `schema/state/schemas/tensor.yaml`. `cargo build` enforces that the
+        // path resolves, but doesn't enforce that the resolved file is the
+        // one we think it is. This test pins the invariant explicitly so
+        // a stale embed (e.g. via a stray same-named file higher up the
+        // include path on some future refactor) fails loud here rather than
+        // silently shipping mismatched content.
+        let on_disk = std::fs::read_to_string("schema/state/schemas/tensor.yaml")
+            .expect("schema/state/schemas/tensor.yaml must exist for include_str! to work");
+        assert_eq!(
+            on_disk, DEFAULT_TENSOR_SCHEMA_YAML,
+            "embedded const drifted from disk source -- this should be \
+             impossible since include_str! is compile-time"
+        );
+    }
 
     fn test_schema() -> TensorSchema {
         TensorSchema {
