@@ -16,6 +16,49 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+/// Embedded default schema. Self-seeds into `$MX_HOME/state/schemas/tensor.yaml`
+/// on first invocation when no user-authored file is present.
+///
+/// Source of truth: `schema/state/schemas/tensor.yaml` (under the existing
+/// repo `schema/` asset convention -- compiled in alongside the SurrealDB
+/// schema string).
+const DEFAULT_TENSOR_SCHEMA_YAML: &str = include_str!("../schema/state/schemas/tensor.yaml");
+
+/// The schema id whose absence triggers a self-seed of the embedded default.
+const DEFAULT_TENSOR_SCHEMA_ID: &str = "tensor";
+
+/// Pure seed logic: write `content` to `path` if it does not already exist.
+///
+/// Returns `Ok(true)` when the seed file was written, `Ok(false)` when the
+/// path already existed and was preserved. Parent directories are created
+/// as needed.
+///
+/// This is the test seam -- mirrors the `_with` pattern in `paths.rs` so
+/// tests don't have to mutate `MX_HOME` (which is a process-wide `OnceLock`).
+fn ensure_schema_seeded_at(path: &Path, content: &str) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create schemas dir: {:?}", parent))?;
+    }
+    fs::write(path, content)
+        .with_context(|| format!("Failed to seed default tensor schema at: {:?}", path))?;
+    Ok(true)
+}
+
+/// Ensure the default `tensor` schema is seeded into `$MX_HOME/state/schemas/`.
+///
+/// No-op when the user has authored (or a previous run has seeded) a file at
+/// `paths::tensor_schema_path("tensor")`. The file's existence is the signal:
+/// once present, content is preserved untouched on subsequent runs.
+fn ensure_default_schema_seeded() -> Result<()> {
+    let path = crate::paths::tensor_schema_path(DEFAULT_TENSOR_SCHEMA_ID);
+    ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML)?;
+    Ok(())
+}
+
 /// A dimension definition in a tensor schema
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TensorDimension {
@@ -109,6 +152,14 @@ impl TensorSchema {
     /// inline against `state_schemas_dir()` because the path helper is
     /// extension-specific by design.
     pub fn load_by_id(schema_id: &str) -> Result<Self> {
+        // Self-seed the default `tensor` schema on first invocation. No-op when
+        // a user-authored or previously-seeded file already exists at the
+        // canonical path. Only seeds for the default id -- other schemas remain
+        // user-authored.
+        if schema_id == DEFAULT_TENSOR_SCHEMA_ID {
+            ensure_default_schema_seeded()?;
+        }
+
         let yaml_path = crate::paths::tensor_schema_path(schema_id);
         if yaml_path.exists() {
             return Self::load(&yaml_path);
@@ -789,6 +840,128 @@ mod tests {
             tensor.interpolate_anchor_description(&dim_no_mid, 0.4),
             "moderately cold"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Default-schema self-seed (#256)
+    //
+    // Tests use the `ensure_schema_seeded_at` seam directly with a tempdir,
+    // mirroring the `_with` pattern in `paths.rs`. We can't mutate `MX_HOME`
+    // mid-process because it's a `OnceLock` shared across parallel tests.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn embedded_default_schema_parses_cleanly() {
+        // Smoke test: the bytes we ship must parse into a TensorSchema.
+        let parsed: TensorSchema = serde_yaml::from_str(DEFAULT_TENSOR_SCHEMA_YAML)
+            .expect("embedded default tensor schema must parse");
+        assert_eq!(parsed.id, "tensor");
+        assert_eq!(parsed.name, "Default Tensor");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.dimensions.len(), 6);
+        // Spec guarantees no moods block in the public default.
+        assert!(parsed.moods.is_empty());
+
+        // Dimension ids in the blessed order from the architecture comment.
+        let ids: Vec<&str> = parsed.dimensions.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "entropy",
+                "agency",
+                "temperature",
+                "verbosity",
+                "skepticism",
+                "humor",
+            ]
+        );
+    }
+
+    #[test]
+    fn fresh_install_seed_writes_embedded_content() {
+        // Fresh install: no state/schemas/ directory exists. Seeder must
+        // create the parent dirs and write the embedded content.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state").join("schemas").join("tensor.yaml");
+
+        assert!(!path.exists(), "precondition: file must not exist");
+        let wrote = ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML).unwrap();
+        assert!(wrote, "seeder should report it wrote the file");
+        assert!(path.exists(), "seed file must be present after seeding");
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, DEFAULT_TENSOR_SCHEMA_YAML);
+
+        // And it must parse back cleanly via the schema loader.
+        let loaded = TensorSchema::load(&path).unwrap();
+        assert_eq!(loaded.id, "tensor");
+        assert_eq!(loaded.dimensions.len(), 6);
+    }
+
+    #[test]
+    fn idempotent_seed_does_not_rewrite_existing_file() {
+        // Second invocation must be a no-op: same content, untouched mtime.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state").join("schemas").join("tensor.yaml");
+
+        let first = ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML).unwrap();
+        assert!(first, "first call should write");
+
+        let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let second = ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML).unwrap();
+        assert!(!second, "second call should be a no-op");
+
+        let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime_before, mtime_after,
+            "idempotent seed must not touch the file"
+        );
+    }
+
+    #[test]
+    fn user_authored_schema_is_preserved() {
+        // If a user has dropped their own tensor.yaml at the canonical path,
+        // the seeder must not overwrite it. The file's existence is the signal.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state").join("schemas");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tensor.yaml");
+
+        let user_content = "id: tensor\nname: User Override\nversion: 99\ndimensions: []\n";
+        std::fs::write(&path, user_content).unwrap();
+
+        let wrote = ensure_schema_seeded_at(&path, DEFAULT_TENSOR_SCHEMA_YAML).unwrap();
+        assert!(!wrote, "seeder must not overwrite user-authored file");
+
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            on_disk, user_content,
+            "user-authored content must be preserved verbatim"
+        );
+        assert_ne!(
+            on_disk, DEFAULT_TENSOR_SCHEMA_YAML,
+            "embedded default must not have been written"
+        );
+    }
+
+    #[test]
+    fn seed_creates_missing_parent_directories() {
+        // The fresh-install case: $MX_HOME exists but no state/schemas/
+        // subdirs. The seeder must mkdir -p before writing.
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp
+            .path()
+            .join("does")
+            .join("not")
+            .join("exist")
+            .join("yet")
+            .join("tensor.yaml");
+
+        assert!(!deep.parent().unwrap().exists());
+        let wrote = ensure_schema_seeded_at(&deep, DEFAULT_TENSOR_SCHEMA_YAML).unwrap();
+        assert!(wrote);
+        assert!(deep.exists());
     }
 
     #[test]
