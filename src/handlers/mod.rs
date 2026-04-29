@@ -485,9 +485,11 @@ pub(crate) fn try_decode_commit_body(body: &str) -> DecodedCommit {
     // Encoded body = every line strictly above the footer, with the
     // dejavu marker filtered out (it can in principle appear in older
     // formats above the footer; current encoder writes it after).
+    // Marker spelling is sourced from the encoder so the writer and
+    // this filter never drift apart.
     let body_lines: Vec<&str> = lines[..footer_idx]
         .iter()
-        .filter(|l| l.trim() != "whoa.")
+        .filter(|l| l.trim() != commit::DEJAVU_MARKER)
         .copied()
         .collect();
 
@@ -776,8 +778,11 @@ mod try_decode_commit_body_tests {
         // text is exactly what `git cat-file -p` returned (everything
         // after the title line). If the decoder ever stops handling
         // this shape, this test catches it.
-        let body = "8NO48P3FCDPIGSJ5C5I6QP9978G76R39DKG46RRECPKMETBIC5Q6IRRE41Q6U83141Q6AOBJCLP20R39DPLMIRJ741Q6U834DTHN6BRGC5Q6GSPEDLI0====\n\n[blake2s:base32hex|snappy:base32hex]\nwhoa.";
-        let result = try_decode_commit_body(body);
+        let body = format!(
+            "8NO48P3FCDPIGSJ5C5I6QP9978G76R39DKG46RRECPKMETBIC5Q6IRRE41Q6U83141Q6AOBJCLP20R39DPLMIRJ741Q6U834DTHN6BRGC5Q6GSPEDLI0====\n\n[blake2s:base32hex|snappy:base32hex]\n{}",
+            commit::DEJAVU_MARKER
+        );
+        let result = try_decode_commit_body(&body);
         assert!(result.was_decoded);
         assert_eq!(
             result.subject,

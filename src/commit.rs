@@ -16,6 +16,15 @@ use std::process::Command;
 /// Each attempt re-rolls the random dictionary selection.
 const MAX_ENCODE_ATTEMPTS: usize = 5;
 
+/// Marker line appended to the footer when title and body randomly land
+/// on the same encoding dictionary (the dejavu easter egg).
+///
+/// Single source of truth: the encoder writes this exact line, and the
+/// `mx log` rendering filter in `handlers::try_decode_commit_body`
+/// strips this exact line from displayed bodies. Both sides import
+/// this constant -- if the spelling ever changes, both update together.
+pub(crate) const DEJAVU_MARKER: &str = "whoa.";
+
 /// Get the staged diff from git
 pub fn get_staged_diff() -> Result<String> {
     let output = Command::new("git")
@@ -384,7 +393,15 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
 
         // Footer: [hash_algo:title_dict|compress_algo:body_dict]
         let footer_tag = format_footer_tag(&hash_algo, &title_dict, &compress_algo, &body_dict);
-        let footer = format!("{}{}", footer_tag, if dejavu { "\nwhoa." } else { "" });
+        let footer = format!(
+            "{}{}",
+            footer_tag,
+            if dejavu {
+                format!("\n{}", DEJAVU_MARKER)
+            } else {
+                String::new()
+            }
+        );
 
         // Validate all parts for unsafe characters
         let title_check = validate_encoded_output(&title, "title");
@@ -660,7 +677,7 @@ mod tests {
         EncodedCommit {
             title: "TTTT-title-glyphs".to_string(),
             body: "BBBB-body-glyphs".to_string(),
-            footer: "[sha384:base62|lzma:base62]\nwhoa.".to_string(),
+            footer: format!("[sha384:base62|lzma:base62]\n{}", DEJAVU_MARKER),
             dejavu: true,
             title_dict: "base62".to_string(),
             body_dict: "base62".to_string(),
@@ -742,10 +759,13 @@ mod tests {
         // different whitespace would have passed the old substring check.
         let encoded = sample_encoded_with_dejavu();
         let out = format_encoded_commit(&encoded, true);
-        let expected = "Title:  TTTT-title-glyphs\n\
-                        Body:   BBBB-body-glyphs\n\
-                        Dejavu: true (both used base62)\n\
-                        Footer: [sha384:base62|lzma:base62]\nwhoa.";
+        let expected = format!(
+            "Title:  TTTT-title-glyphs\n\
+             Body:   BBBB-body-glyphs\n\
+             Dejavu: true (both used base62)\n\
+             Footer: [sha384:base62|lzma:base62]\n{}",
+            DEJAVU_MARKER
+        );
         assert_eq!(out, expected);
     }
 
@@ -781,10 +801,8 @@ mod tests {
     #[test]
     fn test_parse_body_dict_dejavu_footer() {
         // Footer may have trailing content after ']' on next lines
-        assert_eq!(
-            parse_body_dict("[sha384:base62|lzma:base62]\nwhoa."),
-            Some("base62".to_string())
-        );
+        let footer = format!("[sha384:base62|lzma:base62]\n{}", DEJAVU_MARKER);
+        assert_eq!(parse_body_dict(&footer), Some("base62".to_string()));
     }
 
     #[test]
