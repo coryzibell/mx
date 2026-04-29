@@ -6,7 +6,7 @@
 //! - Footer: Compression algorithm hint
 //!
 //! Dejavu detection: When both title and body randomly get the same
-//! dictionary, we add "whoa." to the footer.
+//! dictionary, we add the `DEJAVU_MARKER` to the footer.
 
 use anyhow::{Context, Result, bail};
 use base_d::prelude::*;
@@ -216,7 +216,7 @@ pub(crate) fn parse_body_dict(footer: &str) -> Option<String> {
     let colon_pos = after_pipe.find(':')?;
     let after_colon = &after_pipe[colon_pos + 1..];
 
-    // Strip trailing ']' and anything after (e.g., newline + "whoa.")
+    // Strip trailing ']' and anything after (e.g., newline + `DEJAVU_MARKER`)
     let dict_name = after_colon.split(']').next()?;
 
     if dict_name.is_empty() {
