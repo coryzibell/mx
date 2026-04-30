@@ -376,6 +376,12 @@ mod tests {
     /// file is unreadable (mode 000) so the archive pipeline's
     /// `read_to_string` returns permission-denied — a realistic shape
     /// for the failure mode S3 cares about.
+    ///
+    /// Unix-only: the chmod-000 trick relies on POSIX permission bits.
+    /// Windows uses a different ACL model where there is no clean
+    /// equivalent of "owner cannot read its own file", so we skip the
+    /// failure-mode coverage there.
+    #[cfg(unix)]
     fn drop_unreadable_session(vault_path: &Path) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         // Pick the first snapshot's slug dir.
@@ -402,6 +408,11 @@ mod tests {
     /// `report.errors`, the other (valid) sessions still archive, and
     /// `run_backfill` returns Ok overall — the non-fatal error model
     /// must hold.
+    ///
+    /// Unix-only: depends on `drop_unreadable_session` which uses
+    /// `chmod 000` to simulate the unreadable case. See helper for the
+    /// rationale on Windows.
+    #[cfg(unix)]
     #[test]
     #[serial]
     fn backfill_per_session_failure_is_non_fatal() {
