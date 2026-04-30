@@ -160,34 +160,34 @@ pub fn detect_unarchived_in(projects_dir: &Path, codex_dir: &Path) -> Result<Det
 /// to zero (used by tests that want the legacy "sessions only" warning
 /// shape without depending on disk state).
 fn count_unarchived_tool_outputs(archived: &HashSet<String>) -> usize {
-    if let Ok(override_path) = std::env::var("MX_CLAUDE_TMP_TASKS_DIR") {
-        if override_path == "__SKIP__" {
-            return 0;
+    let root: PathBuf = match std::env::var("MX_CLAUDE_TMP_TASKS_DIR") {
+        Ok(override_path) => {
+            if override_path == "__SKIP__" {
+                return 0;
+            }
+            PathBuf::from(override_path)
         }
-        let root = PathBuf::from(override_path);
-        if !root.exists() {
-            return 0;
+        Err(_) => {
+            #[cfg(unix)]
+            {
+                // SAFETY: getuid(2) is infallible per POSIX.
+                unsafe extern "C" {
+                    fn getuid() -> u32;
+                }
+                let uid = unsafe { getuid() };
+                PathBuf::from(format!("/tmp/claude-{}", uid))
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = archived;
+                return 0;
+            }
         }
-        return count_in_tmp_root(&root, archived);
+    };
+    if !root.exists() {
+        return 0;
     }
-    #[cfg(unix)]
-    {
-        // SAFETY: getuid(2) is infallible per POSIX.
-        unsafe extern "C" {
-            fn getuid() -> u32;
-        }
-        let uid = unsafe { getuid() };
-        let root = PathBuf::from(format!("/tmp/claude-{}", uid));
-        if !root.exists() {
-            return 0;
-        }
-        return count_in_tmp_root(&root, archived);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = archived;
-        0
-    }
+    count_in_tmp_root(&root, archived)
 }
 
 /// Inner walker for [`count_unarchived_tool_outputs`]. Pulled out so the
@@ -200,7 +200,7 @@ fn count_in_tmp_root(root: &Path, archived: &HashSet<String>) -> usize {
             return 0;
         }
         let mut count = 0usize;
-        let user_dirs = match fs::read_dir(&root) {
+        let user_dirs = match fs::read_dir(root) {
             Ok(rd) => rd,
             Err(_) => return 0,
         };
