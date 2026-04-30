@@ -283,6 +283,16 @@ fn collect_archived_ids() -> Result<HashSet<String>> {
     Ok(ids)
 }
 
+/// Derive the dedup key for a vault session JSONL from its filename
+/// stem (`<uuid>.jsonl` → `<uuid>`).
+///
+/// This mirrors what `archive::run(ArchiveRequest::Single, ...)` ends
+/// up using as the canonical `session_id` (the manifest's `session_id`
+/// is currently set from the same file stem). If that ever changes —
+/// e.g., the canonical id starts coming from a `sessionId` field
+/// inside the JSONL — this function and the corresponding NOTE in
+/// `archive::run` (`mod.rs`, the `Single` arm) must be updated
+/// together. See W2 in PR 272 review for context.
 fn session_id_from_path(path: &Path) -> Option<String> {
     path.file_stem()
         .and_then(|s| s.to_str())

@@ -104,6 +104,13 @@ pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveRe
 
     match request {
         ArchiveRequest::Single(path) => {
+            // NOTE: backfill.rs::session_id_from_path derives the dedup
+            // key from the JSONL filename stem. If we ever change how
+            // the canonical session_id is derived for a Single archive
+            // (e.g., from the JSONL's `sessionId` field instead of the
+            // filename), update backfill's dedup logic to match,
+            // otherwise idempotence will break silently. See W2 in PR
+            // 272 review for context.
             let archive_dir = write::archive_session(
                 &path,
                 options.clean,
