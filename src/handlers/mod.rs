@@ -91,6 +91,7 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             clean,
             include_agents,
             include,
+            backfill,
         } => {
             let include_set = codex::IncludeSet::parse(&include)?;
             // W3: --include-agents only does anything when subagents are
@@ -103,6 +104,37 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
                     include
                 );
             }
+
+            if let Some(vault_arg) = backfill {
+                // `--backfill` with no value parses as `Some("")` thanks
+                // to `default_missing_value`. Resolve to the canonical
+                // `~/.wonka/vault/archives/` in that case.
+                let vault_path = if vault_arg.is_empty() {
+                    crate::paths::wonka_vault_archives_dir()
+                } else {
+                    std::path::PathBuf::from(vault_arg)
+                };
+                let options = codex::archive::ArchiveOptions {
+                    clean,
+                    include: include_set,
+                    include_agents_in_clean_md: include_agents,
+                };
+                let report = codex::run_backfill(&vault_path, options)?;
+                // Echo a final terse summary on stdout (the running
+                // progress lines went to stderr); stdout is the
+                // machine-readable channel for chaining in scripts.
+                println!(
+                    "vault={} snapshots={} found={} archived={} skipped={} errors={}",
+                    report.vault_path.display(),
+                    report.vault_snapshots_walked,
+                    report.sessions_found,
+                    report.sessions_archived,
+                    report.sessions_skipped_already_archived,
+                    report.errors.len()
+                );
+                return Ok(());
+            }
+
             codex::save_session(path, all, clean, include_agents, include_set)?;
             Ok(())
         }
@@ -987,6 +1019,7 @@ mod codex_save_validation_tests {
             clean: true,
             include_agents,
             include: include.to_string(),
+            backfill: None,
         }
     }
 

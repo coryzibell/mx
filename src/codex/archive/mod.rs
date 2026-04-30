@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use super::{ArchiveEntry, Manifest};
 
+mod backfill;
 mod include;
 mod paths;
 mod sources;
@@ -34,6 +35,7 @@ mod write;
 
 // Re-exports kept at the historical paths so `super::archive::*` callers
 // (notably `migrate.rs` and `read.rs`) need no changes.
+pub(crate) use backfill::run_backfill;
 pub(crate) use include::IncludeSet;
 pub(crate) use paths::{get_base_archive_name, parse_archive_name};
 

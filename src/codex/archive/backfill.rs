@@ -1,0 +1,446 @@
+//! Vault-backfill walker.
+//!
+//! Walks `~/.wonka/vault/archives/` (or a caller-supplied path) and feeds
+//! every session JSONL it finds back through `archive::run` so the codex
+//! ingests historical clean-shift snapshots.
+//!
+//! Layout we walk (verified empirically against the live vault — every
+//! observed snapshot has the same shape):
+//!
+//! ```text
+//! <vault_path>/
+//!   session-YYYYMMDD-HHMMSS-NNNNNN/
+//!     projects/
+//!       <project-slug>/
+//!         <session-uuid>.jsonl
+//!         <session-uuid>/
+//!           subagents/
+//!             agent-*.jsonl
+//!     plans/         (optional, often empty)
+//!     history.jsonl  (slash-command history slice)
+//! ```
+//!
+//! For each session JSONL we delegate to
+//! `archive::run(ArchiveRequest::Single, options)` — the existing
+//! pipeline already dedups against `manifest.session_id` via the
+//! `archived_ids` mechanism in `write::save_all_sessions`, but `Single`
+//! has no such guard, so we maintain our own seen-set here. (PR 4 left
+//! `Single` archive intentionally unconditional; backfill is the first
+//! caller that actually needs idempotence over the same source set.)
+//!
+//! Per-session failures are non-fatal: the bulk operation must survive a
+//! single corrupt JSONL. Errors are accumulated on the report.
+
+use anyhow::{Context, Result};
+use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use super::super::Manifest;
+use super::{ArchiveOptions, ArchiveRequest, get_codex_dir, run};
+
+/// Aggregated outcome of a `--backfill` run.
+#[derive(Debug, Default)]
+pub struct BackfillReport {
+    /// The vault root we walked.
+    pub vault_path: PathBuf,
+    /// How many `session-*` snapshot directories we visited.
+    pub vault_snapshots_walked: usize,
+    /// How many session JSONLs we found across all snapshots.
+    pub sessions_found: usize,
+    /// How many were freshly archived into the codex.
+    pub sessions_archived: usize,
+    /// How many were skipped because their `session_id` was already in
+    /// the codex (dedup hit).
+    pub sessions_skipped_already_archived: usize,
+    /// Per-session failures (non-fatal). Reported at the end of the run.
+    pub errors: Vec<(PathBuf, anyhow::Error)>,
+}
+
+/// Walk `vault_path` and feed every session JSONL back through the
+/// archive pipeline. See module docs for layout.
+pub fn run_backfill(vault_path: &Path, options: ArchiveOptions) -> Result<BackfillReport> {
+    let mut report = BackfillReport {
+        vault_path: vault_path.to_path_buf(),
+        ..Default::default()
+    };
+
+    if !vault_path.exists() {
+        anyhow::bail!(
+            "vault path does not exist: {}. The vault may have already been removed.",
+            vault_path.display()
+        );
+    }
+
+    // Collect the vault snapshot directories first so we can emit
+    // accurate progress ("12/26") and so `read_dir` ordering doesn't
+    // matter to the final report.
+    let snapshots = collect_snapshot_dirs(vault_path)
+        .with_context(|| format!("walking vault root {}", vault_path.display()))?;
+
+    if snapshots.is_empty() {
+        eprintln!(
+            "warning: vault path {} has no session-* snapshots; nothing to backfill",
+            vault_path.display()
+        );
+        return Ok(report);
+    }
+
+    // Pre-compute the set of already-archived session_ids. This is the
+    // same trick `save_all_sessions` uses; we replicate it here so the
+    // `Single` codepath gets dedup too. Failures to read the codex dir
+    // are non-fatal — we'd rather over-archive (and let the suffix
+    // collision logic in `determine_archive_dir` handle it) than abort
+    // the whole run.
+    let archived_ids = collect_archived_ids().unwrap_or_default();
+    let mut seen: HashSet<String> = archived_ids;
+
+    let total_snapshots = snapshots.len();
+    for (idx, snapshot) in snapshots.iter().enumerate() {
+        report.vault_snapshots_walked += 1;
+
+        let sessions = match collect_session_jsonls(snapshot) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to walk vault snapshot {}: {}",
+                    snapshot.display(),
+                    e
+                );
+                report.errors.push((snapshot.clone(), e));
+                continue;
+            }
+        };
+
+        for session_path in sessions {
+            report.sessions_found += 1;
+
+            // Dedup: derive session_id from the filename
+            // (`<uuid>.jsonl` → `<uuid>`) and skip if we've already
+            // archived it. The session uuid IS the canonical id used by
+            // the archive pipeline, so this matches what `archive::run`
+            // would compute internally.
+            let session_id = match session_id_from_path(&session_path) {
+                Some(id) => id,
+                None => {
+                    let err = anyhow::anyhow!(
+                        "could not derive session_id from {}",
+                        session_path.display()
+                    );
+                    report.errors.push((session_path, err));
+                    continue;
+                }
+            };
+
+            if seen.contains(&session_id) {
+                report.sessions_skipped_already_archived += 1;
+                continue;
+            }
+
+            match run(
+                ArchiveRequest::Single(session_path.clone()),
+                options.clone(),
+            ) {
+                Ok(_result) => {
+                    report.sessions_archived += 1;
+                    seen.insert(session_id);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to archive {}: {}",
+                        session_path.display(),
+                        e
+                    );
+                    report.errors.push((session_path, e));
+                }
+            }
+        }
+
+        eprintln!(
+            "Backfilling vault: {}/{} snapshots, {}/{} sessions archived...",
+            idx + 1,
+            total_snapshots,
+            report.sessions_archived,
+            report.sessions_found
+        );
+    }
+
+    eprintln!(
+        "Backfill complete: {} vault snapshots, {} sessions found, {} archived, \
+         {} already in codex, {} errors.",
+        report.vault_snapshots_walked,
+        report.sessions_found,
+        report.sessions_archived,
+        report.sessions_skipped_already_archived,
+        report.errors.len()
+    );
+
+    Ok(report)
+}
+
+/// Enumerate `session-*` subdirectories under `vault_path`. Non-matching
+/// entries (e.g. stray files) are silently skipped — the vault is a
+/// best-effort historical store, not a sealed contract.
+fn collect_snapshot_dirs(vault_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(vault_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(name) if name.starts_with("session-") => out.push(path),
+            _ => continue,
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Walk `<snapshot>/projects/<slug>/*.jsonl` and return every session
+/// JSONL we find. Subagent files (which live one directory deeper in
+/// `<uuid>/subagents/`) are deliberately NOT returned — `archive::run`
+/// finds them automatically via `find_agent_sessions` so we'd just
+/// re-archive them as if they were primary sessions.
+fn collect_session_jsonls(snapshot_dir: &Path) -> Result<Vec<PathBuf>> {
+    let projects = snapshot_dir.join("projects");
+    if !projects.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for slug_entry in fs::read_dir(&projects)? {
+        let slug_entry = slug_entry?;
+        let slug_path = slug_entry.path();
+        if !slug_path.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&slug_path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            // Skip stray agent-*.jsonl that may have been deposited at
+            // the slug root (shouldn't happen per the vault layout but
+            // defend anyway — the agent walker handles them).
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("agent-")
+            {
+                continue;
+            }
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Build the set of session_ids already present in the codex. Mirrors
+/// the inline logic in `write::save_all_sessions` — could be hoisted to
+/// a shared helper later, but two call sites isn't enough churn yet.
+fn collect_archived_ids() -> Result<HashSet<String>> {
+    let codex_dir = get_codex_dir()?;
+    let mut ids = HashSet::new();
+    if !codex_dir.exists() {
+        return Ok(ids);
+    }
+    for entry in fs::read_dir(&codex_dir)? {
+        let entry = entry?;
+        let manifest_path = entry.path().join("manifest.json");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let content = match fs::read_to_string(&manifest_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let manifest: Manifest = match serde_json::from_str(&content) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        ids.insert(manifest.session_id);
+    }
+    Ok(ids)
+}
+
+fn session_id_from_path(path: &Path) -> Option<String> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Build a minimal vault layout under `root` containing `n_snapshots`
+    /// snapshots, each with one project slug and `sessions_per_snapshot`
+    /// session JSONLs. Returns the vault path.
+    fn build_fake_vault(root: &Path, n_snapshots: usize, sessions_per_snapshot: usize) -> PathBuf {
+        let vault = root.join("vault-archives");
+        fs::create_dir_all(&vault).unwrap();
+        for s in 0..n_snapshots {
+            let snap = vault.join(format!("session-2026{:04}-100000-{:06}", s, s));
+            let slug = snap.join("projects").join("-home-charlie");
+            fs::create_dir_all(&slug).unwrap();
+            for k in 0..sessions_per_snapshot {
+                // Session UUIDs have to look uuid-ish enough for the
+                // 8-char short-id slice; pad with zeros.
+                let uuid = format!(
+                    "{:08x}-snap{:02}-sess{:02}-0000-000000000000",
+                    s * 1000 + k,
+                    s,
+                    k
+                );
+                let session = slug.join(format!("{uuid}.jsonl"));
+                let line = format!(
+                    "{{\"role\":\"user\",\"content\":\"hello\",\
+                     \"timestamp\":\"2026-04-29T10:00:0{}Z\"}}\n",
+                    k % 10
+                );
+                fs::write(&session, line).unwrap();
+            }
+        }
+        vault
+    }
+
+    /// Drive a backfill against an isolated codex dir + fake vault.
+    fn drive_backfill(n_snaps: usize, sess_per_snap: usize) -> (BackfillReport, PathBuf) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join("codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let vault = build_fake_vault(tmp.path(), n_snaps, sess_per_snap);
+
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        // SAFETY: process-wide env mutation, serialized via ENV_LOCK +
+        // #[serial] so concurrent codex tests stay correct.
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_dir);
+        }
+        let options = ArchiveOptions::default();
+        let report = run_backfill(&vault, options).expect("backfill failed");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+
+        // Hold tmp dir for the caller to inspect. Caller's responsibility
+        // to keep it alive long enough; here we leak it via PathBuf and
+        // accept the temp-dir orphan for the duration of the test.
+        let leaked = tmp.keep();
+        (report, leaked.join("codex"))
+    }
+
+    #[test]
+    #[serial]
+    fn backfill_walks_snapshots_and_archives_sessions() {
+        let (report, codex) = drive_backfill(3, 2);
+        assert_eq!(report.vault_snapshots_walked, 3);
+        assert_eq!(report.sessions_found, 6);
+        assert_eq!(report.sessions_archived, 6);
+        assert_eq!(report.sessions_skipped_already_archived, 0);
+        assert!(report.errors.is_empty());
+
+        // Codex dir should now contain 6 archive directories (one per
+        // session) — count the manifest.json files.
+        let manifests = fs::read_dir(&codex)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join("manifest.json").exists())
+            .count();
+        assert_eq!(manifests, 6);
+    }
+
+    #[test]
+    #[serial]
+    fn backfill_is_idempotent_on_second_run() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join("codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let vault = build_fake_vault(tmp.path(), 2, 2);
+
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_dir);
+        }
+
+        let r1 = run_backfill(&vault, ArchiveOptions::default()).unwrap();
+        assert_eq!(r1.sessions_archived, 4);
+        assert_eq!(r1.sessions_skipped_already_archived, 0);
+
+        let r2 = run_backfill(&vault, ArchiveOptions::default()).unwrap();
+        // Second run: nothing new should be archived; everything is a
+        // dedup hit.
+        assert_eq!(r2.sessions_archived, 0);
+        assert_eq!(r2.sessions_skipped_already_archived, 4);
+
+        // The codex directory should still hold exactly the archives
+        // from the first pass — no duplicates.
+        let manifests = fs::read_dir(&codex_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join("manifest.json").exists())
+            .count();
+        assert_eq!(manifests, 4);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+    }
+
+    #[test]
+    fn backfill_missing_vault_path_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("does-not-exist");
+        let err = run_backfill(&bogus, ArchiveOptions::default()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("does not exist"),
+            "expected helpful error, got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn backfill_empty_vault_warns_and_reports_zeros() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("empty-vault");
+        fs::create_dir_all(&vault).unwrap();
+        // No session-* children — should warn and return zeros.
+        let codex_dir = tmp.path().join("codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_dir);
+        }
+
+        let report = run_backfill(&vault, ArchiveOptions::default()).unwrap();
+        assert_eq!(report.vault_snapshots_walked, 0);
+        assert_eq!(report.sessions_found, 0);
+        assert_eq!(report.sessions_archived, 0);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+    }
+}

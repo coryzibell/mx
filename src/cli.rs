@@ -1185,10 +1185,11 @@ pub enum CodexCommands {
     /// Archive current session to permanent storage
     Save {
         /// Path to session JSONL file (defaults to most recent non-agent session)
+        #[arg(conflicts_with_all = ["all", "backfill"])]
         path: Option<String>,
 
         /// Archive all unarchived sessions
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["backfill"])]
         all: bool,
 
         /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
@@ -1216,6 +1217,26 @@ pub enum CodexCommands {
         /// `conversation.md` rendering when `--clean` is set.
         #[arg(long, default_value = "subagents")]
         include: String,
+
+        /// Ingest the legacy wonka vault snapshots into the codex.
+        ///
+        /// Walks every `session-*` snapshot under the supplied path
+        /// (defaults to `~/.wonka/vault/archives/`) and feeds each
+        /// session JSONL through the regular archive pipeline.
+        /// Idempotent: re-running on the same vault produces the same
+        /// codex state.
+        ///
+        /// Mutually exclusive with `--all` and the positional `[PATH]`.
+        /// `--include` and `--clean` still apply (they govern what the
+        /// per-session pipeline captures).
+        #[arg(
+            long,
+            value_name = "VAULT_PATH",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with_all = ["all", "path"],
+        )]
+        backfill: Option<String>,
     },
 
     /// Export an archived session as Markdown or structured JSON.
