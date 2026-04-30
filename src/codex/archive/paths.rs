@@ -58,8 +58,24 @@ pub(crate) fn parse_archive_name(name: &str) -> (String, u32) {
     (extract_short_id(name), 0)
 }
 
+/// Pull the short-id segment from an archive directory name.
+///
+/// Precondition: `name` is the post-`.N` base from `parse_archive_name`,
+/// e.g. `2026-01-03-141500-abc12345`. The short id is the trailing `-`
+/// segment.
+///
+/// S5: we now also validate the trailing segment is non-empty and made
+/// of alphanumerics (the short uuids Claude writes are 8 hex chars; we
+/// accept the broader alnum class so the parser tolerates future ID
+/// schemes). On invalid input the function falls back to the original
+/// `name` — preserving the previous behavior for malformed archive
+/// directories so a single bad name doesn't break a `list` traversal.
 fn extract_short_id(name: &str) -> String {
-    name.split('-').next_back().unwrap_or(name).to_string()
+    let candidate = name.split('-').next_back().unwrap_or(name);
+    if candidate.is_empty() || !candidate.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return name.to_string();
+    }
+    candidate.to_string()
 }
 
 /// Strip the `.N` incremental suffix from an archive directory name, if any.
@@ -100,6 +116,22 @@ mod tests {
             get_base_archive_name("2026-01-03-141500-abc12345"),
             "2026-01-03-141500-abc12345"
         );
+    }
+
+    #[test]
+    fn extract_short_id_validates_trailing_segment() {
+        // Happy path: hex-shaped id.
+        assert_eq!(extract_short_id("2026-01-03-141500-abc12345"), "abc12345");
+        // Empty trailing segment (name ends in '-') falls back to the
+        // whole name rather than yielding an empty string.
+        assert_eq!(extract_short_id("2026-01-03-141500-"), "2026-01-03-141500-");
+        // Non-alnum trailing segment also falls back.
+        assert_eq!(
+            extract_short_id("2026-01-03-141500-bad/path"),
+            "2026-01-03-141500-bad/path"
+        );
+        // No '-' at all: trailing segment IS the name; if alnum, return as-is.
+        assert_eq!(extract_short_id("abc12345"), "abc12345");
     }
 
     #[test]

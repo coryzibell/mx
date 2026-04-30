@@ -247,15 +247,20 @@ fn capture_optional_sidecars(
     counts
 }
 
-/// Archive a single session JSONL into a fresh codex directory. Returns
-/// the chosen archive directory on success (always `Some(_)` today; the
-/// `Option` keeps room for future "nothing to do" short-circuits).
+/// Archive a single session JSONL into a fresh codex directory.
+/// Returns the chosen archive directory.
+///
+/// N3: previously returned `Result<Option<PathBuf>>` "to leave room for
+/// future no-op short-circuits." That short-circuit never materialized
+/// (every code path either errors or returns `Some(dir)`), so the
+/// `Option` was load-bearing only as a noise generator at every call
+/// site. Tightened to `Result<PathBuf>`.
 pub(crate) fn archive_session(
     session_path: &Path,
     clean: bool,
     include_agents_in_clean_md: bool,
     include: &IncludeSet,
-) -> Result<Option<PathBuf>> {
+) -> Result<PathBuf> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -432,7 +437,7 @@ pub(crate) fn archive_session(
         println!("  Size: {} KB", archive_size_bytes / 1024);
         println!("  conversation.md written");
 
-        return Ok(Some(archive_dir));
+        return Ok(archive_dir);
     }
 
     // Full mode (default): copy JSONL, copy agents, extract images.
@@ -529,7 +534,7 @@ pub(crate) fn archive_session(
     println!("  Images: {}", image_count);
     println!("  Size: {} KB", size_bytes / 1024);
 
-    Ok(Some(archive_dir))
+    Ok(archive_dir)
 }
 
 /// Bulk-archive every unarchived session under `~/.claude/projects/`.
@@ -593,11 +598,8 @@ pub(crate) fn save_all_sessions(
                 }
 
                 println!("Archiving: {}", session_id);
-                if let Some(dir) =
-                    archive_session(&file_path, clean, include_agents_in_clean_md, include)?
-                {
-                    summary.archive_paths.push(dir);
-                }
+                let dir = archive_session(&file_path, clean, include_agents_in_clean_md, include)?;
+                summary.archive_paths.push(dir);
                 summary.archived_count += 1;
             }
         }

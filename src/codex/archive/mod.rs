@@ -109,9 +109,7 @@ pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveRe
                 &options.include,
             )?;
             result.archived_count = 1;
-            if let Some(dir) = archive_dir {
-                result.archive_paths.push(dir);
-            }
+            result.archive_paths.push(archive_dir);
         }
         ArchiveRequest::All => {
             // S1: save_all_sessions returns ArchiveResult directly now;
@@ -383,8 +381,10 @@ mod tests {
             std::env::set_var("MX_CODEX_PATH", &codex_dir);
         }
 
-        let mut options = ArchiveOptions::default();
-        options.clean = clean;
+        let options = ArchiveOptions {
+            clean,
+            ..ArchiveOptions::default()
+        };
 
         let result = run(ArchiveRequest::Single(session_path), options);
 

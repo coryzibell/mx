@@ -294,11 +294,19 @@ impl ProjectIndex {
         self.entries
             .sort_by(|a, b| a.basename_slug.cmp(&b.basename_slug));
 
-        eprintln!(
-            "Rebuilt by-project index: {} project(s), {} session(s)",
-            self.entries.len(),
-            session_count
-        );
+        // N2: index rebuild is a normal-path housekeeping step, not a
+        // user-actionable event. Gate the chatter behind MX_VERBOSE so
+        // CI logs and scripted runs stay quiet by default. (We don't
+        // pull in tracing for this — there's no tracing dep in the
+        // crate today; an env-var gate matches the existing
+        // `eprintln!` warnings on the failure paths.)
+        if std::env::var("MX_VERBOSE").is_ok() {
+            eprintln!(
+                "Rebuilt by-project index: {} project(s), {} session(s)",
+                self.entries.len(),
+                session_count
+            );
+        }
 
         Ok(())
     }

@@ -58,30 +58,69 @@ impl IncludeSet {
     /// Parse a comma-separated CLI value.
     ///
     /// Tokens are case-insensitive. Recognized: `subagents`, `mcp`,
-    /// `tool-output` (or `tool_output`), `history`, `all`, `none`.
+    /// `tool-output`, `history`, `all`, `none`.
     /// Unknown tokens print a warning to stderr and are skipped — we
     /// don't fail-hard so a future rename can land alongside an
     /// older user script gracefully.
     ///
-    /// `all` and `none` are exclusive overrides: if either appears
-    /// anywhere in the list, it wins for the whole field it touches
-    /// (`all` sets every flag on, `none` sets every flag off). When
-    /// they appear together, later tokens win — left-to-right reading
-    /// order, the same way a shell would interpret a chain of toggles.
+    /// N4: the hyphenated `tool-output` is the canonical form (matches
+    /// the help text and the directory name on disk). The previous
+    /// `tool_output` underscore alias drifted from the help docs and
+    /// has been removed; users typing `tool_output` get the standard
+    /// "unknown token" warning.
+    ///
+    /// `all` and `none` are exclusive overrides: passing BOTH in the
+    /// same input is rejected as user error (S3). Empty tokens (e.g.
+    /// `,,` or trailing/leading commas) are also rejected so typos in
+    /// the CLI value surface immediately rather than silently no-op.
     pub fn parse(s: &str) -> Result<Self> {
         let mut set = Self::default();
-        for raw in s.split(',') {
+        let mut saw_all = false;
+        let mut saw_none = false;
+        let mut saw_any_meaningful = false;
+
+        for (idx, raw) in s.split(',').enumerate() {
             let token = raw.trim().to_ascii_lowercase();
             if token.is_empty() {
-                continue;
+                // Allow a fully-empty input string ("" -> none-set) for
+                // backward compat with the existing tests, but reject
+                // empty tokens *between* commas — those are clear typos.
+                if s.trim().is_empty() && idx == 0 {
+                    continue;
+                }
+                anyhow::bail!(
+                    "empty token in --include list (got '{}'); \
+                     remove the stray comma or use --include none",
+                    s
+                );
             }
             match token.as_str() {
-                "all" => set = Self::all(),
-                "none" => set = Self::none(),
-                "subagents" => set.subagents = true,
-                "mcp" => set.mcp = true,
-                "tool-output" | "tool_output" => set.tool_output = true,
-                "history" => set.history = true,
+                "all" => {
+                    saw_all = true;
+                    set = Self::all();
+                    saw_any_meaningful = true;
+                }
+                "none" => {
+                    saw_none = true;
+                    set = Self::none();
+                    saw_any_meaningful = true;
+                }
+                "subagents" => {
+                    set.subagents = true;
+                    saw_any_meaningful = true;
+                }
+                "mcp" => {
+                    set.mcp = true;
+                    saw_any_meaningful = true;
+                }
+                "tool-output" => {
+                    set.tool_output = true;
+                    saw_any_meaningful = true;
+                }
+                "history" => {
+                    set.history = true;
+                    saw_any_meaningful = true;
+                }
                 other => {
                     eprintln!(
                         "warning: ignoring unknown --include token '{}' \
@@ -91,6 +130,15 @@ impl IncludeSet {
                 }
             }
         }
+
+        if saw_all && saw_none {
+            anyhow::bail!(
+                "--include cannot contain both 'all' and 'none' (got '{}'); \
+                 pick one — they are mutually exclusive",
+                s
+            );
+        }
+        let _ = saw_any_meaningful;
         Ok(set)
     }
 }
@@ -124,11 +172,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_dash_and_underscore_synonyms() {
+    fn parse_canonical_tool_output_token() {
+        // N4: `tool-output` is the canonical form. The previous
+        // `tool_output` underscore alias has been removed; passing it
+        // now lands in the unknown-token branch (warning, no flag set).
         let a = IncludeSet::parse("tool-output").unwrap();
-        let b = IncludeSet::parse("tool_output").unwrap();
-        assert_eq!(a, b);
         assert!(a.tool_output);
+
+        let b = IncludeSet::parse("tool_output").unwrap();
+        assert!(!b.tool_output, "tool_output is no longer recognized");
     }
 
     #[test]
@@ -173,10 +225,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_all_then_none_left_to_right_none_wins() {
-        // 'none' appears later -> resets the field.
-        let s = IncludeSet::parse("all,none").unwrap();
-        assert_eq!(s, IncludeSet::none());
+    fn parse_all_and_none_together_is_rejected() {
+        // S3: combining `all` and `none` in one --include is a user
+        // error. The previous behavior silently let 'whichever came
+        // last' win, which made typos invisible.
+        let err = IncludeSet::parse("all,none").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'all'") || msg.contains("all"));
+        assert!(msg.contains("'none'") || msg.contains("none"));
     }
 
     #[test]
@@ -184,5 +240,15 @@ mod tests {
         let s = IncludeSet::parse("none,subagents").unwrap();
         assert!(s.subagents);
         assert!(!s.mcp);
+    }
+
+    #[test]
+    fn parse_empty_token_between_commas_is_rejected() {
+        // S3: `subagents,,mcp` is a typo, not a degenerate-but-valid
+        // request — the previous parser would silently drop the empty
+        // segment, hiding the typo.
+        let err = IncludeSet::parse("subagents,,mcp").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty token"), "got: {msg}");
     }
 }
