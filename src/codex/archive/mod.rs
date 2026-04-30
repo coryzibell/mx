@@ -91,6 +91,12 @@ pub struct ArchiveResult {
 ///
 /// Behavior with `IncludeSet::status_quo()` and `clean = false` is
 /// byte-identical to the pre-PR-2 `mx codex archive` flow.
+///
+/// After a successful write, the by-project index
+/// (`<codex_dir>/by-project/`) is rebuilt so subsequent reads can find
+/// sessions by project basename. Index rebuild failures are logged but
+/// do NOT fail the archive — the index is regenerable, so a future
+/// archive run will heal it.
 pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveResult> {
     let mut result = ArchiveResult::default();
 
@@ -119,7 +125,23 @@ pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveRe
         }
     }
 
+    // Refresh the by-project index. Best-effort: a failed rebuild is a
+    // warning, not a hard failure — readers must already tolerate a
+    // missing-or-stale index.
+    if let Err(e) = rebuild_project_index() {
+        eprintln!("warning: by-project index rebuild failed: {e}");
+    }
+
     Ok(result)
+}
+
+/// Open the by-project index and rebuild it from the manifests under
+/// the codex root. Extracted into a small helper so the failure path in
+/// `run` stays obvious.
+fn rebuild_project_index() -> Result<()> {
+    let mut idx = super::index::ProjectIndex::open()?;
+    idx.rebuild_from_manifests()?;
+    Ok(())
 }
 
 /// Backwards-compatible CLI shim. Builds an `ArchiveRequest` from the
