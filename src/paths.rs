@@ -259,19 +259,112 @@ pub fn codex_dir() -> PathBuf {
 // External Claude data (read-only ingest sources, owned by another tool)
 // ---------------------------------------------------------------------------
 
+/// Internal helper: the resolved `~/` for use by Claude-data path builders.
+///
+/// Centralizing this means the codex source-walker helpers below all share a
+/// single failure mode if `dirs::home_dir()` ever returns `None` (which only
+/// happens in pathologically misconfigured environments).
+fn claude_home_root() -> PathBuf {
+    dirs::home_dir().expect("Could not determine home directory")
+}
+
+/// `~/.claude/` -- the root of Claude's per-user data directory.
+///
+/// Use this as the join base when adding new Claude-owned subpaths. Prefer
+/// the more specific helpers below when one already exists; reach for the
+/// root only when adding a new sibling that doesn't yet have its own helper.
+pub fn claude_dir() -> PathBuf {
+    claude_home_root().join(".claude")
+}
+
 /// `~/.claude/projects/` -- read-only by convention.
 pub fn claude_projects_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".claude")
-        .join("projects")
+    claude_dir().join("projects")
 }
 
 /// `~/.claude.json` -- read-only by convention.
 pub fn claude_config_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not determine home directory")
-        .join(".claude.json")
+    claude_home_root().join(".claude.json")
+}
+
+/// `~/.claude/projects/<project_slug>/<session_id>/subagents/`
+///
+/// Claude writes subagent JSONLs (`agent-*.jsonl`) into a `subagents/`
+/// directory that lives next to the parent session JSONL, nested under the
+/// cwd-encoded project slug. The slug is the same encoding Claude uses
+/// elsewhere (e.g. `-home-charlie-recipes-coryzibell-mx`); callers are
+/// responsible for supplying it because the session UUID alone does not
+/// uniquely identify the project directory.
+///
+/// PR 2 of the codex unification will wire this into the archive source
+/// walker (replacing the open-coded join in `archive.rs::find_agent_sessions`).
+pub fn claude_subagents_dir(project_slug: &str, session_id: &str) -> PathBuf {
+    claude_projects_dir()
+        .join(project_slug)
+        .join(session_id)
+        .join("subagents")
+}
+
+/// `~/.claude/sessions/` -- per-pid liveness JSONs.
+///
+/// Used as a liveness signal only (not ingested). The codex archive flow
+/// will consult this directory to resolve "the most recent session" without
+/// relying on mtime heuristics.
+pub fn claude_sessions_dir() -> PathBuf {
+    claude_dir().join("sessions")
+}
+
+/// `~/.claude/history.jsonl` -- the slash-command / prompt history file.
+///
+/// Sliced by session timestamp window into a `history/` sidecar by the codex
+/// archive flow (PR 2).
+pub fn claude_history_jsonl() -> PathBuf {
+    claude_dir().join("history.jsonl")
+}
+
+/// `~/.cache/claude-cli-nodejs/<cwd-encoded>/` -- the *parent* directory
+/// containing per-MCP-server log subdirs (`mcp-logs-<server>/`).
+///
+/// Returns the parent because the per-server `mcp-logs-*` subdirs are
+/// enumerated at call time (their names depend on which MCP servers were
+/// active for the cwd). The `cwd` argument is the same cwd-encoded slug
+/// Claude uses (`-home-charlie-recipes-...`).
+pub fn claude_mcp_logs_dir(cwd_encoded: &str) -> PathBuf {
+    claude_home_root()
+        .join(".cache")
+        .join("claude-cli-nodejs")
+        .join(cwd_encoded)
+}
+
+/// `/tmp/claude-<uid>/-home-<user>/<session_uuid>/tasks/`
+///
+/// Per-uid scratch directory for Claude task outputs. The `user` segment is
+/// the encoded form of the user's home directory (matching Claude's slug
+/// convention), and `session_uuid` is the full session UUID.
+///
+/// These files are disposable by design (cleared on reboot or `/tmp`
+/// cleanup); the codex archive flow snapshots them at run time. Callers
+/// must supply all three components because none can be derived from the
+/// uid alone.
+pub fn tmp_claude_tasks_dir(uid: u32, user_slug: &str, session_uuid: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/claude-{}", uid))
+        .join(user_slug)
+        .join(session_uuid)
+        .join("tasks")
+}
+
+/// `~/.wonka/vault/archives/` -- the legacy vault snapshot directory.
+///
+/// Walked by `mx codex archive --backfill` (PR 5) to ingest the existing
+/// vault snapshots into the codex. Note the literal `~/.wonka/` prefix:
+/// the wonka vault is a *separate* root from `MX_HOME` and intentionally
+/// does not derive from it. If the user has a wonka home override in the
+/// future, this helper will need updating; for v1 the path is fixed.
+pub fn wonka_vault_archives_dir() -> PathBuf {
+    claude_home_root()
+        .join(".wonka")
+        .join("vault")
+        .join("archives")
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +575,78 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         assert_eq!(claude_projects_dir(), home.join(".claude").join("projects"));
         assert_eq!(claude_config_path(), home.join(".claude.json"));
+    }
+
+    #[test]
+    fn claude_dir_is_dot_claude() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(claude_dir(), home.join(".claude"));
+    }
+
+    #[test]
+    fn claude_subagents_dir_layout() {
+        let home = dirs::home_dir().unwrap();
+        let p = claude_subagents_dir("-home-charlie-recipes-coryzibell-mx", "abc-123");
+        let expected = home
+            .join(".claude")
+            .join("projects")
+            .join("-home-charlie-recipes-coryzibell-mx")
+            .join("abc-123")
+            .join("subagents");
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn claude_sessions_dir_layout() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(claude_sessions_dir(), home.join(".claude").join("sessions"));
+    }
+
+    #[test]
+    fn claude_history_jsonl_layout() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            claude_history_jsonl(),
+            home.join(".claude").join("history.jsonl")
+        );
+    }
+
+    #[test]
+    fn claude_mcp_logs_dir_layout() {
+        let home = dirs::home_dir().unwrap();
+        let p = claude_mcp_logs_dir("-home-charlie-recipes-coryzibell-mx");
+        let expected = home
+            .join(".cache")
+            .join("claude-cli-nodejs")
+            .join("-home-charlie-recipes-coryzibell-mx");
+        assert_eq!(p, expected);
+        // Per-server `mcp-logs-*` subdirs are walked at call time, not joined here.
+        assert!(!p.to_string_lossy().contains("mcp-logs-"));
+    }
+
+    #[test]
+    fn tmp_claude_tasks_dir_layout() {
+        let p = tmp_claude_tasks_dir(
+            1002,
+            "-home-charlie",
+            "c3744b8d-5719-4df2-924f-707945438494",
+        );
+        let expected = PathBuf::from("/tmp/claude-1002")
+            .join("-home-charlie")
+            .join("c3744b8d-5719-4df2-924f-707945438494")
+            .join("tasks");
+        assert_eq!(p, expected);
+    }
+
+    #[test]
+    fn wonka_vault_archives_dir_layout() {
+        // wonka_vault_archives_dir is rooted at ~/.wonka, not $MX_HOME.
+        // Match against the home dir directly (per the doc comment).
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(
+            wonka_vault_archives_dir(),
+            home.join(".wonka").join("vault").join("archives")
+        );
     }
 
     // -----------------------------------------------------------------

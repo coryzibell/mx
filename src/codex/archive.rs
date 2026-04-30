@@ -10,7 +10,7 @@ use super::transcript::{
     build_agent_type_map, generate_clean_transcript, generate_clean_transcript_with_agents,
     resolve_agent_display_name, resolve_assistant_name, resolve_user_name,
 };
-use super::{AgentInfo, ArchiveEntry, Manifest};
+use super::{AgentInfo, ArchiveEntry, MANIFEST_WRITE_VERSION, Manifest};
 
 /// Archive the current session to the codex
 pub(crate) fn save_session(
@@ -150,7 +150,7 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         let archive_size_bytes = md_size + images_size;
 
         let manifest = Manifest {
-            version: 2,
+            version: MANIFEST_WRITE_VERSION,
             session_id: session_id.clone(),
             archived_at: Utc::now(),
             session_start,
@@ -166,6 +166,13 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
             has_clean_transcript: Some(true),
             user_name: Some(user_name.clone()),
             assistant_name: Some(assistant_name.clone()),
+            // v5 sidecars not written yet (PR 2 wires these). Foundation
+            // PR bumps the version number only; payload is otherwise
+            // identical to a v2 manifest.
+            tool_output_count: None,
+            mcp_log_count: None,
+            history_lines: None,
+            source_breakdown: None,
         };
 
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -225,10 +232,11 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         }
     }
 
-    // Create manifest (v2 with image support)
+    // Create manifest (schema v5; payload identical to v2 plus a higher
+    // version number until PR 2 wires the new sidecars).
     let image_count = all_images.len();
     let manifest = Manifest {
-        version: 2,
+        version: MANIFEST_WRITE_VERSION,
         session_id: session_id.clone(),
         archived_at: Utc::now(),
         session_start,
@@ -244,6 +252,11 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         has_clean_transcript: None,
         user_name: Some(user_name),
         assistant_name: Some(assistant_name),
+        // v5 sidecars not written yet (PR 2 wires these).
+        tool_output_count: None,
+        mcp_log_count: None,
+        history_lines: None,
+        source_breakdown: None,
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
