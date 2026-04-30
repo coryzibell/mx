@@ -99,13 +99,133 @@ impl ProjectIndex {
 
     /// Like `open`, but rooted under an explicit codex dir. Used by tests
     /// to avoid touching `$MX_HOME/codex/`.
+    ///
+    /// Populates the in-memory `entries` cache from the on-disk
+    /// `by-project/` tree if and only if the index is fresh (per
+    /// [`Self::is_stale`]). When the index is stale or absent, the cache
+    /// is left empty and lookup falls back to a manifest walk; the
+    /// caller can rebuild via [`Self::rebuild_from_manifests`] to refresh
+    /// the on-disk tree.
     pub fn open_under(codex_dir: &Path) -> Result<Self> {
         let root = codex_dir.join(INDEX_SUBDIR);
         fs::create_dir_all(&root)?;
-        Ok(Self {
+        let mut idx = Self {
             root,
             entries: Vec::new(),
-        })
+        };
+        // S2: populate the cache so abs-path lookups consult the index
+        // instead of falling straight through to a manifest walk. We
+        // skip population when the index is stale — a stale cache would
+        // miss recent archives, and the manifest-walk fallback is
+        // already correct for every input form. The caller is expected
+        // to rebuild before relying on freshness.
+        match idx.is_stale() {
+            Ok(false) => {
+                if let Err(e) = idx.populate_from_disk() {
+                    eprintln!(
+                        "warning: by-project index cache population failed; falling back \
+                         to manifest walk: {e}"
+                    );
+                }
+            }
+            Ok(true) => {
+                // Index missing or stale — leave cache empty so callers
+                // see the same manifest-walk behavior they had before
+                // populate_from_disk existed.
+            }
+            Err(e) => {
+                eprintln!("warning: by-project staleness check failed: {e}");
+            }
+        }
+        Ok(idx)
+    }
+
+    /// Walk `<codex_dir>/by-project/<basename-slug>/<archive-name>`
+    /// symlinks, read each pointed-at manifest, and build the in-memory
+    /// `entries` cache. Called by [`Self::open_under`] when the index is
+    /// fresh.
+    ///
+    /// Manifests with bad JSON are surfaced via a stderr warning, mirroring
+    /// the behavior of [`Self::rebuild_from_manifests`]. Symlinks that
+    /// don't resolve to a manifest are silently skipped — they may be a
+    /// transient state during a concurrent rebuild.
+    fn populate_from_disk(&mut self) -> Result<()> {
+        if !self.root.exists() {
+            return Ok(());
+        }
+        let codex_dir = self.root.parent().ok_or_else(|| {
+            anyhow::anyhow!("by-project root has no parent: {}", self.root.display())
+        })?;
+
+        // Group by basename-slug. For each slug we collect:
+        //   (absolute_paths, session_archive_paths)
+        let mut by_slug: HashMap<String, (Vec<PathBuf>, Vec<PathBuf>)> = HashMap::new();
+        for slug_entry in fs::read_dir(&self.root)? {
+            let slug_entry = slug_entry?;
+            let bucket = slug_entry.path();
+            if !bucket.is_dir() {
+                continue;
+            }
+            let slug = match bucket.file_name().and_then(|n| n.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let cell = by_slug.entry(slug).or_default();
+
+            let entries = match fs::read_dir(&bucket) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for archive_entry in entries.flatten() {
+                let archive_name = match archive_entry.file_name().to_str().map(String::from) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let resolved = codex_dir.join(&archive_name);
+                let manifest_path = resolved.join("manifest.json");
+                if !manifest_path.exists() {
+                    continue;
+                }
+                let raw = match fs::read_to_string(&manifest_path) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let manifest: Manifest = match serde_json::from_str(&raw) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: skipping unparseable manifest {}: {e}",
+                            manifest_path.display()
+                        );
+                        continue;
+                    }
+                };
+                if let Some(p) = manifest.project_path.as_ref() {
+                    cell.0.push(PathBuf::from(p));
+                }
+                cell.1.push(resolved);
+            }
+        }
+
+        let mut entries: Vec<ProjectEntry> = by_slug
+            .into_iter()
+            .map(|(slug, (mut abs, mut paths))| {
+                abs.sort();
+                abs.dedup();
+                paths.sort();
+                ProjectEntry {
+                    basename_slug: slug,
+                    absolute_paths: abs,
+                    session_archive_paths: paths,
+                }
+            })
+            // Drop slugs that yielded zero project_paths — they're not
+            // useful for any lookup form and would only confuse callers.
+            .filter(|e| !e.absolute_paths.is_empty())
+            .collect();
+        entries.sort_by(|a, b| a.basename_slug.cmp(&b.basename_slug));
+        self.entries = entries;
+        Ok(())
     }
 
     /// Regenerate the index from all manifests under `<codex_dir>/`.
@@ -1118,6 +1238,78 @@ mod tests {
         let err = idx.lookup("does-not-exist").unwrap_err();
         let downcast = err.downcast_ref::<IndexError>().expect("IndexError");
         assert!(matches!(downcast, IndexError::NotFound { .. }));
+    }
+
+    #[test]
+    fn open_populates_cache_from_existing_index() {
+        // S2: after a rebuild leaves a fresh by-project/ tree on disk,
+        // a *new* ProjectIndex opened against the same codex must see
+        // the entries in its in-memory cache without re-rebuilding.
+        // This is what makes abs-path lookups consult the index instead
+        // of falling straight to a manifest walk.
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path();
+        write_manifest(
+            &codex.join("2026-04-29-100000-aaaaaaaa"),
+            "/home/charlie/work/mx",
+            "aaa",
+        );
+        write_manifest(
+            &codex.join("2026-04-29-110000-bbbbbbbb"),
+            "/home/charlie/work/wonka",
+            "bbb",
+        );
+        // Build the index in one handle, drop it.
+        {
+            let mut idx = ProjectIndex::open_under(codex).unwrap();
+            idx.rebuild_from_manifests().unwrap();
+        }
+        // Open a fresh handle — the cache should be populated from
+        // the on-disk by-project/ tree.
+        let idx = ProjectIndex::open_under(codex).unwrap();
+        assert_eq!(idx.entry_count(), 2, "cache should be populated on open");
+        // And abs-path lookup should now resolve from the cache.
+        let entry = idx
+            .lookup("/home/charlie/work/mx")
+            .expect("abs-path lookup should hit the populated cache");
+        assert_eq!(entry.basename_slug, "mx");
+    }
+
+    #[test]
+    fn open_leaves_cache_empty_when_index_is_stale() {
+        // If a manifest is newer than the by-project/ tree, the index
+        // is stale and the cache must be left empty so callers don't
+        // surface a result that misses the new archive.
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path();
+        write_manifest(
+            &codex.join("2026-04-29-100000-aaaaaaaa"),
+            "/home/charlie/work/mx",
+            "aaa",
+        );
+        {
+            let mut idx = ProjectIndex::open_under(codex).unwrap();
+            idx.rebuild_from_manifests().unwrap();
+        }
+        // Sleep so the next manifest's mtime is strictly newer.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        write_manifest(
+            &codex.join("2026-04-29-110000-bbbbbbbb"),
+            "/home/charlie/work/wonka",
+            "bbb",
+        );
+        let idx = ProjectIndex::open_under(codex).unwrap();
+        // Stale → cache empty → lookup must fall through to manifest
+        // walk, which DOES see the new archive.
+        assert_eq!(
+            idx.entry_count(),
+            0,
+            "stale index should not seed an outdated cache"
+        );
+        let entry = idx
+            .lookup("/home/charlie/work/wonka")
+            .expect("manifest-walk fallback must find the new archive");
+        assert_eq!(entry.basename_slug, "wonka");
     }
 
     #[test]
