@@ -36,12 +36,12 @@ pub struct Manifest {
     pub size_bytes: u64,
     pub checksum: String,
     // v2 fields
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<ImageInfo>>,
     // v3 fields
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_clean_transcript: Option<bool>,
     // v4 fields - configurable speaker names
     #[serde(default, skip_serializing_if = "Option::is_none")]

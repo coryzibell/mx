@@ -9,17 +9,23 @@ use super::archive::{collect_archives, get_codex_dir};
 
 /// Migrate all archives below the current write version up to it.
 ///
-/// Today this means v1 → v5 in one shot:
-///   - v1 → v2 extracts images out of the JSONLs into per-archive `images/`
-///     and records counts (this is the only step that touches bytes on disk).
-///   - v2 → v5 is a metadata-only bump: the v3/v4/v5 fields (`has_clean_transcript`,
-///     `user_name`, `assistant_name`, `tool_output_count`, `mcp_log_count`,
-///     `history_lines`, `source_breakdown`) are all `Option`, so existing
-///     archives keep deserializing and the migration just rewrites the
-///     manifest with the higher version number plus `None` defaults for
-///     anything missing. The new sidecars (`mcp/`, `tool-output/`, `history/`)
-///     do not exist on disk for these archives — that's fine; absent
-///     sidecars are represented by `None` counts.
+/// v1 archives are upgraded in two phases:
+///   1. Image extraction (v1 → v2) pulls images out of the JSONLs into a
+///      per-archive `images/` directory and records counts. This is the
+///      only phase that touches bytes on disk.
+///   2. A metadata-only bump (v2 → v5) folds in the v3/v4/v5 fields
+///      (`has_clean_transcript`, `user_name`, `assistant_name`,
+///      `tool_output_count`, `mcp_log_count`, `history_lines`,
+///      `source_breakdown`). Both phases are applied to the same manifest
+///      write, so v1 archives end up at v5 in a single pass.
+///
+/// v2/v3/v4 archives skip the image-extraction phase and receive only the
+/// metadata-only bump up to v5. All the new fields are `Option`, so older
+/// archives keep deserializing and the bump just rewrites the manifest with
+/// the higher version number plus `None` defaults for anything missing. The
+/// new sidecars (`mcp/`, `tool-output/`, `history/`) do not exist on disk
+/// for these archives — that's fine; absent sidecars are represented by
+/// `None` counts.
 pub(crate) fn migrate_archives(
     dry_run: bool,
     verbose: bool,
@@ -72,10 +78,6 @@ pub(crate) fn migrate_archives(
         metadata_only_bumps.len()
     );
 
-    // The image-extracting path below mutates manifests; rebind so the rest
-    // of the function can keep its existing variable name.
-    let to_migrate = to_extract_images;
-
     if dry_run {
         println!("\n[DRY RUN MODE - No changes will be made]\n");
     }
@@ -84,7 +86,7 @@ pub(crate) fn migrate_archives(
     let mut total_images = 0;
     let mut total_bytes_saved = 0u64;
 
-    for archive in to_migrate {
+    for archive in to_extract_images {
         let archive_dir = codex_dir.join(&archive.dir_name);
         let session_file = archive_dir.join("session.jsonl");
 

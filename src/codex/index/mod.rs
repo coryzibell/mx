@@ -41,38 +41,46 @@ pub struct ProjectEntry {
 impl ProjectIndex {
     /// Open the index at `~/.wonka/codex/by-project/`, creating it if absent.
     ///
-    /// PR 2 will integrate this when archive writes the index.
+    /// PR 2 will integrate this when archive writes the index. Until then,
+    /// this returns [`IndexError::NotImplemented`] so a stray production
+    /// caller surfaces as a typed error rather than a panic.
     pub fn open() -> Result<Self> {
-        unimplemented!("PR 2: integrated when archive writes index")
+        Err(IndexError::NotImplemented { method: "open" }.into())
     }
 
     /// Regenerate the index from all manifests under codex/. Call after archive runs.
     ///
-    /// PR 2 will integrate this when archive writes the index.
+    /// PR 2 will integrate this when archive writes the index. Until then,
+    /// this returns [`IndexError::NotImplemented`].
     pub fn rebuild_from_manifests(&mut self) -> Result<()> {
-        unimplemented!("PR 2: integrated when archive writes index")
+        Err(IndexError::NotImplemented {
+            method: "rebuild_from_manifests",
+        }
+        .into())
     }
 
     /// Look up a project by absolute path, raw slug, or basename. Returns
     /// the matched entry, or an [`IndexError::AmbiguousProject`] error if a
     /// basename matches multiple absolute paths.
     ///
-    /// PR 3 will integrate this when export reads the index.
+    /// PR 3 will integrate this when export reads the index. Until then,
+    /// this returns [`IndexError::NotImplemented`].
     pub fn lookup(&self, _query: &str) -> Result<ProjectEntry> {
-        unimplemented!("PR 3: integrated when export reads index")
+        Err(IndexError::NotImplemented { method: "lookup" }.into())
     }
 
     /// Returns true if the on-disk index is stale relative to the manifest
     /// timestamps. Readers MUST call this before trusting the index.
     ///
-    /// PR 3 will integrate this when export reads the index.
+    /// PR 3 will integrate this when export reads the index. Until then,
+    /// this returns [`IndexError::NotImplemented`].
     pub fn is_stale(&self) -> Result<bool> {
-        unimplemented!("PR 3: integrated when export reads index")
+        Err(IndexError::NotImplemented { method: "is_stale" }.into())
     }
 
     /// Number of entries currently held in memory. Provided as a smoke-test
-    /// hook so PR 1 can assert the type is constructable without touching
-    /// any of the `unimplemented!()` methods.
+    /// hook so PR 1 can assert the type is constructable without exercising
+    /// the not-yet-implemented methods.
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -80,9 +88,11 @@ impl ProjectIndex {
 
 /// Errors raised by the by-project index.
 ///
-/// Only `AmbiguousProject` is enumerated in PR 1; PRs 2 and 3 will extend
-/// this enum as concrete failure modes are wired up. The variant payload is
-/// stable and ready for `--project` disambiguation messages.
+/// `AmbiguousProject` and `NotImplemented` are enumerated in PR 1; PRs 2 and
+/// 3 will extend this enum as concrete failure modes are wired up. The
+/// variant payloads are stable and ready for `--project` disambiguation
+/// messages and for surfacing stub-call sites as typed errors instead of
+/// panics.
 #[derive(Debug, Error)]
 pub enum IndexError {
     #[error("ambiguous project query '{query}' matches multiple paths: {matches:?}")]
@@ -90,6 +100,8 @@ pub enum IndexError {
         query: String,
         matches: Vec<PathBuf>,
     },
+    #[error("ProjectIndex::{method} is not yet implemented (wired up in a later PR)")]
+    NotImplemented { method: &'static str },
 }
 
 #[cfg(test)]
