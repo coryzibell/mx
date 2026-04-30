@@ -339,7 +339,14 @@ mod tests {
     }
 
     /// Drive a backfill against an isolated codex dir + fake vault.
-    fn drive_backfill(n_snaps: usize, sess_per_snap: usize) -> (BackfillReport, PathBuf) {
+    /// Returns the `TempDir` so the caller's scope keeps it alive
+    /// (dropping it cleans up the codex + vault on test exit). The
+    /// previous version called `tmp.keep()` which leaked the directory
+    /// onto disk on every test run — fixed per S2 in PR 272 review.
+    fn drive_backfill(
+        n_snaps: usize,
+        sess_per_snap: usize,
+    ) -> (BackfillReport, PathBuf, tempfile::TempDir) {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let codex_dir = tmp.path().join("codex");
@@ -362,11 +369,7 @@ mod tests {
             }
         }
 
-        // Hold tmp dir for the caller to inspect. Caller's responsibility
-        // to keep it alive long enough; here we leak it via PathBuf and
-        // accept the temp-dir orphan for the duration of the test.
-        let leaked = tmp.keep();
-        (report, leaked.join("codex"))
+        (report, codex_dir, tmp)
     }
 
     /// Add a "corrupt" session JSONL to an existing vault snapshot. The
@@ -461,7 +464,7 @@ mod tests {
     #[test]
     #[serial]
     fn backfill_walks_snapshots_and_archives_sessions() {
-        let (report, codex) = drive_backfill(3, 2);
+        let (report, codex, _tmp) = drive_backfill(3, 2);
         assert_eq!(report.vault_snapshots_walked, 3);
         assert_eq!(report.sessions_found, 6);
         assert_eq!(report.sessions_archived, 6);
