@@ -411,6 +411,93 @@ mod tests {
         assert!(result.detection.unarchived_session_count >= 1);
     }
 
+    /// S1: same architectural invariant as the markdown test, but for
+    /// the JSON emitter. The JSON walker recurses into every string
+    /// field — if it ever read live `~/.claude/projects/` content, the
+    /// sentinel would surface in some string somewhere in the document.
+    /// We parse the output and walk every string value, asserting the
+    /// sentinel never appears.
+    #[test]
+    #[serial]
+    fn export_does_not_read_claude_projects_for_content_json() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        let sentinel = tmp.path().join("claude-projects-sentinel");
+        std::fs::create_dir_all(&codex).unwrap();
+        let proj_subdir = sentinel.join("-home-charlie-mx");
+        std::fs::create_dir_all(&proj_subdir).unwrap();
+        // Same fixture path / sentinel value as the markdown test, so a
+        // regression in either emitter looks the same in the failure.
+        std::fs::write(
+            proj_subdir.join("ffffffff-9999.jsonl"),
+            r#"{"type":"user","message":{"content":"LIVE_DATA_SHOULD_NOT_LEAK"}}
+"#,
+        )
+        .unwrap();
+        write_archive(&codex, "2026-04-29-100000-aaaaaaaa", "aaaaaaaa-1111");
+
+        let prev_codex = std::env::var("MX_CODEX_PATH").ok();
+        let prev_proj = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex);
+            std::env::set_var("MX_CLAUDE_PROJECTS_DIR", &sentinel);
+        }
+        let out_path = tmp.path().join("out.json");
+        let req = ExportRequest {
+            selector: Selector::Latest,
+            format: Format::Json,
+            include: ExportIncludeSet::default_clean(),
+            archive_first: false,
+            output: Some(out_path.clone()),
+        };
+        let result = run(req);
+        unsafe {
+            match prev_codex {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+            match prev_proj {
+                Some(v) => std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v),
+                None => std::env::remove_var("MX_CLAUDE_PROJECTS_DIR"),
+            }
+        }
+        let result = result.expect("export::run failed");
+        let body = std::fs::read_to_string(result.output_path.as_ref().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("JSON output must parse");
+
+        // Walk every string in the JSON tree and assert the sentinel
+        // never appears. This catches the case where a future field
+        // surfaces live content in some unanticipated path (e.g. an
+        // image caption or a subagent excerpt).
+        fn assert_no_sentinel(v: &serde_json::Value, path: &str) {
+            match v {
+                serde_json::Value::String(s) => {
+                    assert!(
+                        !s.contains("LIVE_DATA_SHOULD_NOT_LEAK"),
+                        "sentinel leaked into JSON at {path}: {s}"
+                    );
+                }
+                serde_json::Value::Array(arr) => {
+                    for (i, item) in arr.iter().enumerate() {
+                        assert_no_sentinel(item, &format!("{path}[{i}]"));
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    for (k, val) in map {
+                        assert_no_sentinel(val, &format!("{path}.{k}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_no_sentinel(&parsed, "$");
+        // Detection still flagged the live session as unarchived (same
+        // side-effect signal as the markdown invariant test).
+        assert!(result.detection.unarchived_session_count >= 1);
+    }
+
     #[test]
     #[serial]
     fn export_archive_first_skips_warning() {
