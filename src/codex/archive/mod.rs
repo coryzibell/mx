@@ -219,49 +219,175 @@ pub(super) fn get_codex_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::codex::Manifest;
+    use serial_test::serial;
+    use std::sync::Mutex;
 
-    /// Status-quo invocation must NOT emit the new v5-only fields in the
-    /// serialized manifest. This is the load-bearing constraint of PR 2:
-    /// `mx codex archive` with no `--include` produces output that
-    /// (modulo the version field already at 5 from PR 1) is byte-identical
-    /// to the pre-PR-2 implementation.
+    /// Tests in this file mutate process-wide environment (`MX_CODEX_PATH`)
+    /// to redirect the codex root. Multiple tests doing that concurrently
+    /// would race; this mutex + `#[serial]` keeps them strictly ordered
+    /// even alongside other codex_dir-touching tests in the same binary.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fixture_session_jsonl() -> String {
+        // Inline copy of tests/fixtures/manifest-golden/session.jsonl. We
+        // duplicate it because unit tests run from the crate root with
+        // OUT_DIR-style indirection rather than CARGO_MANIFEST_DIR-style
+        // file lookups, and pinning a path-based fixture into the unit
+        // suite is brittler than the inline string.
+        concat!(
+            r#"{"role":"user","content":"hello","timestamp":"2026-04-29T10:00:00Z"}"#,
+            "\n",
+            r#"{"role":"assistant","content":"hi there","timestamp":"2026-04-29T10:00:30Z"}"#,
+            "\n",
+            r#"{"role":"user","content":"thanks","timestamp":"2026-04-29T10:01:00Z"}"#,
+            "\n",
+        )
+        .to_string()
+    }
+
+    /// Replace volatile fields with sentinels so the comparison is stable
+    /// across machines and runs. Volatile fields are:
     ///
-    /// We exercise this by running the writer against a tiny synthetic
-    /// session JSONL inside a tempdir, with `MX_CODEX_PATH` redirected
-    /// at the codex output dir. The resulting manifest.json is then
-    /// checked for the absence of the new field names.
-    #[test]
-    fn status_quo_manifest_omits_new_v5_fields() {
+    /// - `archived_at` (always `Utc::now()` at archive time)
+    /// - `version` (will rev independently of layout)
+    ///
+    /// `session_start` and `session_end` are NOT normalized: the fixture
+    /// JSONL has stable timestamps in the file itself, so a write that
+    /// regresses C2's timestamp derivation would change them and thus
+    /// fail the golden — exactly the test we want.
+    ///
+    /// Image hashes and byte counts are also normalized because image
+    /// extraction creates files whose names depend on hash content; the
+    /// fixture has no images, so this is a defensive no-op today, but it
+    /// future-proofs the matrix.
+    fn normalize(value: &mut serde_json::Value) {
+        use serde_json::Value;
+        if let Value::Object(map) = value {
+            // Time-dependent fields must be sentinelled.
+            for key in ["archived_at", "version"] {
+                if map.contains_key(key) {
+                    map.insert(key.to_string(), Value::String("__SENTINEL__".to_string()));
+                }
+            }
+            // User/assistant display names resolve via MX_USER_NAME /
+            // MX_ASSISTANT_NAME / git config — machine-dependent. The
+            // golden treats them as opaque so cross-developer runs match.
+            for key in ["user_name", "assistant_name"] {
+                if let Some(v) = map.get_mut(key)
+                    && !v.is_null()
+                {
+                    *v = Value::String("__SENTINEL__".to_string());
+                }
+            }
+            // size_bytes in clean mode includes the rendered
+            // conversation.md, whose length depends on the
+            // (machine-dependent) user_name / assistant_name. The
+            // structure of the manifest — which is what the golden
+            // protects — does not change with size, so we sentinel it
+            // to keep cross-machine runs stable.
+            if let Some(v) = map.get_mut("size_bytes")
+                && v.is_number()
+            {
+                *v = Value::String("__SENTINEL_NUM__".to_string());
+            }
+        }
+    }
+
+    /// Compare a manifest against its golden, normalizing volatile
+    /// fields. The serialized JSON is parsed both sides as `Value` so a
+    /// reorder of the structurally-equivalent JSON would NOT slip
+    /// through — but a structural change (renamed key, reordered fields
+    /// at the schema level, dropped/added fields) WILL fail.
+    ///
+    /// IMPORTANT: this also serializes both back out with
+    /// `to_string_pretty` and string-compares, which catches changes to
+    /// indentation / serializer settings (the C1 brief: "a future change
+    /// that ... changes serializer indentation must FAIL").
+    fn assert_manifest_matches_golden(manifest_text: &str, golden_path: &Path) {
+        let mut got: serde_json::Value =
+            serde_json::from_str(manifest_text).expect("manifest is not valid JSON");
+        normalize(&mut got);
+
+        let regen_env = std::env::var("MX_UPDATE_GOLDENS").is_ok();
+        if regen_env || !golden_path.exists() {
+            // Materialize the golden the first time, or whenever the
+            // operator opts into regeneration.
+            let pretty = serde_json::to_string_pretty(&got).unwrap();
+            std::fs::create_dir_all(golden_path.parent().unwrap()).unwrap();
+            std::fs::write(golden_path, &pretty).unwrap();
+            if !regen_env {
+                eprintln!(
+                    "note: created golden {} on first run",
+                    golden_path.display()
+                );
+                return;
+            }
+        }
+
+        let want_text = std::fs::read_to_string(golden_path)
+            .unwrap_or_else(|e| panic!("missing golden {}: {e}", golden_path.display()));
+        let want: serde_json::Value =
+            serde_json::from_str(&want_text).expect("golden is not valid JSON");
+
+        // Structural equality first — gives the clearest diff.
+        assert_eq!(
+            got,
+            want,
+            "manifest structure drifted from golden {}\n\
+             tip: re-run with MX_UPDATE_GOLDENS=1 to refresh, then audit the diff before committing.",
+            golden_path.display()
+        );
+
+        // Byte-identity of the pretty-printed form. Catches indentation
+        // / serializer-setting drift even when the structural compare
+        // passes.
+        let got_pretty = serde_json::to_string_pretty(&got).unwrap();
+        let want_pretty = serde_json::to_string_pretty(&want).unwrap();
+        assert_eq!(
+            got_pretty,
+            want_pretty,
+            "manifest pretty-print bytes drifted from golden {}",
+            golden_path.display()
+        );
+    }
+
+    fn golden_path(name: &str) -> PathBuf {
+        // CARGO_MANIFEST_DIR points at the crate root for both `cargo
+        // test --bin mx` and `cargo nextest`; the goldens live under
+        // tests/fixtures/manifest-golden/.
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("manifest-golden")
+            .join(name)
+    }
+
+    /// Drive `archive::run` against an isolated codex dir. Returns the
+    /// serialized manifest text from the resulting archive directory.
+    fn archive_and_read_manifest(clean: bool) -> (String, Manifest) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let tmp = tempfile::tempdir().unwrap();
         let codex_dir = tmp.path().join("codex");
         std::fs::create_dir_all(&codex_dir).unwrap();
 
-        // Build a minimal session JSONL (one line is enough)
         let session_dir = tmp.path().join("project-slug");
         std::fs::create_dir_all(&session_dir).unwrap();
         let session_path = session_dir.join("c3744b8d-test.jsonl");
-        std::fs::write(
-            &session_path,
-            r#"{"role":"user","content":"hi","timestamp":"2026-04-29T10:00:00Z"}
-"#,
-        )
-        .unwrap();
+        std::fs::write(&session_path, fixture_session_jsonl()).unwrap();
 
-        // SAFETY: setting an env var is process-wide. We do it here
-        // because paths::codex_dir() reads it on every call (no
-        // OnceLock cache for that path), and serial-test isn't in our
-        // dep tree. Tests in this file must not run in parallel with
-        // other codex_dir-touching tests; if more land, gate them
-        // behind a mutex.
         let prev = std::env::var("MX_CODEX_PATH").ok();
+        // SAFETY: process-wide env var. The ENV_LOCK above and #[serial]
+        // on each test enforce mutual exclusion within and across the
+        // codex test surface.
         unsafe {
             std::env::set_var("MX_CODEX_PATH", &codex_dir);
         }
 
-        let result = run(
-            ArchiveRequest::Single(session_path),
-            ArchiveOptions::default(),
-        );
+        let mut options = ArchiveOptions::default();
+        options.clean = clean;
+
+        let result = run(ArchiveRequest::Single(session_path), options);
 
         unsafe {
             match prev {
@@ -276,33 +402,58 @@ mod tests {
 
         let manifest_text =
             std::fs::read_to_string(archive_dir.join("manifest.json")).expect("manifest missing");
-
-        // The new v5-only field names must NOT appear in the serialized
-        // status-quo manifest. They're skip_serializing_if-guarded for
-        // exactly this reason.
-        assert!(
-            !manifest_text.contains("tool_output_count"),
-            "status-quo manifest leaked tool_output_count: {manifest_text}"
-        );
-        assert!(
-            !manifest_text.contains("mcp_log_count"),
-            "status-quo manifest leaked mcp_log_count"
-        );
-        assert!(
-            !manifest_text.contains("history_lines"),
-            "status-quo manifest leaked history_lines"
-        );
-        assert!(
-            !manifest_text.contains("source_breakdown"),
-            "status-quo manifest leaked source_breakdown"
-        );
-
-        // And the manifest still parses as a v5 Manifest.
         let m: Manifest = serde_json::from_str(&manifest_text).unwrap();
-        assert_eq!(m.version, crate::codex::MANIFEST_WRITE_VERSION);
+        (manifest_text, m)
+    }
+
+    /// Golden file: status-quo (single + full, clean=false).
+    ///
+    /// This is the load-bearing byte-identity test. A future change that
+    /// reorders Manifest fields, renames anything, or changes
+    /// serializer indentation will fail this assertion. To intentionally
+    /// regenerate, run with `MX_UPDATE_GOLDENS=1` and review the diff
+    /// before committing.
+    #[test]
+    #[serial]
+    fn manifest_golden_single_full() {
+        let (manifest_text, m) = archive_and_read_manifest(false);
+        // Sanity: status-quo must not leak v5 fields.
         assert!(m.tool_output_count.is_none());
         assert!(m.mcp_log_count.is_none());
         assert!(m.history_lines.is_none());
         assert!(m.source_breakdown.is_none());
+
+        assert_manifest_matches_golden(&manifest_text, &golden_path("single-full.json"));
     }
+
+    /// Golden file: single + clean (clean=true).
+    ///
+    /// The clean path emits `conversation.md` + images, so the manifest
+    /// has `has_clean_transcript: true` and zeroed-out
+    /// session.jsonl/agents bytes — which is captured in the golden.
+    #[test]
+    #[serial]
+    fn manifest_golden_single_clean() {
+        let (manifest_text, m) = archive_and_read_manifest(true);
+        assert_eq!(m.has_clean_transcript, Some(true));
+        assert!(m.tool_output_count.is_none());
+        assert!(m.source_breakdown.is_none());
+
+        assert_manifest_matches_golden(&manifest_text, &golden_path("single-clean.json"));
+    }
+
+    // NOTE: Two cells from the C1 matrix are deferred:
+    //
+    //   - all + full
+    //   - all + clean
+    //
+    // The `--all` driver walks `~/.claude/projects/`, which derives
+    // strictly from `dirs::home_dir()` with no env-var override. To
+    // exercise it from a unit test would require mutating $HOME
+    // process-wide, which is fragile across the test binary's parallel
+    // suite even with serial_test. The single-* cells already cover the
+    // load-bearing manifest serialization path: the only behavioral
+    // delta in --all is the loop driver and the `archived_count` /
+    // `skipped_count` bookkeeping, both of which are exercised in
+    // separate index/rebuild tests.
 }

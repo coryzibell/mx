@@ -1,0 +1,17 @@
+{
+  "version": "__SENTINEL__",
+  "session_id": "c3744b8d-test",
+  "archived_at": "__SENTINEL__",
+  "session_start": "2026-04-29T10:00:00Z",
+  "session_end": "2026-04-29T10:01:00Z",
+  "project_path": "project-slug",
+  "message_count": 3,
+  "agent_count": 0,
+  "agents": [],
+  "size_bytes": "__SENTINEL_NUM__",
+  "checksum": "sha256:d9d9b21e7a8f1b99d9b06e47406a35fc1bab29968c5f473e910dd0f430d93657",
+  "image_count": 0,
+  "images": [],
+  "user_name": "__SENTINEL__",
+  "assistant_name": "__SENTINEL__"
+}
