@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // Re-export public API
-pub(crate) use archive::save_session;
+pub(crate) use archive::{IncludeSet, save_session};
 pub(crate) use migrate::migrate_archives;
 pub(crate) use read::{list_sessions, read_session, search_archives};
 

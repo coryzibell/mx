@@ -90,8 +90,10 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             all,
             clean,
             include_agents,
+            include,
         } => {
-            codex::save_session(path, all, clean, include_agents)?;
+            let include_set = codex::IncludeSet::parse(&include)?;
+            codex::save_session(path, all, clean, include_agents, include_set)?;
             Ok(())
         }
         CodexCommands::List { all, json } => {

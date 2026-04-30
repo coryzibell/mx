@@ -1,7 +1,10 @@
 //! Per-session archive writer + the `--all` driver.
 //!
 //! This is the body that historically lived inline in `archive.rs`.
-//! Logic is unchanged; only the file boundary moved.
+//! Logic is preserved; the only behavioral wiring change is that
+//! subagent capture is now gated on `IncludeSet::subagents`. Status-quo
+//! callers (`IncludeSet::status_quo()`) leave `subagents = true`, so
+//! the default output is byte-identical to the pre-PR-2 implementation.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -14,17 +17,30 @@ use super::super::transcript::{
     build_agent_type_map, generate_clean_transcript, generate_clean_transcript_with_agents,
     resolve_agent_display_name, resolve_assistant_name, resolve_user_name,
 };
-use super::super::{MANIFEST_WRITE_VERSION, Manifest};
+use super::super::{AgentInfo, MANIFEST_WRITE_VERSION, Manifest};
 use super::get_codex_dir;
+use super::include::IncludeSet;
 use super::paths::determine_archive_dir;
 use super::sources::find_agent_sessions;
 
-/// Archive a single session JSONL into a fresh codex directory.
+/// Internal summary of a `--all` run, distilled into the public
+/// `ArchiveResult` by `archive::run`.
+#[derive(Debug, Default)]
+pub(super) struct BulkSummary {
+    pub archived_count: usize,
+    pub skipped_count: usize,
+    pub archive_paths: Vec<PathBuf>,
+}
+
+/// Archive a single session JSONL into a fresh codex directory. Returns
+/// the chosen archive directory on success (always `Some(_)` today; the
+/// `Option` keeps room for future "nothing to do" short-circuits).
 pub(crate) fn archive_session(
     session_path: &Path,
     clean: bool,
-    include_agents: bool,
-) -> Result<()> {
+    include_agents_in_clean_md: bool,
+    include: &IncludeSet,
+) -> Result<Option<PathBuf>> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -77,17 +93,24 @@ pub(crate) fn archive_session(
     let archive_dir = determine_archive_dir(&codex_dir, &base_name)?;
     fs::create_dir_all(&archive_dir)?;
 
+    // Subagent capture is gated on the include set. Status-quo defaults
+    // (`IncludeSet::status_quo`) leave this on, preserving the pre-PR-2
+    // behavior; an explicit `--include none` (or any set without
+    // `subagents`) suppresses it.
+    let agents: Vec<AgentInfo> = if include.subagents {
+        find_agent_sessions(session_path, &modified)?
+    } else {
+        Vec::new()
+    };
+
     if clean {
         // Clean mode: generate conversation.md + extract images — no JSONL, no agent file copies
-
-        // Create images directory and extract images from session content
         let images_dir = archive_dir.join("images");
         fs::create_dir_all(&images_dir)?;
 
         let (_stripped_content, mut all_images) = extract_images_from_jsonl(&content, &images_dir)?;
 
-        // Find associated agent sessions and extract images from them too (no file copy)
-        let agents = find_agent_sessions(session_path, &modified)?;
+        // Extract images from agent files too (no file copy in clean mode)
         if !agents.is_empty() {
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
@@ -108,7 +131,7 @@ pub(crate) fn archive_session(
 
         // Generate clean transcript (optionally with agent conversations)
         let agent_type_map = build_agent_type_map(&content);
-        let transcript = if include_agents && !agents.is_empty() {
+        let transcript = if include_agents_in_clean_md && !agents.is_empty() {
             let mut agent_sessions = Vec::new();
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
@@ -170,15 +193,11 @@ pub(crate) fn archive_session(
         println!("  Size: {} KB", archive_size_bytes / 1024);
         println!("  conversation.md written");
 
-        return Ok(());
+        return Ok(Some(archive_dir));
     }
 
-    // Full mode (default): find agents, extract images, copy JSONL
+    // Full mode (default): copy JSONL, copy agents, extract images.
 
-    // Find associated agent sessions
-    let agents = find_agent_sessions(session_path, &modified)?;
-
-    // Create images directory for extracted images
     let images_dir = archive_dir.join("images");
     fs::create_dir_all(&images_dir)?;
 
@@ -254,11 +273,15 @@ pub(crate) fn archive_session(
     println!("  Images: {}", image_count);
     println!("  Size: {} KB", size_bytes / 1024);
 
-    Ok(())
+    Ok(Some(archive_dir))
 }
 
 /// Bulk-archive every unarchived session under `~/.claude/projects/`.
-pub(crate) fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
+pub(crate) fn save_all_sessions(
+    clean: bool,
+    include_agents_in_clean_md: bool,
+    include: &IncludeSet,
+) -> Result<BulkSummary> {
     let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
@@ -283,7 +306,7 @@ pub(crate) fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()>
     }
 
     // Scan for unarchived sessions
-    let mut archived_count = 0;
+    let mut summary = BulkSummary::default();
 
     for entry in fs::read_dir(&projects_dir)? {
         let entry = entry?;
@@ -308,16 +331,23 @@ pub(crate) fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()>
                 }
 
                 let session_id = name.trim_end_matches(".jsonl");
-                if !archived_ids.contains(session_id) {
-                    println!("Archiving: {}", session_id);
-                    archive_session(&file_path, clean, include_agents)?;
-                    archived_count += 1;
+                if archived_ids.contains(session_id) {
+                    summary.skipped_count += 1;
+                    continue;
                 }
+
+                println!("Archiving: {}", session_id);
+                if let Some(dir) =
+                    archive_session(&file_path, clean, include_agents_in_clean_md, include)?
+                {
+                    summary.archive_paths.push(dir);
+                }
+                summary.archived_count += 1;
             }
         }
     }
 
-    println!("Archived {} new session(s)", archived_count);
+    println!("Archived {} new session(s)", summary.archived_count);
 
-    Ok(())
+    Ok(summary)
 }
