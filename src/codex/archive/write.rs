@@ -35,19 +35,31 @@ pub(super) struct BulkSummary {
     pub archive_paths: Vec<PathBuf>,
 }
 
-/// Best-effort uid lookup. Reads the uid of `~/` via Unix metadata —
-/// this side-steps a libc/nix dependency for a single integer.
+/// Best-effort uid lookup via the `getuid(2)` syscall.
 ///
-/// Returns `None` on non-Unix platforms or if the home dir is unreadable
-/// (the new MCP/tool-output walkers degrade gracefully when this is
-/// missing — they just yield empty results).
+/// The previous heuristic stat-ed `$HOME` and read its uid, which is
+/// fragile: `$HOME` can be set to a directory owned by a different user
+/// (containers, sudo with HOME-preserved, dropped privileges in CI),
+/// and on shared mounts the uid of the home directory may not match
+/// the running process. A direct `getuid(2)` syscall is the only
+/// authoritative answer.
+///
+/// We bind libc's `getuid` directly via `extern "C"` to avoid pulling
+/// in `libc` or `nix` for a single integer. `getuid(2)` cannot fail per
+/// POSIX, so the call is infallible — we still return `Option<u32>` to
+/// keep the non-Unix shape and the caller's existing graceful-fallback
+/// path intact.
 fn current_uid() -> Option<u32> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
-        let home = dirs::home_dir()?;
-        let meta = std::fs::metadata(home).ok()?;
-        Some(meta.uid())
+        // SAFETY: getuid(2) is documented to always succeed and have no
+        // side effects. The raw FFI binding matches the POSIX prototype
+        // (`uid_t getuid(void)`); on every libc Rust supports, `uid_t`
+        // is a 32-bit unsigned integer.
+        unsafe extern "C" {
+            fn getuid() -> u32;
+        }
+        Some(unsafe { getuid() })
     }
     #[cfg(not(unix))]
     {
