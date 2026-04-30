@@ -40,21 +40,45 @@ pub struct DetectionReport {
 }
 
 impl DetectionReport {
-    /// True iff anything unarchived was found.
+    /// True iff anything unarchived was found in either source
+    /// (~/.claude/ or /tmp/claude-<uid>/).
     pub fn has_unarchived(&self) -> bool {
-        self.unarchived_session_count > 0
+        self.unarchived_session_count > 0 || self.unarchived_tool_output_count > 0
     }
 
     /// Render the operator-facing warning text. Returns `None` when
     /// nothing is unarchived.
+    ///
+    /// S3: surfaces both `unarchived_session_count` (~/.claude/) and
+    /// `unarchived_tool_output_count` (/tmp/claude-<uid>/) when nonzero.
+    /// Either count alone is enough to print the warning; printing only
+    /// the nonzero source keeps the noise focused.
     pub fn warning_text(&self) -> Option<String> {
         if !self.has_unarchived() {
             return None;
         }
-        let mut msg = format!(
-            "note: {} unarchived session(s) detected in ~/.claude/. \
-             Run `mx codex archive --all` to ingest, or rerun with --archive-first.",
-            self.unarchived_session_count
+        let head = match (
+            self.unarchived_session_count,
+            self.unarchived_tool_output_count,
+        ) {
+            (0, 0) => unreachable!("has_unarchived() guards this branch"),
+            (sessions, 0) => format!(
+                "note: {} unarchived session(s) detected in ~/.claude/.",
+                sessions
+            ),
+            (0, tools) => format!(
+                "note: {} session(s) with tool output in /tmp/ not yet archived.",
+                tools
+            ),
+            (sessions, tools) => format!(
+                "note: {} unarchived session(s) detected in ~/.claude/, \
+                 and {} session(s) with tool output in /tmp/.",
+                sessions, tools
+            ),
+        };
+        let mut msg = head;
+        msg.push_str(
+            "\n       Run `mx codex archive --all` to ingest, or rerun with --archive-first.",
         );
         if !self.sample_unarchived_uuids.is_empty() {
             msg.push_str("\n       Sample: ");
@@ -128,10 +152,24 @@ pub fn detect_unarchived_in(projects_dir: &Path, codex_dir: &Path) -> Result<Det
 /// Count session UUIDs under `/tmp/claude-<uid>/<user_slug>/` that don't
 /// have a matching codex manifest. Best-effort — silently returns 0 if
 /// the tmp tree is missing or unreadable.
+///
+/// **Test hook:** the env var `MX_CLAUDE_TMP_TASKS_DIR` overrides the
+/// scan root entirely. Tests set it to an empty tempdir so the count is
+/// deterministic regardless of what's actually in `/tmp/claude-<uid>/`
+/// on the test runner. Setting it to `__SKIP__` short-circuits the scan
+/// to zero (used by tests that want the legacy "sessions only" warning
+/// shape without depending on disk state).
 fn count_unarchived_tool_outputs(archived: &HashSet<String>) -> usize {
-    // The tmp layout encodes uid + user_slug at build time, so we walk
-    // every <session_uuid>/tasks under any user-slug subdirectory we
-    // can find. For non-Unix targets, return 0.
+    if let Ok(override_path) = std::env::var("MX_CLAUDE_TMP_TASKS_DIR") {
+        if override_path == "__SKIP__" {
+            return 0;
+        }
+        let root = PathBuf::from(override_path);
+        if !root.exists() {
+            return 0;
+        }
+        return count_in_tmp_root(&root, archived);
+    }
     #[cfg(unix)]
     {
         // SAFETY: getuid(2) is infallible per POSIX.
@@ -140,6 +178,24 @@ fn count_unarchived_tool_outputs(archived: &HashSet<String>) -> usize {
         }
         let uid = unsafe { getuid() };
         let root = PathBuf::from(format!("/tmp/claude-{}", uid));
+        if !root.exists() {
+            return 0;
+        }
+        return count_in_tmp_root(&root, archived);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = archived;
+        0
+    }
+}
+
+/// Inner walker for [`count_unarchived_tool_outputs`]. Pulled out so the
+/// env-var override and the production /tmp branch share one
+/// implementation.
+fn count_in_tmp_root(root: &Path, archived: &HashSet<String>) -> usize {
+    #[cfg(unix)]
+    {
         if !root.exists() {
             return 0;
         }
@@ -222,6 +278,45 @@ fn collect_archived_session_ids(codex_dir: &Path) -> Result<HashSet<String>> {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use serial_test::serial;
+    use std::sync::Mutex;
+
+    // Process-wide lock so tests that twiddle MX_CLAUDE_TMP_TASKS_DIR
+    // don't interleave with each other. Pairs with `#[serial]`.
+    static TMP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard: sets `MX_CLAUDE_TMP_TASKS_DIR=__SKIP__` for the
+    /// lifetime of the guard. Most detect-tests want a deterministic
+    /// zero from the /tmp scan regardless of what's actually in
+    /// `/tmp/claude-<uid>/` on the runner.
+    struct SkipTmpScan {
+        prev: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+    impl SkipTmpScan {
+        fn new() -> Self {
+            let guard = TMP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var("MX_CLAUDE_TMP_TASKS_DIR").ok();
+            // SAFETY: env mutation guarded by TMP_ENV_LOCK + #[serial].
+            unsafe {
+                std::env::set_var("MX_CLAUDE_TMP_TASKS_DIR", "__SKIP__");
+            }
+            Self {
+                prev,
+                _guard: guard,
+            }
+        }
+    }
+    impl Drop for SkipTmpScan {
+        fn drop(&mut self) {
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("MX_CLAUDE_TMP_TASKS_DIR", v),
+                    None => std::env::remove_var("MX_CLAUDE_TMP_TASKS_DIR"),
+                }
+            }
+        }
+    }
 
     fn write_manifest(archive_dir: &Path, session_id: &str) {
         fs::create_dir_all(archive_dir).unwrap();
@@ -262,7 +357,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_zero_when_everything_archived() {
+        let _skip = SkipTmpScan::new();
         let tmp = tempfile::tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let codex = tmp.path().join("codex");
@@ -276,7 +373,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_some_unarchived() {
+        let _skip = SkipTmpScan::new();
         let tmp = tempfile::tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let codex = tmp.path().join("codex");
@@ -295,7 +394,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_many_unarchived_caps_sample_at_five() {
+        let _skip = SkipTmpScan::new();
         let tmp = tempfile::tempdir().unwrap();
         let projects = tmp.path().join("projects");
         let codex = tmp.path().join("codex");
@@ -312,7 +413,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_skips_agent_files() {
+        let _skip = SkipTmpScan::new();
         // agent-*.jsonl mirrors the parent and is not independently
         // archivable — must not count toward unarchived_session_count.
         let tmp = tempfile::tempdir().unwrap();
@@ -327,11 +430,114 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_handles_missing_projects_dir() {
+        let _skip = SkipTmpScan::new();
         let tmp = tempfile::tempdir().unwrap();
         let projects = tmp.path().join("does-not-exist");
         let codex = tmp.path().join("codex");
         let report = detect_unarchived_in(&projects, &codex).unwrap();
         assert_eq!(report.unarchived_session_count, 0);
+    }
+
+    // ---- S3: warning surfaces tool-output count ----
+
+    #[test]
+    fn warning_text_combines_both_counts_when_both_nonzero() {
+        let report = DetectionReport {
+            unarchived_session_count: 23,
+            unarchived_tool_output_count: 7,
+            sample_unarchived_uuids: vec!["c3744b8d".to_string(), "a1b2c3d4".to_string()],
+        };
+        let warn = report.warning_text().expect("should produce warning");
+        assert!(
+            warn.contains("23 unarchived"),
+            "missing session count: {warn}"
+        );
+        assert!(
+            warn.contains("7 session(s) with tool output"),
+            "missing tool-output count: {warn}"
+        );
+        assert!(warn.contains("/tmp/"), "should mention /tmp source: {warn}");
+        assert!(
+            warn.contains("mx codex archive --all"),
+            "should keep the remediation hint: {warn}"
+        );
+        assert!(
+            warn.contains("c3744b8d"),
+            "should keep sample uuids: {warn}"
+        );
+    }
+
+    #[test]
+    fn warning_text_tool_output_only_still_prints() {
+        // /tmp/claude-<uid>/ has unarchived sessions but ~/.claude/ is
+        // clean. Operator should still see the warning so the tool
+        // outputs aren't lost.
+        let report = DetectionReport {
+            unarchived_session_count: 0,
+            unarchived_tool_output_count: 3,
+            sample_unarchived_uuids: vec![],
+        };
+        assert!(report.has_unarchived());
+        let warn = report.warning_text().expect("tool-output-only must warn");
+        assert!(warn.contains("3 session(s) with tool output"));
+        assert!(!warn.contains("unarchived session(s) detected in ~/.claude/"));
+    }
+
+    #[test]
+    #[serial]
+    fn detect_counts_unarchived_tool_outputs_via_override() {
+        // Exercise the env-var override path: a fixture /tmp tree with
+        // two sessions, one of which IS in the codex. Expect a count of
+        // exactly 1 unarchived tool-output session.
+        let guard = TMP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let projects = tmp.path().join("projects");
+        let codex = tmp.path().join("codex");
+        let tmp_root = tmp.path().join("tmp_claude");
+        std::fs::create_dir_all(&projects).unwrap();
+
+        // Codex has one archived session.
+        write_manifest(&codex.join("2026-04-29-100000-aaaaaaaa"), "aaaaaaaa-1111");
+
+        // /tmp fixture: two sessions, each with a `tasks/` dir.
+        let user_slug = tmp_root.join("user-charlie");
+        std::fs::create_dir_all(user_slug.join("aaaaaaaa-1111").join("tasks")).unwrap();
+        std::fs::create_dir_all(user_slug.join("zzzzzzzz-9999").join("tasks")).unwrap();
+
+        let prev = std::env::var("MX_CLAUDE_TMP_TASKS_DIR").ok();
+        unsafe {
+            std::env::set_var("MX_CLAUDE_TMP_TASKS_DIR", &tmp_root);
+        }
+        let report = detect_unarchived_in(&projects, &codex).unwrap();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CLAUDE_TMP_TASKS_DIR", v),
+                None => std::env::remove_var("MX_CLAUDE_TMP_TASKS_DIR"),
+            }
+        }
+        drop(guard);
+
+        // aaaaaaaa is archived → not counted; zzzzzzzz is not → counted.
+        assert_eq!(report.unarchived_tool_output_count, 1);
+        // Has-unarchived should fire on tool-output count alone.
+        assert!(report.has_unarchived());
+    }
+
+    #[test]
+    fn warning_text_sessions_only_omits_tool_output_phrase() {
+        // Backwards-compatible shape when the /tmp source is clean.
+        let report = DetectionReport {
+            unarchived_session_count: 2,
+            unarchived_tool_output_count: 0,
+            sample_unarchived_uuids: vec!["aaaaaaaa".to_string()],
+        };
+        let warn = report.warning_text().unwrap();
+        assert!(warn.contains("2 unarchived"));
+        assert!(
+            !warn.contains("tool output"),
+            "no tool-output phrase when count is zero: {warn}"
+        );
     }
 }
