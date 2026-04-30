@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub mod detect;
 pub mod filter;
@@ -37,9 +37,13 @@ pub struct ExportRequest {
     /// If set, run `mx codex archive --all` before exporting and skip
     /// the unarchived-data warning.
     pub archive_first: bool,
-    /// Output file path. `None` means stdout for markdown / JSON; for
-    /// `Format::Both` an output path is required (we route JSON to the
-    /// file and markdown to stderr).
+    /// Output file path. `None` means stdout for markdown / JSON.
+    ///
+    /// `Format::Both` requires this to be `Some`: JSON is written to the
+    /// supplied path and markdown is written to a sibling sidecar file
+    /// (see [`both_sidecar_paths`] for the naming rule). Calling `run`
+    /// with `Format::Both` and `output: None` returns an error rather
+    /// than silently mixing JSON on stdout with markdown on stderr.
     pub output: Option<PathBuf>,
 }
 
@@ -54,8 +58,48 @@ pub struct ExportResult {
     pub output_path: Option<PathBuf>,
 }
 
+/// Compute the sidecar file pair for `Format::Both`.
+///
+/// Rule:
+/// - If `path` ends in `.json`: JSON goes to `path`, markdown goes to
+///   `path.with_extension("md")`.
+/// - If `path` ends in `.md`: markdown goes to `path`, JSON goes to
+///   `path.with_extension("json")`.
+/// - Otherwise: JSON goes to `<path>.json`, markdown goes to `<path>.md`
+///   (the original `path` is preserved as a stem).
+///
+/// Returns `(json_path, markdown_path)`.
+pub fn both_sidecar_paths(path: &Path) -> (PathBuf, PathBuf) {
+    let ext = path.extension().and_then(|s| s.to_str());
+    match ext {
+        Some("json") => (path.to_path_buf(), path.with_extension("md")),
+        Some("md") => (path.with_extension("json"), path.to_path_buf()),
+        _ => {
+            // Append the typed extension to whatever stem the operator
+            // gave us (e.g. `out` → `out.json` + `out.md`, or
+            // `out.txt` → `out.txt.json` + `out.txt.md`). We deliberately
+            // do NOT strip arbitrary extensions here — that would be
+            // surprising for paths like `archive.tar` where the operator
+            // expects the name preserved verbatim.
+            let mut json_path = path.as_os_str().to_owned();
+            json_path.push(".json");
+            let mut md_path = path.as_os_str().to_owned();
+            md_path.push(".md");
+            (PathBuf::from(json_path), PathBuf::from(md_path))
+        }
+    }
+}
+
 /// Canonical export entry point.
 pub fn run(request: ExportRequest) -> Result<ExportResult> {
+    // -------- Step 0: validate --------
+    if matches!(request.format, Format::Both) && request.output.is_none() {
+        anyhow::bail!(
+            "--format both requires --output (writes <out>.json and <out>.md sidecar files; \
+             pure stdout would mix JSON on stdout with markdown on stderr)"
+        );
+    }
+
     // -------- Step 1: optional pre-archive --------
     if request.archive_first {
         let archive_request = crate::codex::archive::ArchiveRequest::All;
@@ -139,14 +183,23 @@ pub fn run(request: ExportRequest) -> Result<ExportResult> {
             emit(&request.output, &body)?
         }
         Format::Both => {
-            // For `both`, JSON goes to the output (file or stdout) and
-            // markdown is sent to stderr commentary. The brief calls
-            // out that pure stdout for json+markdown is confusing.
+            // Step 0 has guaranteed `output.is_some()`. Split into two
+            // sidecar files so neither stream stomps on the other.
+            let path = request
+                .output
+                .as_ref()
+                .expect("Format::Both with no output should have been rejected at step 0");
+            let (json_path, md_path) = both_sidecar_paths(path);
             let json_body = join_json(&json_chunks);
             let md_body = join_markdown(&markdown_chunks);
-            let p = emit(&request.output, &json_body)?;
-            eprintln!("{}", md_body);
-            p
+            std::fs::write(&json_path, &json_body)
+                .with_context(|| format!("write export JSON to {}", json_path.display()))?;
+            std::fs::write(&md_path, &md_body)
+                .with_context(|| format!("write export markdown to {}", md_path.display()))?;
+            // Report the JSON path as the "primary" output_path for
+            // backwards-compatibility with callers that already inspect
+            // it; the markdown sidecar is implied by the rule.
+            Some(json_path)
         }
     };
 
@@ -404,5 +457,128 @@ mod tests {
         // Post-archive-first detection: there's no live ~/.claude/projects/
         // session here, so unarchived count must be zero.
         assert_eq!(result.detection.unarchived_session_count, 0);
+    }
+
+    // ---- W1: Format::Both sidecar split ----
+
+    #[test]
+    #[serial]
+    fn export_format_both_without_output_errors() {
+        // `Format::Both` without `--output` must be rejected loudly. The
+        // previous behavior routed JSON to stdout and markdown to stderr,
+        // which mangled `mx codex export --format both > out.json`.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        let projects = tmp.path().join("projects");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        write_archive(&codex, "2026-04-29-100000-aaaaaaaa", "aaaaaaaa-1111");
+
+        let prev_codex = std::env::var("MX_CODEX_PATH").ok();
+        let prev_proj = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex);
+            std::env::set_var("MX_CLAUDE_PROJECTS_DIR", &projects);
+        }
+        let req = ExportRequest {
+            selector: Selector::Latest,
+            format: Format::Both,
+            include: ExportIncludeSet::default_clean(),
+            archive_first: false,
+            output: None,
+        };
+        let result = run(req);
+        unsafe {
+            match prev_codex {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+            match prev_proj {
+                Some(v) => std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v),
+                None => std::env::remove_var("MX_CLAUDE_PROJECTS_DIR"),
+            }
+        }
+        let err = result.expect_err("Format::Both without --output should error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--format both requires --output"),
+            "error message should call out the requirement; got: {msg}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn export_format_both_writes_sidecar_files() {
+        // With `-o foo.json` we expect `foo.json` (JSON) and `foo.md`
+        // (markdown) written side by side.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        let projects = tmp.path().join("projects");
+        let out_json = tmp.path().join("foo.json");
+        let out_md = tmp.path().join("foo.md");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::create_dir_all(&projects).unwrap();
+        write_archive(&codex, "2026-04-29-100000-aaaaaaaa", "aaaaaaaa-1111");
+
+        let prev_codex = std::env::var("MX_CODEX_PATH").ok();
+        let prev_proj = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex);
+            std::env::set_var("MX_CLAUDE_PROJECTS_DIR", &projects);
+        }
+        let req = ExportRequest {
+            selector: Selector::Latest,
+            format: Format::Both,
+            include: ExportIncludeSet::default_clean(),
+            archive_first: false,
+            output: Some(out_json.clone()),
+        };
+        let result = run(req);
+        unsafe {
+            match prev_codex {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+            match prev_proj {
+                Some(v) => std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v),
+                None => std::env::remove_var("MX_CLAUDE_PROJECTS_DIR"),
+            }
+        }
+        let result = result.expect("Format::Both export should succeed with --output");
+        assert_eq!(result.output_path.as_deref(), Some(out_json.as_path()));
+        assert!(out_json.exists(), "JSON sidecar at .json path must exist");
+        assert!(out_md.exists(), "markdown sidecar at .md path must exist");
+        let json_body = std::fs::read_to_string(&out_json).unwrap();
+        // Must parse as JSON (not be markdown by accident).
+        let _: serde_json::Value =
+            serde_json::from_str(&json_body).expect("json sidecar must be parseable JSON");
+        let md_body = std::fs::read_to_string(&out_md).unwrap();
+        assert!(
+            md_body.contains("Session aaaaaaaa-1111"),
+            "markdown sidecar must contain the rendered conversation"
+        );
+    }
+
+    #[test]
+    fn both_sidecar_paths_extension_rules() {
+        let (j, m) = both_sidecar_paths(Path::new("/tmp/foo.json"));
+        assert_eq!(j, PathBuf::from("/tmp/foo.json"));
+        assert_eq!(m, PathBuf::from("/tmp/foo.md"));
+
+        let (j, m) = both_sidecar_paths(Path::new("/tmp/foo.md"));
+        assert_eq!(j, PathBuf::from("/tmp/foo.json"));
+        assert_eq!(m, PathBuf::from("/tmp/foo.md"));
+
+        // No extension: append both.
+        let (j, m) = both_sidecar_paths(Path::new("/tmp/foo"));
+        assert_eq!(j, PathBuf::from("/tmp/foo.json"));
+        assert_eq!(m, PathBuf::from("/tmp/foo.md"));
+
+        // Unrelated extension: preserve verbatim and append.
+        let (j, m) = both_sidecar_paths(Path::new("/tmp/archive.tar"));
+        assert_eq!(j, PathBuf::from("/tmp/archive.tar.json"));
+        assert_eq!(m, PathBuf::from("/tmp/archive.tar.md"));
     }
 }

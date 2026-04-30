@@ -1231,6 +1231,11 @@ pub enum CodexCommands {
         date: Option<String>,
 
         /// Output format. `markdown` (default), `json`, or `both`.
+        ///
+        /// `both` requires `--output`: JSON is written to the supplied
+        /// path and markdown is written to a sibling sidecar file
+        /// (`<out>.json` + `<out>.md`, with the operator-supplied
+        /// extension preserved if it's already `.json` or `.md`).
         #[arg(long, default_value = "markdown")]
         format: String,
 
@@ -1247,8 +1252,9 @@ pub enum CodexCommands {
         #[arg(long)]
         archive_first: bool,
 
-        /// Output file path. Default: stdout (markdown / json) or stdout
-        /// + stderr (both).
+        /// Output file path. Default: stdout (markdown / json).
+        /// Required when `--format both` (writes `<out>.json` and
+        /// `<out>.md` sidecar files).
         #[arg(short, long)]
         output: Option<String>,
     },
