@@ -1277,7 +1277,7 @@ pub enum CodexCommands {
         #[arg(long, default_value = "subagents")]
         include: String,
 
-        /// Run `mx codex archive --all` before exporting and skip the
+        /// Run `mx codex save --all` before exporting and skip the
         /// unarchived-data warning. Useful when you know live
         /// `~/.claude/projects/` data hasn't been ingested yet.
         #[arg(long)]

@@ -78,7 +78,7 @@ impl DetectionReport {
         };
         let mut msg = head;
         msg.push_str(
-            "\n       Run `mx codex archive --all` to ingest, or rerun with --archive-first.",
+            "\n       Run `mx codex save --all` to ingest, or rerun with --archive-first.",
         );
         if !self.sample_unarchived_uuids.is_empty() {
             msg.push_str("\n       Sample: ");
@@ -460,7 +460,7 @@ mod tests {
         );
         assert!(warn.contains("/tmp/"), "should mention /tmp source: {warn}");
         assert!(
-            warn.contains("mx codex archive --all"),
+            warn.contains("mx codex save --all"),
             "should keep the remediation hint: {warn}"
         );
         assert!(

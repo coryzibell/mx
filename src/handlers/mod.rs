@@ -85,7 +85,7 @@ pub(crate) fn handle_session(cmd: SessionCommands) -> Result<()> {
 
 pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
     // Suppress the vault nag for the one invocation that's already
-    // mid-fix: `mx codex archive --backfill`. Every other handler emits
+    // mid-fix: `mx codex save --backfill`. Every other handler emits
     // the warning at most once per process via the OnceLock guard
     // inside `warn_if_vault_present`.
     let suppress_vault_warning = matches!(

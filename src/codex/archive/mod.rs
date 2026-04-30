@@ -18,7 +18,7 @@
 //! `archive::run` is the one canonical entry point. The historical
 //! `save_session` is a thin wrapper that builds an `ArchiveRequest` from
 //! CLI args and calls `run`. Status-quo invocations
-//! (`mx codex archive` with no `--include`) produce byte-identical
+//! (`mx codex save` with no `--include`) produce byte-identical
 //! output to the pre-PR-2 implementation.
 
 use anyhow::Result;
@@ -92,7 +92,7 @@ pub struct ArchiveResult {
 /// to `request` and `options`, returns a summary.
 ///
 /// Behavior with `IncludeSet::status_quo()` and `clean = false` is
-/// byte-identical to the pre-PR-2 `mx codex archive` flow.
+/// byte-identical to the pre-PR-2 `mx codex save` flow.
 ///
 /// After a successful write, the by-project index
 /// (`<codex_dir>/by-project/`) is rebuilt so subsequent reads can find

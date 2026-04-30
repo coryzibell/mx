@@ -355,7 +355,7 @@ pub fn tmp_claude_tasks_dir(uid: u32, user_slug: &str, session_uuid: &str) -> Pa
 
 /// `~/.wonka/vault/archives/` -- the legacy vault snapshot directory.
 ///
-/// Walked by `mx codex archive --backfill` (PR 5) to ingest the existing
+/// Walked by `mx codex save --backfill` (PR 5) to ingest the existing
 /// vault snapshots into the codex. Note the literal `~/.wonka/` prefix:
 /// the wonka vault is a *separate* root from `MX_HOME` and intentionally
 /// does not derive from it. If the user has a wonka home override in the

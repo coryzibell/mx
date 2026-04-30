@@ -34,7 +34,7 @@ pub struct ExportRequest {
     pub selector: Selector,
     pub format: Format,
     pub include: ExportIncludeSet,
-    /// If set, run `mx codex archive --all` before exporting and skip
+    /// If set, run `mx codex save --all` before exporting and skip
     /// the unarchived-data warning.
     pub archive_first: bool,
     /// Output file path. `None` means stdout for markdown / JSON.

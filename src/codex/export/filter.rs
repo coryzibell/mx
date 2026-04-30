@@ -301,7 +301,7 @@ pub fn resolve_latest(archives: Vec<ResolvedArchive>) -> Result<ResolvedArchive>
     archives
         .into_iter()
         .max_by_key(|a| a.manifest.session_start)
-        .context("no archived sessions in codex (run `mx codex archive --all`)")
+        .context("no archived sessions in codex (run `mx codex save --all`)")
 }
 
 #[cfg(test)]
