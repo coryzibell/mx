@@ -16,6 +16,7 @@
 
 use anyhow::{Context, Result};
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// Stderr-printed deprecation notice for `mx session export`. Kept as a
@@ -85,6 +86,19 @@ pub(crate) fn build_alias_request(
     })
 }
 
+/// Write the deprecation notice to the given writer, followed by a
+/// trailing newline. Extracted as a generic helper so tests can inject
+/// a `Vec<u8>` and assert routing without wrestling with process-level
+/// stderr capture (no `gag` dev-dep needed). Production wires this to
+/// `io::stderr()`.
+///
+/// Load-bearing: the notice MUST go to stderr, not stdout — pipelines
+/// like `mx session export | pandoc` would otherwise be corrupted by
+/// the warning text appearing in the document body.
+pub(crate) fn print_deprecation_notice<W: Write>(w: &mut W) -> io::Result<()> {
+    writeln!(w, "{}", DEPRECATION_NOTICE)
+}
+
 /// Entry point invoked by `handle_session(SessionCommands::Export {..})`.
 ///
 /// Prints the deprecation notice to stderr, builds the request, and
@@ -92,7 +106,10 @@ pub(crate) fn build_alias_request(
 /// pipeline returns — errors propagate so existing scripts that check
 /// the exit code keep working.
 pub fn export_session(path: Option<String>, output: Option<String>) -> Result<()> {
-    eprintln!("{}", DEPRECATION_NOTICE);
+    // Stderr (NOT stdout — would corrupt piped output). The
+    // `print_deprecation_notice` helper exists so the routing is
+    // unit-testable without sniffing process stderr.
+    let _ = print_deprecation_notice(&mut io::stderr());
     let request = build_alias_request(path, output)?;
     crate::codex::export::run(request)?;
     Ok(())
@@ -161,6 +178,50 @@ mod tests {
     use crate::codex::{Format, Selector};
 
     // ----- DEPRECATION_NOTICE shape -----
+
+    #[test]
+    fn print_deprecation_notice_writes_full_text_to_writer() {
+        // Load-bearing: proves the production call site routes the
+        // deprecation notice through a Write impl rather than, say,
+        // println!() (which would land on stdout and corrupt
+        // `mx session export | pandoc` style pipelines). Production
+        // wires this same helper to `io::stderr()` — see
+        // `export_session`. The matching call site is asserted by
+        // `export_session_uses_print_deprecation_notice_with_stderr`.
+        let mut buf: Vec<u8> = Vec::new();
+        print_deprecation_notice(&mut buf).expect("write to Vec cannot fail");
+        let s = String::from_utf8(buf).expect("notice is utf8");
+        assert!(
+            s.contains(DEPRECATION_NOTICE),
+            "writer must receive full DEPRECATION_NOTICE; got: {s}"
+        );
+        assert!(
+            s.ends_with('\n'),
+            "notice must terminate with a newline so the next line of output isn't glued to it"
+        );
+    }
+
+    #[test]
+    fn export_session_uses_print_deprecation_notice_with_stderr() {
+        // Source-text assertion: confirm `export_session` routes
+        // through `print_deprecation_notice(&mut io::stderr())`. Prevents
+        // a future refactor from accidentally swapping stderr for
+        // stdout (which would corrupt piped output) or replacing the
+        // helper with a raw println!.
+        let src = include_str!("session.rs");
+        // Strip the test module so we're not just matching on a comment
+        // mentioning the call shape.
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(
+            prod.contains("print_deprecation_notice(&mut io::stderr())"),
+            "export_session must call print_deprecation_notice with io::stderr() — \
+             stderr routing is load-bearing for piped output integrity"
+        );
+        assert!(
+            !prod.contains("println!(\"{}\", DEPRECATION_NOTICE)"),
+            "deprecation notice must NOT go to stdout"
+        );
+    }
 
     #[test]
     fn deprecation_notice_mentions_new_command() {
