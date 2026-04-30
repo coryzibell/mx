@@ -184,9 +184,19 @@ impl ProjectIndex {
                 if !manifest_path.exists() {
                     continue;
                 }
+                // S5: same stderr warning shape as `rebuild_from_manifests`
+                // and `lookup_via_manifests` so the operator sees one
+                // consistent message regardless of which code path
+                // tripped over a bad manifest.
                 let raw = match fs::read_to_string(&manifest_path) {
                     Ok(r) => r,
-                    Err(_) => continue,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: skipping unreadable manifest {}: {e}",
+                            manifest_path.display()
+                        );
+                        continue;
+                    }
                 };
                 let manifest: Manifest = match serde_json::from_str(&raw) {
                     Ok(m) => m,
@@ -565,12 +575,33 @@ impl ProjectIndex {
             let resolved = codex_dir.join(&archive_name);
             session_archive_paths.push(resolved.clone());
             // Read the manifest's project_path so we can detect ambiguity.
+            // S5: surface unreadable / unparseable manifests via the
+            // same stderr warning the rebuild path uses, instead of
+            // silently dropping them.
             let manifest_path = resolved.join("manifest.json");
-            if let Ok(raw) = fs::read_to_string(&manifest_path)
-                && let Ok(m) = serde_json::from_str::<Manifest>(&raw)
-                && let Some(p) = m.project_path
-            {
-                absolute_paths.push(PathBuf::from(p));
+            match fs::read_to_string(&manifest_path) {
+                Ok(raw) => match serde_json::from_str::<Manifest>(&raw) {
+                    Ok(m) => {
+                        if let Some(p) = m.project_path {
+                            absolute_paths.push(PathBuf::from(p));
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "warning: skipping unparseable manifest {}: {e}",
+                        manifest_path.display()
+                    ),
+                },
+                Err(e) => {
+                    // ENOENT through a dangling symlink isn't actionable;
+                    // only warn when the symlink resolves to something
+                    // else broken.
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!(
+                            "warning: skipping unreadable manifest {}: {e}",
+                            manifest_path.display()
+                        );
+                    }
+                }
             }
         }
         absolute_paths.sort();
@@ -637,13 +668,30 @@ impl ProjectIndex {
             if !manifest_path.exists() {
                 continue;
             }
+            // S5: surface the same stderr warning as
+            // `rebuild_from_manifests` when a manifest is unreadable or
+            // unparseable. The fallback used to swallow these silently,
+            // which made bad manifests invisible until the next archive
+            // run forced a rebuild.
             let raw = match fs::read_to_string(&manifest_path) {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping unreadable manifest {}: {e}",
+                        manifest_path.display()
+                    );
+                    continue;
+                }
             };
             let manifest: Manifest = match serde_json::from_str(&raw) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping unparseable manifest {}: {e}",
+                        manifest_path.display()
+                    );
+                    continue;
+                }
             };
             let abs = match manifest.project_path.as_ref() {
                 Some(p) => PathBuf::from(p),
@@ -1359,6 +1407,37 @@ mod tests {
             .lookup("/home/charlie/work/wonka")
             .expect("manifest-walk fallback must find the new archive");
         assert_eq!(entry.basename_slug, "wonka");
+    }
+
+    #[test]
+    fn lookup_via_manifests_skips_bad_manifests_without_panic() {
+        // S5: the manifest-walk fallback must not panic on a manifest
+        // that's unparseable garbage. It should warn (to stderr — we
+        // can't capture that here without an extra dep) and then keep
+        // walking. The good manifest at the same level should still
+        // resolve.
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path();
+
+        // Good manifest.
+        write_manifest(
+            &codex.join("2026-04-29-100000-aaaaaaaa"),
+            "/home/charlie/work/mx",
+            "aaa",
+        );
+        // Bad manifest: invalid JSON.
+        let bad_archive = codex.join("2026-04-29-110000-bbbbbbbb");
+        fs::create_dir_all(&bad_archive).unwrap();
+        fs::write(bad_archive.join("manifest.json"), "{not json").unwrap();
+
+        // Open without rebuilding so the lookup goes through the
+        // manifest-walk fallback (cache is empty + on-disk index is
+        // empty).
+        let idx = ProjectIndex::open_under(codex).unwrap();
+        let entry = idx
+            .lookup("/home/charlie/work/mx")
+            .expect("good manifest should still resolve");
+        assert_eq!(entry.basename_slug, "mx");
     }
 
     #[test]
