@@ -28,7 +28,10 @@ note: `mx session export` is deprecated; use `mx codex export` instead.
       if needed; this alias does that for you), supports filtering by
       --session, --project, --date, multiple output formats, and inlines
       sub-agent transcripts by default. Run `mx codex export --help` for
-      the full surface.";
+      the full surface.
+note: the new command selects \"most recent\" by session start time, not
+      by JSONL file mtime. For single-session use cases this matches the
+      legacy behavior.";
 
 /// Build the `ExportRequest` that this alias dispatches to
 /// `codex::export::run`. Pure — no I/O, no env reads — so the routing
@@ -178,7 +181,12 @@ pub fn export_session(path: Option<String>, output: Option<String>) -> Result<()
 /// `codex::archive::resolve_session_path` still calls it for the
 /// "archive the currently-live session" path. When `src/session.rs`
 /// is deleted in a future PR, this helper migrates with it.
-pub fn find_most_recent_session() -> Result<PathBuf> {
+///
+/// `pub(crate)`: only `codex::archive` consumes this. Integration
+/// tests under `tests/` do not touch it. Tightening from `pub`
+/// prevents external surface area from accreting around a helper
+/// scheduled for migration.
+pub(crate) fn find_most_recent_session() -> Result<PathBuf> {
     let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
@@ -495,9 +503,14 @@ mod tests {
         let mut alias_req =
             build_alias_request(None, Some(alias_out.to_string_lossy().to_string()))
                 .expect("build_alias_request");
-        // archive_first=true would re-archive a tempdir with no live
-        // sources; that's a no-op here, but flip it off so the two
-        // requests are byte-for-byte the same shape.
+        // We flip `archive_first` off here because re-archiving a
+        // tempdir with no live sources would itself work but adds
+        // nondeterminism (timing, fs walks, env-dependent claude
+        // projects discovery) to a test that's measuring output
+        // equivalence, not archive behavior. The on-by-default
+        // invariant is asserted separately by
+        // `alias_forces_archive_first`, and PR #270's tests cover the
+        // archive_first → run integration end-to-end.
         alias_req.archive_first = false;
         let alias_result = crate::codex::export::run(alias_req);
 
