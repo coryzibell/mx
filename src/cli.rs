@@ -1208,6 +1208,51 @@ pub enum CodexCommands {
         include: String,
     },
 
+    /// Export an archived session as Markdown or structured JSON.
+    ///
+    /// The default with no flags is "the most recent codex session, as
+    /// markdown to stdout, with sub-agent transcripts inlined and
+    /// everything else stripped." Selectors are mutually exclusive: at
+    /// most one of `--session`, `--project`, `--date` may be passed.
+    Export {
+        /// Session UUID (full or unique prefix).
+        #[arg(long, group = "selector")]
+        session: Option<String>,
+
+        /// Project to filter by: absolute path, raw cwd-encoded slug
+        /// (`-home-charlie-...`), or basename (`mx`). Ambiguous basenames
+        /// list every colliding absolute path and exit non-zero.
+        #[arg(long, group = "selector")]
+        project: Option<String>,
+
+        /// Date selector. Accepts `YYYY-MM-DD`, `YYYY-MM-DD..YYYY-MM-DD`,
+        /// or `YYYY-MM`.
+        #[arg(long, group = "selector")]
+        date: Option<String>,
+
+        /// Output format. `markdown` (default), `json`, or `both`.
+        #[arg(long, default_value = "markdown")]
+        format: String,
+
+        /// Comma-separated list of optional content to render. Default:
+        /// `subagents`. Recognized: `subagents`, `tools`,
+        /// `system-reminders`, `mcp`, `tool-output`, `history`, `all`,
+        /// `none`.
+        #[arg(long, default_value = "subagents")]
+        include: String,
+
+        /// Run `mx codex archive --all` before exporting and skip the
+        /// unarchived-data warning. Useful when you know live
+        /// `~/.claude/projects/` data hasn't been ingested yet.
+        #[arg(long)]
+        archive_first: bool,
+
+        /// Output file path. Default: stdout (markdown / json) or stdout
+        /// + stderr (both).
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+
     /// List archived sessions
     List {
         /// Show all archives including incremental saves

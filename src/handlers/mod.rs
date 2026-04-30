@@ -106,6 +106,23 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             codex::save_session(path, all, clean, include_agents, include_set)?;
             Ok(())
         }
+        CodexCommands::Export {
+            session,
+            project,
+            date,
+            format,
+            include,
+            archive_first,
+            output,
+        } => handle_codex_export(
+            session,
+            project,
+            date,
+            format,
+            include,
+            archive_first,
+            output,
+        ),
         CodexCommands::List { all, json } => {
             codex::list_sessions(all, json)?;
             Ok(())
@@ -136,6 +153,46 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Build an `ExportRequest` from the flat CLI args and dispatch to
+/// `codex::export::run`. The selectors are mutually exclusive at the
+/// CLI level (clap `group = "selector"`) so at most one of
+/// `--session / --project / --date` will be `Some`.
+#[allow(clippy::too_many_arguments)]
+fn handle_codex_export(
+    session: Option<String>,
+    project: Option<String>,
+    date: Option<String>,
+    format: String,
+    include: String,
+    archive_first: bool,
+    output: Option<String>,
+) -> Result<()> {
+    use std::path::PathBuf;
+
+    let selector = match (session, project, date) {
+        (Some(s), None, None) => codex::Selector::Session(codex::export::SessionRef(s)),
+        (None, Some(p), None) => codex::Selector::Project(p),
+        (None, None, Some(d)) => codex::Selector::Date(codex::export::DateRange::parse(&d)?),
+        (None, None, None) => codex::Selector::Latest,
+        // The clap group should prevent this, but defend anyway so the
+        // error is friendly if a downstream caller hand-builds the args.
+        _ => anyhow::bail!(
+            "--session, --project, and --date are mutually exclusive; pass at most one"
+        ),
+    };
+    let format = codex::Format::parse(&format)?;
+    let include = codex::ExportIncludeSet::parse(&include)?;
+    let request = codex::ExportRequest {
+        selector,
+        format,
+        include,
+        archive_first,
+        output: output.map(PathBuf::from),
+    };
+    codex::run_export(request)?;
+    Ok(())
 }
 
 pub(crate) fn handle_convert(cmd: ConvertCommands) -> Result<()> {
