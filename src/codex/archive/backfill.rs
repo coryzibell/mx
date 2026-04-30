@@ -91,9 +91,25 @@ pub fn run_backfill(vault_path: &Path, options: ArchiveOptions) -> Result<Backfi
     // `Single` codepath gets dedup too. Failures to read the codex dir
     // are non-fatal — we'd rather over-archive (and let the suffix
     // collision logic in `determine_archive_dir` handle it) than abort
-    // the whole run.
-    let archived_ids = collect_archived_ids().unwrap_or_default();
-    let mut seen: HashSet<String> = archived_ids;
+    // the whole run. But we MUST surface the failure: silently swallowing
+    // it (W1 from the PR 272 review) means a permission-denied or
+    // corrupted manifest produces zero dedup, which leads to
+    // double-archiving on re-run with no warning to the operator.
+    let mut seen: HashSet<String> = match collect_archived_ids() {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!(
+                "warning: failed to scan codex for dedup set: {e}; \
+                 backfill may produce duplicates"
+            );
+            let codex_dir = get_codex_dir().unwrap_or_else(|_| PathBuf::from("<codex>"));
+            report.errors.push((
+                codex_dir,
+                e.context("scanning codex for already-archived session_ids (dedup set)"),
+            ));
+            HashSet::new()
+        }
+    };
 
     let total_snapshots = snapshots.len();
     for (idx, snapshot) in snapshots.iter().enumerate() {
@@ -413,6 +429,63 @@ mod tests {
         assert!(
             msg.contains("does not exist"),
             "expected helpful error, got: {msg}"
+        );
+    }
+
+    /// W1 from the PR 272 review: if `collect_archived_ids` fails (e.g.,
+    /// the codex path points at a regular file rather than a directory,
+    /// simulating a permission-denied or corrupted-tree state), the old
+    /// code silently swallowed the error via `unwrap_or_default()` and
+    /// proceeded with zero dedup — risking double-archives on re-run.
+    /// The new behavior surfaces the failure on the report and continues
+    /// with an empty seen set so the bulk operation still completes.
+    #[test]
+    #[serial]
+    fn backfill_surfaces_codex_scan_failure_on_report() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Codex path is a *file*, not a directory. `read_dir` will return
+        // NotADirectory, which now propagates to `BackfillReport.errors`.
+        let codex_path = tmp.path().join("codex-not-a-dir");
+        fs::write(&codex_path, "i am a file, not a directory").unwrap();
+
+        let vault = build_fake_vault(tmp.path(), 1, 1);
+
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        // SAFETY: process-wide env mutation, serialized via ENV_LOCK +
+        // #[serial] so concurrent codex tests stay correct.
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_path);
+        }
+
+        let report = run_backfill(&vault, ArchiveOptions::default())
+            .expect("backfill must continue past a codex scan failure (non-fatal error model)");
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+
+        // The codex-scan failure must show up on the report so the
+        // operator sees it. There may be additional per-session errors
+        // (the per-session archive path may also choke on the
+        // not-a-directory codex), but we require the scan failure to be
+        // present.
+        let scan_err_present = report.errors.iter().any(|(_, e)| {
+            let msg = format!("{e:#}");
+            msg.contains("scanning codex") || msg.contains("dedup set")
+        });
+        assert!(
+            scan_err_present,
+            "expected a codex-scan failure in report.errors, got: {:?}",
+            report
+                .errors
+                .iter()
+                .map(|(p, e)| format!("{}: {e}", p.display()))
+                .collect::<Vec<_>>()
         );
     }
 
