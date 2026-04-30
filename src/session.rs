@@ -73,6 +73,23 @@ pub(crate) fn build_alias_request(
                     p
                 )
             })?;
+
+            // Sanity-check the path before routing into the codex,
+            // which would otherwise translate "README.md" into a
+            // Selector::Session("README") and fail downstream with a
+            // codex-flavored "session not found" — confusing for the
+            // operator. Accept either a `.jsonl` extension OR a
+            // UUID-shaped stem (full 36-char dashed UUID, or the
+            // 8-char short form the codex uses internally).
+            let ext = pb.extension().and_then(|s| s.to_str());
+            let is_jsonl = matches!(ext, Some("jsonl"));
+            if !is_jsonl && !is_uuid_shaped(stem) {
+                anyhow::bail!(
+                    "session export expects a path to a session JSONL file; got: {}\n\
+                     hint: try `mx codex export --session <uuid>` instead",
+                    p
+                );
+            }
             Selector::Session(SessionRef(stem.to_string()))
         }
     };
@@ -84,6 +101,45 @@ pub(crate) fn build_alias_request(
         archive_first: true,
         output: output.map(PathBuf::from),
     })
+}
+
+/// Heuristic: does this filename stem look like a session UUID?
+///
+/// Two accepted shapes:
+///
+/// - Full UUID: 36 chars, 8-4-4-4-12 hex with dashes
+///   (e.g. `c3744b8d-5719-4df2-924f-707945438494`).
+/// - Short form: 8 hex chars (codex's internal short-id form).
+///
+/// Anything else (e.g. `README`, `notes`) is rejected so we can give a
+/// clearer error than the codex's downstream "session not found".
+fn is_uuid_shaped(s: &str) -> bool {
+    fn is_hex(c: char) -> bool {
+        c.is_ascii_hexdigit()
+    }
+
+    // Short form: exactly 8 hex chars.
+    if s.len() == 8 && s.chars().all(is_hex) {
+        return true;
+    }
+
+    // Full form: 8-4-4-4-12 hex with dashes — 36 chars total.
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let dash_positions = [8usize, 13, 18, 23];
+    for (i, b) in bytes.iter().enumerate() {
+        let c = *b as char;
+        if dash_positions.contains(&i) {
+            if c != '-' {
+                return false;
+            }
+        } else if !is_hex(c) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Write the deprecation notice to the given writer, followed by a
@@ -247,6 +303,52 @@ mod tests {
             "no positional should route to Selector::Latest, got {:?}",
             req.selector
         );
+    }
+
+    #[test]
+    fn non_jsonl_non_uuid_path_is_rejected() {
+        // Without this guard, `mx session export README.md` would
+        // route to Selector::Session("README") and fail downstream
+        // with a codex-flavored "session not found" error — confusing
+        // because the input was never a plausible session path.
+        let err = build_alias_request(Some("README.md".to_string()), None)
+            .expect_err("non-jsonl, non-uuid path must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("session JSONL file"),
+            "error must explain expected input shape; got: {msg}"
+        );
+        assert!(
+            msg.contains("mx codex export --session"),
+            "error must hint at the replacement command; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn uuid_shaped_stem_without_extension_accepted() {
+        // The codex sometimes refers to sessions by bare UUID; accept
+        // those without a file extension as a courtesy.
+        let req = build_alias_request(
+            Some("c3744b8d-5719-4df2-924f-707945438494".to_string()),
+            None,
+        )
+        .expect("uuid-shaped stem should pass validation");
+        match req.selector {
+            Selector::Session(SessionRef(ref id)) => {
+                assert_eq!(id, "c3744b8d-5719-4df2-924f-707945438494");
+            }
+            other => panic!("expected Selector::Session, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn is_uuid_shaped_accepts_short_and_full_forms() {
+        assert!(is_uuid_shaped("aaaaaaaa"));
+        assert!(is_uuid_shaped("c3744b8d-5719-4df2-924f-707945438494"));
+        assert!(!is_uuid_shaped("README"));
+        assert!(!is_uuid_shaped("notes"));
+        assert!(!is_uuid_shaped("zzzzzzzz")); // 8 chars but not hex
+        assert!(!is_uuid_shaped("c3744b8d_5719_4df2_924f_707945438494")); // wrong separators
     }
 
     #[test]
