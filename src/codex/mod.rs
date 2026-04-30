@@ -3,6 +3,7 @@ pub(crate) mod export;
 mod images;
 pub mod index;
 mod migrate;
+pub(crate) mod notices;
 mod read;
 mod transcript;
 
