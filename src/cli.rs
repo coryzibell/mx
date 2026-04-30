@@ -1185,7 +1185,11 @@ pub enum CodexCommands {
         #[arg(long)]
         clean: bool,
 
-        /// Include agent sub-session conversations in clean transcript
+        /// Include agent sub-session conversations in clean transcript.
+        ///
+        /// Requires `subagents` in `--include` (the default; if you pass
+        /// `--include none` or any value without `subagents`, this flag
+        /// will error at parse time rather than silently no-op).
         #[arg(long, requires = "clean")]
         include_agents: bool,
 

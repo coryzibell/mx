@@ -93,6 +93,16 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             include,
         } => {
             let include_set = codex::IncludeSet::parse(&include)?;
+            // W3: --include-agents only does anything when subagents are
+            // also being captured. Silently doing nothing was confusing
+            // — fail-loud so the operator can correct the invocation.
+            if include_agents && !include_set.subagents {
+                anyhow::bail!(
+                    "--include-agents requires `subagents` in --include (got --include='{}'). \
+                     Either drop --include-agents or add `subagents` to --include.",
+                    include
+                );
+            }
             codex::save_session(path, all, clean, include_agents, include_set)?;
             Ok(())
         }
@@ -901,5 +911,46 @@ mod try_decode_commit_body_tests {
                 algo
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod codex_save_validation_tests {
+    //! W3 from Verdictia's PR #268 review: `--include-agents` without
+    //! `subagents` in `--include` was a silent no-op. The handler now
+    //! errors at the seam between CLI parsing and the codex writer; we
+    //! cover that edge here.
+    use super::*;
+    use crate::cli::CodexCommands;
+
+    fn save_cmd(include_agents: bool, include: &str) -> CodexCommands {
+        CodexCommands::Save {
+            path: None,
+            all: false,
+            clean: true,
+            include_agents,
+            include: include.to_string(),
+        }
+    }
+
+    #[test]
+    fn include_agents_without_subagents_errors() {
+        let result = handle_codex(save_cmd(true, "none"));
+        let err = result.expect_err("--include-agents + --include none must error");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--include-agents") && msg.contains("subagents"),
+            "error must explain the constraint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn include_agents_without_subagents_token_errors_even_with_others() {
+        // `mcp` alone — no subagents in the set — also fails.
+        let result = handle_codex(save_cmd(true, "mcp,history"));
+        assert!(
+            result.is_err(),
+            "--include-agents + --include without subagents must error"
+        );
     }
 }
