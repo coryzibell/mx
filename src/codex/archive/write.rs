@@ -545,8 +545,19 @@ pub(crate) fn save_all_sessions(
 ) -> Result<ArchiveResult> {
     let projects_dir = crate::paths::claude_projects_dir();
 
+    // A missing `~/.claude/projects/` is a normal state -- a fresh user
+    // who has never run Claude, or a CI environment that has no live
+    // Claude install, will land here. Treating it as a hard error makes
+    // `mx codex archive --all` (and the `--archive-first` export hop
+    // that wraps it) blow up on first run. Instead, we treat "no
+    // projects dir" as "no sessions to archive", warn on stderr so the
+    // operator knows nothing was scanned, and return an empty summary.
     if !projects_dir.exists() {
-        anyhow::bail!("Claude projects directory not found");
+        eprintln!(
+            "note: no Claude projects found at {}; nothing to archive",
+            projects_dir.display()
+        );
+        return Ok(ArchiveResult::default());
     }
 
     let codex_dir = get_codex_dir()?;

@@ -278,7 +278,17 @@ pub fn claude_dir() -> PathBuf {
 }
 
 /// `~/.claude/projects/` -- read-only by convention.
+///
+/// Honors the `MX_CLAUDE_PROJECTS_DIR` environment variable as an
+/// override. Tests set this to a controlled tempdir so they don't
+/// depend on the developer's (or CI machine's) live `~/.claude/`
+/// state. Production paths reach this through the same surface, so
+/// the override is opt-in via env var only — no behavior change for
+/// real users.
 pub fn claude_projects_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("MX_CLAUDE_PROJECTS_DIR") {
+        return PathBuf::from(override_dir);
+    }
     claude_dir().join("projects")
 }
 
@@ -374,9 +384,14 @@ pub fn wonka_vault_archives_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     // Tests call the `_with` variants directly with explicit parameters,
     // avoiding any env-var mutation and running safely in parallel.
+    // The handful of tests that DO observe `claude_projects_dir()`'s env
+    // override (`MX_CLAUDE_PROJECTS_DIR`) are marked `#[serial]` so they
+    // can clear the env without racing concurrent codex tests that set
+    // the override to a tempdir.
 
     #[test]
     fn mx_home_default_when_unset() {
@@ -571,10 +586,25 @@ mod tests {
     // ---------------------------------------------------------------------
 
     #[test]
+    #[serial]
     fn claude_paths_under_home() {
+        // `claude_projects_dir()` reads `MX_CLAUDE_PROJECTS_DIR` for
+        // hermetic test overrides; clear it here so we observe the
+        // real default.
+        let prev = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
+        // SAFETY: process-wide env mutation, serialized via #[serial]
+        // so concurrent codex tests don't race on the override.
+        unsafe {
+            std::env::remove_var("MX_CLAUDE_PROJECTS_DIR");
+        }
         let home = dirs::home_dir().unwrap();
         assert_eq!(claude_projects_dir(), home.join(".claude").join("projects"));
         assert_eq!(claude_config_path(), home.join(".claude.json"));
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v);
+            }
+        }
     }
 
     #[test]
@@ -584,7 +614,16 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn claude_subagents_dir_layout() {
+        // Calls `claude_projects_dir()` transitively, which reads
+        // `MX_CLAUDE_PROJECTS_DIR`; clear it for the default-case
+        // assertion here.
+        let prev = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
+        // SAFETY: process-wide env mutation, serialized via #[serial].
+        unsafe {
+            std::env::remove_var("MX_CLAUDE_PROJECTS_DIR");
+        }
         let home = dirs::home_dir().unwrap();
         let p = claude_subagents_dir("-home-charlie-recipes-coryzibell-mx", "abc-123");
         let expected = home
@@ -594,6 +633,11 @@ mod tests {
             .join("abc-123")
             .join("subagents");
         assert_eq!(p, expected);
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v);
+            }
+        }
     }
 
     #[test]
