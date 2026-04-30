@@ -369,6 +369,95 @@ mod tests {
         (report, leaked.join("codex"))
     }
 
+    /// Add a "corrupt" session JSONL to an existing vault snapshot. The
+    /// file is unreadable (mode 000) so the archive pipeline's
+    /// `read_to_string` returns permission-denied — a realistic shape
+    /// for the failure mode S3 cares about.
+    fn drop_unreadable_session(vault_path: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        // Pick the first snapshot's slug dir.
+        let snap = fs::read_dir(vault_path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("session-"))
+            })
+            .expect("at least one snapshot");
+        let slug = snap.path().join("projects").join("-home-charlie");
+        let path = slug.join("deadbeef-corrupt-uuid-0000-000000000000.jsonl");
+        fs::write(&path, "this content cannot be read because chmod 000").unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// S3 from PR 272 review: a corrupt session JSONL in the vault must
+    /// not abort the whole backfill. The error is recorded on
+    /// `report.errors`, the other (valid) sessions still archive, and
+    /// `run_backfill` returns Ok overall — the non-fatal error model
+    /// must hold.
+    #[test]
+    #[serial]
+    fn backfill_per_session_failure_is_non_fatal() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join("codex");
+        fs::create_dir_all(&codex_dir).unwrap();
+
+        // 3 valid sessions across 3 snapshots (one each), then drop one
+        // corrupt session into the first snapshot for a total of 4
+        // sessions found (3 valid + 1 corrupt).
+        let vault = build_fake_vault(tmp.path(), 3, 1);
+        let corrupt = drop_unreadable_session(&vault);
+
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        // SAFETY: process-wide env mutation, serialized via ENV_LOCK +
+        // #[serial] so concurrent codex tests stay correct.
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_dir);
+        }
+
+        let report = run_backfill(&vault, ArchiveOptions::default())
+            .expect("backfill must return Ok even when a session fails");
+
+        // Restore permissions so TempDir cleanup doesn't choke.
+        use std::os::unix::fs::PermissionsExt;
+        if corrupt.exists() {
+            let mut perms = fs::metadata(&corrupt).unwrap().permissions();
+            perms.set_mode(0o644);
+            let _ = fs::set_permissions(&corrupt, perms);
+        }
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+
+        // 4 sessions found (3 valid + 1 corrupt), 3 archived.
+        assert_eq!(report.sessions_found, 4);
+        assert_eq!(report.sessions_archived, 3);
+        assert_eq!(report.sessions_skipped_already_archived, 0);
+
+        // Exactly one per-session error, and it points at the corrupt
+        // file.
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "expected exactly one error (the corrupt session), got: {:?}",
+            report
+                .errors
+                .iter()
+                .map(|(p, e)| format!("{}: {e}", p.display()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(report.errors[0].0, corrupt);
+    }
+
     #[test]
     #[serial]
     fn backfill_walks_snapshots_and_archives_sessions() {
