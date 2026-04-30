@@ -30,6 +30,20 @@ use crate::codex::export::read::LoadedArchive;
 
 static SYSTEM_REMINDER_RE: OnceLock<Regex> = OnceLock::new();
 
+/// Compiled pattern for stripping `<system-reminder>...</system-reminder>`
+/// blocks injected by the platform.
+///
+/// **Known limitation (v1, by design).** This is a textual heuristic: any
+/// occurrence of the byte sequence `<system-reminder>...</system-reminder>`
+/// in a string field is removed, regardless of who wrote it. A user
+/// message that legitimately quotes that sequence — e.g. an excerpt of a
+/// meta-conversation about reminders — will be incorrectly stripped along
+/// with the platform-injected blocks. Acceptable for v1: the failure mode
+/// is a redaction, not data leakage, and the false-positive rate on real
+/// transcripts is effectively zero. Future work could anchor stripping to
+/// the platform-injection envelope (a stable discriminator on the message
+/// shape rather than a substring match) once the platform exposes one.
+/// Tracked as TODO(#254-followup).
 fn system_reminder_re() -> &'static Regex {
     SYSTEM_REMINDER_RE.get_or_init(|| {
         Regex::new(r"(?s)<system-reminder>.*?</system-reminder>")
@@ -39,6 +53,12 @@ fn system_reminder_re() -> &'static Regex {
 
 /// Cross-emitter accessor: the JSON emitter scrubs `<system-reminder>`
 /// blocks from string fields too, so it borrows the same compiled regex.
+///
+/// Inherits the textual-heuristic limitation documented on
+/// [`system_reminder_re`]. The JSON walker recurses into every string
+/// value in the document, so the same false-positive applies anywhere a
+/// quoted `<system-reminder>...</system-reminder>` appears in legitimate
+/// content.
 pub(crate) fn system_reminder_re_for_export() -> &'static Regex {
     system_reminder_re()
 }
@@ -345,6 +365,45 @@ mod tests {
         inc.system_reminders = true;
         let out = render(&arc, &m, &inc).unwrap();
         assert!(out.contains("secret"));
+    }
+
+    /// W2 / TODO(#254-followup): the `<system-reminder>` regex is a
+    /// textual heuristic and will strip the byte sequence even from
+    /// legitimately-quoted user prose (e.g. a meta-conversation excerpt).
+    /// This test documents the v1 limitation by asserting the
+    /// known-incorrect behavior: a user message that quotes the pattern
+    /// IS stripped. When future work anchors stripping to the
+    /// platform-injection envelope, this assertion will need to flip
+    /// (the prose should survive) and that flip is the signal that the
+    /// limitation has been lifted.
+    #[test]
+    fn render_xfail_strips_legitimately_quoted_system_reminder() {
+        // The user is meta-quoting what a reminder block looks like;
+        // ideally this prose would be preserved.
+        let jsonl = concat!(
+            r#"{"type":"user","message":{"content":"For context, the platform sometimes injects <system-reminder>do X</system-reminder> blocks — please ignore them."}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"understood"}]}}"#,
+            "\n",
+        );
+        let m = fixture_manifest();
+        let arc = empty_archive_with_jsonl(jsonl);
+        let inc = ExportIncludeSet::default_clean(); // system_reminders=false
+        let out = render(&arc, &m, &inc).unwrap();
+        // XFAIL: the regex strips the quoted block from the user prose.
+        // When this changes (correctly preserving the user's quote), the
+        // assertions below should flip — that's the signal to revisit
+        // the doc comment on `system_reminder_re`.
+        assert!(
+            !out.contains("do X"),
+            "v1 textual heuristic strips the quoted reminder; if this assertion \
+             starts failing, the limitation has been lifted — update the doc \
+             comment on system_reminder_re()"
+        );
+        // Surrounding prose is preserved (the regex is non-greedy and
+        // only eats the matched span).
+        assert!(out.contains("the platform sometimes injects"));
+        assert!(out.contains("please ignore them"));
     }
 
     #[test]
