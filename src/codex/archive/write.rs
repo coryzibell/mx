@@ -1,42 +1,30 @@
+//! Per-session archive writer + the `--all` driver.
+//!
+//! This is the body that historically lived inline in `archive.rs`.
+//! Logic is unchanged; only the file boundary moved.
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use super::images::extract_images_from_jsonl;
-use super::transcript::{
+use super::super::images::extract_images_from_jsonl;
+use super::super::transcript::{
     build_agent_type_map, generate_clean_transcript, generate_clean_transcript_with_agents,
     resolve_agent_display_name, resolve_assistant_name, resolve_user_name,
 };
-use super::{AgentInfo, ArchiveEntry, MANIFEST_WRITE_VERSION, Manifest};
+use super::super::{MANIFEST_WRITE_VERSION, Manifest};
+use super::get_codex_dir;
+use super::paths::determine_archive_dir;
+use super::sources::find_agent_sessions;
 
-/// Archive the current session to the codex
-pub(crate) fn save_session(
-    session_path: Option<String>,
-    all: bool,
+/// Archive a single session JSONL into a fresh codex directory.
+pub(crate) fn archive_session(
+    session_path: &Path,
     clean: bool,
     include_agents: bool,
 ) -> Result<()> {
-    if all {
-        save_all_sessions(clean, include_agents)?;
-    } else {
-        let path = resolve_session_path(session_path)?;
-        archive_session(&path, clean, include_agents)?;
-    }
-    Ok(())
-}
-
-fn resolve_session_path(path: Option<String>) -> Result<PathBuf> {
-    if let Some(p) = path {
-        Ok(PathBuf::from(p))
-    } else {
-        crate::session::find_most_recent_session()
-    }
-}
-
-fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Result<()> {
     if !session_path.exists() {
         anyhow::bail!("Session file not found: {:?}", session_path);
     }
@@ -166,9 +154,7 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
             has_clean_transcript: Some(true),
             user_name: Some(user_name.clone()),
             assistant_name: Some(assistant_name.clone()),
-            // v5 sidecars not written yet (PR 2 wires these). Foundation
-            // PR bumps the version number only; payload is otherwise
-            // identical to a v2 manifest.
+            // v5 sidecars not written yet (later commits in PR 2 wire these).
             tool_output_count: None,
             mcp_log_count: None,
             history_lines: None,
@@ -233,7 +219,7 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
     }
 
     // Create manifest (schema v5; payload identical to v2 plus a higher
-    // version number until PR 2 wires the new sidecars).
+    // version number until later commits wire the new sidecars).
     let image_count = all_images.len();
     let manifest = Manifest {
         version: MANIFEST_WRITE_VERSION,
@@ -252,7 +238,7 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
         has_clean_transcript: None,
         user_name: Some(user_name),
         assistant_name: Some(assistant_name),
-        // v5 sidecars not written yet (PR 2 wires these).
+        // v5 sidecars not written yet (later commits in PR 2 wire these).
         tool_output_count: None,
         mcp_log_count: None,
         history_lines: None,
@@ -271,148 +257,8 @@ fn archive_session(session_path: &Path, clean: bool, include_agents: bool) -> Re
     Ok(())
 }
 
-fn find_agent_sessions(
-    session_path: &Path,
-    _session_modified: &SystemTime,
-) -> Result<Vec<AgentInfo>> {
-    let parent_dir = session_path
-        .parent()
-        .context("Session file has no parent directory")?;
-
-    let session_stem = session_path
-        .file_stem()
-        .context("Session file has no stem")?;
-
-    // Construct path to subagents directory: {project}/<session_id>/subagents/
-    let subagents_dir = parent_dir.join(session_stem).join("subagents");
-
-    let mut agents = Vec::new();
-
-    // Only search if subagents directory exists
-    if subagents_dir.exists() {
-        for entry in fs::read_dir(&subagents_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            // Check if it's an agent-*.jsonl file
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && name.starts_with("agent-")
-                && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-            {
-                // Check if modification time is within session window
-                if let Ok(meta) = entry.metadata()
-                    && let Ok(_modified) = meta.modified()
-                {
-                    // Simple heuristic: agent file modified around same time as session
-                    // Could be improved with actual timestamp parsing from JSONL
-                    let content = fs::read_to_string(&path)?;
-                    let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
-
-                    agents.push(AgentInfo {
-                        id: path.to_string_lossy().to_string(), // Store full path temporarily
-                        file: format!("agents/{}", name),
-                        messages,
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(agents)
-}
-
-fn determine_archive_dir(codex_dir: &Path, base_name: &str) -> Result<PathBuf> {
-    let base_dir = codex_dir.join(base_name);
-
-    if !base_dir.exists() {
-        return Ok(base_dir);
-    }
-
-    // Find highest incremental number
-    let mut max_incremental = 0;
-    for entry in fs::read_dir(codex_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        if name_str.starts_with(base_name)
-            && let Some(suffix) = name_str.strip_prefix(base_name)
-            && let Some(num_str) = suffix.strip_prefix('.')
-            && let Ok(num) = num_str.parse::<u32>()
-        {
-            max_incremental = max_incremental.max(num);
-        }
-    }
-
-    Ok(codex_dir.join(format!("{}.{}", base_name, max_incremental + 1)))
-}
-
-pub(super) fn collect_archives(codex_dir: &Path) -> Result<Vec<ArchiveEntry>> {
-    let mut archives = Vec::new();
-
-    for entry in fs::read_dir(codex_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if !path.is_dir() {
-            continue;
-        }
-
-        let manifest_path = path.join("manifest.json");
-        if !manifest_path.exists() {
-            continue;
-        }
-
-        let manifest_content = fs::read_to_string(&manifest_path)?;
-        let manifest: Manifest = serde_json::from_str(&manifest_content)?;
-
-        let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
-        let (short_id, incremental) = parse_archive_name(&dir_name);
-
-        archives.push(ArchiveEntry {
-            dir_name,
-            short_id,
-            incremental,
-            manifest,
-        });
-    }
-
-    Ok(archives)
-}
-
-fn parse_archive_name(name: &str) -> (String, u32) {
-    // Extract short UUID from name like "2026-01-03-141500-abc12345" or "2026-01-03-141500-abc12345.1"
-    if let Some(dot_pos) = name.rfind('.')
-        && let Ok(num) = name[dot_pos + 1..].parse::<u32>()
-    {
-        let base = &name[..dot_pos];
-        let short_id = extract_short_id(base);
-        return (short_id, num);
-    }
-
-    (extract_short_id(name), 0)
-}
-
-fn extract_short_id(name: &str) -> String {
-    // Extract last part after last hyphen (the short UUID)
-    name.split('-').next_back().unwrap_or(name).to_string()
-}
-
-pub(super) fn get_base_archive_name(name: &str) -> String {
-    // Strip incremental suffix (.N) if present
-    if let Some(dot_pos) = name.rfind('.')
-        && name[dot_pos + 1..].parse::<u32>().is_ok()
-    {
-        return name[..dot_pos].to_string();
-    }
-    name.to_string()
-}
-
-pub(super) fn get_codex_dir() -> Result<PathBuf> {
-    Ok(crate::paths::codex_dir())
-}
-
-fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
+/// Bulk-archive every unarchived session under `~/.claude/projects/`.
+pub(crate) fn save_all_sessions(clean: bool, include_agents: bool) -> Result<()> {
     let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
