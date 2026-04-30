@@ -1038,6 +1038,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    // Windows: by-project index uses relative symlinks; production
+    // make_symlink is cfg(unix)-gated, so this scenario is unix-only.
     fn rebuild_populated_codex_creates_symlinks() {
         let tmp = tempfile::tempdir().unwrap();
         let codex = tmp.path();
@@ -1135,6 +1138,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    // Windows: rollback exercises the symlinked by-project tree, which
+    // is unix-only (see make_symlink).
     fn rebuild_rolls_back_on_swap_failure() {
         // If the staging->by-project rename fails, the previous index
         // must be restored. We force the failure by pre-creating a
@@ -1338,6 +1344,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    // Windows: cache-from-existing-index requires the symlinked
+    // by-project tree, which is unix-only.
     fn open_populates_cache_from_existing_index() {
         // S2: after a rebuild leaves a fresh by-project/ tree on disk,
         // a *new* ProjectIndex opened against the same codex must see

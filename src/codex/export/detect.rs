@@ -487,6 +487,11 @@ mod tests {
 
     #[test]
     #[serial]
+    #[cfg(unix)]
+    // Windows: count_in_tmp_root is cfg(unix)-gated (returns 0); the
+    // override path is exercised only on unix. Tool-output capture is
+    // a unix-only feature in v1 because /tmp/claude-<uid> has no
+    // stable Windows analogue.
     fn detect_counts_unarchived_tool_outputs_via_override() {
         // Exercise the env-var override path: a fixture /tmp tree with
         // two sessions, one of which IS in the codex. Expect a count of
