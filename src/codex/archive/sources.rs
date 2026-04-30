@@ -43,19 +43,96 @@ impl TimestampWindow {
     }
 }
 
+/// Derive the session's timestamp window from its JSONL.
+///
+/// Walks the session JSONL once, parsing each line for a top-level
+/// `timestamp` (ISO-8601 string). Returns:
+///
+/// - `session_start` = first parseable timestamp in the file
+/// - `session_end`   = last parseable timestamp in the file
+///
+/// Falls back to file metadata if the JSONL is empty or has no
+/// parseable timestamps:
+///
+/// - `session_end`   <- file mtime
+/// - `session_start` <- file `created()` (or mtime if `created()` is
+///   unsupported on the filesystem)
+///
+/// On the fallback path a `tracing`-style stderr warning is emitted so
+/// the operator knows the heuristic kicked in. Empty / unparseable
+/// histories are not an error — the unification architecture lets the
+/// session window be approximate.
+pub(super) fn derive_session_window(session_path: &Path) -> Result<TimestampWindow> {
+    let metadata = fs::metadata(session_path)
+        .with_context(|| format!("session metadata: {}", session_path.display()))?;
+
+    let mut first: Option<DateTime<Utc>> = None;
+    let mut last: Option<DateTime<Utc>> = None;
+
+    if let Ok(content) = fs::read_to_string(session_path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let ts = match value.get("timestamp") {
+                Some(serde_json::Value::String(s)) => s.parse::<DateTime<Utc>>().ok(),
+                Some(serde_json::Value::Number(n)) => n.as_i64().and_then(|secs| {
+                    let (s, ns) = if secs > 1_000_000_000_000 {
+                        (secs / 1000, ((secs % 1000) * 1_000_000) as u32)
+                    } else {
+                        (secs, 0u32)
+                    };
+                    DateTime::<Utc>::from_timestamp(s, ns)
+                }),
+                _ => None,
+            };
+            if let Some(ts) = ts {
+                if first.is_none() {
+                    first = Some(ts);
+                }
+                last = Some(ts);
+            }
+        }
+    }
+
+    if let (Some(s), Some(e)) = (first, last) {
+        // Order defensively: a malformed JSONL with shuffled timestamps
+        // shouldn't yield an inverted window.
+        let (start, end) = if s <= e { (s, e) } else { (e, s) };
+        return Ok(TimestampWindow::new(start, end));
+    }
+
+    // Fallback: derive from file metadata. mtime is the most reliable
+    // proxy for "when was the session last touched"; created() can be
+    // unavailable on some filesystems, so we degrade to mtime.
+    let mtime: DateTime<Utc> = metadata.modified()?.into();
+    let created: DateTime<Utc> = metadata.created().map(|c| c.into()).unwrap_or(mtime);
+    let (start, end) = if created <= mtime {
+        (created, mtime)
+    } else {
+        (mtime, created)
+    };
+    eprintln!(
+        "warning: no parseable timestamps in {} — falling back to file metadata for session window",
+        session_path.display()
+    );
+    Ok(TimestampWindow::new(start, end))
+}
+
 /// Find subagent JSONLs that belong to a given parent session.
 ///
 /// Walks `<project>/<session_id>/subagents/` (the layout Claude writes
 /// into) and returns every `agent-*.jsonl` it finds.
 ///
-/// The `_session_modified` parameter is retained on the signature for
-/// future window-tightening; today it is unused — the directory itself
-/// is already scoped by `session_id`, so any agent JSONL inside it is
-/// in-scope by construction.
-pub(super) fn find_agent_sessions(
-    session_path: &Path,
-    _session_modified: &SystemTime,
-) -> Result<Vec<AgentInfo>> {
+/// The directory itself is already scoped by `session_id`, so any agent
+/// JSONL inside it is in-scope by construction. No timestamp filtering
+/// is needed here — that's why this walker takes no `TimestampWindow`.
+pub(super) fn find_agent_sessions(session_path: &Path) -> Result<Vec<AgentInfo>> {
     let parent_dir = session_path
         .parent()
         .context("Session file has no parent directory")?;
@@ -79,8 +156,6 @@ pub(super) fn find_agent_sessions(
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("agent-")
                 && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                && let Ok(meta) = entry.metadata()
-                && let Ok(_modified) = meta.modified()
             {
                 let content = fs::read_to_string(&path)?;
                 let messages = content.lines().filter(|l| !l.trim().is_empty()).count();
@@ -252,6 +327,81 @@ mod tests {
             now + Duration::seconds(start_offset_secs),
             now + Duration::seconds(end_offset_secs),
         )
+    }
+
+    // ---------------------------------------------------------------------
+    // derive_session_window
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn derive_session_window_uses_jsonl_first_and_last_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("c3744b8d.jsonl");
+        let body = concat!(
+            r#"{"role":"user","timestamp":"2026-04-29T10:00:00Z"}"#,
+            "\n",
+            r#"{"role":"assistant","timestamp":"2026-04-29T10:05:00Z"}"#,
+            "\n",
+            r#"{"role":"user","timestamp":"2026-04-29T10:42:30Z"}"#,
+            "\n",
+        );
+        fs::write(&session_path, body).unwrap();
+
+        let w = derive_session_window(&session_path).unwrap();
+        let expected_start: DateTime<Utc> = "2026-04-29T10:00:00Z".parse().unwrap();
+        let expected_end: DateTime<Utc> = "2026-04-29T10:42:30Z".parse().unwrap();
+        assert_eq!(w.start, expected_start);
+        assert_eq!(w.end, expected_end);
+    }
+
+    #[test]
+    fn derive_session_window_skips_lines_without_parseable_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("aa.jsonl");
+        let body = concat!(
+            "not json\n",
+            r#"{"no":"timestamp"}"#,
+            "\n",
+            r#"{"role":"user","timestamp":"2026-04-29T11:00:00Z"}"#,
+            "\n",
+            r#"{"role":"assistant","timestamp":"2026-04-29T11:30:00Z"}"#,
+            "\n",
+        );
+        fs::write(&session_path, body).unwrap();
+
+        let w = derive_session_window(&session_path).unwrap();
+        let expected_start: DateTime<Utc> = "2026-04-29T11:00:00Z".parse().unwrap();
+        let expected_end: DateTime<Utc> = "2026-04-29T11:30:00Z".parse().unwrap();
+        assert_eq!(w.start, expected_start);
+        assert_eq!(w.end, expected_end);
+    }
+
+    #[test]
+    fn derive_session_window_falls_back_to_metadata_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("empty.jsonl");
+        fs::write(&session_path, "").unwrap();
+
+        // The fallback path uses file metadata: end <- mtime, start <- created (or mtime).
+        // Sanity: the call must succeed and produce a window that contains
+        // `now` within a reasonable slop.
+        let w = derive_session_window(&session_path).unwrap();
+        let now = Utc::now();
+        // start <= end is required; either end is "right now" or close to it.
+        assert!(w.start <= w.end, "fallback window must be ordered");
+        let drift = (now - w.end).num_seconds().abs();
+        assert!(drift < 60, "fallback end should be close to mtime/now");
+    }
+
+    #[test]
+    fn derive_session_window_falls_back_when_no_parseable_timestamps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session_path = tmp.path().join("garbage.jsonl");
+        fs::write(&session_path, "not json\n{\"no\":1}\n").unwrap();
+        let w = derive_session_window(&session_path).unwrap();
+        // We can't assert exact values, but the call must succeed and
+        // return a non-inverted window.
+        assert!(w.start <= w.end);
     }
 
     #[test]

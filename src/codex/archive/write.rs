@@ -22,7 +22,8 @@ use super::get_codex_dir;
 use super::include::IncludeSet;
 use super::paths::determine_archive_dir;
 use super::sources::{
-    TimestampWindow, find_agent_sessions, find_history_slice, find_mcp_logs, find_tool_outputs,
+    TimestampWindow, derive_session_window, find_agent_sessions, find_history_slice, find_mcp_logs,
+    find_tool_outputs,
 };
 
 /// Internal summary of a `--all` run, distilled into the public
@@ -267,7 +268,6 @@ pub(crate) fn archive_session(
         .to_string();
 
     let metadata = fs::metadata(session_path)?;
-    let modified = metadata.modified()?;
     let size_bytes = metadata.len();
 
     // Determine project path (parent directory name in .claude/projects/)
@@ -286,9 +286,15 @@ pub(crate) fn archive_session(
     hasher.update(&content);
     let checksum = format!("sha256:{:x}", hasher.finalize());
 
-    // Determine session start/end from file times
-    let session_start: DateTime<Utc> = modified.into();
-    let session_end: DateTime<Utc> = Utc::now();
+    // Derive the session window from the JSONL's first/last event
+    // timestamps. This is the load-bearing input to MCP / history
+    // attribution — using mtime alone (the pre-fix heuristic) misses
+    // the actual session boundary by however long the user took to run
+    // their last tool. `derive_session_window` falls back to file
+    // metadata for empty/garbage JSONLs and warns on stderr.
+    let window = derive_session_window(session_path)?;
+    let session_start: DateTime<Utc> = window.start;
+    let session_end: DateTime<Utc> = window.end;
 
     // Create archive directory
     let codex_dir = get_codex_dir()?;
@@ -308,15 +314,10 @@ pub(crate) fn archive_session(
     // behavior; an explicit `--include none` (or any set without
     // `subagents`) suppresses it.
     let agents: Vec<AgentInfo> = if include.subagents {
-        find_agent_sessions(session_path, &modified)?
+        find_agent_sessions(session_path)?
     } else {
         Vec::new()
     };
-
-    // Compute the session window once. Today this is approximate (file
-    // mtime → "now"); a future PR may parse the session JSONL's first
-    // and last event timestamps for tighter MCP/history attribution.
-    let window = TimestampWindow::new(session_start, session_end);
 
     if clean {
         // Clean mode: generate conversation.md + extract images — no JSONL, no agent file copies
