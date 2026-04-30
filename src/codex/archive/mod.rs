@@ -192,3 +192,95 @@ pub(super) fn collect_archives(codex_dir: &Path) -> Result<Vec<ArchiveEntry>> {
 pub(super) fn get_codex_dir() -> Result<PathBuf> {
     Ok(crate::paths::codex_dir())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex::Manifest;
+
+    /// Status-quo invocation must NOT emit the new v5-only fields in the
+    /// serialized manifest. This is the load-bearing constraint of PR 2:
+    /// `mx codex archive` with no `--include` produces output that
+    /// (modulo the version field already at 5 from PR 1) is byte-identical
+    /// to the pre-PR-2 implementation.
+    ///
+    /// We exercise this by running the writer against a tiny synthetic
+    /// session JSONL inside a tempdir, with `MX_CODEX_PATH` redirected
+    /// at the codex output dir. The resulting manifest.json is then
+    /// checked for the absence of the new field names.
+    #[test]
+    fn status_quo_manifest_omits_new_v5_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_dir = tmp.path().join("codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+
+        // Build a minimal session JSONL (one line is enough)
+        let session_dir = tmp.path().join("project-slug");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let session_path = session_dir.join("c3744b8d-test.jsonl");
+        std::fs::write(
+            &session_path,
+            r#"{"role":"user","content":"hi","timestamp":"2026-04-29T10:00:00Z"}
+"#,
+        )
+        .unwrap();
+
+        // SAFETY: setting an env var is process-wide. We do it here
+        // because paths::codex_dir() reads it on every call (no
+        // OnceLock cache for that path), and serial-test isn't in our
+        // dep tree. Tests in this file must not run in parallel with
+        // other codex_dir-touching tests; if more land, gate them
+        // behind a mutex.
+        let prev = std::env::var("MX_CODEX_PATH").ok();
+        unsafe {
+            std::env::set_var("MX_CODEX_PATH", &codex_dir);
+        }
+
+        let result = run(
+            ArchiveRequest::Single(session_path),
+            ArchiveOptions::default(),
+        );
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CODEX_PATH", v),
+                None => std::env::remove_var("MX_CODEX_PATH"),
+            }
+        }
+
+        let result = result.expect("archive::run failed");
+        assert_eq!(result.archived_count, 1);
+        let archive_dir = result.archive_paths.first().expect("no archive dir");
+
+        let manifest_text =
+            std::fs::read_to_string(archive_dir.join("manifest.json")).expect("manifest missing");
+
+        // The new v5-only field names must NOT appear in the serialized
+        // status-quo manifest. They're skip_serializing_if-guarded for
+        // exactly this reason.
+        assert!(
+            !manifest_text.contains("tool_output_count"),
+            "status-quo manifest leaked tool_output_count: {manifest_text}"
+        );
+        assert!(
+            !manifest_text.contains("mcp_log_count"),
+            "status-quo manifest leaked mcp_log_count"
+        );
+        assert!(
+            !manifest_text.contains("history_lines"),
+            "status-quo manifest leaked history_lines"
+        );
+        assert!(
+            !manifest_text.contains("source_breakdown"),
+            "status-quo manifest leaked source_breakdown"
+        );
+
+        // And the manifest still parses as a v5 Manifest.
+        let m: Manifest = serde_json::from_str(&manifest_text).unwrap();
+        assert_eq!(m.version, crate::codex::MANIFEST_WRITE_VERSION);
+        assert!(m.tool_output_count.is_none());
+        assert!(m.mcp_log_count.is_none());
+        assert!(m.history_lines.is_none());
+        assert!(m.source_breakdown.is_none());
+    }
+}

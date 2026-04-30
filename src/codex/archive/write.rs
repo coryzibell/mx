@@ -17,11 +17,13 @@ use super::super::transcript::{
     build_agent_type_map, generate_clean_transcript, generate_clean_transcript_with_agents,
     resolve_agent_display_name, resolve_assistant_name, resolve_user_name,
 };
-use super::super::{AgentInfo, MANIFEST_WRITE_VERSION, Manifest};
+use super::super::{AgentInfo, MANIFEST_WRITE_VERSION, Manifest, SourceBreakdown};
 use super::get_codex_dir;
 use super::include::IncludeSet;
 use super::paths::determine_archive_dir;
-use super::sources::find_agent_sessions;
+use super::sources::{
+    TimestampWindow, find_agent_sessions, find_history_slice, find_mcp_logs, find_tool_outputs,
+};
 
 /// Internal summary of a `--all` run, distilled into the public
 /// `ArchiveResult` by `archive::run`.
@@ -30,6 +32,214 @@ pub(super) struct BulkSummary {
     pub archived_count: usize,
     pub skipped_count: usize,
     pub archive_paths: Vec<PathBuf>,
+}
+
+/// Best-effort uid lookup. Reads the uid of `~/` via Unix metadata —
+/// this side-steps a libc/nix dependency for a single integer.
+///
+/// Returns `None` on non-Unix platforms or if the home dir is unreadable
+/// (the new MCP/tool-output walkers degrade gracefully when this is
+/// missing — they just yield empty results).
+fn current_uid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let home = dirs::home_dir()?;
+        let meta = std::fs::metadata(home).ok()?;
+        Some(meta.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Encode the home directory as Claude does: leading `-`, separator
+/// `/` → `-`. E.g. `/home/charlie` → `-home-charlie`.
+fn home_user_slug() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let s = home.to_string_lossy();
+    Some(s.replace('/', "-"))
+}
+
+/// Sum the byte sizes of every file under `archive_dir/agents/`.
+/// Returns 0 if the directory does not exist (no agents captured).
+fn total_agents_bytes(archive_dir: &Path) -> u64 {
+    let agents_dir = archive_dir.join("agents");
+    if !agents_dir.exists() {
+        return 0;
+    }
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(&agents_dir) {
+        for e in entries.flatten() {
+            if let Ok(meta) = e.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// Build the optional `source_breakdown` field. Returns `None` when no
+/// new (PR 2) sidecars were captured AND the legacy byte counts are
+/// also zero, so status-quo archives stay byte-identical to v2/v3/v4
+/// manifests (which never carried a breakdown).
+fn build_source_breakdown(
+    session_jsonl_bytes: u64,
+    agents_bytes: u64,
+    images_bytes: u64,
+    sidecars: &SidecarCounts,
+) -> Option<SourceBreakdown> {
+    let any_new_sidecar = sidecars.mcp_log_count.is_some()
+        || sidecars.tool_output_count.is_some()
+        || sidecars.history_lines.is_some();
+    if !any_new_sidecar {
+        // Status-quo: don't emit the field at all. Keeps manifest output
+        // byte-identical to the pre-PR-2 implementation.
+        return None;
+    }
+    Some(SourceBreakdown {
+        session_jsonl_bytes,
+        agents_bytes,
+        images_bytes,
+        mcp_bytes: sidecars.mcp_bytes,
+        tool_output_bytes: sidecars.tool_output_bytes,
+        history_bytes: sidecars.history_bytes,
+    })
+}
+
+/// Counts produced by the optional sidecar capture step.
+#[derive(Debug, Default)]
+struct SidecarCounts {
+    tool_output_count: Option<usize>,
+    mcp_log_count: Option<usize>,
+    history_lines: Option<usize>,
+    mcp_bytes: u64,
+    tool_output_bytes: u64,
+    history_bytes: u64,
+}
+
+/// Capture the optional new sidecars (MCP / tool-output / history)
+/// according to `include`, writing each into a subdirectory of
+/// `archive_dir`. Returns the per-source counts so the caller can
+/// populate the manifest's v5 fields.
+///
+/// Each sub-walker is best-effort: failures inside one source are
+/// logged to stderr and that source is left out of the archive,
+/// rather than aborting the whole archive run. Archive success is the
+/// load-bearing operation; the new sidecars are auxiliary.
+///
+/// `cwd_encoded` is the same encoding Claude uses (the `project_path`
+/// stored on the manifest); `session_uuid` is the session_id.
+fn capture_optional_sidecars(
+    archive_dir: &Path,
+    cwd_encoded: Option<&str>,
+    session_uuid: &str,
+    window: TimestampWindow,
+    include: &IncludeSet,
+) -> SidecarCounts {
+    let mut counts = SidecarCounts::default();
+
+    // ---- MCP logs ----
+    if include.mcp
+        && let Some(cwd) = cwd_encoded
+    {
+        match find_mcp_logs(cwd, window) {
+            Ok(paths) => {
+                let mcp_dir = archive_dir.join("mcp");
+                if let Err(e) = fs::create_dir_all(&mcp_dir) {
+                    eprintln!("warning: failed to create mcp/ sidecar dir: {e}");
+                } else {
+                    let mut n = 0usize;
+                    let mut bytes = 0u64;
+                    for src in paths {
+                        let name = match src.file_name() {
+                            Some(n) => n.to_owned(),
+                            None => continue,
+                        };
+                        let dest = mcp_dir.join(&name);
+                        if let Err(e) = fs::copy(&src, &dest) {
+                            eprintln!("warning: failed to copy mcp log {src:?}: {e}");
+                            continue;
+                        }
+                        if let Ok(meta) = fs::metadata(&dest) {
+                            bytes += meta.len();
+                        }
+                        n += 1;
+                    }
+                    counts.mcp_log_count = Some(n);
+                    counts.mcp_bytes = bytes;
+                }
+            }
+            Err(e) => eprintln!("warning: mcp log walk failed: {e}"),
+        }
+    }
+
+    // ---- Tool outputs ----
+    if include.tool_output
+        && let (Some(uid), Some(user_slug)) = (current_uid(), home_user_slug())
+    {
+        match find_tool_outputs(uid, &user_slug, session_uuid) {
+            Ok(paths) => {
+                let to_dir = archive_dir.join("tool-output");
+                if let Err(e) = fs::create_dir_all(&to_dir) {
+                    eprintln!("warning: failed to create tool-output/ sidecar dir: {e}");
+                } else {
+                    let mut n = 0usize;
+                    let mut bytes = 0u64;
+                    for src in paths {
+                        let name = match src.file_name() {
+                            Some(n) => n.to_owned(),
+                            None => continue,
+                        };
+                        let dest = to_dir.join(&name);
+                        if let Err(e) = fs::copy(&src, &dest) {
+                            eprintln!("warning: failed to copy tool output {src:?}: {e}");
+                            continue;
+                        }
+                        if let Ok(meta) = fs::metadata(&dest) {
+                            bytes += meta.len();
+                        }
+                        n += 1;
+                    }
+                    counts.tool_output_count = Some(n);
+                    counts.tool_output_bytes = bytes;
+                }
+            }
+            Err(e) => eprintln!("warning: tool-output walk failed: {e}"),
+        }
+    }
+
+    // ---- History slice ----
+    if include.history {
+        match find_history_slice(window) {
+            Ok(lines) => {
+                let history_dir = archive_dir.join("history");
+                if let Err(e) = fs::create_dir_all(&history_dir) {
+                    eprintln!("warning: failed to create history/ sidecar dir: {e}");
+                } else {
+                    let payload = if lines.is_empty() {
+                        String::new()
+                    } else {
+                        let mut s = lines.join("\n");
+                        s.push('\n');
+                        s
+                    };
+                    let dest = history_dir.join("history.jsonl");
+                    let bytes = payload.len() as u64;
+                    if let Err(e) = fs::write(&dest, &payload) {
+                        eprintln!("warning: failed to write history slice: {e}");
+                    } else {
+                        counts.history_lines = Some(lines.len());
+                        counts.history_bytes = bytes;
+                    }
+                }
+            }
+            Err(e) => eprintln!("warning: history walk failed: {e}"),
+        }
+    }
+
+    counts
 }
 
 /// Archive a single session JSONL into a fresh codex directory. Returns
@@ -103,6 +313,11 @@ pub(crate) fn archive_session(
         Vec::new()
     };
 
+    // Compute the session window once. Today this is approximate (file
+    // mtime → "now"); a future PR may parse the session JSONL's first
+    // and last event timestamps for tighter MCP/history attribution.
+    let window = TimestampWindow::new(session_start, session_end);
+
     if clean {
         // Clean mode: generate conversation.md + extract images — no JSONL, no agent file copies
         let images_dir = archive_dir.join("images");
@@ -160,6 +375,18 @@ pub(crate) fn archive_session(
         let images_size: u64 = all_images.iter().map(|img| img.size_bytes).sum();
         let archive_size_bytes = md_size + images_size;
 
+        // Capture optional new sidecars (gated on the include set).
+        // Status-quo callers never trigger this — all three flags are
+        // off by default, leaving the manifest byte-identical.
+        let sidecars = capture_optional_sidecars(
+            &archive_dir,
+            project_path.as_deref(),
+            &session_id,
+            window,
+            include,
+        );
+        let breakdown = build_source_breakdown(0, 0, images_size, &sidecars);
+
         let manifest = Manifest {
             version: MANIFEST_WRITE_VERSION,
             session_id: session_id.clone(),
@@ -177,11 +404,10 @@ pub(crate) fn archive_session(
             has_clean_transcript: Some(true),
             user_name: Some(user_name.clone()),
             assistant_name: Some(assistant_name.clone()),
-            // v5 sidecars not written yet (later commits in PR 2 wire these).
-            tool_output_count: None,
-            mcp_log_count: None,
-            history_lines: None,
-            source_breakdown: None,
+            tool_output_count: sidecars.tool_output_count,
+            mcp_log_count: sidecars.mcp_log_count,
+            history_lines: sidecars.history_lines,
+            source_breakdown: breakdown,
         };
 
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
@@ -237,8 +463,26 @@ pub(crate) fn archive_session(
         }
     }
 
-    // Create manifest (schema v5; payload identical to v2 plus a higher
-    // version number until later commits wire the new sidecars).
+    // Capture optional new sidecars (gated on the include set).
+    // Status-quo callers leave all three flags off, keeping manifest
+    // bytes identical to the pre-PR-2 layout.
+    let sidecars = capture_optional_sidecars(
+        &archive_dir,
+        project_path.as_deref(),
+        &session_id,
+        window,
+        include,
+    );
+
+    // Per-source byte counts for the v5 breakdown. session.jsonl bytes
+    // are taken from the destination file (post image-extraction).
+    let session_jsonl_bytes = fs::metadata(&dest_session).map(|m| m.len()).unwrap_or(0);
+    let agents_bytes = total_agents_bytes(&archive_dir);
+    let images_bytes: u64 = all_images.iter().map(|img| img.size_bytes).sum();
+    let breakdown =
+        build_source_breakdown(session_jsonl_bytes, agents_bytes, images_bytes, &sidecars);
+
+    // Create manifest (schema v5).
     let image_count = all_images.len();
     let manifest = Manifest {
         version: MANIFEST_WRITE_VERSION,
@@ -257,11 +501,10 @@ pub(crate) fn archive_session(
         has_clean_transcript: None,
         user_name: Some(user_name),
         assistant_name: Some(assistant_name),
-        // v5 sidecars not written yet (later commits in PR 2 wire these).
-        tool_output_count: None,
-        mcp_log_count: None,
-        history_lines: None,
-        source_breakdown: None,
+        tool_output_count: sidecars.tool_output_count,
+        mcp_log_count: sidecars.mcp_log_count,
+        history_lines: sidecars.history_lines,
+        source_breakdown: breakdown,
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
