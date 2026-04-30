@@ -1,4 +1,5 @@
-mod archive;
+pub(crate) mod archive;
+pub(crate) mod export;
 mod images;
 pub mod index;
 mod migrate;
@@ -10,6 +11,8 @@ use serde::{Deserialize, Serialize};
 
 // Re-export public API
 pub(crate) use archive::{IncludeSet, save_session};
+pub(crate) use export::run as run_export;
+pub(crate) use export::{ExportIncludeSet, ExportRequest, Format, Selector};
 pub(crate) use migrate::migrate_archives;
 pub(crate) use read::{list_sessions, read_session, search_archives};
 
