@@ -31,13 +31,11 @@
 //!
 //! Readers (PR 3) MUST call `is_stale` before trusting the index.
 
+use crate::codex::Manifest;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use thiserror::Error;
-
-use crate::codex::Manifest;
 
 /// On-disk subdirectory name where the by-project index lives, under
 /// the codex root.
@@ -791,18 +789,55 @@ fn make_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 }
 
 /// Errors raised by the by-project index.
-#[derive(Debug, Error)]
+///
+/// `AmbiguousProject` has a hand-written `Display` so the path list
+/// pretty-prints (one per line, indented) instead of the default `{:?}`
+/// debug form. The result is what an operator sees on stderr when the
+/// basename collides:
+///
+/// ```text
+/// project 'mx' is ambiguous — matches multiple absolute paths:
+///   /home/alice/mx
+///   /home/bob/recipes/mx
+/// Disambiguate by passing the absolute path.
+/// ```
+#[derive(Debug)]
 pub enum IndexError {
-    #[error("ambiguous project query '{query}' matches multiple paths: {matches:?}")]
     AmbiguousProject {
         query: String,
         matches: Vec<PathBuf>,
     },
-    #[error("project query '{query}' did not match any archived session")]
-    NotFound { query: String },
-    #[error("ProjectIndex::{method} is not yet implemented (wired up in a later PR)")]
-    NotImplemented { method: &'static str },
+    NotFound {
+        query: String,
+    },
 }
+
+impl std::fmt::Display for IndexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexError::AmbiguousProject { query, matches } => {
+                writeln!(
+                    f,
+                    "project '{}' is ambiguous — matches multiple absolute paths:",
+                    query
+                )?;
+                for p in matches {
+                    writeln!(f, "  {}", p.display())?;
+                }
+                write!(f, "Disambiguate by passing the absolute path.")
+            }
+            IndexError::NotFound { query } => {
+                write!(
+                    f,
+                    "project query '{}' did not match any archived session",
+                    query
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for IndexError {}
 
 #[cfg(test)]
 mod tests {
@@ -913,6 +948,20 @@ mod tests {
         assert!(msg.contains("'mx'"));
         assert!(msg.contains("/home/a/mx"));
         assert!(msg.contains("/home/b/mx"));
+        // S4: the new pretty-printed shape uses indented lines, no
+        // debug-syntax brackets/quotes around the path list.
+        assert!(
+            !msg.contains("\"/home/a/mx\""),
+            "must not use debug-quoted paths"
+        );
+        assert!(
+            !msg.contains("PathBuf"),
+            "must not leak debug type names: {msg}"
+        );
+        // Each match should appear on its own indented line.
+        assert!(msg.contains("\n  /home/a/mx"));
+        assert!(msg.contains("\n  /home/b/mx"));
+        assert!(msg.contains("Disambiguate by passing the absolute path."));
     }
 
     #[test]
