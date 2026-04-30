@@ -1159,12 +1159,22 @@ pub enum CommentCommands {
 
 #[derive(Subcommand)]
 pub enum SessionCommands {
-    /// Export session to markdown
+    /// Export a Claude session as markdown.
+    ///
+    /// DEPRECATED: use `mx codex export` instead. This subcommand is now
+    /// a thin alias that forwards into the codex export pipeline and
+    /// will be removed in a future release. The new command supports
+    /// filtering by --session, --project, --date, multiple output
+    /// formats (markdown / json / both), and inlines sub-agent
+    /// transcripts by default.
     Export {
-        /// Path to session JSONL file (defaults to most recent non-agent session)
+        /// Path to session JSONL file (defaults to most recent non-agent session).
+        ///
+        /// DEPRECATED: when set, the file stem (the session UUID) is
+        /// extracted and routed to `mx codex export --session <uuid>`.
         path: Option<String>,
 
-        /// Output file (defaults to stdout)
+        /// Output file (defaults to stdout).
         #[arg(short, long)]
         output: Option<String>,
     },
