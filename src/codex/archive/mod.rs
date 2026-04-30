@@ -114,14 +114,13 @@ pub fn run(request: ArchiveRequest, options: ArchiveOptions) -> Result<ArchiveRe
             }
         }
         ArchiveRequest::All => {
-            let summary = write::save_all_sessions(
+            // S1: save_all_sessions returns ArchiveResult directly now;
+            // no field-by-field copy from a near-duplicate BulkSummary.
+            result = write::save_all_sessions(
                 options.clean,
                 options.include_agents_in_clean_md,
                 &options.include,
             )?;
-            result.archived_count = summary.archived_count;
-            result.skipped_count = summary.skipped_count;
-            result.archive_paths = summary.archive_paths;
         }
     }
 

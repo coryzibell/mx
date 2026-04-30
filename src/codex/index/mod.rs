@@ -60,18 +60,34 @@ pub struct ProjectIndex {
     entries: Vec<ProjectEntry>,
 }
 
-/// One project's entry in the index: its absolute path on disk, its
-/// basename-slug (the human-friendly key used by `--project mx`), and the
+/// One project's entry in the index: its basename-slug, the full set of
+/// distinct absolute paths that share that basename (so PR 3's `lookup`
+/// can detect ambiguity without re-walking manifests), and the
 /// time-indexed codex directories that archive sessions for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectEntry {
-    /// The absolute path of the project on disk (matches `manifest.project_path`).
-    pub absolute_path: PathBuf,
-    /// The basename-slug (e.g. `mx`, `wonka`) — last segment of `absolute_path`.
+    /// The basename-slug (e.g. `mx`, `wonka`) — last segment of every
+    /// path in `absolute_paths`.
     pub basename_slug: String,
+    /// Every distinct project absolute path that maps to this slug.
+    /// Length 1 in the common case; length > 1 means the slug is
+    /// ambiguous and PR 3's `lookup` will surface
+    /// [`IndexError::AmbiguousProject`].
+    pub absolute_paths: Vec<PathBuf>,
     /// Paths into `<codex_dir>/<YYYY-MM-DD-HHMMSS>-<short-uuid>/` for
-    /// every archived session belonging to this project.
+    /// every archived session belonging to this project (any of the
+    /// `absolute_paths`).
     pub session_archive_paths: Vec<PathBuf>,
+}
+
+impl ProjectEntry {
+    /// Convenience: the canonical "first" path for callers that don't
+    /// care about ambiguity. Returns `None` for the (theoretical) empty
+    /// entry; in practice the index only constructs entries with at
+    /// least one path.
+    pub fn first_absolute_path(&self) -> Option<&PathBuf> {
+        self.absolute_paths.first()
+    }
 }
 
 impl ProjectIndex {
@@ -259,11 +275,18 @@ impl ProjectIndex {
                 let mut session_archive_paths: Vec<PathBuf> =
                     archives.iter().map(|(_, p)| p.clone()).collect();
                 session_archive_paths.sort();
+
+                // S2: collect every distinct absolute_path that mapped
+                // to this slug. PR 3's `lookup` uses this to surface
+                // `AmbiguousProject` without re-walking manifests.
+                let mut absolute_paths: Vec<PathBuf> =
+                    archives.iter().map(|(a, _)| a.clone()).collect();
+                absolute_paths.sort();
+                absolute_paths.dedup();
+
                 ProjectEntry {
-                    // Pick any of the absolute paths; ambiguity is
-                    // surfaced by `lookup` (PR 3), not by the index.
-                    absolute_path: archives.first().map(|(a, _)| a.clone()).unwrap_or_default(),
                     basename_slug: slug,
+                    absolute_paths,
                     session_archive_paths,
                 }
             })
@@ -403,14 +426,58 @@ mod tests {
     #[test]
     fn project_entry_constructable() {
         let entry = ProjectEntry {
-            absolute_path: PathBuf::from("/home/charlie/recipes/coryzibell/mx"),
             basename_slug: "mx".to_string(),
+            absolute_paths: vec![PathBuf::from("/home/charlie/recipes/coryzibell/mx")],
             session_archive_paths: vec![PathBuf::from(
                 "/home/charlie/.wonka/codex/2026-04-29-143022-c3744b8d",
             )],
         };
         assert_eq!(entry.basename_slug, "mx");
         assert_eq!(entry.session_archive_paths.len(), 1);
+        assert_eq!(entry.absolute_paths.len(), 1);
+        assert_eq!(
+            entry.first_absolute_path(),
+            Some(&PathBuf::from("/home/charlie/recipes/coryzibell/mx"))
+        );
+    }
+
+    #[test]
+    fn rebuild_collects_all_absolute_paths_for_ambiguous_basename() {
+        // Two projects with the same basename `mx` but different
+        // absolute paths must both end up in the entry's
+        // `absolute_paths`, so PR 3's lookup can detect the ambiguity
+        // without re-walking manifests (S2).
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path();
+
+        write_manifest(
+            &codex.join("2026-04-29-100000-aaaaaaaa"),
+            "/home/alice/recipes/mx",
+            "aaa",
+        );
+        write_manifest(
+            &codex.join("2026-04-29-110000-bbbbbbbb"),
+            "/home/bob/work/mx",
+            "bbb",
+        );
+
+        let mut idx = ProjectIndex::open_under(codex).unwrap();
+        idx.rebuild_from_manifests().unwrap();
+
+        assert_eq!(idx.entry_count(), 1, "single basename, two abs paths");
+        let entry = &idx.entries[0];
+        assert_eq!(entry.basename_slug, "mx");
+        assert_eq!(entry.absolute_paths.len(), 2);
+        assert!(
+            entry
+                .absolute_paths
+                .contains(&PathBuf::from("/home/alice/recipes/mx"))
+        );
+        assert!(
+            entry
+                .absolute_paths
+                .contains(&PathBuf::from("/home/bob/work/mx"))
+        );
     }
 
     #[test]

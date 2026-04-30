@@ -278,8 +278,20 @@ pub(super) fn find_history_slice(window: TimestampWindow) -> Result<Vec<String>>
     if !path.exists() {
         return Ok(Vec::new());
     }
-
     let content = fs::read_to_string(&path)?;
+    Ok(filter_history_lines(&content, &window))
+}
+
+/// Pure: pick the lines from a `history.jsonl`-shaped string whose
+/// embedded `timestamp` lies within `window`.
+///
+/// Extracted out of `find_history_slice` so production AND tests
+/// exercise the same code (W4 from Verdictia's PR #268 review). Lines
+/// without a parseable JSON object, or without a parseable `timestamp`
+/// field, are dropped silently — they were not attributable to the
+/// session window and Claude's history format has varied enough across
+/// versions that we don't want to error on a malformed line.
+pub(super) fn filter_history_lines(content: &str, window: &TimestampWindow) -> Vec<String> {
     let mut out = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
@@ -313,7 +325,7 @@ pub(super) fn find_history_slice(window: TimestampWindow) -> Result<Vec<String>>
             out.push(line.to_string());
         }
     }
-    Ok(out)
+    out
 }
 
 #[cfg(test)]
@@ -465,41 +477,43 @@ mod tests {
     }
 
     #[test]
-    fn find_history_slice_filters_by_window() {
-        // Direct test of the parsing/filter logic via a tempfile. We
-        // can't redirect the path helper from a test, so we replicate the
-        // inner loop here against a known input — the production caller
-        // exercises the full `claude_history_jsonl()` path.
-        let lines = [
+    fn filter_history_lines_keeps_only_in_window() {
+        // W4: this hits the SAME `filter_history_lines` function the
+        // production walker calls — the previous version of this test
+        // was a copy of the inner loop, which insulated the test from
+        // any real regression in the production code path.
+        let content = concat!(
             r#"{"timestamp": "2026-04-29T12:00:00Z", "msg": "in"}"#,
+            "\n",
             r#"{"timestamp": "2026-04-29T08:00:00Z", "msg": "before"}"#,
+            "\n",
             r#"{"timestamp": "2026-04-29T18:00:00Z", "msg": "after"}"#,
+            "\n",
             r#"{"no-timestamp-field": true}"#,
-            r#"not even json"#,
-        ];
-        // Window: 10:00 - 14:00 on the same day
+            "\n",
+            "not even json\n",
+            "\n", // blank line — should be skipped
+        );
         let start: DateTime<Utc> = "2026-04-29T10:00:00Z".parse().unwrap();
         let end: DateTime<Utc> = "2026-04-29T14:00:00Z".parse().unwrap();
         let w = TimestampWindow::new(start, end);
 
-        // Replicate the in-loop logic for this test (the function reads
-        // from a fixed path, which we don't override here).
-        let mut hits = 0;
-        for line in lines.iter() {
-            let v: serde_json::Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let ts = match v.get("timestamp") {
-                Some(serde_json::Value::String(s)) => s.parse::<DateTime<Utc>>().ok(),
-                _ => None,
-            };
-            if let Some(ts) = ts
-                && w.contains(ts)
-            {
-                hits += 1;
-            }
-        }
-        assert_eq!(hits, 1, "only the 12:00 line should match the window");
+        let kept = filter_history_lines(content, &w);
+        assert_eq!(kept.len(), 1, "expected exactly one in-window line");
+        assert!(kept[0].contains("\"in\""));
+    }
+
+    #[test]
+    fn filter_history_lines_accepts_epoch_seconds_and_millis() {
+        let secs: i64 = 1_777_809_600; // 2026-05-04T00:00:00Z
+        let millis: i64 = secs * 1_000 + 250;
+        let content = format!(
+            "{{\"timestamp\": {secs}, \"msg\": \"sec\"}}\n{{\"timestamp\": {millis}, \"msg\": \"ms\"}}\n",
+        );
+        let start = DateTime::<Utc>::from_timestamp(secs - 60, 0).unwrap();
+        let end = DateTime::<Utc>::from_timestamp(secs + 60, 0).unwrap();
+        let w = TimestampWindow::new(start, end);
+        let kept = filter_history_lines(&content, &w);
+        assert_eq!(kept.len(), 2, "both seconds and millis variants must match");
     }
 }

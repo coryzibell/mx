@@ -18,6 +18,7 @@ use super::super::transcript::{
     resolve_agent_display_name, resolve_assistant_name, resolve_user_name,
 };
 use super::super::{AgentInfo, MANIFEST_WRITE_VERSION, Manifest, SourceBreakdown};
+use super::ArchiveResult;
 use super::get_codex_dir;
 use super::include::IncludeSet;
 use super::paths::determine_archive_dir;
@@ -25,15 +26,6 @@ use super::sources::{
     TimestampWindow, derive_session_window, find_agent_sessions, find_history_slice, find_mcp_logs,
     find_tool_outputs,
 };
-
-/// Internal summary of a `--all` run, distilled into the public
-/// `ArchiveResult` by `archive::run`.
-#[derive(Debug, Default)]
-pub(super) struct BulkSummary {
-    pub archived_count: usize,
-    pub skipped_count: usize,
-    pub archive_paths: Vec<PathBuf>,
-}
 
 /// Best-effort uid lookup via the `getuid(2)` syscall.
 ///
@@ -282,12 +274,20 @@ pub(crate) fn archive_session(
     let metadata = fs::metadata(session_path)?;
     let size_bytes = metadata.len();
 
-    // Determine project path (parent directory name in .claude/projects/)
-    let project_path = session_path
+    // Determine the cwd-encoded project slug (the parent directory name
+    // under .claude/projects/, e.g. `-home-charlie-recipes-coryzibell-mx`).
+    //
+    // NOTE: today this string is stored verbatim in `manifest.project_path`
+    // because the encoding is identity at the manifest layer: the slug
+    // IS the project_path (we don't decode it). A future decoder must
+    // re-apply Claude's `/` -> `-` encoding before passing through to
+    // MCP-log walkers, which require the cwd_encoded form.
+    let cwd_encoded = session_path
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|n| n.to_str())
         .map(|s| s.to_string());
+    let project_path = cwd_encoded.clone();
 
     // Count messages
     let content = fs::read_to_string(session_path)?;
@@ -393,7 +393,7 @@ pub(crate) fn archive_session(
         // off by default, leaving the manifest byte-identical.
         let sidecars = capture_optional_sidecars(
             &archive_dir,
-            project_path.as_deref(),
+            cwd_encoded.as_deref(),
             &session_id,
             window,
             include,
@@ -481,7 +481,7 @@ pub(crate) fn archive_session(
     // bytes identical to the pre-PR-2 layout.
     let sidecars = capture_optional_sidecars(
         &archive_dir,
-        project_path.as_deref(),
+        cwd_encoded.as_deref(),
         &session_id,
         window,
         include,
@@ -537,7 +537,7 @@ pub(crate) fn save_all_sessions(
     clean: bool,
     include_agents_in_clean_md: bool,
     include: &IncludeSet,
-) -> Result<BulkSummary> {
+) -> Result<ArchiveResult> {
     let projects_dir = crate::paths::claude_projects_dir();
 
     if !projects_dir.exists() {
@@ -562,7 +562,7 @@ pub(crate) fn save_all_sessions(
     }
 
     // Scan for unarchived sessions
-    let mut summary = BulkSummary::default();
+    let mut summary = ArchiveResult::default();
 
     for entry in fs::read_dir(&projects_dir)? {
         let entry = entry?;
