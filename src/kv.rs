@@ -372,7 +372,10 @@ pub struct SearchHit {
 /// Count result.
 #[derive(Debug)]
 pub struct CountResult {
-    pub total: usize,
+    /// Number of entries that matched (all entries when no filter, matching entries when filtered).
+    pub matched: usize,
+    /// Total entries for the key. Present only when a value filter was applied.
+    pub total: Option<usize>,
     pub latest_ts: Option<String>,
 }
 
@@ -998,18 +1001,21 @@ impl KvStore {
         }
 
         let query_lower = value.map(|v| v.to_lowercase());
-        let mut total = 0usize;
+        let filtering = query_lower.is_some();
+        let mut matched = 0usize;
+        let mut entry_total = 0usize;
         let mut latest_ts: Option<String> = None;
 
         match self.data.entries.get(key) {
             Some(DataValue::History { entries, .. }) => {
                 for e in entries {
-                    let matches = match &query_lower {
+                    entry_total += 1;
+                    let is_match = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
                         None => true,
                     };
-                    if matches {
-                        total += 1;
+                    if is_match {
+                        matched += 1;
                         if latest_ts.is_none() || e.ts > *latest_ts.as_ref().unwrap() {
                             latest_ts = Some(e.ts.clone());
                         }
@@ -1018,12 +1024,13 @@ impl KvStore {
             }
             Some(DataValue::List { items, .. }) => {
                 for e in items {
-                    let matches = match &query_lower {
+                    entry_total += 1;
+                    let is_match = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
                         None => true,
                     };
-                    if matches {
-                        total += 1;
+                    if is_match {
+                        matched += 1;
                         if !e.ts.is_empty()
                             && (latest_ts.is_none() || e.ts > *latest_ts.as_ref().unwrap())
                         {
@@ -1035,7 +1042,11 @@ impl KvStore {
             _ => {}
         }
 
-        Ok(CountResult { total, latest_ts })
+        Ok(CountResult {
+            matched,
+            total: if filtering { Some(entry_total) } else { None },
+            latest_ts,
+        })
     }
 
     /// List all keys with their types.
@@ -1943,7 +1954,8 @@ max_entries = 5
         store.push("tags", "c").unwrap();
 
         let result = store.count("tags", None).unwrap();
-        assert_eq!(result.total, 3);
+        assert_eq!(result.matched, 3);
+        assert!(result.total.is_none()); // no filter => no total
     }
 
     #[test]
@@ -1954,7 +1966,8 @@ max_entries = 5
         store.push("tags", "rust-tools").unwrap();
 
         let result = store.count("tags", Some("rust")).unwrap();
-        assert_eq!(result.total, 2);
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.total, Some(3)); // 2 of 3 match
     }
 
     #[test]
@@ -1978,7 +1991,8 @@ max_entries = 5
             .unwrap();
 
         let result = store.count("flavor_history", Some("bergamot")).unwrap();
-        assert_eq!(result.total, 2);
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.total, Some(3)); // 2 of 3 match
         assert!(result.latest_ts.is_some());
         assert!(result.latest_ts.unwrap().contains("2026-04-22"));
     }
@@ -1987,8 +2001,17 @@ max_entries = 5
     fn count_empty() {
         let (store, _dir) = setup_store(test_schema());
         let result = store.count("tags", None).unwrap();
-        assert_eq!(result.total, 0);
+        assert_eq!(result.matched, 0);
+        assert!(result.total.is_none());
         assert!(result.latest_ts.is_none());
+    }
+
+    #[test]
+    fn count_filtered_empty_total() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.count("tags", Some("rust")).unwrap();
+        assert_eq!(result.matched, 0);
+        assert_eq!(result.total, Some(0)); // 0 of 0
     }
 
     #[test]

@@ -337,9 +337,29 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
         KvCommands::Count { key, value } => match store.count(&key, value.as_deref()) {
             Ok(result) => {
-                match result.latest_ts {
-                    Some(ts) => println!("{} (latest: {})", result.total, ts),
-                    None => println!("{}", result.total),
+                match result.total {
+                    Some(total) => {
+                        // Filtered: show matched/total (pct%) — latest: ...
+                        let pct = if total == 0 {
+                            0
+                        } else {
+                            ((result.matched as f64 / total as f64) * 100.0).round() as u64
+                        };
+                        match result.latest_ts {
+                            Some(ts) => println!(
+                                "{}/{} ({}%) \u{2014} latest: {}",
+                                result.matched, total, pct, ts
+                            ),
+                            None => println!("{}/{} ({}%)", result.matched, total, pct),
+                        }
+                    }
+                    None => {
+                        // Unfiltered: preserve original format
+                        match result.latest_ts {
+                            Some(ts) => println!("{} (latest: {})", result.matched, ts),
+                            None => println!("{}", result.matched),
+                        }
+                    }
                 }
                 Ok(kv::EXIT_OK)
             }
