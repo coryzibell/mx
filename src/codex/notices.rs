@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 /// Emit the vault-present warning at most once per process. Idempotent
 /// across repeated calls — the `OnceLock` guarantees a single fire even
-/// if `mx codex save` and `mx codex export` both run in the same
+/// if `mx codex archive` and `mx codex export` both run in the same
 /// process.
 ///
 /// Skipped when:
@@ -35,7 +35,7 @@ pub(crate) fn warn_if_vault_present(suppress: bool) {
     }
     eprintln!(
         "note: {} contains historical session data not in the codex.\n      \
-         Run `mx codex save --backfill` to ingest, then remove the vault directory.",
+         Run `mx codex archive --backfill` to ingest, then remove the vault directory.",
         vault.display()
     );
     let _ = FIRED.set(());
@@ -101,16 +101,12 @@ mod tests {
         assert!(vault_has_snapshots(&vault));
     }
 
-    /// Regression guard: the warning must reference the actual CLI verb
-    /// (`mx codex save --backfill`), not the architecturally-aspirational
-    /// `mx codex archive --backfill`. C1 from PR 272 review — the
-    /// non-existent subcommand string had been shipping to every operator
-    /// with a vault. We capture stderr by firing the warning against a
-    /// fake vault and assert the literal `mx codex save --backfill`
-    /// appears in the message body. If the verb ever gets renamed,
-    /// update both the message and this test.
+    /// Regression guard: the warning must reference the canonical CLI verb
+    /// (`mx codex archive --backfill`). C1 from PR 272 review caught a
+    /// mismatch where the string said one thing and the CLI said another.
+    /// Now that the verb IS `archive`, we just assert consistency.
     #[test]
-    fn warning_text_uses_real_save_subcommand() {
+    fn warning_text_uses_archive_subcommand() {
         // Build a vault with one snapshot so the warning fires.
         let tmp = tempfile::tempdir().unwrap();
         let vault = tmp.path().join("real-vault");
@@ -119,35 +115,31 @@ mod tests {
 
         // Format the message exactly as `warn_if_vault_present` would.
         // We don't go through `warn_if_vault_present` itself because its
-        // `OnceLock` makes the test order-sensitive across the suite —
+        // `OnceLock` makes the test order-sensitive across the suite --
         // this is an equivalent literal-string assertion.
         let msg = format!(
             "note: {} contains historical session data not in the codex.\n      \
-             Run `mx codex save --backfill` to ingest, then remove the vault directory.",
+             Run `mx codex archive --backfill` to ingest, then remove the vault directory.",
             vault.display()
         );
         assert!(
-            msg.contains("mx codex save --backfill"),
-            "vault-warning string must reference `mx codex save --backfill`: {msg}"
+            msg.contains("mx codex archive --backfill"),
+            "vault-warning string must reference `mx codex archive --backfill`: {msg}"
         );
 
-        // Also assert the bug-fix invariant directly against the source
-        // line that produces the warning: `eprintln!` body should never
-        // contain the broken `mx codex archive --backfill` string. We
-        // grep just the `warn_if_vault_present` function body, not the
-        // test module (where the string legitimately appears in
-        // assertion messages).
+        // Assert the function body uses the canonical verb.
         let src = include_str!("notices.rs");
         let func_start = src.find("pub(crate) fn warn_if_vault_present").unwrap();
         let func_end = src[func_start..].find("\n}\n").unwrap() + func_start;
         let func_body = &src[func_start..func_end];
         assert!(
-            !func_body.contains("mx codex archive"),
-            "warn_if_vault_present must not emit `mx codex archive` (C1 regression)"
+            func_body.contains("mx codex archive --backfill"),
+            "warn_if_vault_present must emit `mx codex archive --backfill`"
         );
+        // The old verb should no longer appear in the function body.
         assert!(
-            func_body.contains("mx codex save --backfill"),
-            "warn_if_vault_present must emit `mx codex save --backfill` (C1)"
+            !func_body.contains("mx codex save"),
+            "warn_if_vault_present must not reference deprecated `mx codex save`"
         );
     }
 }

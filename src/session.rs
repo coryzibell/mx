@@ -24,7 +24,7 @@ use std::path::PathBuf;
 /// stderr from a child process.
 pub const DEPRECATION_NOTICE: &str = "\
 note: `mx session export` is deprecated; use `mx codex export` instead.
-      The new command reads from the codex (run `mx codex save` first
+      The new command reads from the codex (run `mx codex archive` first
       if needed; this alias does that for you), supports filtering by
       --session, --project, --date, multiple output formats, and inlines
       sub-agent transcripts by default. Run `mx codex export --help` for
@@ -48,7 +48,7 @@ note: the new command selects \"most recent\" by session start time, not
 /// - `output` flows through verbatim.
 /// - `archive_first: true` is forced. The legacy command read live
 ///   data; the new command reads codex. Without `--archive-first`, an
-///   operator who has never run `mx codex save` would get a "no
+///   operator who has never run `mx codex archive` would get a "no
 ///   codex data" error here. Forcing archive-first preserves the
 ///   user-visible "I just ran the command and it worked" semantics.
 /// - `format: Markdown` — the only output the legacy command emitted.
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn alias_forces_archive_first() {
         // Load-bearing: without this, a user who has never run
-        // `mx codex save` would get "no codex data" instead of the
+        // `mx codex archive` would get "no codex data" instead of the
         // legacy "exported your latest session" behavior.
         let req = build_alias_request(None, None).unwrap();
         assert!(req.archive_first, "alias must force archive_first=true");

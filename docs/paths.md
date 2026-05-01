@@ -118,7 +118,7 @@ The knowledge graph backend and its inputs.
 
 ### `codex/`
 
-Session archives written by `mx codex save` -- transcripts, extracted images,
+Session archives written by `mx codex archive` -- transcripts, extracted images,
 and per-archive manifests. Override with [`MX_CODEX_PATH`](#env-paths). This is
 typically the largest directory in `~/.mx/`; point it at a roomier disk if you
 archive a lot of sessions.

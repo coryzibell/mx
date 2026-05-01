@@ -95,13 +95,13 @@ Archives Claude session JSONL files to permanent storage with transcripts, extra
 
 ```bash
 # Archive the current session
-mx codex save
+mx codex archive
 
 # Archive with clean markdown transcript only (no raw JSONL)
-mx codex save --clean
+mx codex archive --clean
 
 # Archive all unarchived sessions
-mx codex save --all
+mx codex archive --all
 
 # List archived sessions
 mx codex list

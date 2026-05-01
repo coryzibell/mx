@@ -1,4 +1,4 @@
-//! Opt-in source selection for `mx codex save`.
+//! Opt-in source selection for `mx codex archive`.
 //!
 //! `IncludeSet` controls which optional sidecars the writer captures.
 //! Today only `subagents` is on by default — the same artifact the
@@ -28,7 +28,7 @@ pub struct IncludeSet {
 }
 
 impl IncludeSet {
-    /// The set that reproduces today's `mx codex save` defaults
+    /// The set that reproduces today's `mx codex archive` defaults
     /// byte-for-byte: subagents on, everything else off.
     pub fn status_quo() -> Self {
         Self {

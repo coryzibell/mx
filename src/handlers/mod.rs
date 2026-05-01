@@ -86,12 +86,15 @@ pub(crate) fn handle_session(cmd: SessionCommands) -> Result<()> {
 
 pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
     // Suppress the vault nag for the one invocation that's already
-    // mid-fix: `mx codex save --backfill`. Every other handler emits
+    // mid-fix: `mx codex archive --backfill`. Every other handler emits
     // the warning at most once per process via the OnceLock guard
     // inside `warn_if_vault_present`.
     let suppress_vault_warning = matches!(
         cmd,
-        CodexCommands::Save {
+        CodexCommands::Archive {
+            backfill: Some(_),
+            ..
+        } | CodexCommands::Save {
             backfill: Some(_),
             ..
         }
@@ -99,6 +102,8 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
     codex::notices::warn_if_vault_present(suppress_vault_warning);
 
     match cmd {
+        // Deprecated alias: print a one-shot notice and fall through to
+        // the canonical Archive handler.
         CodexCommands::Save {
             path,
             all,
@@ -107,51 +112,19 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             include,
             backfill,
         } => {
-            let include_set = codex::IncludeSet::parse(&include)?;
-            // W3: --include-agents only does anything when subagents are
-            // also being captured. Silently doing nothing was confusing
-            // — fail-loud so the operator can correct the invocation.
-            if include_agents && !include_set.subagents {
-                anyhow::bail!(
-                    "--include-agents requires `subagents` in --include (got --include='{}'). \
-                     Either drop --include-agents or add `subagents` to --include.",
-                    include
-                );
-            }
-
-            if let Some(vault_arg) = backfill {
-                // `--backfill` with no value parses as `Some("")` thanks
-                // to `default_missing_value`. Resolve to the canonical
-                // `~/.wonka/vault/archives/` in that case.
-                let vault_path = if vault_arg.is_empty() {
-                    crate::paths::wonka_vault_archives_dir()
-                } else {
-                    std::path::PathBuf::from(vault_arg)
-                };
-                let options = codex::archive::ArchiveOptions {
-                    clean,
-                    include: include_set,
-                    include_agents_in_clean_md: include_agents,
-                };
-                let report = codex::run_backfill(&vault_path, options)?;
-                // Echo a final terse summary on stdout (the running
-                // progress lines went to stderr); stdout is the
-                // machine-readable channel for chaining in scripts.
-                println!(
-                    "vault={} snapshots={} found={} archived={} skipped={} errors={}",
-                    report.vault_path.display(),
-                    report.vault_snapshots_walked,
-                    report.sessions_found,
-                    report.sessions_archived,
-                    report.sessions_skipped_already_archived,
-                    report.errors.len()
-                );
-                return Ok(());
-            }
-
-            codex::save_session(path, all, clean, include_agents, include_set)?;
-            Ok(())
+            eprintln!(
+                "note: `mx codex save` is deprecated; use `mx codex archive` instead."
+            );
+            handle_codex_archive(path, all, clean, include_agents, include, backfill)
         }
+        CodexCommands::Archive {
+            path,
+            all,
+            clean,
+            include_agents,
+            include,
+            backfill,
+        } => handle_codex_archive(path, all, clean, include_agents, include, backfill),
         CodexCommands::Export {
             session,
             project,
@@ -199,6 +172,64 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Shared implementation for `mx codex archive` (and its deprecated
+/// `save` alias). Extracted so both CLI variants dispatch to the same
+/// handler without duplicating the business logic.
+#[allow(clippy::too_many_arguments)]
+fn handle_codex_archive(
+    path: Option<String>,
+    all: bool,
+    clean: bool,
+    include_agents: bool,
+    include: String,
+    backfill: Option<String>,
+) -> Result<()> {
+    let include_set = codex::IncludeSet::parse(&include)?;
+    // W3: --include-agents only does anything when subagents are
+    // also being captured. Silently doing nothing was confusing
+    // -- fail-loud so the operator can correct the invocation.
+    if include_agents && !include_set.subagents {
+        anyhow::bail!(
+            "--include-agents requires `subagents` in --include (got --include='{}'). \
+             Either drop --include-agents or add `subagents` to --include.",
+            include
+        );
+    }
+
+    if let Some(vault_arg) = backfill {
+        // `--backfill` with no value parses as `Some("")` thanks
+        // to `default_missing_value`. Resolve to the canonical
+        // `~/.wonka/vault/archives/` in that case.
+        let vault_path = if vault_arg.is_empty() {
+            crate::paths::wonka_vault_archives_dir()
+        } else {
+            std::path::PathBuf::from(vault_arg)
+        };
+        let options = codex::archive::ArchiveOptions {
+            clean,
+            include: include_set,
+            include_agents_in_clean_md: include_agents,
+        };
+        let report = codex::run_backfill(&vault_path, options)?;
+        // Echo a final terse summary on stdout (the running
+        // progress lines went to stderr); stdout is the
+        // machine-readable channel for chaining in scripts.
+        println!(
+            "vault={} snapshots={} found={} archived={} skipped={} errors={}",
+            report.vault_path.display(),
+            report.vault_snapshots_walked,
+            report.sessions_found,
+            report.sessions_archived,
+            report.sessions_skipped_already_archived,
+            report.errors.len()
+        );
+        return Ok(());
+    }
+
+    codex::save_session(path, all, clean, include_agents, include_set)?;
+    Ok(())
 }
 
 /// Build an `ExportRequest` from the flat CLI args and dispatch to
@@ -1018,7 +1049,7 @@ mod try_decode_commit_body_tests {
 }
 
 #[cfg(test)]
-mod codex_save_validation_tests {
+mod codex_archive_validation_tests {
     //! W3 from Verdictia's PR #268 review: `--include-agents` without
     //! `subagents` in `--include` was a silent no-op. The handler now
     //! errors at the seam between CLI parsing and the codex writer; we
@@ -1026,8 +1057,8 @@ mod codex_save_validation_tests {
     use super::*;
     use crate::cli::CodexCommands;
 
-    fn save_cmd(include_agents: bool, include: &str) -> CodexCommands {
-        CodexCommands::Save {
+    fn archive_cmd(include_agents: bool, include: &str) -> CodexCommands {
+        CodexCommands::Archive {
             path: None,
             all: false,
             clean: true,
@@ -1039,7 +1070,7 @@ mod codex_save_validation_tests {
 
     #[test]
     fn include_agents_without_subagents_errors() {
-        let result = handle_codex(save_cmd(true, "none"));
+        let result = handle_codex(archive_cmd(true, "none"));
         let err = result.expect_err("--include-agents + --include none must error");
         let msg = format!("{err:#}");
         assert!(
@@ -1050,11 +1081,48 @@ mod codex_save_validation_tests {
 
     #[test]
     fn include_agents_without_subagents_token_errors_even_with_others() {
-        // `mcp` alone — no subagents in the set — also fails.
-        let result = handle_codex(save_cmd(true, "mcp,history"));
+        // `mcp` alone -- no subagents in the set -- also fails.
+        let result = handle_codex(archive_cmd(true, "mcp,history"));
         assert!(
             result.is_err(),
             "--include-agents + --include without subagents must error"
+        );
+    }
+
+    /// Regression guard: both `mx codex archive` and the deprecated
+    /// `mx codex save` must route through the same `handle_codex_archive`
+    /// helper. We verify by asserting that both produce the same error
+    /// for the same invalid input -- if they diverge, the alias is broken.
+    #[test]
+    fn save_alias_routes_to_same_handler_as_archive() {
+        let archive_result = handle_codex(CodexCommands::Archive {
+            path: None,
+            all: false,
+            clean: true,
+            include_agents: true,
+            include: "none".to_string(),
+            backfill: None,
+        });
+        let save_result = handle_codex(CodexCommands::Save {
+            path: None,
+            all: false,
+            clean: true,
+            include_agents: true,
+            include: "none".to_string(),
+            backfill: None,
+        });
+
+        let archive_err = archive_result
+            .expect_err("archive with invalid args must error")
+            .to_string();
+        let save_err = save_result
+            .expect_err("save with invalid args must error")
+            .to_string();
+
+        assert_eq!(
+            archive_err, save_err,
+            "save alias must produce the same error as archive: \
+             archive={archive_err:?}, save={save_err:?}"
         );
     }
 }

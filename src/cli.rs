@@ -1193,7 +1193,7 @@ pub enum SessionCommands {
 #[derive(Subcommand)]
 pub enum CodexCommands {
     /// Archive current session to permanent storage
-    Save {
+    Archive {
         /// Path to session JSONL file (defaults to most recent non-agent session)
         #[arg(conflicts_with_all = ["all", "backfill"])]
         path: Option<String>,
@@ -1249,6 +1249,40 @@ pub enum CodexCommands {
         backfill: Option<String>,
     },
 
+    /// Deprecated alias for `mx codex archive`. Use `archive` instead.
+    #[command(hide = true)]
+    Save {
+        /// Path to session JSONL file (defaults to most recent non-agent session)
+        #[arg(conflicts_with_all = ["all", "backfill"])]
+        path: Option<String>,
+
+        /// Archive all unarchived sessions
+        #[arg(long, conflicts_with_all = ["backfill"])]
+        all: bool,
+
+        /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
+        #[arg(long)]
+        clean: bool,
+
+        /// Include agent sub-session conversations in clean transcript.
+        #[arg(long, requires = "clean")]
+        include_agents: bool,
+
+        /// Comma-separated list of optional source artifacts to capture.
+        #[arg(long, default_value = "subagents")]
+        include: String,
+
+        /// Ingest the legacy wonka vault snapshots into the codex.
+        #[arg(
+            long,
+            value_name = "VAULT_PATH",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with_all = ["all", "path"],
+        )]
+        backfill: Option<String>,
+    },
+
     /// Export an archived session as Markdown or structured JSON.
     ///
     /// The default with no flags is "the most recent codex session, as
@@ -1287,7 +1321,7 @@ pub enum CodexCommands {
         #[arg(long, default_value = "subagents")]
         include: String,
 
-        /// Run `mx codex save --all` before exporting and skip the
+        /// Run `mx codex archive --all` before exporting and skip the
         /// unarchived-data warning. Useful when you know live
         /// `~/.claude/projects/` data hasn't been ingested yet.
         #[arg(long)]
