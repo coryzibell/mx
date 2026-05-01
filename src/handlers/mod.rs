@@ -24,8 +24,9 @@ pub(crate) fn handle_pr(cmd: PrCommands) -> Result<()> {
             number,
             rebase,
             merge_commit,
+            no_cleanup,
         } => {
-            commit::pr_merge(number, rebase, merge_commit)?;
+            commit::pr_merge(number, rebase, merge_commit, no_cleanup)?;
             Ok(())
         }
     }

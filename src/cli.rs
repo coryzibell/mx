@@ -269,6 +269,10 @@ pub enum PrCommands {
         /// Use standard merge commit instead of squash (mutually exclusive with --rebase)
         #[arg(long, name = "merge", conflicts_with = "rebase")]
         merge_commit: bool,
+
+        /// Skip post-merge cleanup (don't switch to target branch or delete local source branch)
+        #[arg(long)]
+        no_cleanup: bool,
     },
 }
 

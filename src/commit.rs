@@ -575,14 +575,27 @@ fn get_pr_diff(number: u32) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Merge a pull request with encoded commit message
-pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
+/// Merge a pull request with encoded commit message.
+///
+/// When `no_cleanup` is false (the default), performs post-merge cleanup:
+/// fetches + prunes, switches to the PR's target branch, fast-forward
+/// pulls, and deletes the local source branch. This prevents the common
+/// footgun where `git pull --rebase` fails because the remote source
+/// branch has been deleted by GitHub.
+pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool, no_cleanup: bool) -> Result<()> {
     // Get PR diff for title hash
     let diff = get_pr_diff(number)?;
 
-    // Get PR info from gh
+    // Get PR info from gh -- include headRefName and baseRefName for
+    // post-merge cleanup so we know source and target branches.
     let pr_info = Command::new("gh")
-        .args(["pr", "view", &number.to_string(), "--json", "title,body"])
+        .args([
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "title,body,headRefName,baseRefName",
+        ])
         .output()
         .context("Failed to run gh pr view")?;
 
@@ -599,6 +612,8 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
 
     let pr_title = json["title"].as_str().unwrap_or("PR");
     let pr_body = json["body"].as_str().unwrap_or("");
+    let source_branch = json["headRefName"].as_str().unwrap_or("").to_string();
+    let target_branch = json["baseRefName"].as_str().unwrap_or("").to_string();
 
     // Combine PR title and body into full message for body encoding
     let full_message = format!("{}\n\n{}", pr_title, pr_body);
@@ -641,7 +656,183 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool) -> Result<()> {
     println!("Merged PR #{} ({})", number, method);
     println!("{}", String::from_utf8_lossy(&output.stdout));
 
+    // Post-merge cleanup: switch to target branch and delete local source branch
+    if !no_cleanup {
+        post_merge_cleanup(&source_branch, &target_branch);
+    }
+
     Ok(())
+}
+
+/// Post-merge cleanup: fetch, switch to target branch, and delete local source branch.
+///
+/// Each step is best-effort -- the merge already succeeded, so cleanup
+/// failures are warnings, not errors. This avoids the footgun where
+/// the user is left on a dead branch whose remote ref was deleted by
+/// GitHub, causing the next `git pull --rebase` to fail.
+fn post_merge_cleanup(source_branch: &str, target_branch: &str) {
+    // Guard: need both branch names from PR metadata
+    if source_branch.is_empty() || target_branch.is_empty() {
+        eprintln!(
+            "Warning: could not determine source/target branches from PR metadata, skipping cleanup."
+        );
+        return;
+    }
+
+    // Guard: check for uncommitted changes before switching
+    match has_uncommitted_changes() {
+        Ok(true) => {
+            eprintln!(
+                "Warning: uncommitted changes detected. Skipping cleanup -- stash or commit first."
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("Warning: could not check working tree status: {}", e);
+            return;
+        }
+    }
+
+    // Guard: check for unpushed local commits on the source branch
+    match has_unpushed_commits(source_branch) {
+        Ok(true) => {
+            eprintln!(
+                "Warning: local branch '{}' has unpushed commits. Skipping cleanup to avoid data loss.",
+                source_branch
+            );
+            return;
+        }
+        Ok(false) => {}
+        Err(_) => {
+            // If we can't check (e.g., no remote tracking), proceed cautiously --
+            // the branch was just merged so it's likely safe.
+        }
+    }
+
+    // Step 1: fetch origin --prune
+    println!("Fetching origin...");
+    let fetch = Command::new("git")
+        .args(["fetch", "origin", "--prune"])
+        .output();
+    match fetch {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            eprintln!(
+                "Warning: git fetch origin --prune failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(e) => {
+            eprintln!("Warning: could not run git fetch: {}", e);
+        }
+    }
+
+    // Step 2: checkout target branch
+    println!("Switching to {}...", target_branch);
+    let checkout = Command::new("git")
+        .args(["checkout", target_branch])
+        .output();
+    match checkout {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            eprintln!(
+                "Warning: git checkout {} failed: {}",
+                target_branch,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return; // Can't continue if checkout failed
+        }
+        Err(e) => {
+            eprintln!("Warning: could not run git checkout: {}", e);
+            return;
+        }
+    }
+
+    // Step 3: fast-forward pull
+    let pull = Command::new("git")
+        .args(["pull", "--ff-only"])
+        .output();
+    match pull {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            eprintln!(
+                "Warning: git pull --ff-only failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Continue to branch deletion anyway -- we're on the right branch
+        }
+        Err(e) => {
+            eprintln!("Warning: could not run git pull: {}", e);
+        }
+    }
+
+    // Step 4: delete local source branch
+    // Don't delete if source == target (shouldn't happen, but defend)
+    if source_branch == target_branch {
+        return;
+    }
+    let delete = Command::new("git")
+        .args(["branch", "-D", source_branch])
+        .output();
+    match delete {
+        Ok(out) if out.status.success() => {
+            println!("Deleted local branch {}.", source_branch);
+        }
+        Ok(out) => {
+            eprintln!(
+                "Warning: could not delete local branch '{}': {}",
+                source_branch,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Warning: could not run git branch -D {}: {}",
+                source_branch, e
+            );
+        }
+    }
+}
+
+/// Check for uncommitted changes (staged or unstaged) in the working tree.
+fn has_uncommitted_changes() -> Result<bool> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .context("Failed to run git status")?;
+
+    if !output.status.success() {
+        bail!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+}
+
+/// Check if the local branch has commits that are not on the remote.
+/// Returns true if there are unpushed commits.
+fn has_unpushed_commits(branch: &str) -> Result<bool> {
+    let remote_ref = format!("origin/{}", branch);
+    let range = format!("{}..{}", remote_ref, branch);
+    let output = Command::new("git")
+        .args(["log", &range, "--oneline"])
+        .output()
+        .context("Failed to run git log for unpushed commit check")?;
+
+    if !output.status.success() {
+        // If the remote ref doesn't exist, we can't check -- bail with error
+        // so the caller can decide how to handle it.
+        bail!(
+            "git log {} failed: {}",
+            range,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 #[cfg(test)]
