@@ -92,11 +92,15 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
     let suppress_vault_warning = matches!(
         cmd,
         CodexCommands::Archive {
-            backfill: Some(_),
-            ..
+            args: ArchiveArgs {
+                backfill: Some(_),
+                ..
+            },
         } | CodexCommands::Save {
-            backfill: Some(_),
-            ..
+            args: ArchiveArgs {
+                backfill: Some(_),
+                ..
+            },
         }
     );
     codex::notices::warn_if_vault_present(suppress_vault_warning);
@@ -104,27 +108,13 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
     match cmd {
         // Deprecated alias: print a one-shot notice and fall through to
         // the canonical Archive handler.
-        CodexCommands::Save {
-            path,
-            all,
-            clean,
-            include_agents,
-            include,
-            backfill,
-        } => {
+        CodexCommands::Save { args } => {
             eprintln!(
                 "note: `mx codex save` is deprecated; use `mx codex archive` instead."
             );
-            handle_codex_archive(path, all, clean, include_agents, include, backfill)
+            handle_codex_archive(args)
         }
-        CodexCommands::Archive {
-            path,
-            all,
-            clean,
-            include_agents,
-            include,
-            backfill,
-        } => handle_codex_archive(path, all, clean, include_agents, include, backfill),
+        CodexCommands::Archive { args } => handle_codex_archive(args),
         CodexCommands::Export {
             session,
             project,
@@ -177,15 +167,16 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
 /// Shared implementation for `mx codex archive` (and its deprecated
 /// `save` alias). Extracted so both CLI variants dispatch to the same
 /// handler without duplicating the business logic.
-#[allow(clippy::too_many_arguments)]
-fn handle_codex_archive(
-    path: Option<String>,
-    all: bool,
-    clean: bool,
-    include_agents: bool,
-    include: String,
-    backfill: Option<String>,
-) -> Result<()> {
+fn handle_codex_archive(args: ArchiveArgs) -> Result<()> {
+    let ArchiveArgs {
+        path,
+        all,
+        clean,
+        include_agents,
+        include,
+        backfill,
+    } = args;
+
     let include_set = codex::IncludeSet::parse(&include)?;
     // W3: --include-agents only does anything when subagents are
     // also being captured. Silently doing nothing was confusing
@@ -228,7 +219,7 @@ fn handle_codex_archive(
         return Ok(());
     }
 
-    codex::save_session(path, all, clean, include_agents, include_set)?;
+    codex::archive_session(path, all, clean, include_agents, include_set)?;
     Ok(())
 }
 
@@ -1059,12 +1050,14 @@ mod codex_archive_validation_tests {
 
     fn archive_cmd(include_agents: bool, include: &str) -> CodexCommands {
         CodexCommands::Archive {
-            path: None,
-            all: false,
-            clean: true,
-            include_agents,
-            include: include.to_string(),
-            backfill: None,
+            args: ArchiveArgs {
+                path: None,
+                all: false,
+                clean: true,
+                include_agents,
+                include: include.to_string(),
+                backfill: None,
+            },
         }
     }
 
@@ -1096,20 +1089,24 @@ mod codex_archive_validation_tests {
     #[test]
     fn save_alias_routes_to_same_handler_as_archive() {
         let archive_result = handle_codex(CodexCommands::Archive {
-            path: None,
-            all: false,
-            clean: true,
-            include_agents: true,
-            include: "none".to_string(),
-            backfill: None,
+            args: ArchiveArgs {
+                path: None,
+                all: false,
+                clean: true,
+                include_agents: true,
+                include: "none".to_string(),
+                backfill: None,
+            },
         });
         let save_result = handle_codex(CodexCommands::Save {
-            path: None,
-            all: false,
-            clean: true,
-            include_agents: true,
-            include: "none".to_string(),
-            backfill: None,
+            args: ArchiveArgs {
+                path: None,
+                all: false,
+                clean: true,
+                include_agents: true,
+                include: "none".to_string(),
+                backfill: None,
+            },
         });
 
         let archive_err = archive_result

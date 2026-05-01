@@ -3,7 +3,7 @@
 //! Splits across several files (was a single `archive.rs` until the
 //! codex unification PR 2). Layout:
 //!
-//! - `mod.rs` — public entry points (`save_session`, `collect_archives`,
+//! - `mod.rs` — public entry points (`archive_session`, `collect_archives`,
 //!   `get_codex_dir`, `get_base_archive_name`), plus the
 //!   `ArchiveRequest` / `ArchiveResult` plumbing and `archive::run`.
 //! - `include.rs` — `IncludeSet`, the opt-in source selector parsed from
@@ -15,8 +15,8 @@
 //! - `paths.rs` — archive-folder naming utilities (`determine_archive_dir`,
 //!   `parse_archive_name`, `extract_short_id`, `get_base_archive_name`).
 //!
-//! `archive::run` is the one canonical entry point. The historical
-//! `save_session` is a thin wrapper that builds an `ArchiveRequest` from
+//! `archive::run` is the one canonical entry point.
+//! `archive_session` is a thin wrapper that builds an `ArchiveRequest` from
 //! CLI args and calls `run`. Status-quo invocations
 //! (`mx codex archive` with no `--include`) produce byte-identical
 //! output to the pre-PR-2 implementation.
@@ -150,9 +150,9 @@ fn rebuild_project_index() -> Result<()> {
     Ok(())
 }
 
-/// Backwards-compatible CLI shim. Builds an `ArchiveRequest` from the
-/// flat CLI args and delegates to `run`.
-pub(crate) fn save_session(
+/// CLI shim. Builds an `ArchiveRequest` from the flat CLI args and
+/// delegates to `run`.
+pub(crate) fn archive_session(
     session_path: Option<String>,
     all: bool,
     clean: bool,

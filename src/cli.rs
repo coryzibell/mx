@@ -1190,97 +1190,79 @@ pub enum SessionCommands {
     },
 }
 
+/// Shared fields for `mx codex archive` and its deprecated `save` alias.
+/// Extracted so both CLI variants use the same definition and neither can
+/// drift out of sync with the other.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ArchiveArgs {
+    /// Path to session JSONL file (defaults to most recent non-agent session)
+    #[arg(conflicts_with_all = ["all", "backfill"])]
+    pub path: Option<String>,
+
+    /// Archive all unarchived sessions
+    #[arg(long, conflicts_with_all = ["backfill"])]
+    pub all: bool,
+
+    /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
+    #[arg(long)]
+    pub clean: bool,
+
+    /// Include agent sub-session conversations in clean transcript.
+    ///
+    /// Requires `subagents` in `--include` (the default; if you pass
+    /// `--include none` or any value without `subagents`, this flag
+    /// will error at parse time rather than silently no-op).
+    #[arg(long, requires = "clean")]
+    pub include_agents: bool,
+
+    /// Comma-separated list of optional source artifacts to capture.
+    ///
+    /// Recognized: `subagents`, `mcp`, `tool-output`, `history`, `all`,
+    /// `none`. Today's default behavior corresponds to `--include
+    /// subagents`. The other tokens enable forthcoming source walkers
+    /// (MCP server logs, /tmp tool outputs, history.jsonl slice).
+    ///
+    /// Note: this flag governs which source files are *captured* into
+    /// the archive sidecars. The separate `--include-agents` flag
+    /// controls whether subagent transcripts are folded into the
+    /// `conversation.md` rendering when `--clean` is set.
+    #[arg(long, default_value = "subagents")]
+    pub include: String,
+
+    /// Ingest the legacy wonka vault snapshots into the codex.
+    ///
+    /// Walks every `session-*` snapshot under the supplied path
+    /// (defaults to `~/.wonka/vault/archives/`) and feeds each
+    /// session JSONL through the regular archive pipeline.
+    /// Idempotent: re-running on the same vault produces the same
+    /// codex state.
+    ///
+    /// Mutually exclusive with `--all` and the positional `[PATH]`.
+    /// `--include` and `--clean` still apply (they govern what the
+    /// per-session pipeline captures).
+    #[arg(
+        long,
+        value_name = "VAULT_PATH",
+        num_args = 0..=1,
+        default_missing_value = "",
+        conflicts_with_all = ["all", "path"],
+    )]
+    pub backfill: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum CodexCommands {
     /// Archive current session to permanent storage
     Archive {
-        /// Path to session JSONL file (defaults to most recent non-agent session)
-        #[arg(conflicts_with_all = ["all", "backfill"])]
-        path: Option<String>,
-
-        /// Archive all unarchived sessions
-        #[arg(long, conflicts_with_all = ["backfill"])]
-        all: bool,
-
-        /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
-        #[arg(long)]
-        clean: bool,
-
-        /// Include agent sub-session conversations in clean transcript.
-        ///
-        /// Requires `subagents` in `--include` (the default; if you pass
-        /// `--include none` or any value without `subagents`, this flag
-        /// will error at parse time rather than silently no-op).
-        #[arg(long, requires = "clean")]
-        include_agents: bool,
-
-        /// Comma-separated list of optional source artifacts to capture.
-        ///
-        /// Recognized: `subagents`, `mcp`, `tool-output`, `history`, `all`,
-        /// `none`. Today's default behavior corresponds to `--include
-        /// subagents`. The other tokens enable forthcoming source walkers
-        /// (MCP server logs, /tmp tool outputs, history.jsonl slice).
-        ///
-        /// Note: this flag governs which source files are *captured* into
-        /// the archive sidecars. The separate `--include-agents` flag
-        /// controls whether subagent transcripts are folded into the
-        /// `conversation.md` rendering when `--clean` is set.
-        #[arg(long, default_value = "subagents")]
-        include: String,
-
-        /// Ingest the legacy wonka vault snapshots into the codex.
-        ///
-        /// Walks every `session-*` snapshot under the supplied path
-        /// (defaults to `~/.wonka/vault/archives/`) and feeds each
-        /// session JSONL through the regular archive pipeline.
-        /// Idempotent: re-running on the same vault produces the same
-        /// codex state.
-        ///
-        /// Mutually exclusive with `--all` and the positional `[PATH]`.
-        /// `--include` and `--clean` still apply (they govern what the
-        /// per-session pipeline captures).
-        #[arg(
-            long,
-            value_name = "VAULT_PATH",
-            num_args = 0..=1,
-            default_missing_value = "",
-            conflicts_with_all = ["all", "path"],
-        )]
-        backfill: Option<String>,
+        #[command(flatten)]
+        args: ArchiveArgs,
     },
 
     /// Deprecated alias for `mx codex archive`. Use `archive` instead.
     #[command(hide = true)]
     Save {
-        /// Path to session JSONL file (defaults to most recent non-agent session)
-        #[arg(conflicts_with_all = ["all", "backfill"])]
-        path: Option<String>,
-
-        /// Archive all unarchived sessions
-        #[arg(long, conflicts_with_all = ["backfill"])]
-        all: bool,
-
-        /// Save only conversation.md + manifest.json + images (no JSONL, no agent files)
-        #[arg(long)]
-        clean: bool,
-
-        /// Include agent sub-session conversations in clean transcript.
-        #[arg(long, requires = "clean")]
-        include_agents: bool,
-
-        /// Comma-separated list of optional source artifacts to capture.
-        #[arg(long, default_value = "subagents")]
-        include: String,
-
-        /// Ingest the legacy wonka vault snapshots into the codex.
-        #[arg(
-            long,
-            value_name = "VAULT_PATH",
-            num_args = 0..=1,
-            default_missing_value = "",
-            conflicts_with_all = ["all", "path"],
-        )]
-        backfill: Option<String>,
+        #[command(flatten)]
+        args: ArchiveArgs,
     },
 
     /// Export an archived session as Markdown or structured JSON.
