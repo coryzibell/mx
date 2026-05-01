@@ -486,13 +486,21 @@ pub fn format_encoded_commit(encoded: &EncodedCommit, show_encoded: bool) -> Str
 ///   (plus `Pushed.` if `push` is set).
 /// - `true`: prints the full `Title:` / `Body:` / `Dejavu:` / `Footer:`
 ///   block — historical behavior, opt-in via `mx commit --show-encoded`.
+///
+/// `dry_run` runs all encoding/validation logic but skips the actual git
+/// operations (commit, push). Output is prefixed with `[dry-run]` so it
+/// is never mistaken for a real commit log. Exits 0 on success, nonzero
+/// if the real commit would have failed (no staged changes, encoding
+/// error, etc.).
 pub fn upload_commit(
     message: &str,
     stage_all_flag: bool,
     push: bool,
     show_encoded: bool,
+    dry_run: bool,
 ) -> Result<()> {
-    // Stage if requested
+    // Stage if requested (real staging even in dry-run so we can validate
+    // the diff — `git add -A` is idempotent and non-destructive)
     if stage_all_flag {
         stage_all()?;
     }
@@ -507,6 +515,19 @@ pub fn upload_commit(
 
     // Encode with retry: title from diff hash, body from compressed message
     let encoded = encode_commit(&diff, message)?;
+
+    if dry_run {
+        // Prefix every output line with [dry-run]
+        let formatted = format_encoded_commit(&encoded, show_encoded);
+        for line in formatted.lines() {
+            println!("[dry-run] {}", line);
+        }
+        println!("[dry-run] Would commit.");
+        if push {
+            println!("[dry-run] Would push.");
+        }
+        return Ok(());
+    }
 
     println!("{}", format_encoded_commit(&encoded, show_encoded));
 

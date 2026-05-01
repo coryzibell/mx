@@ -52,6 +52,12 @@ pub enum Commands {
         /// Default output is just the footer line and `Committed.`
         #[arg(long, conflicts_with = "encode_only", conflicts_with_all = ["title", "body"])]
         show_encoded: bool,
+
+        /// Preview what would be committed without mutating git state.
+        /// Runs all encoding/validation logic but skips git commit and push.
+        /// Output is prefixed with `[dry-run]`.
+        #[arg(long, conflicts_with = "encode_only", conflicts_with_all = ["title", "body"])]
+        dry_run: bool,
     },
 
     /// Pull request operations

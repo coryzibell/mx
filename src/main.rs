@@ -46,6 +46,7 @@ fn main() -> Result<()> {
             title,
             body,
             show_encoded,
+            dry_run,
         } => {
             if encode_only {
                 // PR-style encoding: encode title and body, print to stdout.
@@ -62,7 +63,7 @@ fn main() -> Result<()> {
                 // Normal commit workflow
                 let msg =
                     message.ok_or_else(|| anyhow::anyhow!("message is required for commit"))?;
-                commit::upload_commit(&msg, all, push, show_encoded)?;
+                commit::upload_commit(&msg, all, push, show_encoded, dry_run)?;
             }
             Ok(())
         }
