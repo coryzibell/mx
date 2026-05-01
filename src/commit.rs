@@ -479,6 +479,19 @@ pub fn format_encoded_commit(encoded: &EncodedCommit, show_encoded: bool) -> Str
     out
 }
 
+/// Prefix every line of `output` with `[dry-run] `.
+///
+/// Useful for marking preview output so it is never mistaken for a real
+/// commit log. Extracted as a standalone helper so it can be unit-tested
+/// without git state.
+pub fn prefix_dry_run(output: &str) -> String {
+    output
+        .lines()
+        .map(|line| format!("[dry-run] {}", line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Perform the full upload commit.
 ///
 /// `show_encoded` controls stdout verbosity:
@@ -499,14 +512,17 @@ pub fn upload_commit(
     show_encoded: bool,
     dry_run: bool,
 ) -> Result<()> {
-    // Stage if requested (real staging even in dry-run so we can validate
-    // the diff — `git add -A` is idempotent and non-destructive)
-    if stage_all_flag {
+    // Stage if requested — but never under dry-run: mutating the index
+    // violates the dry-run contract.
+    if stage_all_flag && !dry_run {
         stage_all()?;
     }
 
     // Check for staged changes
     if !has_staged_changes()? {
+        if dry_run {
+            bail!("[dry-run] No staged changes to commit");
+        }
         bail!("No staged changes to commit");
     }
 
@@ -517,15 +533,13 @@ pub fn upload_commit(
     let encoded = encode_commit(&diff, message)?;
 
     if dry_run {
-        // Prefix every output line with [dry-run]
         let formatted = format_encoded_commit(&encoded, show_encoded);
-        for line in formatted.lines() {
-            println!("[dry-run] {}", line);
-        }
-        println!("[dry-run] Would commit.");
+        let mut preview = formatted;
+        preview.push_str("\nWould commit.");
         if push {
-            println!("[dry-run] Would push.");
+            preview.push_str("\nWould push.");
         }
+        println!("{}", prefix_dry_run(&preview));
         return Ok(());
     }
 
@@ -891,5 +905,93 @@ mod tests {
         assert!(!is_known_compress_algo("notreal"));
         assert!(!is_known_compress_algo(""));
         assert!(!is_known_compress_algo("anything"));
+    }
+
+    // --- prefix_dry_run ---
+
+    #[test]
+    fn test_prefix_dry_run_single_line() {
+        let out = prefix_dry_run("Footer: [sha384:base62|lzma:uuencode]");
+        assert_eq!(out, "[dry-run] Footer: [sha384:base62|lzma:uuencode]");
+    }
+
+    #[test]
+    fn test_prefix_dry_run_multi_line() {
+        let input = "Title:  TTTT\nBody:   BBBB\nFooter: [x:y|z:w]";
+        let out = prefix_dry_run(input);
+        for line in out.lines() {
+            assert!(
+                line.starts_with("[dry-run] "),
+                "every line must start with [dry-run] prefix -- got {:?}",
+                line,
+            );
+        }
+        assert_eq!(out.lines().count(), 3);
+    }
+
+    #[test]
+    fn test_prefix_dry_run_empty_input() {
+        // An empty string has zero lines, so the prefixed result is also empty.
+        let out = prefix_dry_run("");
+        assert_eq!(out, "");
+    }
+
+    // --- dry-run formatted output ---
+
+    #[test]
+    fn test_dry_run_output_format_default() {
+        // Simulate what upload_commit builds for dry-run (default mode):
+        // format_encoded_commit + status lines, then prefix_dry_run.
+        let encoded = sample_encoded_no_dejavu();
+        let formatted = format_encoded_commit(&encoded, false);
+        let mut preview = formatted;
+        preview.push_str("\nWould commit.");
+        let prefixed = prefix_dry_run(&preview);
+
+        let lines: Vec<&str> = prefixed.lines().collect();
+        // Should have: footer line + "Would commit."
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("[dry-run] Footer:"));
+        assert_eq!(lines[1], "[dry-run] Would commit.");
+    }
+
+    #[test]
+    fn test_dry_run_output_format_with_push() {
+        let encoded = sample_encoded_no_dejavu();
+        let formatted = format_encoded_commit(&encoded, false);
+        let mut preview = formatted;
+        preview.push_str("\nWould commit.");
+        preview.push_str("\nWould push.");
+        let prefixed = prefix_dry_run(&preview);
+
+        let lines: Vec<&str> = prefixed.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("[dry-run] Footer:"));
+        assert_eq!(lines[1], "[dry-run] Would commit.");
+        assert_eq!(lines[2], "[dry-run] Would push.");
+    }
+
+    #[test]
+    fn test_dry_run_output_format_verbose() {
+        // With show_encoded == true, more lines appear before the status.
+        let encoded = sample_encoded_with_dejavu();
+        let formatted = format_encoded_commit(&encoded, true);
+        let mut preview = formatted;
+        preview.push_str("\nWould commit.");
+        let prefixed = prefix_dry_run(&preview);
+
+        for line in prefixed.lines() {
+            assert!(
+                line.starts_with("[dry-run] "),
+                "every line must have [dry-run] prefix -- got {:?}",
+                line,
+            );
+        }
+        // Title, Body, Dejavu, Footer (with dejavu marker on same footer value),
+        // Would commit.
+        assert!(prefixed.contains("[dry-run] Title:  TTTT-title-glyphs"));
+        assert!(prefixed.contains("[dry-run] Body:   BBBB-body-glyphs"));
+        assert!(prefixed.contains("[dry-run] Dejavu: true (both used base62)"));
+        assert!(prefixed.contains("[dry-run] Would commit."));
     }
 }
