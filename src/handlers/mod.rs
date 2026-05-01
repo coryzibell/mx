@@ -109,9 +109,7 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
         // Deprecated alias: print a one-shot notice and fall through to
         // the canonical Archive handler.
         CodexCommands::Save { args } => {
-            eprintln!(
-                "note: `mx codex save` is deprecated; use `mx codex archive` instead."
-            );
+            eprintln!("note: `mx codex save` is deprecated; use `mx codex archive` instead.");
             handle_codex_archive(args)
         }
         CodexCommands::Archive { args } => handle_codex_archive(args),
