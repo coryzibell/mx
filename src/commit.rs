@@ -679,6 +679,20 @@ fn post_merge_cleanup(source_branch: &str, target_branch: &str) {
         return;
     }
 
+    // Guard: cleanup is pointless when source and target are the same branch
+    if source_branch == target_branch {
+        return;
+    }
+
+    // Guard: check if source branch exists locally -- if not, skip the
+    // unpushed-commits guard and branch deletion (nothing to check or delete)
+    // but still do fetch+prune, checkout target, and ff-only pull.
+    let source_exists_locally = Command::new("git")
+        .args(["rev-parse", "--verify", source_branch])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
     // Guard: check for uncommitted changes before switching
     match has_uncommitted_changes() {
         Ok(true) => {
@@ -694,19 +708,24 @@ fn post_merge_cleanup(source_branch: &str, target_branch: &str) {
         }
     }
 
-    // Guard: check for unpushed local commits on the source branch
-    match has_unpushed_commits(source_branch) {
-        Ok(true) => {
-            eprintln!(
-                "Warning: local branch '{}' has unpushed commits. Skipping cleanup to avoid data loss.",
-                source_branch
-            );
-            return;
-        }
-        Ok(false) => {}
-        Err(_) => {
-            // If we can't check (e.g., no remote tracking), proceed cautiously --
-            // the branch was just merged so it's likely safe.
+    // Guard: check for unpushed local commits on the source branch.
+    // Only meaningful when the branch exists locally -- otherwise there
+    // are no local commits to lose.
+    if source_exists_locally {
+        match has_unpushed_commits(source_branch) {
+            Ok(true) => {
+                eprintln!(
+                    "Warning: local branch '{}' has unpushed commits. Skipping cleanup to avoid data loss.",
+                    source_branch
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                // Remote tracking ref (origin/<branch>) is missing or git log
+                // failed. The branch was just merged on the remote, so the
+                // local commits are likely already included -- proceed.
+            }
         }
     }
 
@@ -765,49 +784,57 @@ fn post_merge_cleanup(source_branch: &str, target_branch: &str) {
         }
     }
 
-    // Step 4: delete local source branch
-    // Don't delete if source == target (shouldn't happen, but defend)
-    if source_branch == target_branch {
-        return;
-    }
-    let delete = Command::new("git")
-        .args(["branch", "-D", source_branch])
-        .output();
-    match delete {
-        Ok(out) if out.status.success() => {
-            println!("Deleted local branch {}.", source_branch);
-        }
-        Ok(out) => {
-            eprintln!(
-                "Warning: could not delete local branch '{}': {}",
-                source_branch,
-                String::from_utf8_lossy(&out.stderr)
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "Warning: could not run git branch -D {}: {}",
-                source_branch, e
-            );
+    // Step 4: delete local source branch (safe delete -- refuses if not merged)
+    if source_exists_locally {
+        let delete = Command::new("git")
+            .args(["branch", "-d", source_branch])
+            .output();
+        match delete {
+            Ok(out) if out.status.success() => {
+                println!("Deleted local branch {}.", source_branch);
+            }
+            Ok(out) => {
+                eprintln!(
+                    "Warning: could not delete local branch '{}': {}",
+                    source_branch,
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not run git branch -d {}: {}",
+                    source_branch, e
+                );
+            }
         }
     }
 }
 
-/// Check for uncommitted changes (staged or unstaged) in the working tree.
+/// Check for uncommitted changes (staged or unstaged) to tracked files.
+///
+/// Uses `git diff --quiet HEAD` which exits non-zero when tracked files
+/// have staged or unstaged modifications. Untracked files are intentionally
+/// ignored -- a stray untracked file should not block post-merge cleanup.
 fn has_uncommitted_changes() -> Result<bool> {
     let output = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["diff", "--quiet", "HEAD"])
         .output()
-        .context("Failed to run git status")?;
+        .context("Failed to run git diff --quiet HEAD")?;
 
-    if !output.status.success() {
-        bail!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    // exit 0 = clean, exit 1 = dirty, other = error
+    if output.status.success() {
+        return Ok(false);
     }
 
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    match output.status.code() {
+        Some(1) => Ok(true),
+        _ => {
+            bail!(
+                "git diff --quiet HEAD failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }
 
 /// Check if the local branch has commits that are not on the remote.
