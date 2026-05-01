@@ -750,9 +750,7 @@ fn post_merge_cleanup(source_branch: &str, target_branch: &str) {
     }
 
     // Step 3: fast-forward pull
-    let pull = Command::new("git")
-        .args(["pull", "--ff-only"])
-        .output();
+    let pull = Command::new("git").args(["pull", "--ff-only"]).output();
     match pull {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
