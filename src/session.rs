@@ -549,10 +549,12 @@ mod tests {
 
         let prev_home = std::env::var("HOME").ok();
         let prev_mx_home = std::env::var("MX_HOME").ok();
+        let prev_proj = std::env::var("MX_CLAUDE_PROJECTS_DIR").ok();
         // SAFETY: serial + lock.
         unsafe {
             std::env::set_var("HOME", &nonexistent);
             std::env::remove_var("MX_HOME");
+            std::env::remove_var("MX_CLAUDE_PROJECTS_DIR");
         }
         let result = find_most_recent_session();
         unsafe {
@@ -562,6 +564,10 @@ mod tests {
             }
             if let Some(v) = prev_mx_home {
                 std::env::set_var("MX_HOME", v);
+            }
+            match prev_proj {
+                Some(v) => std::env::set_var("MX_CLAUDE_PROJECTS_DIR", v),
+                None => std::env::remove_var("MX_CLAUDE_PROJECTS_DIR"),
             }
         }
         assert!(result.is_err(), "missing projects dir must error");
