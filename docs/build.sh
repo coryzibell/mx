@@ -19,7 +19,7 @@ CROSSREF_FILTER="$BUILD_DIR/crossref.lua"
 
 # Ordered list for LLM output (getting-started first, architecture last)
 LLM_ORDER=(
-  getting-started index commit log memory codex kv state
+  index getting-started commit log memory codex kv state
   sync pr github convert session wiki heartbeat
   base-d paths architecture
 )
@@ -44,8 +44,10 @@ for src in "$SRC_DIR"/*.typ; do
   [ "$name" = "lib" ] && continue
 
   # Write a tiny YAML file so the template can test current-page.<name>
+  # Also derive a human-readable title from the filename for <title>.
   meta_file="$META_TMP/$name.yaml"
-  printf 'current-page:\n  %s: true\n' "$name" > "$meta_file"
+  page_title="$(echo "$name" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')"
+  printf 'current-page:\n  %s: true\ntitle: "%s"\n' "$name" "$page_title" > "$meta_file"
 
   pandoc "$src" \
     -f typst \
@@ -79,6 +81,7 @@ if [ ${#llm_sources[@]} -gt 0 ]; then
     -t markdown \
     --lua-filter "$ADMONITION_FILTER" \
     --lua-filter "$CROSSREF_FILTER" \
+    --lua-filter "$BUILD_DIR/strip-links.lua" \
     -o "$OUT_LLM/mx-docs.md"
 fi
 

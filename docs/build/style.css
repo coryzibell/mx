@@ -181,6 +181,7 @@ hr {
   margin: 0 auto;
   padding: 2em 2em 4em;
   flex: 1;
+  overflow-x: auto;
 }
 
 /* ----- Sidebar ----- */
@@ -401,12 +402,9 @@ th {
   font-weight: 600;
 }
 
-/* Horizontal scroll for wide tables on mobile */
-.content table {
-  display: block;
-  overflow-x: auto;
-  white-space: nowrap;
-}
+/* Wide tables scroll within the content container (overflow-x on
+   .content above).  No display:block override needed — that breaks
+   table semantics (column widths, row alignment). */
 
 /* ----- Admonitions ----- */
 

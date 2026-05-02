@@ -25,8 +25,13 @@
 // Command reference formatting
 // ---------------------------------------------------------------------------
 
+// Heading level is hardcoded to h2. This is intentional: each command page
+// uses h1 for the page title, h2 for individual commands, and h3 for
+// sub-sections like flags and examples. If the page structure changes (e.g.,
+// grouping commands under h2 categories), this level may need to become a
+// configurable parameter.
 #let command(name, description, flags: (), examples: ()) = {
-  [== `#name`]
+  heading(level: 2, raw(name))
   [#description]
 
   if flags.len() > 0 {
@@ -56,7 +61,7 @@
 
 #let deprecated-since(version, replacement) = {
   admonition("deprecated",
-    [Deprecated since v#version. Use `#replacement` instead.])
+    [Deprecated since v#version. Use #raw(replacement) instead.])
 }
 
 // ---------------------------------------------------------------------------

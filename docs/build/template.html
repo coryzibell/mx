@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <title>$if(title)$$title$ - mx docs$else$mx docs$endif$</title>
   <script>const t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t;</script>
+  <script>if(window.innerWidth<769)document.addEventListener('DOMContentLoaded',function(){var d=document.getElementById('sidebar');if(d)d.querySelector('details').removeAttribute('open')})</script>
 $for(css)$
   <link rel="stylesheet" href="$css$" />
 $endfor$
