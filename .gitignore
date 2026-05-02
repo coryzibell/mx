@@ -119,6 +119,9 @@ GitHub.sublime-settings
 # Logs
 *.log
 
+# Claude Code
+.claude/worktrees/
+
 # Environment
 .env
 .env.local
