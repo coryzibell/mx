@@ -36,12 +36,12 @@ one directory per session, named with a timestamp and short session ID.
   After archiving, the by-project index is rebuilt so subsequent reads can
   locate sessions by project name.],
   flags: (
-    [`[PATH]`], [positional], [Path to a specific session JSONL file. Conflicts with `--all` and `--backfill`.],
-    [`--all`], [flag], [Archive all unarchived sessions. Conflicts with `--backfill`.],
-    [`--clean`], [flag], [Save only `conversation.md`, `manifest.json`, and extracted images. Omits the raw JSONL and agent files. Produces a smaller, human-readable archive.],
-    [`--include-agents`], [flag], [Fold sub-agent transcripts into `conversation.md`. Requires `--clean` and requires `subagents` in `--include` (the default).],
-    [`--include <LIST>`], [string], [Comma-separated list of source artifacts to capture. Recognized tokens: `subagents` (default), `mcp`, `tool-output`, `history`, `all`, `none`. See below.],
-    [`--backfill [VAULT_PATH]`], [optional path], [Ingest legacy vault snapshots into the codex. See _Backfill_ section. Conflicts with `--all` and `[PATH]`.],
+    ([`[PATH]`], [positional], [Path to a specific session JSONL file. Conflicts with `--all` and `--backfill`.]),
+    ([`--all`], [flag], [Archive all unarchived sessions. Conflicts with `--backfill`.]),
+    ([`--clean`], [flag], [Save only `conversation.md`, `manifest.json`, and extracted images. Omits the raw JSONL and agent files. Produces a smaller, human-readable archive.]),
+    ([`--include-agents`], [flag], [Fold sub-agent transcripts into `conversation.md`. Requires `--clean` and requires `subagents` in `--include` (the default).]),
+    ([`--include <LIST>`], [string], [Comma-separated list of source artifacts to capture. Recognized tokens: `subagents` (default), `mcp`, `tool-output`, `history`, `all`, `none`. See below.]),
+    ([`--backfill [VAULT_PATH]`], [optional path], [Ingest legacy vault snapshots into the codex. See _Backfill_ section. Conflicts with `--all` and `[PATH]`.]),
   ),
   examples: (
     "mx codex archive",
@@ -113,7 +113,7 @@ The `--backfill` flag migrates historical session data from the legacy vault
   The `--clean` and `--include` flags still apply during backfill, governing
   what each per-session archive captures.],
   flags: (
-    [`--backfill [VAULT_PATH]`], [optional path], [Path to the vault archives directory. Defaults to `~/.wonka/vault/archives/`.],
+    ([`--backfill [VAULT_PATH]`], [optional path], [Path to the vault archives directory. Defaults to `~/.wonka/vault/archives/`.]),
   ),
   examples: (
     "mx codex archive --backfill",
@@ -152,13 +152,13 @@ you are already running backfill.]
   are mutually exclusive: at most one of `--session`, `--project`, or `--date`
   may be passed.],
   flags: (
-    [`--session <UUID>`], [string], [Select by session UUID (full or unique prefix).],
-    [`--project <QUERY>`], [string], [Filter by project: absolute path, cwd-encoded slug, or basename. Ambiguous basenames list collisions and exit non-zero.],
-    [`--date <RANGE>`], [string], [Date selector. Accepts `YYYY-MM-DD`, `YYYY-MM-DD..YYYY-MM-DD`, or `YYYY-MM`.],
-    [`--format <FMT>`], [string], [Output format: `markdown` (default), `json`, or `both`. `both` requires `--output`.],
-    [`--include <LIST>`], [string], [Comma-separated content to render. Default: `subagents`. Tokens: `subagents`, `tools`, `system-reminders`, `mcp`, `tool-output`, `history`, `all`, `none`.],
-    [`--archive-first`], [flag], [Run `mx codex archive --all` before exporting. Suppresses the unarchived-data warning.],
-    [`-o, --output <PATH>`], [path], [Output file. Default: stdout. Required when `--format both`.],
+    ([`--session <UUID>`], [string], [Select by session UUID (full or unique prefix).]),
+    ([`--project <QUERY>`], [string], [Filter by project: absolute path, cwd-encoded slug, or basename. Ambiguous basenames list collisions and exit non-zero.]),
+    ([`--date <RANGE>`], [string], [Date selector. Accepts `YYYY-MM-DD`, `YYYY-MM-DD..YYYY-MM-DD`, or `YYYY-MM`.]),
+    ([`--format <FMT>`], [string], [Output format: `markdown` (default), `json`, or `both`. `both` requires `--output`.]),
+    ([`--include <LIST>`], [string], [Comma-separated content to render. Default: `subagents`. Tokens: `subagents`, `tools`, `system-reminders`, `mcp`, `tool-output`, `history`, `all`, `none`.]),
+    ([`--archive-first`], [flag], [Run `mx codex archive --all` before exporting. Suppresses the unarchived-data warning.]),
+    ([`-o, --output <PATH>`], [path], [Output file. Default: stdout. Required when `--format both`.]),
   ),
   examples: (
     "mx codex export",
@@ -208,8 +208,8 @@ The remaining tokens (`subagents`, `mcp`, `tool-output`, `history`, `all`,
   columns: archive ID, archived timestamp, message count, agent count, and
   size.],
   flags: (
-    [`--all`], [flag], [Show all archives including incremental saves.],
-    [`--json`], [flag], [Output as JSON array.],
+    ([`--all`], [flag], [Show all archives including incremental saves.]),
+    ([`--json`], [flag], [Output as JSON array.]),
   ),
   examples: (
     "mx codex list",
@@ -230,12 +230,12 @@ The remaining tokens (`subagents`, `mcp`, `tool-output`, `history`, `all`,
   `mx codex migrate --clean` to generate one). With `--human`, pretty-prints
   JSONL as labeled User/Assistant blocks.],
   flags: (
-    [`<ID>`], [positional], [Archive ID (short UUID from `list`).],
-    [`--human`], [flag], [Pretty-print JSONL in human-readable format. Conflicts with `--clean`.],
-    [`--agents`], [flag], [Include agent transcripts in the output.],
-    [`--grep <PATTERN>`], [string], [Filter output to lines matching the pattern.],
-    [`--json`], [flag], [Output the manifest as JSON.],
-    [`--clean`], [flag], [Read the clean markdown transcript (`conversation.md`). Conflicts with `--human`.],
+    ([`<ID>`], [positional], [Archive ID (short UUID from `list`).]),
+    ([`--human`], [flag], [Pretty-print JSONL in human-readable format. Conflicts with `--clean`.]),
+    ([`--agents`], [flag], [Include agent transcripts in the output.]),
+    ([`--grep <PATTERN>`], [string], [Filter output to lines matching the pattern.]),
+    ([`--json`], [flag], [Output the manifest as JSON.]),
+    ([`--clean`], [flag], [Read the clean markdown transcript (`conversation.md`). Conflicts with `--human`.]),
   ),
   examples: (
     "mx codex read abc12345",
@@ -257,8 +257,8 @@ The remaining tokens (`subagents`, `mcp`, `tool-output`, `history`, `all`,
   pattern. Archives with no transcript file are skipped with a count
   reported to stderr.],
   flags: (
-    [`<PATTERN>`], [positional], [Text pattern to search for.],
-    [`--json`], [flag], [Output matches as JSON.],
+    ([`<PATTERN>`], [positional], [Text pattern to search for.]),
+    ([`--json`], [flag], [Output matches as JSON.]),
   ),
   examples: (
     "mx codex search \"retry logic\"",
@@ -284,10 +284,10 @@ The remaining tokens (`subagents`, `mcp`, `tool-output`, `history`, `all`,
   adding human-readable transcripts to archives created before clean mode
   existed.],
   flags: (
-    [`--dry-run`], [flag], [Show what would be migrated without making changes.],
-    [`--verbose`], [flag], [Show detailed progress for each archive.],
-    [`--clean`], [flag], [Generate `conversation.md` for archives missing a clean transcript.],
-    [`--include-agents`], [flag], [Include sub-agent transcripts in generated clean transcripts. Requires `--clean`.],
+    ([`--dry-run`], [flag], [Show what would be migrated without making changes.]),
+    ([`--verbose`], [flag], [Show detailed progress for each archive.]),
+    ([`--clean`], [flag], [Generate `conversation.md` for archives missing a clean transcript.]),
+    ([`--include-agents`], [flag], [Include sub-agent transcripts in generated clean transcripts. Requires `--clean`.]),
   ),
   examples: (
     "mx codex migrate --dry-run",

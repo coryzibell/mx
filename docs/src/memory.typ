@@ -43,33 +43,33 @@ similarity, and surfaced through keyword or semantic search.
   and title (or a `--type` for ephemeral facts, which auto-routes the category
   and generates a title from content).],
   flags: (
-    [`--category`],   [`string`], [Category name (run `mx memory categories list` for valid names). Required unless `--type` is provided.],
-    [`-t, --title`],  [`string`], [Entry title. Required unless `--type` is provided.],
-    [`--content`],    [`string`], [Inline content. Conflicts with `--file`.],
-    [`-f, --file`],   [`path`],   [Read content from a file. Also accepts `--content-file`.],
-    [`--tags`],       [`string`], [Comma-separated tags.],
-    [`-a, --applicability`], [`string`], [Comma-separated applicability contexts.],
-    [`-p, --project`], [`string`], [Source project ID.],
-    [`--source-agent`], [`string`], [Source agent ID. Defaults to `MX_CURRENT_AGENT` env var.],
-    [`--source-type`], [`string`], [Source type: `manual`, `ram`, `cache`, `agent_session`. Default: `manual`.],
-    [`--entry-type`], [`string`], [Entry type: `primary`, `summary`, `synthesis`. Default: `primary`.],
-    [`--session-id`], [`string`], [Session ID to associate with this entry.],
-    [`--ephemeral`],  [`flag`],   [Mark entry as ephemeral.],
-    [`-d, --domain`], [`string`], [Domain/subdomain path.],
-    [`--content-type`], [`string`], [Content type: `text`, `code`, `config`, `data`, `binary`. Default: `text`.],
-    [`--private`],    [`flag`],   [Mark as private (only visible to owner). Shorthand for `--visibility private`.],
-    [`--visibility`], [`string`], [Set visibility: `public` or `private`.],
-    [`--owner`],      [`string`], [Explicit owner. Defaults to `source_agent` or `MX_CURRENT_AGENT` if private.],
-    [`--resonance`],  [`int`],    [Resonance level (1--10, or higher for transcendent).],
-    [`--resonance-type`], [`string`], [Resonance type: `foundational`, `transformative`, `relational`, `operational`, `ephemeral`, `session`.],
-    [`--wake-phrase`], [`string`], [Wake phrase for memory ritual verification.],
-    [`--wake-phrases`], [`string`], [Multiple wake phrases (comma-separated).],
-    [`--wake-order`], [`int`],    [Custom wake order (lower = earlier in sequence).],
-    [`--anchors`],    [`string`], [Comma-separated bloom IDs this entry connects to.],
-    [`--type`],       [`string`], [Fact type for ephemeral knowledge: `decision`, `insight`, `person`, `quote`, `thread_opened`, `commitment`, `thread_closed`. Auto-routes category and sets `resonance_type=ephemeral`.],
-    [`--session`],    [`string`], [Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.],
-    [`--thread-id`],  [`string`], [Thread ID for `thread_closed` operations. Requires `--type`.],
-    [`--json`],       [`flag`],   [Output as JSON.],
+    ([`--category`],   [`string`], [Category name (run `mx memory categories list` for valid names). Required unless `--type` is provided.]),
+    ([`-t, --title`],  [`string`], [Entry title. Required unless `--type` is provided.]),
+    ([`--content`],    [`string`], [Inline content. Conflicts with `--file`.]),
+    ([`-f, --file`],   [`path`],   [Read content from a file. Also accepts `--content-file`.]),
+    ([`--tags`],       [`string`], [Comma-separated tags.]),
+    ([`-a, --applicability`], [`string`], [Comma-separated applicability contexts.]),
+    ([`-p, --project`], [`string`], [Source project ID.]),
+    ([`--source-agent`], [`string`], [Source agent ID. Defaults to `MX_CURRENT_AGENT` env var.]),
+    ([`--source-type`], [`string`], [Source type: `manual`, `ram`, `cache`, `agent_session`. Default: `manual`.]),
+    ([`--entry-type`], [`string`], [Entry type: `primary`, `summary`, `synthesis`. Default: `primary`.]),
+    ([`--session-id`], [`string`], [Session ID to associate with this entry.]),
+    ([`--ephemeral`],  [`flag`],   [Mark entry as ephemeral.]),
+    ([`-d, --domain`], [`string`], [Domain/subdomain path.]),
+    ([`--content-type`], [`string`], [Content type: `text`, `code`, `config`, `data`, `binary`. Default: `text`.]),
+    ([`--private`],    [`flag`],   [Mark as private (only visible to owner). Shorthand for `--visibility private`.]),
+    ([`--visibility`], [`string`], [Set visibility: `public` or `private`.]),
+    ([`--owner`],      [`string`], [Explicit owner. Defaults to `source_agent` or `MX_CURRENT_AGENT` if private.]),
+    ([`--resonance`],  [`int`],    [Resonance level (1--10, or higher for transcendent).]),
+    ([`--resonance-type`], [`string`], [Resonance type: `foundational`, `transformative`, `relational`, `operational`, `ephemeral`, `session`.]),
+    ([`--wake-phrase`], [`string`], [Wake phrase for memory ritual verification.]),
+    ([`--wake-phrases`], [`string`], [Multiple wake phrases (comma-separated).]),
+    ([`--wake-order`], [`int`],    [Custom wake order (lower = earlier in sequence).]),
+    ([`--anchors`],    [`string`], [Comma-separated bloom IDs this entry connects to.]),
+    ([`--type`],       [`string`], [Fact type for ephemeral knowledge: `decision`, `insight`, `person`, `quote`, `thread_opened`, `commitment`, `thread_closed`. Auto-routes category and sets `resonance_type=ephemeral`.]),
+    ([`--session`],    [`string`], [Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.]),
+    ([`--thread-id`],  [`string`], [Thread ID for `thread_closed` operations. Requires `--type`.]),
+    ([`--json`],       [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory add --category recipe --title \"Retry with backoff\" \\\n  --content \"Use exponential backoff with jitter...\" \\\n  --tags \"reliability,networking\" --source-agent whistledown",
@@ -92,7 +92,7 @@ content automatically.]
 
 === Shared filter flags
 
-Several read commands (`search`, `list`, `recent`) share a common set of filter
+Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
 #table(
@@ -118,8 +118,8 @@ flags. These are documented once here and referenced below.
   "mx memory show",
   [Display a single entry by ID.],
   flags: (
-    [`--json`],         [`flag`], [Output as JSON.],
-    [`--content-only`], [`flag`], [Output only the body content (useful for piping).],
+    ([`--json`],         [`flag`], [Output as JSON.]),
+    ([`--content-only`], [`flag`], [Output only the body content (useful for piping).]),
   ),
   examples: (
     "mx memory show kn-abc123",
@@ -146,7 +146,7 @@ flags. These are documented once here and referenced below.
   [Search entries by keyword or semantic similarity. Keyword search is the
   default; add `--semantic` to use vector embeddings.],
   flags: (
-    [`--semantic`], [`flag`], [Use semantic (vector) search instead of keyword search.],
+    ([`--semantic`], [`flag`], [Use semantic (vector) search instead of keyword search.]),
   ),
   examples: (
     "mx memory search \"retry pattern\"",
@@ -164,12 +164,12 @@ to have embeddings generated via `mx memory embed`.]
   entries from the last 10 days. Use `--all-types` to surface all resonance
   types.],
   flags: (
-    [`--days`],           [`int`],    [Number of days to look back. Default: `10`.],
-    [`--json`],           [`flag`],   [Output as JSON.],
-    [`--resonance-type`], [`string`], [Filter by resonance type. Defaults to ephemeral only when `--all-types` is omitted.],
-    [`--all-types`],      [`flag`],   [Surface all resonance types instead of ephemeral only.],
-    [`--sort`],           [`enum`],   [Sort order: `chronological` (default) or `resonance` (highest first).],
-    [`--limit`],          [`int`],    [Maximum number of results. Default: `100`.],
+    ([`--days`],           [`int`],    [Number of days to look back. Default: `10`.]),
+    ([`--json`],           [`flag`],   [Output as JSON.]),
+    ([`--resonance-type`], [`string`], [Filter by resonance type. Defaults to ephemeral only when `--all-types` is omitted.]),
+    ([`--all-types`],      [`flag`],   [Surface all resonance types instead of ephemeral only.]),
+    ([`--sort`],           [`enum`],   [Sort order: `chronological` (default) or `resonance` (highest first).]),
+    ([`--limit`],          [`int`],    [Maximum number of results. Default: `100`.]),
   ),
   examples: (
     "mx memory recent",
@@ -191,39 +191,39 @@ to have embeddings generated via `mx memory embed`.]
   prepending, find-and-replace, and modifying any metadata field. Content
   mutation modes are mutually exclusive.],
   flags: (
-    [`-t, --title`],     [`string`], [Update the title.],
-    [`--content`],       [`string`], [Replace content entirely (inline).],
-    [`-f, --file`],      [`path`],   [Replace content entirely from file.],
-    [`--append-content`], [`string`], [Append text to end of existing content.],
-    [`--append-file`],   [`path`],   [Append content from file to end.],
-    [`--prepend-content`], [`string`], [Prepend text to start of existing content.],
-    [`--prepend-file`],  [`path`],   [Prepend content from file to start.],
-    [`--find`],          [`string`], [Find text in content (requires `--replace`).],
-    [`--replace`],       [`string`], [Replace text found by `--find`.],
-    [`--replace-all`],   [`flag`],   [Replace all occurrences (with `--find`/`--replace`).],
-    [`--nth`],           [`int`],    [Replace only the Nth occurrence (1-indexed).],
-    [`--category`],      [`string`], [Update category.],
-    [`--tags`],          [`string`], [Replace all tags (comma-separated).],
-    [`--add-tag`],       [`string`], [Add a single tag to existing tags.],
-    [`--remove-tag`],    [`string`], [Remove a specific tag.],
-    [`-a, --applicability`], [`string`], [Update applicability (comma-separated, replaces all).],
-    [`--content-type`],  [`string`], [Update content type.],
-    [`--resonance`],     [`int`],    [Update resonance level (1--10+).],
-    [`--resonance-type`], [`string`], [Update resonance type.],
-    [`--anchors`],       [`string`], [Replace all anchors (comma-separated bloom IDs).],
-    [`--add-anchor`],    [`string`], [Add a single anchor.],
-    [`--remove-anchor`], [`string`], [Remove a specific anchor.],
-    [`--wake-phrase`],   [`string`], [Update wake phrase.],
-    [`--wake-phrases`],  [`string`], [Replace all wake phrases (comma-separated).],
-    [`--add-wake-phrase`], [`string`], [Add a single wake phrase.],
-    [`--remove-wake-phrase`], [`string`], [Remove a specific wake phrase.],
-    [`--wake-order`],    [`string`], [Update wake order. Use `'-'` to clear.],
-    [`--private`],       [`flag`],   [Mark as private (shorthand for `--visibility private`).],
-    [`--visibility`],    [`string`], [Change visibility: `public` or `private`.],
-    [`--owner`],         [`string`], [Update owner (only valid when visibility is private).],
-    [`--session-id`],    [`string`], [Update session ID (for retrofitting entries with wrong or missing session linkage).],
-    [`--force`],         [`flag`],   [Force dangerous visibility changes (e.g., making blooms public).],
-    [`--json`],          [`flag`],   [Output as JSON.],
+    ([`-t, --title`],     [`string`], [Update the title.]),
+    ([`--content`],       [`string`], [Replace content entirely (inline).]),
+    ([`-f, --file`],      [`path`],   [Replace content entirely from file.]),
+    ([`--append-content`], [`string`], [Append text to end of existing content.]),
+    ([`--append-file`],   [`path`],   [Append content from file to end.]),
+    ([`--prepend-content`], [`string`], [Prepend text to start of existing content.]),
+    ([`--prepend-file`],  [`path`],   [Prepend content from file to start.]),
+    ([`--find`],          [`string`], [Find text in content (requires `--replace`).]),
+    ([`--replace`],       [`string`], [Replace text found by `--find`.]),
+    ([`--replace-all`],   [`flag`],   [Replace all occurrences (with `--find`/`--replace`).]),
+    ([`--nth`],           [`int`],    [Replace only the Nth occurrence (1-indexed).]),
+    ([`--category`],      [`string`], [Update category.]),
+    ([`--tags`],          [`string`], [Replace all tags (comma-separated).]),
+    ([`--add-tag`],       [`string`], [Add a single tag to existing tags.]),
+    ([`--remove-tag`],    [`string`], [Remove a specific tag.]),
+    ([`-a, --applicability`], [`string`], [Update applicability (comma-separated, replaces all).]),
+    ([`--content-type`],  [`string`], [Update content type.]),
+    ([`--resonance`],     [`int`],    [Update resonance level (1--10+).]),
+    ([`--resonance-type`], [`string`], [Update resonance type.]),
+    ([`--anchors`],       [`string`], [Replace all anchors (comma-separated bloom IDs).]),
+    ([`--add-anchor`],    [`string`], [Add a single anchor.]),
+    ([`--remove-anchor`], [`string`], [Remove a specific anchor.]),
+    ([`--wake-phrase`],   [`string`], [Update wake phrase.]),
+    ([`--wake-phrases`],  [`string`], [Replace all wake phrases (comma-separated).]),
+    ([`--add-wake-phrase`], [`string`], [Add a single wake phrase.]),
+    ([`--remove-wake-phrase`], [`string`], [Remove a specific wake phrase.]),
+    ([`--wake-order`],    [`string`], [Update wake order. Use `'-'` to clear.]),
+    ([`--private`],       [`flag`],   [Mark as private (shorthand for `--visibility private`).]),
+    ([`--visibility`],    [`string`], [Change visibility: `public` or `private`.]),
+    ([`--owner`],         [`string`], [Update owner (only valid when visibility is private).]),
+    ([`--session-id`],    [`string`], [Update session ID (for retrofitting entries with wrong or missing session linkage).]),
+    ([`--force`],         [`flag`],   [Force dangerous visibility changes (e.g., making blooms public).]),
+    ([`--json`],          [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory update kn-abc123 --title \"Better title\"",
@@ -239,11 +239,11 @@ to have embeddings generated via `mx memory embed`.]
   [Find-and-replace shortcut. Equivalent to
   `mx memory update <id> --find ... --replace ...` with a simpler interface.],
   flags: (
-    [`--find`],        [`string`], [Text to find in content. Also accepts `--old`.],
-    [`--replace`],     [`string`], [Replacement text. Also accepts `--new`.],
-    [`--replace-all`], [`flag`],   [Replace all occurrences (default: error if multiple matches).],
-    [`--nth`],         [`int`],    [Replace only the Nth occurrence (1-indexed).],
-    [`--json`],        [`flag`],   [Output as JSON.],
+    ([`--find`],        [`string`], [Text to find in content. Also accepts `--old`.]),
+    ([`--replace`],     [`string`], [Replacement text. Also accepts `--new`.]),
+    ([`--replace-all`], [`flag`],   [Replace all occurrences (default: error if multiple matches).]),
+    ([`--nth`],         [`int`],    [Replace only the Nth occurrence (1-indexed).]),
+    ([`--json`],        [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory edit kn-abc123 --find \"old pattern\" --replace \"new pattern\"",
@@ -256,9 +256,9 @@ to have embeddings generated via `mx memory embed`.]
   [Append content to the end of an entry's body. Shortcut for
   `mx memory update <id> --append-content ...`.],
   flags: (
-    [`--content`], [`string`], [Content to append (omit to read from stdin).],
-    [`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.],
-    [`--json`],    [`flag`],   [Output as JSON.],
+    ([`--content`], [`string`], [Content to append (omit to read from stdin).]),
+    ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
+    ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory append kn-abc123 --content \"\\n\\nAdditional note here.\"",
@@ -271,9 +271,9 @@ to have embeddings generated via `mx memory embed`.]
   [Prepend content to the start of an entry's body. Shortcut for
   `mx memory update <id> --prepend-content ...`.],
   flags: (
-    [`--content`], [`string`], [Content to prepend (omit to read from stdin).],
-    [`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.],
-    [`--json`],    [`flag`],   [Output as JSON.],
+    ([`--content`], [`string`], [Content to prepend (omit to read from stdin).]),
+    ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
+    ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory prepend kn-abc123 --content \"IMPORTANT: \"",
@@ -285,8 +285,8 @@ to have embeddings generated via `mx memory embed`.]
   [Restore entry content from a backup. Use `--list` to see available backups
   before restoring.],
   flags: (
-    [`--list`], [`flag`], [List available backups instead of restoring.],
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--list`], [`flag`], [List available backups instead of restoring.]),
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory restore kn-abc123 --list",
@@ -305,7 +305,7 @@ to have embeddings generated via `mx memory embed`.]
   "mx memory delete",
   [Remove an entry from the knowledge graph.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory delete kn-abc123",
@@ -329,20 +329,20 @@ modes and an interactive engage flow.
   [Wake up with resonant identity cascade. Retrieves high-resonance blooms
   and presents them in the requested format.],
   flags: (
-    [`-l, --limit`],   [`int`],    [Number of blooms to return. Default: `20`.],
-    [`--min-resonance`], [`int`],   [Minimum resonance threshold -- get ALL blooms >= this value (overrides `--limit`).],
-    [`-d, --days`],    [`int`],    [Include memories activated in last N days. Default: `7`.],
-    [`--json`],        [`flag`],   [Output as JSON.],
-    [`--ritual`],      [`flag`],   [Output as bash ritual script (sequential reading).],
-    [`--index`],       [`flag`],   [Output as compact markdown index (for identity loading).],
-    [`--no-activate`], [`flag`],   [Do not update activation counts.],
-    [`-e, --engage`],  [`flag`],   [Interactive engage mode -- verify wake phrases (requires TTY).],
-    [`-s, --set-missing`], [`flag`], [Prompt to set missing wake phrases during engage mode. Requires `--engage`.],
-    [`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.],
-    [`--bloom-id`],    [`string`], [Bloom ID for `--respond` or `--skip` operations.],
-    [`--respond`],     [`string`], [Submit wake phrase response for a bloom.],
-    [`--skip`],        [`flag`],   [Skip a bloom without wake phrase.],
-    [`--session`],     [`string`], [Session token for chained ritual (required with `--respond` or `--skip`).],
+    ([`-l, --limit`],   [`int`],    [Number of blooms to return. Default: `20`.]),
+    ([`--min-resonance`], [`int`],   [Minimum resonance threshold -- get ALL blooms >= this value (overrides `--limit`).]),
+    ([`-d, --days`],    [`int`],    [Include memories activated in last N days. Default: `7`.]),
+    ([`--json`],        [`flag`],   [Output as JSON.]),
+    ([`--ritual`],      [`flag`],   [Output as bash ritual script (sequential reading).]),
+    ([`--index`],       [`flag`],   [Output as compact markdown index (for identity loading).]),
+    ([`--no-activate`], [`flag`],   [Do not update activation counts.]),
+    ([`-e, --engage`],  [`flag`],   [Interactive engage mode -- verify wake phrases (requires TTY).]),
+    ([`-s, --set-missing`], [`flag`], [Prompt to set missing wake phrases during engage mode. Requires `--engage`.]),
+    ([`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.]),
+    ([`--bloom-id`],    [`string`], [Bloom ID for `--respond` or `--skip` operations.]),
+    ([`--respond`],     [`string`], [Submit wake phrase response for a bloom.]),
+    ([`--skip`],        [`flag`],   [Skip a bloom without wake phrase.]),
+    ([`--session`],     [`string`], [Session token for chained ritual (required with `--respond` or `--skip`).]),
   ),
   examples: (
     "# Default wake -- top 20 blooms, text output\nmx memory wake",
@@ -372,8 +372,8 @@ the agent can produce each bloom's wake phrase.]
   across all types, sorted by resonance (highest first). Designed as a
   data source for wake ritual presentation.],
   flags: (
-    [`--days`],  [`int`], [Number of days to look back. Default: `15`.],
-    [`--limit`], [`int`], [Maximum number of results. Default: `100`.],
+    ([`--days`],  [`int`], [Number of days to look back. Default: `15`.]),
+    ([`--limit`], [`int`], [Maximum number of results. Default: `100`.]),
   ),
   examples: (
     "mx memory wake-fetch",
@@ -397,7 +397,7 @@ Anchors are connections between entries discovered via embedding similarity.
   [Generate a vector embedding for one or all entries. Embeddings power
   semantic search (`--semantic` flag on `search`) and automatic anchoring.],
   flags: (
-    [`-a, --all`], [`flag`], [Embed all knowledge entries (instead of a single ID).],
+    ([`-a, --all`], [`flag`], [Embed all knowledge entries (instead of a single ID).]),
   ),
   examples: (
     "mx memory embed kn-abc123",
@@ -410,10 +410,10 @@ Anchors are connections between entries discovered via embedding similarity.
   [Automatically add anchors between entries based on embedding similarity.
   Processes a single entry or all entries that have embeddings.],
   flags: (
-    [`--threshold`],   [`float`], [Minimum cosine similarity (0.0--1.0). Default: `0.75`.],
-    [`--max-anchors`], [`int`],   [Maximum anchors to add per entry. Default: `5`.],
-    [`--dry-run`],     [`flag`],  [Preview changes without writing.],
-    [`--verbose`],     [`flag`],  [Show similarity scores in output.],
+    ([`--threshold`],   [`float`], [Minimum cosine similarity (0.0--1.0). Default: `0.75`.]),
+    ([`--max-anchors`], [`int`],   [Maximum anchors to add per entry. Default: `5`.]),
+    ([`--dry-run`],     [`flag`],  [Preview changes without writing.]),
+    ([`--verbose`],     [`flag`],  [Show similarity scores in output.]),
   ),
   examples: (
     "mx memory auto-anchor",
@@ -441,7 +441,7 @@ semantic connections.
   "mx memory relationships list",
   [List all relationships for an entry.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory relationships list kn-abc123",
@@ -452,9 +452,9 @@ semantic connections.
   "mx memory relationships add",
   [Add a typed relationship between two entries.],
   flags: (
-    [`--from`], [`string`], [Source entry ID.],
-    [`--to`],   [`string`], [Target entry ID.],
-    [`--type`], [`string`], [Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.],
+    ([`--from`], [`string`], [Source entry ID.]),
+    ([`--to`],   [`string`], [Target entry ID.]),
+    ([`--type`], [`string`], [Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.]),
   ),
   examples: (
     "mx memory relationships add --from kn-abc --to kn-def --type extends",
@@ -486,7 +486,7 @@ initial setup and bulk import.
   [Seed agents from markdown files with YAML frontmatter. Reads from
   `$MX_HOME/memory/seed/agents/` by default.],
   flags: (
-    [`-p, --path`], [`path`], [Path to agents directory. Defaults to `$MX_HOME/memory/seed/agents/`.],
+    ([`-p, --path`], [`path`], [Path to agents directory. Defaults to `$MX_HOME/memory/seed/agents/`.]),
   ),
   examples: (
     "mx memory seed agents",
@@ -522,7 +522,7 @@ removed in a future release.]
   [Show index statistics -- entry counts, category breakdown, and other
   aggregate metrics.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory stats",
@@ -535,7 +535,7 @@ removed in a future release.]
   [Show graph health vitality percentages: embedding coverage, anchor
   coverage, and stale high-resonance entries.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON (default format for dashboard consumers).],
+    ([`--json`], [`flag`], [Output as JSON (default format for dashboard consumers).]),
   ),
   examples: (
     "mx memory health",
@@ -547,7 +547,7 @@ removed in a future release.]
   "mx memory growth",
   [Show per-week entry growth over the last 8 weeks.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON array of 8 integers (oldest to newest).],
+    ([`--json`], [`flag`], [Output as JSON array of 8 integers (oldest to newest).]),
   ),
   examples: (
     "mx memory growth",
@@ -560,7 +560,7 @@ removed in a future release.]
   [List open threads (`category:thread` entries with `state=\"open\"` or no
   state).],
   flags: (
-    [`--json`], [`flag`], [Output as JSON array (required for dashboard consumers).],
+    ([`--json`], [`flag`], [Output as JSON array (required for dashboard consumers).]),
   ),
   examples: (
     "mx memory open-threads",
@@ -579,8 +579,8 @@ removed in a future release.]
   "mx memory export",
   [Export the entire knowledge database to a file or directory.],
   flags: (
-    [`-f, --format`], [`string`], [Output format: `md`, `jsonl`, `csv`. Default: `md`.],
-    [`-o, --output`], [`path`],   [Output directory for `md` format (defaults to `./memory-export`), or file for `jsonl`/`csv` (defaults to stdout).],
+    ([`-f, --format`], [`string`], [Output format: `md`, `jsonl`, `csv`. Default: `md`.]),
+    ([`-o, --output`], [`path`],   [Output directory for `md` format (defaults to `./memory-export`), or file for `jsonl`/`csv` (defaults to stdout).]),
   ),
   examples: (
     "mx memory export",
@@ -603,9 +603,9 @@ removed in a future release.]
   `last_activated`, and incrementing `activation_count`. Used to signal
   that an entry remains relevant.],
   flags: (
-    [`--amount`], [`int`], [Amount to increase resonance by. Default: `1`.],
-    [`--cap`],    [`int`], [Maximum resonance cap. Default: `10`.],
-    [`--json`],   [`flag`], [Output as JSON.],
+    ([`--amount`], [`int`], [Amount to increase resonance by. Default: `1`.]),
+    ([`--cap`],    [`int`], [Maximum resonance cap. Default: `10`.]),
+    ([`--json`],   [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory reinforce kn-abc123",
@@ -630,7 +630,7 @@ agent identities that entries reference.
   "mx memory agents list",
   [List all registered agents.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory agents list",
@@ -641,8 +641,8 @@ agent identities that entries reference.
   "mx memory agents add",
   [Register a new agent.],
   flags: (
-    [`-d, --description`], [`string`], [Agent description.],
-    [`-D, --domain`],      [`string`], [Agent domain/responsibility.],
+    ([`-d, --description`], [`string`], [Agent description.]),
+    ([`-D, --domain`],      [`string`], [Agent domain/responsibility.]),
   ),
   examples: (
     "mx memory agents add whistledown -d \"Round-trip builder\" -D \"development\"",
@@ -664,7 +664,7 @@ agent identities that entries reference.
   "mx memory projects list",
   [List all registered projects.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory projects list",
@@ -675,11 +675,11 @@ agent identities that entries reference.
   "mx memory projects add",
   [Register a new project.],
   flags: (
-    [`--id`],          [`string`], [Unique project identifier.],
-    [`--name`],        [`string`], [Human-readable project name.],
-    [`--path`],        [`path`],   [Local filesystem path to the project.],
-    [`--repo-url`],    [`string`], [Git repository URL (e.g., `owner/repo`).],
-    [`--description`], [`string`], [Project description.],
+    ([`--id`],          [`string`], [Unique project identifier.]),
+    ([`--name`],        [`string`], [Human-readable project name.]),
+    ([`--path`],        [`path`],   [Local filesystem path to the project.]),
+    ([`--repo-url`],    [`string`], [Git repository URL (e.g., `owner/repo`).]),
+    ([`--description`], [`string`], [Project description.]),
   ),
   examples: (
     "mx memory projects add --id mx --name \"mx CLI\" \\\n  --repo-url coryzibell/mx --path ~/recipes/coryzibell/mx",
@@ -692,7 +692,7 @@ agent identities that entries reference.
   "mx memory categories list",
   [List all categories.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory categories list",
@@ -732,9 +732,9 @@ agent identities that entries reference.
   "mx memory applicability add",
   [Add a new applicability type.],
   flags: (
-    [`--id`],          [`string`], [Unique identifier.],
-    [`--description`], [`string`], [Description of when this applicability applies.],
-    [`--scope`],       [`string`], [Scope constraint (e.g., `project`, `global`).],
+    ([`--id`],          [`string`], [Unique identifier.]),
+    ([`--description`], [`string`], [Description of when this applicability applies.]),
+    ([`--scope`],       [`string`], [Scope constraint (e.g., `project`, `global`).]),
   ),
   examples: (
     "mx memory applicability add --id rust-only \\\n  --description \"Applies only to Rust projects\" --scope project",
@@ -774,8 +774,8 @@ to sessions, and facts can be queried by their source session.
   "mx memory sessions list",
   [List sessions, optionally filtered by project.],
   flags: (
-    [`--project`], [`string`], [Filter by project ID.],
-    [`--json`],    [`flag`],   [Output as JSON.],
+    ([`--project`], [`string`], [Filter by project ID.]),
+    ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
     "mx memory sessions list",
@@ -787,8 +787,8 @@ to sessions, and facts can be queried by their source session.
   "mx memory sessions create",
   [Create a new session.],
   flags: (
-    [`--session-type`], [`string`], [Session type (e.g., `development`, `review`, `exploration`).],
-    [`--project`],      [`string`], [Associated project ID.],
+    ([`--session-type`], [`string`], [Session type (e.g., `development`, `review`, `exploration`).]),
+    ([`--project`],      [`string`], [Associated project ID.]),
   ),
   examples: (
     "mx memory sessions create --session-type development --project mx",
@@ -799,7 +799,7 @@ to sessions, and facts can be queried by their source session.
   "mx memory sessions close",
   [Close an active session.],
   flags: (
-    [`--id`], [`string`], [Session ID to close.],
+    ([`--id`], [`string`], [Session ID to close.]),
   ),
   examples: (
     "mx memory sessions close --id ses-abc123",
@@ -811,7 +811,7 @@ to sessions, and facts can be queried by their source session.
   [List facts extracted from a specific session. The session ID can be
   provided with or without the `kn-` prefix.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory for-session ses-abc123",
@@ -823,7 +823,7 @@ to sessions, and facts can be queried by their source session.
   [Get the session a fact was extracted from. The fact ID can be provided
   with or without the `kn-` prefix.],
   flags: (
-    [`--json`], [`flag`], [Output as JSON.],
+    ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
     "mx memory fact-session kn-abc123",
