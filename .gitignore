@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Docs build output
+docs/out/
+
 # macOS
 .DS_Store
 .AppleDouble

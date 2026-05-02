@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>$if(title)$$title$ - mx docs$else$mx docs$endif$</title>
+  <script>const t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t;</script>
+$for(css)$
+  <link rel="stylesheet" href="$css$" />
+$endfor$
+$if(math)$
+  $math$
+$endif$
+</head>
+<body>
+
+<nav class="sidebar" id="sidebar">
+  <details class="sidebar-toggle" open>
+    <summary class="sidebar-toggle-label">Menu</summary>
+    <div class="sidebar-content">
+      <div class="sidebar-header">
+        <a href="index.html" class="sidebar-title">mx docs</a>
+      </div>
+
+      <div class="sidebar-group">
+        <div class="sidebar-group-title">Intro</div>
+        <ul>
+          <li$if(current-page)$$if(current-page.index)$ class="active"$endif$$endif$><a href="index.html">Overview</a></li>
+          <li$if(current-page)$$if(current-page.getting-started)$ class="active"$endif$$endif$><a href="getting-started.html">Getting Started</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-group">
+        <div class="sidebar-group-title">Commands</div>
+        <ul>
+          <li$if(current-page)$$if(current-page.commit)$ class="active"$endif$$endif$><a href="commit.html">commit</a></li>
+          <li$if(current-page)$$if(current-page.log)$ class="active"$endif$$endif$><a href="log.html">log</a></li>
+          <li$if(current-page)$$if(current-page.memory)$ class="active"$endif$$endif$><a href="memory.html">memory</a></li>
+          <li$if(current-page)$$if(current-page.codex)$ class="active"$endif$$endif$><a href="codex.html">codex</a></li>
+          <li$if(current-page)$$if(current-page.kv)$ class="active"$endif$$endif$><a href="kv.html">kv</a></li>
+          <li$if(current-page)$$if(current-page.state)$ class="active"$endif$$endif$><a href="state.html">state</a></li>
+          <li$if(current-page)$$if(current-page.sync)$ class="active"$endif$$endif$><a href="sync.html">sync</a></li>
+          <li$if(current-page)$$if(current-page.pr)$ class="active"$endif$$endif$><a href="pr.html">pr</a></li>
+          <li$if(current-page)$$if(current-page.github)$ class="active"$endif$$endif$><a href="github.html">github</a></li>
+          <li$if(current-page)$$if(current-page.convert)$ class="active"$endif$$endif$><a href="convert.html">convert</a></li>
+          <li$if(current-page)$$if(current-page.heartbeat)$ class="active"$endif$$endif$><a href="heartbeat.html">heartbeat</a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar-group">
+        <div class="sidebar-group-title">Reference</div>
+        <ul>
+          <li$if(current-page)$$if(current-page.paths)$ class="active"$endif$$endif$><a href="paths.html">paths</a></li>
+          <li$if(current-page)$$if(current-page.base-d)$ class="active"$endif$$endif$><a href="base-d.html">base-d</a></li>
+          <li$if(current-page)$$if(current-page.architecture)$ class="active"$endif$$endif$><a href="architecture.html">architecture</a></li>
+        </ul>
+      </div>
+    </div>
+  </details>
+</nav>
+
+<div class="main">
+  <header class="site-header">
+    <a href="index.html" class="header-title">mx docs</a>
+    <div class="header-right">
+      <a href="https://github.com/coryzibell/mx" class="header-link">GitHub</a>
+      <button class="theme-toggle" onclick="let t=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=t;localStorage.setItem('theme',t)" aria-label="Toggle theme">&#9684;</button>
+    </div>
+  </header>
+
+  <article class="content">
+$if(toc)$
+    <nav class="toc" role="doc-toc">
+      <details open>
+        <summary>Contents</summary>
+        $table-of-contents$
+      </details>
+    </nav>
+$endif$
+    $body$
+  </article>
+
+  <footer class="site-footer">
+    <p>mx docs &middot; Built with Typst + Pandoc</p>
+  </footer>
+</div>
+
+</body>
+</html>

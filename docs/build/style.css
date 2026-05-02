@@ -1,0 +1,510 @@
+/* ================================================================
+   mx docs — stylesheet
+   Clean, minimal, responsive. CSS variables for theming.
+   ================================================================ */
+
+/* ----- Reset ----- */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* ----- Theme variables ----- */
+
+/* Default: light */
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --fg-muted: #555;
+  --nav-bg: #f5f5f5;
+  --code-bg: #f0f0f0;
+  --code-fg: #1a1a1a;
+  --link: #0066cc;
+  --link-hover: #004499;
+  --border: #ddd;
+  --header-bg: #fafafa;
+  --header-border: #e0e0e0;
+  --admonition-note-bg: #e7f2fa;
+  --admonition-note-border: #2196f3;
+  --admonition-warning-bg: #fff3cd;
+  --admonition-warning-border: #ff9800;
+  --admonition-deprecated-bg: #f8d7da;
+  --admonition-deprecated-border: #f44336;
+  --admonition-tip-bg: #d4edda;
+  --admonition-tip-border: #4caf50;
+  --active-bg: #e8e8e8;
+}
+
+/* User chose dark */
+:root[data-theme="dark"] {
+  --bg: #1a1a1a;
+  --fg: #e0e0e0;
+  --fg-muted: #999;
+  --nav-bg: #242424;
+  --code-bg: #2d2d2d;
+  --code-fg: #e0e0e0;
+  --link: #6db3f2;
+  --link-hover: #9dcbf5;
+  --border: #444;
+  --header-bg: #222;
+  --header-border: #333;
+  --admonition-note-bg: #1a3a4a;
+  --admonition-note-border: #2196f3;
+  --admonition-warning-bg: #4a3a1a;
+  --admonition-warning-border: #ff9800;
+  --admonition-deprecated-bg: #4a1a1a;
+  --admonition-deprecated-border: #f44336;
+  --admonition-tip-bg: #1a3a1a;
+  --admonition-tip-border: #4caf50;
+  --active-bg: #333;
+}
+
+/* System prefers dark, user hasn't chosen */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1a1a1a;
+    --fg: #e0e0e0;
+    --fg-muted: #999;
+    --nav-bg: #242424;
+    --code-bg: #2d2d2d;
+    --code-fg: #e0e0e0;
+    --link: #6db3f2;
+    --link-hover: #9dcbf5;
+    --border: #444;
+    --header-bg: #222;
+    --header-border: #333;
+    --admonition-note-bg: #1a3a4a;
+    --admonition-note-border: #2196f3;
+    --admonition-warning-bg: #4a3a1a;
+    --admonition-warning-border: #ff9800;
+    --admonition-deprecated-bg: #4a1a1a;
+    --admonition-deprecated-border: #f44336;
+    --admonition-tip-bg: #1a3a1a;
+    --admonition-tip-border: #4caf50;
+    --active-bg: #333;
+  }
+}
+
+/* User chose light (overrides system dark) */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --fg-muted: #555;
+  --nav-bg: #f5f5f5;
+  --code-bg: #f0f0f0;
+  --code-fg: #1a1a1a;
+  --link: #0066cc;
+  --link-hover: #004499;
+  --border: #ddd;
+  --header-bg: #fafafa;
+  --header-border: #e0e0e0;
+  --admonition-note-bg: #e7f2fa;
+  --admonition-note-border: #2196f3;
+  --admonition-warning-bg: #fff3cd;
+  --admonition-warning-border: #ff9800;
+  --admonition-deprecated-bg: #f8d7da;
+  --admonition-deprecated-border: #f44336;
+  --admonition-tip-bg: #d4edda;
+  --admonition-tip-border: #4caf50;
+  --active-bg: #e8e8e8;
+}
+
+/* ----- Typography ----- */
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+    Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", Arial,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--link-hover);
+  text-decoration: underline;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  line-height: 1.3;
+}
+
+h1 { font-size: 1.8em; }
+h2 { font-size: 1.4em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+h3 { font-size: 1.15em; }
+h4 { font-size: 1em; }
+
+p {
+  margin: 0.8em 0;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5em 0;
+}
+
+/* ----- Layout ----- */
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 240px;
+  background: var(--nav-bg);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.main {
+  margin-left: 240px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.content {
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 2em 2em 4em;
+  flex: 1;
+}
+
+/* ----- Sidebar ----- */
+
+.sidebar-toggle {
+  height: 100%;
+}
+
+.sidebar-toggle > summary {
+  display: none;
+}
+
+.sidebar-content {
+  padding: 1em 0;
+}
+
+.sidebar-header {
+  padding: 0 1.2em 0.5em;
+  margin-bottom: 0.5em;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-title {
+  font-size: 1.3em;
+  font-weight: 700;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.sidebar-title:hover {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.sidebar-group {
+  margin-bottom: 0.5em;
+}
+
+.sidebar-group-title {
+  font-size: 0.75em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  padding: 0.5em 1.6em 0.2em;
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar li a {
+  display: block;
+  padding: 0.3em 1.6em;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.9em;
+}
+
+.sidebar li a:hover {
+  background: var(--active-bg);
+  text-decoration: none;
+}
+
+.sidebar li.active a {
+  background: var(--active-bg);
+  font-weight: 600;
+  color: var(--link);
+}
+
+/* ----- Header ----- */
+
+.site-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6em 2em;
+  background: var(--header-bg);
+  border-bottom: 1px solid var(--header-border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.header-title {
+  font-weight: 700;
+  font-size: 1.1em;
+  color: var(--fg);
+  text-decoration: none;
+}
+
+.header-title:hover {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+}
+
+.header-link {
+  font-size: 0.9em;
+  color: var(--fg-muted);
+}
+
+.header-link:hover {
+  color: var(--link);
+}
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2em 0.5em;
+  font-size: 1.1em;
+  cursor: pointer;
+  color: var(--fg);
+  line-height: 1;
+}
+
+.theme-toggle:hover {
+  background: var(--active-bg);
+}
+
+/* ----- Footer ----- */
+
+.site-footer {
+  padding: 1em 2em;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 0.85em;
+  color: var(--fg-muted);
+}
+
+/* ----- TOC ----- */
+
+.toc {
+  margin-bottom: 2em;
+  padding: 1em 1.2em;
+  background: var(--nav-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.toc summary {
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 0.5em;
+}
+
+.toc ul {
+  margin: 0.3em 0;
+  padding-left: 1.5em;
+}
+
+.toc li {
+  margin: 0.2em 0;
+}
+
+.toc a {
+  color: var(--fg);
+}
+
+.toc a:hover {
+  color: var(--link);
+}
+
+/* ----- Code ----- */
+
+code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.88em;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 0.15em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  padding: 1em;
+  border-radius: 4px;
+  overflow-x: auto;
+  line-height: 1.45;
+  border: 1px solid var(--border);
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.88em;
+}
+
+/* ----- Tables ----- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.9em;
+}
+
+th, td {
+  padding: 0.5em 0.8em;
+  text-align: left;
+  border: 1px solid var(--border);
+}
+
+th {
+  background: var(--nav-bg);
+  font-weight: 600;
+}
+
+/* Horizontal scroll for wide tables on mobile */
+.content table {
+  display: block;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* ----- Admonitions ----- */
+
+.admonition {
+  padding: 0.8em 1em;
+  margin: 1em 0;
+  border-left: 4px solid var(--border);
+  border-radius: 0 4px 4px 0;
+}
+
+.admonition p {
+  margin: 0.3em 0;
+}
+
+.admonition p:first-child strong {
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.03em;
+}
+
+.admonition.note {
+  background: var(--admonition-note-bg);
+  border-left-color: var(--admonition-note-border);
+}
+
+.admonition.warning {
+  background: var(--admonition-warning-bg);
+  border-left-color: var(--admonition-warning-border);
+}
+
+.admonition.deprecated {
+  background: var(--admonition-deprecated-bg);
+  border-left-color: var(--admonition-deprecated-border);
+}
+
+.admonition.tip {
+  background: var(--admonition-tip-bg);
+  border-left-color: var(--admonition-tip-border);
+}
+
+/* ----- Lists ----- */
+
+ul, ol {
+  padding-left: 1.5em;
+}
+
+li {
+  margin: 0.3em 0;
+}
+
+li > ul, li > ol {
+  margin-top: 0.2em;
+}
+
+/* ----- Images ----- */
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ----- Mobile (< 768px): sidebar collapses ----- */
+
+@media (max-width: 768px) {
+  .sidebar {
+    position: relative;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar-toggle > summary {
+    display: block;
+    padding: 0.8em 1.2em;
+    font-weight: 600;
+    cursor: pointer;
+    background: var(--nav-bg);
+  }
+
+  /* Closed by default on mobile via JS-free approach:
+     the <details open> attribute is set in HTML for desktop,
+     but on mobile we rely on the user toggling it. The 'open'
+     attribute means it starts expanded on desktop. On mobile
+     the summary is visible so users can toggle. */
+
+  .main {
+    margin-left: 0;
+  }
+
+  .content {
+    padding: 1em;
+  }
+
+  .site-header {
+    padding: 0.6em 1em;
+  }
+
+  .site-footer {
+    padding: 1em;
+  }
+}
