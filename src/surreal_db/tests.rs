@@ -14,7 +14,7 @@ fn test_schema_applies_without_error() {
 }
 
 #[test]
-fn test_open_with_path() {
+fn test_embedded_connect_creates_directory() {
     use super::connection::SurrealConfig;
     use tempfile::tempdir;
 
