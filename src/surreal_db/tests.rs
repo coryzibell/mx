@@ -15,13 +15,19 @@ fn test_schema_applies_without_error() {
 
 #[test]
 fn test_open_with_path() {
+    use super::connection::SurrealConfig;
     use tempfile::tempdir;
 
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.surreal");
 
-    // Open database at specific path
-    let _db = SurrealDatabase::open(&db_path).unwrap();
+    // Use connect() with default config to force embedded mode, same as
+    // open_in_memory(). The public open() reads MX_SURREAL_MODE from the
+    // environment, which may route to a network backend that never creates
+    // a local directory -- making the exists()/is_dir() assertions flaky
+    // on hosts where the factory runs in network mode.
+    let config = SurrealConfig::default(); // always Embedded
+    let _db = SurrealDatabase::connect(&db_path, &config).unwrap();
 
     // Verify directory was created
     assert!(db_path.exists());
