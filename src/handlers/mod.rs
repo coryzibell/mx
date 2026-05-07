@@ -505,10 +505,11 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
 
     // ── Pass 1: commit metadata + encoded message ───────────────────
     // Format: full hash, author, date, empty-subject-placeholder, body.
-    // We use `--date=default` to match `git show`'s default date format.
-    let format_str = "%H%n%an <%ae>%n%ad%n%s%n%b%n---MX-SHOW-END---";
+    // %ad uses the user's configured date format, matching git show's behavior.
+    let format_str = "%H%n%p%n%an <%ae>%n%ad%n%s%n%b%n---MX-SHOW-END---";
     let mut cmd1 = Command::new("git");
-    cmd1.args(["show", &format!("--format={}", format_str), "--no-patch"]);
+    cmd1.args(["show", &format!("--format={}", format_str), "--no-patch"])
+        .stderr(std::process::Stdio::inherit());
     for arg in &args {
         // Skip diff-presentation flags for Pass 1 (metadata only).
         if arg == "--stat"
@@ -549,7 +550,7 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
         }
 
         let lines: Vec<&str> = commit_block.lines().collect();
-        if lines.len() < 4 {
+        if lines.len() < 5 {
             // Not enough lines for a commit -- might be tag preamble.
             // Print as-is.
             for line in &lines {
@@ -559,16 +560,20 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
         }
 
         let hash = lines[0];
-        let author = lines[1];
-        let date = lines[2];
-        let _encoded_subject = lines[3]; // one-way hash, not decodable
-        let body: String = lines[4..].join("\n");
+        let parent_hashes = lines[1];
+        let author = lines[2];
+        let date = lines[3];
+        let raw_subject = lines[4]; // one-way hash, not decodable
+        let body: String = lines[5..].join("\n");
 
         // Decode the body.
         let result = try_decode_commit_body(&body);
 
         // Print header (matching git show's default format).
         writeln!(out, "\x1b[33mcommit {}\x1b[0m", hash)?;
+        if parent_hashes.split_whitespace().count() >= 2 {
+            writeln!(out, "Merge:  {}", parent_hashes)?;
+        }
         writeln!(out, "Author: {}", author)?;
         writeln!(out, "Date:   {}", date)?;
         writeln!(out)?;
@@ -588,7 +593,7 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
         } else {
             // Not encoded -- show the original subject line from git,
             // then the body below it (matching git show's default).
-            writeln!(out, "    {}", _encoded_subject)?;
+            writeln!(out, "    {}", raw_subject)?;
             let body_trimmed = body.trim();
             if !body_trimmed.is_empty() {
                 writeln!(out)?;
@@ -603,7 +608,8 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
     // ── Pass 2: diff output ─────────────────────────────────────────
     if !has_no_patch {
         let mut cmd2 = Command::new("git");
-        cmd2.args(["show", "--format="]);
+        cmd2.args(["show", "--format="])
+            .stderr(std::process::Stdio::inherit());
         for arg in &args {
             cmd2.arg(arg);
         }
