@@ -504,7 +504,7 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
     let has_no_patch = args.iter().any(|a| a == "--no-patch" || a == "-s");
 
     // ── Pass 1: commit metadata + encoded message ───────────────────
-    // Format: full hash, author, date, empty-subject-placeholder, body.
+    // Format: full hash, parent hashes, author, date, subject, body.
     // %ad uses the user's configured date format, matching git show's behavior.
     let format_str = "%H%n%p%n%an <%ae>%n%ad%n%s%n%b%n---MX-SHOW-END---";
     let mut cmd1 = Command::new("git");
