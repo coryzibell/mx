@@ -74,17 +74,20 @@ mx log -n 5 --full -- docs/
 mx log -- --author="charlie"
 ```
 
-== Relationship to mx commit
+== Relationship to mx commit and mx show
 
-`mx commit` and `mx log` are two halves of the same round-trip:
+`mx commit`, `mx log`, and #link("show.html")[`mx show`] form the encoding
+round-trip:
 
 + `mx commit` compresses your message, encodes it through a random dictionary,
   and writes the encoded result as the git commit body with a footer tag.
 + `mx log` reads the footer tag, reverses the encoding, decompresses, and
-  displays your original message.
+  displays your original message across the commit history.
++ `mx show` does the same decoding for individual commits, replacing
+  `git show`.
 
 Non-encoded commits (e.g. commits made with raw `git commit`) pass through
-unchanged -- `mx log` detects the absence of a footer tag and displays the
-original subject line.
+unchanged -- both `mx log` and `mx show` detect the absence of a footer tag
+and display the original message.
 
 For the full encoding specification, see #link("commit.html")[commit].

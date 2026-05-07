@@ -14,14 +14,16 @@ second (also random) dictionary. The result is a three-part commit:
 - *Footer* -- a tag identifying the hash algorithm, compression algorithm, and
   both dictionary names: `[hash:title_dict|compress:body_dict]`.
 
-Raw `git log` shows encoded glyphs. `mx log` decodes them back to plain text.
+Raw `git log` and `git show` display encoded glyphs. `mx log` and
+`mx show` decode them back to plain text.
 
 When both the title and body randomly land on the _same_ dictionary, a dejavu
 marker (`whoa.`) is appended to the footer -- a small easter egg that emerges
 from pure chance.
 
-#note[Always use `mx log` to read commit history. Raw `git log` output is
-intentionally unreadable.]
+#note[Always use `mx log` to read commit history and `mx show` to inspect
+individual commits. Raw `git log` and `git show` output is intentionally
+unreadable.]
 
 == Basic usage
 
@@ -178,8 +180,8 @@ system that maps binary data to tokens from randomly selected dictionaries.
   dictionary. This becomes the commit *body*.
 + A footer tag records the algorithms and dictionaries used:
   `[hash_algo:title_dict|compress_algo:body_dict]`.
-+ `mx log` reads the footer, looks up the dictionaries, and reverses the
-  process to recover the original message.
++ `mx log` and `mx show` read the footer, look up the dictionaries, and
+  reverse the process to recover the original message.
 
 If the encoded output contains NUL bytes or control characters (which would
 break git), the encoder retries with a different random dictionary, up to 5

@@ -47,6 +47,24 @@ mx log
 mx log -n 20 --full
 ```
 
+### Decoded Git Show
+
+`mx show` is a drop-in replacement for `git show` that transparently decodes encoded commit messages. All `git show` flags work as expected.
+
+```bash
+# Show the latest commit, decoded
+mx show
+
+# Show a specific commit with diffstat
+mx show abc1234 --stat
+
+# Show just the commit message, no diff
+mx show --no-patch
+
+# View a file at a specific revision (passes through to git show)
+mx show HEAD:src/main.rs
+```
+
 ### Knowledge / Memory
 
 The memory system is a knowledge graph backed by SurrealDB (or embedded SurrealKV). Entries have categories, tags, resonance levels, embeddings, and relationships.

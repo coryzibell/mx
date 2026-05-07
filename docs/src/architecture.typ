@@ -73,7 +73,7 @@ src/
  cli.rs             # the full command tree (clap derive enums)
  paths.rs           # single source of path truth
  handlers/          # command handler routing
-   mod.rs           # top-level dispatchers (pr, github, codex, log, etc.)
+   mod.rs           # top-level dispatchers (pr, github, codex, log, show, etc.)
    memory.rs        # mx memory subcommand handler
    kv.rs            # mx kv subcommand handler
    metadata.rs      # metadata subcommand handler (categories, tags, etc.)
@@ -165,6 +165,7 @@ Some commands dispatch directly to domain functions from `main.rs`:
 ```rust
 Commands::Commit { .. } => commit::upload_commit(..),
 Commands::Log { .. } => handle_log(..),
+Commands::Show { .. } => handle_show(..),
 ```
 
 Others dispatch through `handlers/mod.rs`:
@@ -651,9 +652,10 @@ pub struct EncodedCommit {
 
 === `handlers/mod.rs` -- the decoding pipeline
 
-`mx log` decodes commits by:
+`mx log` and `mx show` decode commits by:
 
-+ Running `git log` with a structured format.
++ Running the underlying git command (`git log` or `git show`) with a
+  structured format.
 + For each commit body, calling `try_decode_commit_body()`.
 + The function scans for the last footer-shaped line (validated against the
   known compression algorithm vocabulary).
@@ -665,6 +667,12 @@ pub struct EncodedCommit {
 The scan uses a "last wins" heuristic: if multiple footer-shaped lines appear
 (e.g., from a user-amended commit that quotes a prior footer), the last one is
 used.
+
+`handle_show()` uses a two-pass approach: Pass 1 retrieves commit metadata
+and the encoded message (with `--no-patch`), decodes it, and prints the
+header. Pass 2 retrieves the diff output (with `--format=""`) and streams it
+as-is. Passthrough detection skips decoding entirely for `ref:path` syntax
+(file content viewing) and `--format`/`--pretty` (user-controlled output).
 
 === `commit.rs` -- PR merge encoding
 

@@ -19,7 +19,7 @@ CROSSREF_FILTER="$BUILD_DIR/crossref.lua"
 
 # Ordered list for LLM output (getting-started first, architecture last)
 LLM_ORDER=(
-  index getting-started commit log memory codex kv state
+  index getting-started commit log show memory codex kv state
   sync pr github convert session wiki
   base-d paths architecture
 )

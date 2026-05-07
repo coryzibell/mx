@@ -55,6 +55,13 @@ This shows the last 10 commits with decoded messages. For more detail:
 mx log -n 20 --full
 ```
 
+To inspect a single commit (decoded replacement for `git show`):
+
+```bash
+mx show
+mx show abc1234 --stat
+```
+
 === Preview without committing
 
 If you want to see what the encoding produces without actually committing:
@@ -69,9 +76,9 @@ Or to test title/body encoding separately:
 mx commit --encode-only --title "refactor store" --body "split backends"
 ```
 
-#note[Always use `mx log` to read commit history. Raw `git log` shows encoded
-output that is intentionally unreadable. See #link("base-d.html")[base-d] for
-how the encoding works.]
+#note[Always use `mx log` and `mx show` to read commit history. Raw `git log`
+and `git show` show encoded output that is intentionally unreadable. See
+#link("base-d.html")[base-d] for how the encoding works.]
 
 == Setting up MX_HOME
 
@@ -160,8 +167,8 @@ mx sync push owner/repo --dry-run
 
 == What's next
 
-- Read the #link("commit.html")[commit] and #link("log.html")[log] reference
-  pages for the full flag reference
+- Read the #link("commit.html")[commit], #link("log.html")[log], and
+  #link("show.html")[show] reference pages for the full flag reference
 - Explore the #link("memory.html")[memory] system for persistent knowledge
 - Check #link("paths.html")[filesystem layout] for configuration options
 - See #link("architecture.html")[architecture] for how mx is built internally
