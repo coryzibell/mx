@@ -102,6 +102,13 @@ pub enum Commands {
         command: ConvertCommands,
     },
 
+    /// Decoded git show (transparently decodes encoded commit messages)
+    Show {
+        /// Arguments passed to git show
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Decoded git log (decodes encoded commit messages)
     Log {
         /// Number of commits to show

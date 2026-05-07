@@ -444,6 +444,181 @@ pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> R
     Ok(())
 }
 
+/// Handle `mx show` -- decoded `git show`.
+///
+/// Two-pass approach:
+///   Pass 1: `git show --format=<custom> --no-patch` to get commit metadata
+///           + message. Decode the body using `try_decode_commit_body()`.
+///   Pass 2: `git show --format="" <args>` to get the diff. Stream as-is.
+///
+/// Passthrough modes (skip decoding, run raw `git show`):
+///   - Any arg matches the `ref:path` pattern (viewing file content).
+///   - `--format` or `--pretty` present (user controls output format).
+///
+/// Fallback: if decoding fails, show the raw message (same as `git show`).
+pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
+    use std::io::Write;
+    use std::process::Command;
+
+    // ── Passthrough detection ───────────────────────────────────────
+    let should_passthrough = args.iter().any(|a| {
+        // --format or --pretty means user controls the format.
+        if a == "--format" || a.starts_with("--format=") {
+            return true;
+        }
+        if a == "--pretty" || a.starts_with("--pretty=") {
+            return true;
+        }
+        // ref:path pattern -- viewing file content, not a commit.
+        // Heuristic: contains ':' but isn't a flag value like --since=12:00.
+        if !a.starts_with('-') && a.contains(':') {
+            // Could be `HEAD:src/main.rs` or `abc123:README.md`.
+            // Exclude things that look like times (digits:digits).
+            let parts: Vec<&str> = a.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let after_colon = parts[1];
+                // If after-colon is purely digits, it's probably a time,
+                // not a path. Otherwise it's ref:path.
+                if !after_colon.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+        false
+    });
+
+    if should_passthrough {
+        // Pure passthrough: run `git show` with all args, no decoding.
+        let status = Command::new("git")
+            .arg("show")
+            .args(&args)
+            .status()
+            .context("Failed to run git show")?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
+    // ── Detect --no-patch ───────────────────────────────────────────
+    let has_no_patch = args.iter().any(|a| a == "--no-patch" || a == "-s");
+
+    // ── Pass 1: commit metadata + encoded message ───────────────────
+    // Format: full hash, author, date, empty-subject-placeholder, body.
+    // We use `--date=default` to match `git show`'s default date format.
+    let format_str = "%H%n%an <%ae>%n%ad%n%s%n%b%n---MX-SHOW-END---";
+    let mut cmd1 = Command::new("git");
+    cmd1.args(["show", &format!("--format={}", format_str), "--no-patch"]);
+    for arg in &args {
+        // Skip diff-presentation flags for Pass 1 (metadata only).
+        if arg == "--stat"
+            || arg == "--shortstat"
+            || arg == "--numstat"
+            || arg == "--name-only"
+            || arg == "--name-status"
+            || arg.starts_with("--diff-filter")
+        {
+            continue;
+        }
+        cmd1.arg(arg);
+    }
+
+    let output1 = cmd1.output().context("Failed to run git show (pass 1)")?;
+    if !output1.status.success() {
+        // Might be a blob/tree/tag -- fallback to raw git show.
+        let status = Command::new("git")
+            .arg("show")
+            .args(&args)
+            .status()
+            .context("Failed to run git show (fallback)")?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
+    let raw1 = String::from_utf8_lossy(&output1.stdout);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    // Parse and print each commit block (handles multiple refs).
+    for commit_block in raw1.split("---MX-SHOW-END---") {
+        let commit_block = commit_block.trim();
+        if commit_block.is_empty() {
+            continue;
+        }
+
+        let lines: Vec<&str> = commit_block.lines().collect();
+        if lines.len() < 4 {
+            // Not enough lines for a commit -- might be tag preamble.
+            // Print as-is.
+            for line in &lines {
+                writeln!(out, "{}", line)?;
+            }
+            continue;
+        }
+
+        let hash = lines[0];
+        let author = lines[1];
+        let date = lines[2];
+        let _encoded_subject = lines[3]; // one-way hash, not decodable
+        let body: String = lines[4..].join("\n");
+
+        // Decode the body.
+        let result = try_decode_commit_body(&body);
+
+        // Print header (matching git show's default format).
+        writeln!(out, "\x1b[33mcommit {}\x1b[0m", hash)?;
+        writeln!(out, "Author: {}", author)?;
+        writeln!(out, "Date:   {}", date)?;
+        writeln!(out)?;
+
+        // Print decoded message. The decoded body's first line is the
+        // subject (since the encoded title is a non-decodable hash).
+        if result.was_decoded {
+            for line in result.subject.lines() {
+                writeln!(out, "    {}", line)?;
+            }
+            if let Some(trailing) = result.trailing.as_deref() {
+                writeln!(out)?;
+                for line in trailing.lines() {
+                    writeln!(out, "    \x1b[2m{}\x1b[0m", line)?;
+                }
+            }
+        } else {
+            // Not encoded -- show the original subject line from git,
+            // then the body below it (matching git show's default).
+            writeln!(out, "    {}", _encoded_subject)?;
+            let body_trimmed = body.trim();
+            if !body_trimmed.is_empty() {
+                writeln!(out)?;
+                for line in body_trimmed.lines() {
+                    writeln!(out, "    {}", line)?;
+                }
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // ── Pass 2: diff output ─────────────────────────────────────────
+    if !has_no_patch {
+        let mut cmd2 = Command::new("git");
+        cmd2.args(["show", "--format="]);
+        for arg in &args {
+            cmd2.arg(arg);
+        }
+
+        let output2 = cmd2.output().context("Failed to run git show (pass 2)")?;
+        if output2.status.success() {
+            out.write_all(&output2.stdout)?;
+        }
+        // If pass 2 fails (e.g. binary file), that's OK -- the header
+        // was already printed. git show's own stderr will have the error.
+    }
+
+    Ok(())
+}
+
 /// A line is "footer-shaped" if it parses as the `[hash:dict|algo:dict]`
 /// tag we emit during encode AND the compression-algorithm slot names a
 /// real algorithm from our known vocabulary.
