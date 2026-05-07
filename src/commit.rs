@@ -1332,7 +1332,10 @@ mod tests {
         let dir = create_temp_git_repo();
         let result = check_uncommitted_in_dir(dir.path());
         assert!(result.is_ok());
-        assert!(!result.unwrap(), "clean repo should report no uncommitted changes");
+        assert!(
+            !result.unwrap(),
+            "clean repo should report no uncommitted changes"
+        );
     }
 
     #[test]
@@ -1342,7 +1345,10 @@ mod tests {
         std::fs::write(dir.path().join("README.md"), "modified").expect("write failed");
         let result = check_uncommitted_in_dir(dir.path());
         assert!(result.is_ok());
-        assert!(result.unwrap(), "modified tracked file should report uncommitted changes");
+        assert!(
+            result.unwrap(),
+            "modified tracked file should report uncommitted changes"
+        );
     }
 
     #[test]
@@ -1356,7 +1362,10 @@ mod tests {
             .expect("git add failed");
         let result = check_uncommitted_in_dir(dir.path());
         assert!(result.is_ok());
-        assert!(result.unwrap(), "staged change should report uncommitted changes");
+        assert!(
+            result.unwrap(),
+            "staged change should report uncommitted changes"
+        );
     }
 
     #[test]
@@ -1366,7 +1375,10 @@ mod tests {
         std::fs::write(dir.path().join("newfile.txt"), "untracked").expect("write failed");
         let result = check_uncommitted_in_dir(dir.path());
         assert!(result.is_ok());
-        assert!(!result.unwrap(), "untracked file should not count as uncommitted changes");
+        assert!(
+            !result.unwrap(),
+            "untracked file should not count as uncommitted changes"
+        );
     }
 
     // --- PR #281: has_unpushed_commits tests ---
@@ -1421,7 +1433,9 @@ mod tests {
             .current_dir(work_dir.path())
             .output()
             .expect("git rev-parse failed");
-        let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+        let branch = String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string();
 
         Command::new("git")
             .args(["push", "-u", "origin", &branch])
@@ -1448,7 +1462,10 @@ mod tests {
         let branch = get_branch_name(work_dir.path());
         let result = check_unpushed_in_dir(work_dir.path(), &branch);
         assert!(result.is_ok());
-        assert!(!result.unwrap(), "freshly pushed repo should have no unpushed commits");
+        assert!(
+            !result.unwrap(),
+            "freshly pushed repo should have no unpushed commits"
+        );
     }
 
     #[test]
