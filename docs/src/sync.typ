@@ -9,7 +9,7 @@ files. Issues and discussions are pulled from GitHub into a local cache as YAML,
 edited locally, and pushed back.
 
 The sync subsystem uses two API layers internally: the GitHub REST API for
-issues, and the GitHub GraphQL API for discussions. Authentication
+issues and the GitHub GraphQL API for discussions. Authentication
 is handled automatically through a token stored in `~/.claude.json`.
 
 All YAML files live in a sync cache directory at
