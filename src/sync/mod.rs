@@ -3,7 +3,6 @@
 //! Replaces Python scripts with native Rust for:
 //! - Pull: GitHub → YAML
 //! - Push: YAML → GitHub
-//! - Labels: Sync identity labels
 //! - Issues: Bidirectional sync
 
 pub mod commands;
@@ -23,12 +22,6 @@ pub fn default_sync_dir(repo: &str) -> PathBuf {
     crate::paths::sync_cache_dir(repo)
 }
 
-/// Artifacts directory.
-/// Delegates to `crate::paths::artifacts_dir`; kept for sub-module convenience.
-pub fn artifacts_dir() -> PathBuf {
-    crate::paths::artifacts_dir()
-}
-
 pub fn handle_sync(cmd: SyncCommands) -> Result<()> {
     match cmd {
         SyncCommands::Pull {
@@ -42,8 +35,6 @@ pub fn handle_sync(cmd: SyncCommands) -> Result<()> {
             input,
             dry_run,
         } => commands::push::run(&repo, input, dry_run),
-
-        SyncCommands::Labels { repo, dry_run } => commands::labels::run(&repo, dry_run),
 
         SyncCommands::Issues { repo, dry_run } => commands::issues::run(&repo, dry_run),
     }

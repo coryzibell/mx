@@ -112,7 +112,7 @@ src/
  display.rs         # safe_truncate, formatting helpers
  tensor.rs          # emotional state tensor encode/decode
  github.rs          # GitHub API operations (cleanup, comments)
- sync/              # GitHub sync (issues, labels, wiki)
+ sync/              # GitHub sync (issues, wiki)
  convert.rs         # md2yaml / yaml2md conversion
  session.rs         # deprecated session export (forwards to codex)
  index.rs           # legacy index operations
@@ -238,7 +238,6 @@ Each subsystem has its own function in `paths.rs`:
   [`state_schemas_dir()`], [`$MX_HOME/state/schemas/`],
   [`swap_dir()`], [`$MX_HOME/swap/`],
   [`sync_cache_dir(repo)`], [`$MX_HOME/cache/sync/{repo-slug}/`],
-  [`artifacts_dir()`], [`$MX_HOME/artifacts/`],
 )
 
 === The `_with()` test-seam pattern <with-pattern>

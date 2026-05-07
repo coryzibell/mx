@@ -85,11 +85,6 @@ pub fn sync_cache_dir(repo: &str) -> PathBuf {
     mx_home().join("cache").join("sync").join(repo_slug)
 }
 
-/// Artifacts directory: `$MX_HOME/artifacts/`
-pub fn artifacts_dir() -> PathBuf {
-    mx_home().join("artifacts")
-}
-
 // ---------------------------------------------------------------------------
 // kv (decision 1)
 // ---------------------------------------------------------------------------
@@ -422,13 +417,6 @@ mod tests {
         let swap = swap_dir();
         assert!(swap.starts_with(home), "swap_dir not under mx_home");
         assert_eq!(swap.file_name().unwrap(), "swap");
-
-        let artifacts = artifacts_dir();
-        assert!(
-            artifacts.starts_with(home),
-            "artifacts_dir not under mx_home"
-        );
-        assert_eq!(artifacts.file_name().unwrap(), "artifacts");
 
         // codex_dir without override should also be under mx_home
         let codex = codex_dir_with(None, home);

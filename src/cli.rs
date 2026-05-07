@@ -295,16 +295,6 @@ pub enum SyncCommands {
         dry_run: bool,
     },
 
-    /// Sync identity labels to repository
-    Labels {
-        /// Repository (owner/repo format)
-        repo: String,
-
-        /// Dry run - show what would be synced
-        #[arg(long)]
-        dry_run: bool,
-    },
-
     /// Sync issues bidirectionally
     Issues {
         /// Repository (owner/repo format)

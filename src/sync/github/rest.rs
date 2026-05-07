@@ -1,6 +1,6 @@
 //! GitHub REST API client
 //!
-//! Handles issues, labels, and other REST endpoints.
+//! Handles issues and other REST endpoints.
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
@@ -142,86 +142,6 @@ impl RestClient {
             .context("Failed to parse update issue response")
     }
 
-    /// List all labels in a repository
-    pub fn list_labels(&self, owner: &str, repo: &str) -> Result<Vec<Label>> {
-        let mut all_labels = Vec::new();
-        let mut page = 1;
-
-        loop {
-            let url = format!(
-                "{}/repos/{}/{}/labels?per_page=100&page={}",
-                GITHUB_API_BASE, owner, repo, page
-            );
-
-            let response: Vec<Label> = self
-                .client
-                .get(&url)
-                .send()
-                .context("Failed to fetch labels")?
-                .error_for_status()
-                .context("GitHub API error")?
-                .json()
-                .context("Failed to parse labels response")?;
-
-            if response.is_empty() {
-                break;
-            }
-
-            let count = response.len();
-            all_labels.extend(response);
-
-            if count < 100 {
-                break;
-            }
-
-            page += 1;
-        }
-
-        Ok(all_labels)
-    }
-
-    /// Create a new label
-    pub fn create_label(&self, owner: &str, repo: &str, req: &CreateLabelRequest) -> Result<Label> {
-        let url = format!("{}/repos/{}/{}/labels", GITHUB_API_BASE, owner, repo);
-
-        self.client
-            .post(&url)
-            .json(req)
-            .send()
-            .context("Failed to create label")?
-            .error_for_status()
-            .context("GitHub API error")?
-            .json()
-            .context("Failed to parse create label response")
-    }
-
-    /// Update an existing label
-    pub fn update_label(
-        &self,
-        owner: &str,
-        repo: &str,
-        name: &str,
-        req: &UpdateLabelRequest,
-    ) -> Result<Label> {
-        let url = format!(
-            "{}/repos/{}/{}/labels/{}",
-            GITHUB_API_BASE,
-            owner,
-            repo,
-            urlencoding::encode(name)
-        );
-
-        self.client
-            .patch(&url)
-            .json(req)
-            .send()
-            .context("Failed to update label")?
-            .error_for_status()
-            .context("GitHub API error")?
-            .json()
-            .context("Failed to parse update label response")
-    }
-
     /// List comments on an issue
     pub fn list_issue_comments(
         &self,
@@ -325,15 +245,6 @@ pub struct PullRequestRef {
     pub url: String,
 }
 
-/// GitHub Label
-#[derive(Debug, Clone, Deserialize)]
-pub struct Label {
-    pub name: String,
-    pub color: String,
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
 /// GitHub Comment
 #[derive(Debug, Clone, Deserialize)]
 pub struct Comment {
@@ -367,24 +278,4 @@ pub struct UpdateIssueRequest {
     pub assignees: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-}
-
-/// Request to create a label
-#[derive(Debug, Serialize)]
-pub struct CreateLabelRequest {
-    pub name: String,
-    pub color: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Request to update a label
-#[derive(Debug, Serialize)]
-pub struct UpdateLabelRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub new_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
 }

@@ -1,16 +1,15 @@
 #import "lib.typ": *
 
-#page-header("Sync", "GitHub sync for issues, discussions, and labels.")
+#page-header("Sync", "GitHub sync for issues and discussions.")
 
 == Overview
 
 `mx sync` provides bidirectional synchronization between GitHub and local YAML
 files. Issues and discussions are pulled from GitHub into a local cache as YAML,
-edited locally, and pushed back. Labels can be synced separately from an
-identity definition file.
+edited locally, and pushed back.
 
 The sync subsystem uses two API layers internally: the GitHub REST API for
-issues and labels, and the GitHub GraphQL API for discussions. Authentication
+issues, and the GitHub GraphQL API for discussions. Authentication
 is handled automatically through a token stored in `~/.claude.json`.
 
 All YAML files live in a sync cache directory at
@@ -19,11 +18,10 @@ issue or discussion.
 
 == Subcommands
 
-`mx sync` has four subcommands:
+`mx sync` has three subcommands:
 
 - `pull` -- download issues and discussions from GitHub to local YAML
 - `push` -- upload local YAML changes back to GitHub
-- `labels` -- sync identity labels from a definition file to a repository
 - `issues` -- run a full bidirectional sync (pull then push)
 
 Every subcommand accepts a `--dry-run` flag that previews what would happen
@@ -169,54 +167,6 @@ Issues: 1 created, 3 updated, 8 unchanged
 Discussions: 0 created, 1 updated, 2 unchanged
 ```
 
-== Labels
-
-#command("mx sync labels <repo>",
-  [Sync identity labels from a local definition file to a GitHub repository.
-  Creates missing labels and updates existing ones whose color or description
-  has drifted.],
-  flags: (
-    ([`repo`], [positional], [Repository in `owner/repo` format.]),
-    ([`--dry-run`], [flag], [Preview what would be synced without modifying
-    the repository.]),
-  ),
-  examples: (
-    "mx sync labels coryzibell/mx",
-    "mx sync labels coryzibell/mx --dry-run",
-  ),
-)
-
-=== Identity colors file
-
-Labels are defined in `$MX_HOME/artifacts/etc/identity-colors.yaml`. Each
-entry maps an identity name to a color and rationale:
-
-```yaml
-identities:
-  agent:
-    color: "#0075ca"
-    rationale: "Assigned to an agent"
-  human:
-    color: "#e4e669"
-    rationale: "Requires human attention"
-```
-
-Labels are created on GitHub with the naming convention `identity:<name>`
-(e.g., `identity:agent`). The color is a hex value and the rationale becomes
-the label description.
-
-=== Sync behavior
-
-+ Fetches all existing labels from the repository.
-+ For each identity defined in the colors file:
-  - If the label does not exist, creates it.
-  - If the label exists but the color or description differs, updates it.
-  - If the label exists and matches, skips it.
-+ Prints a summary of created, updated, and unchanged counts.
-
-Labels that exist on GitHub but are *not* in the identity file are left
-untouched. This command only manages `identity:*` labels.
-
 == Issues
 
 #command("mx sync issues <repo>",
@@ -298,7 +248,7 @@ Sync reads the GitHub token from `~/.claude.json`, looking for
 `projects.<project>.mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN`
 across all configured projects.
 
-#note[The token needs `repo` scope for issues and labels, and `read:discussion`
+#note[The token needs `repo` scope for issues, and `read:discussion`
 plus `write:discussion` for discussions.]
 
 == Related commands

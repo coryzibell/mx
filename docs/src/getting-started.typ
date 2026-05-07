@@ -156,7 +156,6 @@ YAML files for offline editing and batch operations.
 ```bash
 mx sync pull owner/repo
 mx sync push owner/repo --dry-run
-mx sync labels owner/repo
 ```
 
 == What's next
