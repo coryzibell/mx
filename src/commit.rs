@@ -1231,7 +1231,7 @@ mod tests {
         );
         // The stage_all path must NOT fire under dry-run
         assert!(
-            !(stage_all_flag && !dry_run),
+            !stage_all_flag || dry_run,
             "stage_all must not run when dry_run is true"
         );
     }
