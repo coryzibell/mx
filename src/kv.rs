@@ -3452,7 +3452,9 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("flavor_history", "bergamot", ts).unwrap();
+        store
+            .push_with_ts("flavor_history", "bergamot", ts)
+            .unwrap();
         store.push_with_ts("flavor_history", "vanilla", ts).unwrap();
 
         let results = store.random("flavor_history", 1, None).unwrap();
@@ -3492,8 +3494,12 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("flavor_history", "inside", ts_in).unwrap();
-        store.push_with_ts("flavor_history", "outside", ts_out).unwrap();
+        store
+            .push_with_ts("flavor_history", "inside", ts_in)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "outside", ts_out)
+            .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.random("flavor_history", 10, Some(&range)).unwrap();
