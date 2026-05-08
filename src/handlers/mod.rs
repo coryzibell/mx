@@ -531,7 +531,8 @@ fn parse_log_args(args: Vec<String>) -> LogOptions {
 fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
     use std::process::Command;
 
-    let harvest_format = "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
+    let harvest_format =
+        "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
 
     let mut cmd = Command::new("git");
     cmd.arg("log");
@@ -655,8 +656,7 @@ fn attach_diffs(commits: &mut [ParsedCommit], opts: &LogOptions) -> Result<()> {
     let raw = String::from_utf8_lossy(&output.stdout);
 
     // Build a map from hash -> diff content
-    let mut diff_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut diff_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for block in raw.split("---MX-DIFF--") {
         let block = block.trim();
@@ -796,10 +796,7 @@ fn render_oneline(commits: &[ParsedCommit], show_decorate: bool) {
         } else {
             String::new()
         };
-        println!(
-            "\x1b[33m{}\x1b[0m{} {}",
-            commit.short_hash, deco, subject
-        );
+        println!("\x1b[33m{}\x1b[0m{} {}", commit.short_hash, deco, subject);
 
         if let Some(ref diff) = commit.diff_block {
             let diff_trimmed = diff.trim();
@@ -962,9 +959,15 @@ pub(crate) fn handle_log(args: Vec<String>) -> Result<()> {
         }
         cmd.arg(format!("--format={}", fmt));
         match opts.diff_mode {
-            DiffMode::Stat => { cmd.arg("--stat"); }
-            DiffMode::ShortStat => { cmd.arg("--shortstat"); }
-            DiffMode::Patch => { cmd.arg("-p"); }
+            DiffMode::Stat => {
+                cmd.arg("--stat");
+            }
+            DiffMode::ShortStat => {
+                cmd.arg("--shortstat");
+            }
+            DiffMode::Patch => {
+                cmd.arg("-p");
+            }
             DiffMode::None => {}
         }
         for arg in &opts.filter_args {
@@ -988,18 +991,36 @@ pub(crate) fn handle_log(args: Vec<String>) -> Result<()> {
         }
         cmd.arg("--graph");
         match opts.display_mode {
-            LogDisplayMode::Oneline => { cmd.arg("--oneline"); }
-            LogDisplayMode::Full => { cmd.arg("--format=full"); }
-            LogDisplayMode::FormatShort => { cmd.arg("--format=short"); }
-            LogDisplayMode::FormatMedium => { cmd.arg("--format=medium"); }
-            LogDisplayMode::FormatFull => { cmd.arg("--format=full"); }
-            LogDisplayMode::FormatFuller => { cmd.arg("--format=fuller"); }
+            LogDisplayMode::Oneline => {
+                cmd.arg("--oneline");
+            }
+            LogDisplayMode::Full => {
+                cmd.arg("--format=full");
+            }
+            LogDisplayMode::FormatShort => {
+                cmd.arg("--format=short");
+            }
+            LogDisplayMode::FormatMedium => {
+                cmd.arg("--format=medium");
+            }
+            LogDisplayMode::FormatFull => {
+                cmd.arg("--format=full");
+            }
+            LogDisplayMode::FormatFuller => {
+                cmd.arg("--format=fuller");
+            }
             _ => {}
         }
         match opts.diff_mode {
-            DiffMode::Stat => { cmd.arg("--stat"); }
-            DiffMode::ShortStat => { cmd.arg("--shortstat"); }
-            DiffMode::Patch => { cmd.arg("-p"); }
+            DiffMode::Stat => {
+                cmd.arg("--stat");
+            }
+            DiffMode::ShortStat => {
+                cmd.arg("--shortstat");
+            }
+            DiffMode::Patch => {
+                cmd.arg("-p");
+            }
             DiffMode::None => {}
         }
         for arg in &opts.filter_args {
