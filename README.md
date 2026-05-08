@@ -114,6 +114,31 @@ mx memory stats
 
 Default categories: `pattern`, `technique`, `insight`, `gotcha`, `reference`, `decision`, `bloom`, `session`. Categories are customizable per-deployment -- run `mx memory categories list` to see available categories.
 
+### KV Store
+
+Fast local key-value state per agent. Counters, strings, lists, timestamped history, and structured state fields -- all backed by a TOML schema file and a JSON data file. No networking, no database.
+
+```bash
+# Basic operations
+mx kv set session_goal "ship the docs"
+mx kv inc builds
+mx kv push decisions "chose Typst for docs"
+mx kv last decisions --count 5
+
+# Time-range queries on history/list keys
+mx kv last shipped --day 2026-04-25
+mx kv last shipped --month 2026-04
+mx kv last shipped --week 2026-W17
+mx kv last shipped --from 2026-04-01 --to 2026-04-15
+mx kv search shipped "feature" --month 2026-04
+mx kv count shipped --day 2026-05-07
+
+# Time range composes with --count (filter first, then limit)
+mx kv last shipped --month 2026-04 --count 5
+```
+
+Time-range flags (`--day`, `--month`, `--week`, `--from`/`--to`) are available on `last`, `search`, and `count`. All dates are UTC. For relative time queries (`1h`, `7d`), use `mx kv since`.
+
 ### PR Merge
 
 ```bash

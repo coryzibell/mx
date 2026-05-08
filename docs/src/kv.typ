@@ -227,15 +227,26 @@ lists support `pop`. Only history supports `since` (time-based queries).
   with their ID, value, and timestamp.
 
   For history keys, "last" means the most recent (entries are stored newest
-  first). For list keys, "last" means the tail of the list.],
+  first). For list keys, "last" means the tail of the list.
+
+  Time-range flags narrow the result set before `--count` is applied. See
+  #link(<time-range-queries>)[Time-range queries] for details and examples.],
   flags: (
     ([`--count <n>`], [integer], [Number of entries to return (default: 1)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--day <YYYY-MM-DD>`], [string], [Entries from a specific day (UTC)]),
+    ([`--month <YYYY-MM>`], [string], [Entries from a specific month (UTC)]),
+    ([`--week <YYYY-Www>`], [string], [Entries from an ISO week, Monday to Sunday]),
+    ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
+    ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
   ),
   examples: (
     "mx kv last decisions",
     "mx kv last decisions --count 5",
     "mx kv last todos --count 3 --memory",
+    "mx kv last shipped --day 2026-04-25",
+    "mx kv last shipped --month 2026-04",
+    "mx kv last shipped --month 2026-04 --count 5",
   ),
 )
 
@@ -266,13 +277,22 @@ lists support `pop`. Only history supports `since` (time-based queries).
 #command(
   "mx kv search <key> <query>",
   [Search entries in a list or history by case-insensitive substring match.
-  Prints matching entries with their ID, value, and timestamp.],
+  Prints matching entries with their ID, value, and timestamp.
+
+  Time-range flags narrow the search to entries within the specified period.
+  See #link(<time-range-queries>)[Time-range queries] for details.],
   flags: (
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--day <YYYY-MM-DD>`], [string], [Search within a specific day (UTC)]),
+    ([`--month <YYYY-MM>`], [string], [Search within a specific month (UTC)]),
+    ([`--week <YYYY-Www>`], [string], [Search within an ISO week, Monday to Sunday]),
+    ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
+    ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
   ),
   examples: (
     "mx kv search decisions \"typst\"",
     "mx kv search todos \"test\"",
+    "mx kv search shipped \"feature\" --month 2026-04",
   ),
 )
 
@@ -289,11 +309,23 @@ lists support `pop`. Only history supports `since` (time-based queries).
   Filtered output: `<matched>/<total> (<pct>%) --- latest: <timestamp>`.
 
   The percentage display makes it easy to gauge ratios at a glance -- for
-  example, what fraction of your decisions mentioned a particular topic.],
+  example, what fraction of your decisions mentioned a particular topic.
+
+  Time-range flags restrict the count to entries within the specified period.
+  See #link(<time-range-queries>)[Time-range queries] for details.],
+  flags: (
+    ([`--day <YYYY-MM-DD>`], [string], [Count within a specific day (UTC)]),
+    ([`--month <YYYY-MM>`], [string], [Count within a specific month (UTC)]),
+    ([`--week <YYYY-Www>`], [string], [Count within an ISO week, Monday to Sunday]),
+    ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
+    ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
+  ),
   examples: (
     "mx kv count decisions",
     "mx kv count decisions \"typst\"",
     "mx kv count todos \"blocked\"",
+    "mx kv count shipped --day 2026-05-07",
+    "mx kv count shipped --from 2026-04-01 --to 2026-04-15",
   ),
 )
 
@@ -316,6 +348,76 @@ lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv remove decisions \"typo\" --all",
   ),
 )
+
+== Time-range queries <time-range-queries>
+
+The `last`, `search`, and `count` subcommands accept time-range flags that
+filter entries by their timestamp before any other processing. This lets you
+answer questions like "what did I ship last Tuesday?" or "how many decisions
+were recorded in April?" without scanning the full history.
+
+=== Available flags
+
+All time-range flags are mutually exclusive -- you can use one shorthand
+(`--day`, `--month`, `--week`) or one explicit range (`--from`/`--to`), but
+not both.
+
+#table(
+  columns: (auto, auto, 1fr),
+  table.header([*Flag*], [*Format*], [*Selects*]),
+  [`--day`], [`YYYY-MM-DD`], [All entries from that calendar day (00:00 to 23:59 UTC)],
+  [`--month`], [`YYYY-MM`], [All entries from that calendar month (first day to last day, UTC)],
+  [`--week`], [`YYYY-Www`], [All entries from that ISO week (Monday 00:00 to Sunday 23:59 UTC)],
+  [`--from`], [`YYYY-MM-DD`], [Start of range, inclusive (midnight UTC). Can be used alone (implies "to now")],
+  [`--to`], [`YYYY-MM-DD`], [End of range, inclusive (end of day UTC). Can be used alone (implies "from the beginning")],
+)
+
+All dates are interpreted as UTC. The `--to` date is inclusive -- entries from
+any time on that day are included.
+
+=== Interaction with `--count`
+
+When both a time range and `--count` are specified, the time range is applied
+first, then `--count` limits the result. For example:
+
+```bash
+# The 5 most recent entries from April 2026
+mx kv last shipped --month 2026-04 --count 5
+```
+
+=== Examples
+
+```bash
+# Everything shipped on a specific day
+mx kv last shipped --day 2026-04-25
+
+# Everything shipped in April
+mx kv last shipped --month 2026-04
+
+# Everything shipped in ISO week 17
+mx kv last shipped --week 2026-W17
+
+# Everything shipped in the first half of April
+mx kv last shipped --from 2026-04-01 --to 2026-04-15
+
+# Search within a time window
+mx kv search shipped "feature" --month 2026-04
+
+# Count entries on a specific day
+mx kv count shipped --day 2026-05-07
+```
+
+=== Relationship to `since`
+
+The `since` subcommand handles _relative_ time queries (`1h`, `7d`, `2w`).
+Time-range flags handle _absolute_ time queries (specific dates, months,
+weeks). They are complementary tools -- `since` is for "what happened
+recently?" while time-range flags are for "what happened in this specific
+period?"
+
+#note[Time-range flags are only available on `last`, `search`, and `count`.
+The `since` subcommand is unchanged and continues to work with relative and
+ISO-8601 absolute timestamps.]
 
 == Management
 
