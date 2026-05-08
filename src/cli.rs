@@ -1,5 +1,13 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|e| format!("{e}"))?;
+    if n == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(n)
+}
+
 #[derive(Parser)]
 #[command(name = "mx")]
 #[command(about = "Tsunderground CLI - memory, workflow, and identity tooling")]
@@ -1657,7 +1665,7 @@ pub struct TimeRangeArgs {
     #[arg(long = "to", conflicts_with_all = ["day", "month", "week", "since"])]
     pub range_to: Option<String>,
 
-    /// Filter to entries since a relative time (e.g. 30d, 1w, 2h, 30m)
+    /// Filter entries since a relative time (e.g. 30d, 1w, 2h) or ISO-8601 timestamp
     #[arg(long, conflicts_with_all = ["day", "month", "week", "range_from", "range_to"])]
     pub since: Option<String>,
 }
@@ -1805,13 +1813,13 @@ pub enum KvCommands {
         time_range: TimeRangeArgs,
     },
 
-    /// Get random entries from a history or list
+    /// Get N random entries from a history or list
     Random {
         /// Key name
         key: String,
 
         /// Number of random entries (default: 1)
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "1", value_parser = parse_nonzero_usize)]
         count: usize,
 
         /// Resolve and display linked memory entry

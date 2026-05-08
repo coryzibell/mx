@@ -884,11 +884,11 @@ impl KvStore {
 
         // Shared sampling + formatting closure. Takes a filtered vec of
         // (value, id, ts) tuples and returns formatted strings.
-        let sample = |filtered: Vec<(&str, u64, &str)>, count: usize| -> Vec<String> {
+        let sample = |filtered: Vec<(&str, u64, &str)>, n: usize| -> Vec<String> {
             if filtered.is_empty() {
                 return vec![];
             }
-            let take = count.min(filtered.len());
+            let take = n.min(filtered.len());
             let mut rng = rand::rng();
             let chosen: Vec<_> = filtered.choose_multiple(&mut rng, take).collect();
             chosen
@@ -912,7 +912,9 @@ impl KvStore {
                         .map(|e| (e.value.as_str(), e.id, e.ts.as_str()))
                         .collect();
                     let available = filtered.len();
-                    if available > 0 && available < count {
+                    if available == 0 && !entries.is_empty() {
+                        eprintln!("note: no entries match the time range");
+                    } else if available > 0 && available < count {
                         eprintln!(
                             "note: only {} entries available (requested {})",
                             available, count
@@ -930,7 +932,9 @@ impl KvStore {
                         .map(|e| (e.value.as_str(), e.id, e.ts.as_str()))
                         .collect();
                     let available = filtered.len();
-                    if available > 0 && available < count {
+                    if available == 0 && !items.is_empty() {
+                        eprintln!("note: no entries match the time range");
+                    } else if available > 0 && available < count {
                         eprintln!(
                             "note: only {} entries available (requested {})",
                             available, count
