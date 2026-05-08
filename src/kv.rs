@@ -822,12 +822,20 @@ impl KvStore {
 
         match def.value_type {
             ValueType::History => match self.data.entries.get(key) {
-                Some(DataValue::History { entries, .. }) => Ok(entries
-                    .iter()
-                    .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
-                    .take(count)
-                    .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
-                    .collect()),
+                Some(DataValue::History { entries, .. }) => {
+                    // History stores newest-first; reverse so filtered vec is
+                    // chronological (oldest-first), matching the List branch.
+                    let filtered: Vec<_> = entries
+                        .iter()
+                        .rev()
+                        .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
+                        .collect();
+                    let start = filtered.len().saturating_sub(count);
+                    Ok(filtered[start..]
+                        .iter()
+                        .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
+                        .collect())
+                }
                 _ => Ok(vec![]),
             },
             ValueType::List => match self.data.entries.get(key) {
@@ -3199,6 +3207,59 @@ max_entries = 5
         let hits = store.search("tags", "rust", Some(&range)).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].value, "rust-in");
+    }
+
+    #[test]
+    fn last_with_time_range_filters_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-24T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store.push_with_ts("tags", "inside", ts_in).unwrap();
+        store.push_with_ts("tags", "outside", ts_out).unwrap();
+        store.push_with_ts("tags", "also-inside", ts_in).unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let results = store.last("tags", 10, Some(&range)).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].contains("inside"));
+        assert!(results[1].contains("also-inside"));
+
+        // count limit applies after time filter
+        let results = store.last("tags", 1, Some(&range)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("also-inside"));
+    }
+
+    #[test]
+    fn search_with_time_range_filters_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "bergamot-in", ts_in)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "bergamot-out", ts_out)
+            .unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let hits = store
+            .search("flavor_history", "bergamot", Some(&range))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].value, "bergamot-in");
     }
 
     #[test]
