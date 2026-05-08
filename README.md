@@ -130,14 +130,20 @@ mx kv last shipped --day 2026-04-25
 mx kv last shipped --month 2026-04
 mx kv last shipped --week 2026-W17
 mx kv last shipped --from 2026-04-01 --to 2026-04-15
+mx kv last shipped --since 1w
 mx kv search shipped "feature" --month 2026-04
 mx kv count shipped --day 2026-05-07
 
 # Time range composes with --count (filter first, then limit)
 mx kv last shipped --month 2026-04 --count 5
+
+# Random sampling from history/list keys
+mx kv random shipped --count 5
+mx kv random ideas --count 1
+mx kv random shipped --count 3 --since 30d
 ```
 
-Time-range flags (`--day`, `--month`, `--week`, `--from`/`--to`) are available on `last`, `search`, and `count`. All dates are UTC. For relative time queries (`1h`, `7d`), use `mx kv since`.
+Time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) are available on `last`, `search`, `count`, and `random`. All dates are UTC. The `--since` flag accepts relative times (`30d`, `1w`, `2h`, `30m`) and ISO-8601 timestamps. For a standalone relative-time query on history keys, use `mx kv since`.
 
 ### PR Merge
 

@@ -137,8 +137,9 @@ mx kv set session.goal "ship the docs"
 mx kv inc builds
 mx kv push decisions "chose Typst for docs"
 mx kv last decisions --count 5
-mx kv last decisions --month 2026-04
+mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
+mx kv random decisions --count 3
 ```
 
 === State

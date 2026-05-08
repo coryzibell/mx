@@ -183,8 +183,8 @@ History and list types both store timestamped entries with auto-assigned IDs.
 The difference is semantic: history is append-only (newest first, no pop),
 while lists support push/pop and maintain insertion order.
 
-Both types support `push`, `last`, `search`, `count`, and `remove`. Only
-lists support `pop`. Only history supports `since` (time-based queries).
+Both types support `push`, `last`, `search`, `count`, `random`, and `remove`.
+Only lists support `pop`. Only history supports `since` (time-based queries).
 
 === push
 
@@ -239,6 +239,7 @@ lists support `pop`. Only history supports `since` (time-based queries).
     ([`--week <YYYY-Www>`], [string], [Entries from an ISO week, Monday to Sunday]),
     ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
     ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
+    ([`--since <relative-or-iso>`], [string], [Filter entries since a relative time (`30d`, `1w`, `2h`, `30m`) or ISO-8601 timestamp]),
   ),
   examples: (
     "mx kv last decisions",
@@ -247,6 +248,7 @@ lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv last shipped --day 2026-04-25",
     "mx kv last shipped --month 2026-04",
     "mx kv last shipped --month 2026-04 --count 5",
+    "mx kv last shipped --since 1w",
   ),
 )
 
@@ -288,11 +290,13 @@ lists support `pop`. Only history supports `since` (time-based queries).
     ([`--week <YYYY-Www>`], [string], [Search within an ISO week, Monday to Sunday]),
     ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
     ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
+    ([`--since <relative-or-iso>`], [string], [Search since a relative time (`30d`, `1w`, `2h`, `30m`) or ISO-8601 timestamp]),
   ),
   examples: (
     "mx kv search decisions \"typst\"",
     "mx kv search todos \"test\"",
     "mx kv search shipped \"feature\" --month 2026-04",
+    "mx kv search shipped \"feature\" --since 30d",
   ),
 )
 
@@ -319,6 +323,7 @@ lists support `pop`. Only history supports `since` (time-based queries).
     ([`--week <YYYY-Www>`], [string], [Count within an ISO week, Monday to Sunday]),
     ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
     ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
+    ([`--since <relative-or-iso>`], [string], [Count since a relative time (`30d`, `1w`, `2h`, `30m`) or ISO-8601 timestamp]),
   ),
   examples: (
     "mx kv count decisions",
@@ -326,6 +331,40 @@ lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv count todos \"blocked\"",
     "mx kv count shipped --day 2026-05-07",
     "mx kv count shipped --from 2026-04-01 --to 2026-04-15",
+    "mx kv count shipped --since 1w",
+  ),
+)
+
+=== random
+
+#command(
+  "mx kv random <key>",
+  [Get N random entries from a history or list key. Entries are printed
+  with their ID, value, and timestamp.
+
+  Useful for inspiration (pick a random idea), spot-checking (sample from
+  a large history), or building variety into automated workflows.
+
+  When fewer entries are available than requested, all matching entries are
+  returned and a note is printed to stderr. If a time range is specified,
+  entries are filtered first, then random sampling is applied to the
+  filtered set.],
+  flags: (
+    ([`--count <n>`], [integer], [Number of random entries to return (default: 1, must be >= 1)]),
+    ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--day <YYYY-MM-DD>`], [string], [Sample from entries on a specific day (UTC)]),
+    ([`--month <YYYY-MM>`], [string], [Sample from entries in a specific month (UTC)]),
+    ([`--week <YYYY-Www>`], [string], [Sample from entries in an ISO week, Monday to Sunday]),
+    ([`--from <YYYY-MM-DD>`], [string], [Start of date range, inclusive (UTC)]),
+    ([`--to <YYYY-MM-DD>`], [string], [End of date range, inclusive (UTC)]),
+    ([`--since <relative-or-iso>`], [string], [Sample from entries since a relative time (`30d`, `1w`, `2h`, `30m`) or ISO-8601 timestamp]),
+  ),
+  examples: (
+    "mx kv random shipped",
+    "mx kv random shipped --count 5",
+    "mx kv random ideas --count 1",
+    "mx kv random shipped --count 3 --since 30d",
+    "mx kv random decisions --month 2026-04 --count 3",
   ),
 )
 
@@ -351,16 +390,16 @@ lists support `pop`. Only history supports `since` (time-based queries).
 
 == Time-range queries <time-range-queries>
 
-The `last`, `search`, and `count` subcommands accept time-range flags that
-filter entries by their timestamp before any other processing. This lets you
-answer questions like "what did I ship last Tuesday?" or "how many decisions
-were recorded in April?" without scanning the full history.
+The `last`, `search`, `count`, and `random` subcommands accept time-range
+flags that filter entries by their timestamp before any other processing. This
+lets you answer questions like "what did I ship last Tuesday?" or "how many
+decisions were recorded in April?" without scanning the full history.
 
 === Available flags
 
 All time-range flags are mutually exclusive -- you can use one shorthand
-(`--day`, `--month`, `--week`) or one explicit range (`--from`/`--to`), but
-not both.
+(`--day`, `--month`, `--week`, `--since`) or one explicit range
+(`--from`/`--to`), but not both.
 
 #table(
   columns: (auto, auto, 1fr),
@@ -368,6 +407,7 @@ not both.
   [`--day`], [`YYYY-MM-DD`], [All entries from that calendar day (00:00 to 23:59 UTC)],
   [`--month`], [`YYYY-MM`], [All entries from that calendar month (first day to last day, UTC)],
   [`--week`], [`YYYY-Www`], [All entries from that ISO week (Monday 00:00 to Sunday 23:59 UTC)],
+  [`--since`], [relative or ISO-8601], [All entries from the given point in time until now. Relative formats: `30d` (days), `1w` (weeks), `2h` (hours), `30m` (minutes). Also accepts full ISO-8601 timestamps.],
   [`--from`], [`YYYY-MM-DD`], [Start of range, inclusive (midnight UTC). Can be used alone (implies "to now")],
   [`--to`], [`YYYY-MM-DD`], [End of range, inclusive (end of day UTC). Can be used alone (implies "from the beginning")],
 )
@@ -378,11 +418,16 @@ any time on that day are included.
 === Interaction with `--count`
 
 When both a time range and `--count` are specified, the time range is applied
-first, then `--count` limits the result. For example:
+first, then `--count` limits the result. This applies to both `last` (which
+takes the N most recent from the filtered set) and `random` (which samples N
+entries from the filtered set).
 
 ```bash
 # The 5 most recent entries from April 2026
 mx kv last shipped --month 2026-04 --count 5
+
+# 3 random entries from the last 30 days
+mx kv random shipped --since 30d --count 3
 ```
 
 === Examples
@@ -400,24 +445,41 @@ mx kv last shipped --week 2026-W17
 # Everything shipped in the first half of April
 mx kv last shipped --from 2026-04-01 --to 2026-04-15
 
+# Everything shipped in the last week
+mx kv last shipped --since 1w
+
 # Search within a time window
 mx kv search shipped "feature" --month 2026-04
 
 # Count entries on a specific day
 mx kv count shipped --day 2026-05-07
+
+# Count entries from the last 30 days
+mx kv count shipped --since 30d
+
+# Random entry from the last 2 hours
+mx kv random shipped --since 2h
 ```
 
-=== Relationship to `since`
+=== Relationship to `since` subcommand
 
-The `since` subcommand handles _relative_ time queries (`1h`, `7d`, `2w`).
-Time-range flags handle _absolute_ time queries (specific dates, months,
-weeks). They are complementary tools -- `since` is for "what happened
-recently?" while time-range flags are for "what happened in this specific
-period?"
+The `since` subcommand (`mx kv since <key> <timeref>`) is a standalone command
+that returns all history entries since a time reference. It only works on
+history keys and predates the time-range flag system.
 
-#note[Time-range flags are only available on `last`, `search`, and `count`.
-The `since` subcommand is unchanged and continues to work with relative and
-ISO-8601 absolute timestamps.]
+The `--since` flag brings relative time filtering to all time-range-aware
+subcommands (`last`, `search`, `count`, `random`) and works on both history
+and list types. It accepts the same relative formats (`30d`, `1w`, `2h`, `30m`)
+and ISO-8601 timestamps.
+
+Use the `since` subcommand when you want a quick "everything since X" dump
+from a history key. Use the `--since` flag when you want to combine relative
+time filtering with other operations like counting, searching, or random
+sampling, or when you need it on a list key.
+
+#note[Time-range flags (`--day`, `--month`, `--week`, `--since`,
+`--from`/`--to`) are available on `last`, `search`, `count`, and `random`.
+The `since` subcommand is unchanged and continues to work for history keys.]
 
 == Management
 
@@ -464,8 +526,8 @@ History, list, and state keys can be linked to a memory graph entry via the
 (a `kn-` ID), bridging fast local state with the persistent knowledge graph.
 
 When a memory link is set, commands that read the key (`get`, `last`, `since`,
-`search`, `dump`) can resolve the link with `--memory`, which fetches the
-linked entry from SurrealDB and prints its title, category, and body.
+`search`, `random`, `dump`) can resolve the link with `--memory`, which fetches
+the linked entry from SurrealDB and prints its title, category, and body.
 
 === Setting a memory link
 

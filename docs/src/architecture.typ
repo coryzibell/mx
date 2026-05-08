@@ -583,8 +583,8 @@ Supported types:
   table.header([*Type*], [*Behavior*]),
   [`counter`], [Integer with optional `min`/`max` bounds. Supports `inc`, `dec`, `set`, `get`],
   [`string`], [Simple string value. Supports `set`, `get`],
-  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`. The `last`, `search`, and `count` commands accept time-range flags (`--day`, `--month`, `--week`, `--from`/`--to`) for absolute date filtering.],
-  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`. The `last`, `search`, and `count` commands accept the same time-range flags as history.],
+  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
+  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
   [`state`], [Named fields (like a struct). Supports `set <key> <field> <value>`, `get`],
 )
 
