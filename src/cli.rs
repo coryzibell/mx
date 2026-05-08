@@ -1677,7 +1677,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// Entry ID, range (35-64), or comma-separated IDs (1,5,12)
+        /// Entry ID (35), range (35-64), or comma-separated IDs (1,5,12). Formats cannot be combined.
         #[arg(long)]
         id: Option<String>,
 

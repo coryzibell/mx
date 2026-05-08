@@ -1,5 +1,7 @@
 //! Handler for `mx kv` subcommands. Wires CLI to the KV engine.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 
 use crate::cli::{DumpFormat, KvCommands};
@@ -135,6 +137,14 @@ fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
                 start, end
             ));
         }
+        const MAX_RANGE_SIZE: u64 = 10_000;
+        if end - start + 1 > MAX_RANGE_SIZE {
+            return Err(format!(
+                "range too large ({} entries, max {})",
+                end - start + 1,
+                MAX_RANGE_SIZE
+            ));
+        }
         (start..=end).collect()
     } else {
         // Single ID
@@ -169,12 +179,14 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     Ok(ids) => ids,
                     Err(msg) => {
                         eprintln!("Error: {}", msg);
-                        return Ok(kv::EXIT_KEY_NOT_FOUND);
+                        return Ok(kv::EXIT_INVALID_INPUT);
                     }
                 };
                 match store.get_entries_by_id(&key, &ids) {
                     Ok(hits) => {
-                        // Print found entries
+                        // Print found entries.
+                        // History entries always have a timestamp; list entries may not.
+                        // We check for empty ts to handle both types uniformly.
                         for hit in &hits {
                             if hit.ts.is_empty() {
                                 println!("{}: {}", hit.id, hit.value);
@@ -184,7 +196,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         }
 
                         // Report missing IDs
-                        let found_ids: std::collections::HashSet<u64> =
+                        let found_ids: HashSet<u64> =
                             hits.iter().map(|h| h.id).collect();
                         let missing: Vec<u64> = ids
                             .iter()
@@ -619,5 +631,20 @@ mod tests {
         let result = parse_id_spec("   ");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn parse_open_ended_range_start() {
+        assert!(parse_id_spec("-5").is_err());
+    }
+
+    #[test]
+    fn parse_open_ended_range_end() {
+        assert!(parse_id_spec("5-").is_err());
+    }
+
+    #[test]
+    fn parse_range_too_large() {
+        assert!(parse_id_spec("1-20000").is_err());
     }
 }

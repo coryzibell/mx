@@ -3,7 +3,7 @@
 //! Backed by a TOML schema file and a JSON data file. All writes are atomic
 //! (serialize to tmp, fsync, rename). No networking, no database.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
@@ -94,6 +94,7 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_KEY_NOT_FOUND: i32 = 1;
 pub const EXIT_TYPE_MISMATCH: i32 = 2;
 pub const EXIT_SCHEMA_MISSING: i32 = 3;
+pub const EXIT_INVALID_INPUT: i32 = 4;
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -1123,7 +1124,7 @@ impl KvStore {
             }
         }
 
-        let id_set: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        let id_set: HashSet<u64> = ids.iter().copied().collect();
         let mut hits = Vec::new();
 
         match self.data.entries.get(key) {
@@ -1149,7 +1150,7 @@ impl KvStore {
                     }
                 }
             }
-            _ => {}
+            _ => {} // Key defined in schema but no entries pushed yet
         }
 
         Ok(hits)
@@ -2329,9 +2330,15 @@ max_entries = 5
         store.push("tags", "beta").unwrap();
         store.push("tags", "gamma").unwrap();
 
-        let hits = store.get_entries_by_id("tags", &[2]).unwrap();
+        // Read the actual ID of the second entry from the store
+        let target_id = match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => items[1].id,
+            _ => panic!("Expected list"),
+        };
+
+        let hits = store.get_entries_by_id("tags", &[target_id]).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].id, 2);
+        assert_eq!(hits[0].id, target_id);
         assert_eq!(hits[0].value, "beta");
     }
 
