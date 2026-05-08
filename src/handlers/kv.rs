@@ -94,6 +94,58 @@ fn resolve_dump_memories(store: &KvStore, verbose: bool) {
     }
 }
 
+/// Parse an ID specification into a sorted, deduplicated list of u64 IDs.
+///
+/// Accepted formats:
+/// - Single ID: "35" -> [35]
+/// - Range: "35-64" -> [35, 36, ..., 64]
+/// - Comma-separated: "1,5,12" -> [1, 5, 12]
+fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("empty ID specification".to_string());
+    }
+
+    let mut ids: Vec<u64> = if spec.contains(',') {
+        // Comma-separated list
+        spec.split(',')
+            .map(|s| {
+                s.trim()
+                    .parse::<u64>()
+                    .map_err(|_| format!("invalid ID '{}' in spec '{}'", s.trim(), spec))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else if spec.contains('-') {
+        // Range
+        let parts: Vec<&str> = spec.splitn(2, '-').collect();
+        let start: u64 = parts[0]
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid range start '{}' in spec '{}'", parts[0].trim(), spec))?;
+        let end: u64 = parts[1]
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid range end '{}' in spec '{}'", parts[1].trim(), spec))?;
+        if start > end {
+            return Err(format!(
+                "invalid range: start ({}) is greater than end ({})",
+                start, end
+            ));
+        }
+        (start..=end).collect()
+    } else {
+        // Single ID
+        let id: u64 = spec
+            .parse()
+            .map_err(|_| format!("invalid ID '{}'", spec))?;
+        vec![id]
+    };
+
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
 pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     let mut store = match KvStore::from_env() {
@@ -109,16 +161,67 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     };
 
     match cmd {
-        KvCommands::Get { key, memory } => match store.get(&key) {
-            Ok(val) => {
-                println!("{}", kv::format_value(val));
-                if memory {
-                    resolve_memory(&store, &key, verbose);
+        KvCommands::Get { key, id, memory } => {
+            if let Some(id_spec) = id {
+                // ID-based entry lookup on history/list
+                let ids = match parse_id_spec(&id_spec) {
+                    Ok(ids) => ids,
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_KEY_NOT_FOUND);
+                    }
+                };
+                match store.get_entries_by_id(&key, &ids) {
+                    Ok(hits) => {
+                        // Print found entries
+                        for hit in &hits {
+                            if hit.ts.is_empty() {
+                                println!("{}: {}", hit.id, hit.value);
+                            } else {
+                                println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+                            }
+                        }
+
+                        // Report missing IDs
+                        let found_ids: std::collections::HashSet<u64> =
+                            hits.iter().map(|h| h.id).collect();
+                        let missing: Vec<u64> =
+                            ids.iter().filter(|id| !found_ids.contains(id)).copied().collect();
+                        if !missing.is_empty() {
+                            let missing_str: Vec<String> =
+                                missing.iter().map(|id| id.to_string()).collect();
+                            eprintln!("note: IDs not found: {}", missing_str.join(", "));
+                        }
+
+                        if memory {
+                            // Resolve memory for each entry value that looks like a kn- reference
+                            for hit in &hits {
+                                if hit.value.starts_with("kn-") {
+                                    print_resolved_memory(&hit.value, verbose);
+                                }
+                            }
+                            // Also resolve key-level memory pointer
+                            resolve_memory(&store, &key, verbose);
+                        }
+
+                        Ok(kv::EXIT_OK)
+                    }
+                    Err(e) => handle_kv_err(e),
                 }
-                Ok(kv::EXIT_OK)
+            } else {
+                // Original scalar get behavior
+                match store.get(&key) {
+                    Ok(val) => {
+                        println!("{}", kv::format_value(val));
+                        if memory {
+                            resolve_memory(&store, &key, verbose);
+                        }
+                        Ok(kv::EXIT_OK)
+                    }
+                    Err(e) => handle_kv_err(e),
+                }
             }
-            Err(e) => handle_kv_err(e),
-        },
+        }
 
         KvCommands::Set {
             key,
@@ -417,5 +520,100 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
             Ok(kv::EXIT_OK)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- parse_id_spec --
+
+    #[test]
+    fn parse_single_id() {
+        assert_eq!(parse_id_spec("35").unwrap(), vec![35]);
+    }
+
+    #[test]
+    fn parse_single_id_zero() {
+        assert_eq!(parse_id_spec("0").unwrap(), vec![0]);
+    }
+
+    #[test]
+    fn parse_range() {
+        assert_eq!(parse_id_spec("3-7").unwrap(), vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn parse_range_single_element() {
+        assert_eq!(parse_id_spec("5-5").unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn parse_range_start_greater_than_end() {
+        let result = parse_id_spec("10-5");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("greater than end"));
+    }
+
+    #[test]
+    fn parse_comma_separated() {
+        assert_eq!(parse_id_spec("1,5,12").unwrap(), vec![1, 5, 12]);
+    }
+
+    #[test]
+    fn parse_comma_separated_deduplicates() {
+        assert_eq!(parse_id_spec("5,1,5,3,1").unwrap(), vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn parse_comma_separated_with_spaces() {
+        assert_eq!(parse_id_spec("1, 5, 12").unwrap(), vec![1, 5, 12]);
+    }
+
+    #[test]
+    fn parse_invalid_single() {
+        let result = parse_id_spec("abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid ID"));
+    }
+
+    #[test]
+    fn parse_invalid_in_list() {
+        let result = parse_id_spec("1,5,abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid ID"));
+    }
+
+    #[test]
+    fn parse_invalid_range_start() {
+        let result = parse_id_spec("abc-10");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid range start"));
+    }
+
+    #[test]
+    fn parse_invalid_range_end() {
+        let result = parse_id_spec("1-abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid range end"));
+    }
+
+    #[test]
+    fn parse_empty_spec() {
+        let result = parse_id_spec("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn parse_whitespace_only_spec() {
+        let result = parse_id_spec("   ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
     }
 }

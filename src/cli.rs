@@ -1672,10 +1672,14 @@ pub struct TimeRangeArgs {
 
 #[derive(Subcommand)]
 pub enum KvCommands {
-    /// Get the current value for a key
+    /// Get the current value of a key, or specific entries by ID
     Get {
         /// Key name
         key: String,
+
+        /// Entry ID, range (35-64), or comma-separated IDs (1,5,12)
+        #[arg(long)]
+        id: Option<String>,
 
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]

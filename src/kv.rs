@@ -1106,6 +1106,55 @@ impl KvStore {
         Ok(hits)
     }
 
+    /// Look up entries by ID in a history or list.
+    ///
+    /// Returns matching entries as `SearchHit`s (same struct used by `search`).
+    /// Only works on History and List types; returns TypeMismatch for others.
+    pub fn get_entries_by_id(&self, key: &str, ids: &[u64]) -> Result<Vec<SearchHit>, KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        let id_set: std::collections::HashSet<u64> = ids.iter().copied().collect();
+        let mut hits = Vec::new();
+
+        match self.data.entries.get(key) {
+            Some(DataValue::History { entries, .. }) => {
+                for e in entries {
+                    if id_set.contains(&e.id) {
+                        hits.push(SearchHit {
+                            id: e.id,
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                        });
+                    }
+                }
+            }
+            Some(DataValue::List { items, .. }) => {
+                for e in items {
+                    if id_set.contains(&e.id) {
+                        hits.push(SearchHit {
+                            id: e.id,
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(hits)
+    }
+
     /// Count entries in a list or history, optionally filtered by substring and/or time range.
     ///
     /// When `range` is provided, only entries within the time range are counted.
@@ -2248,6 +2297,129 @@ max_entries = 5
         let result = store.search("warmth", "x", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    // -- get_entries_by_id operations --
+
+    #[test]
+    fn get_by_id_single_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "bergamot").unwrap();
+        store.push("flavor_history", "lapsang").unwrap();
+        store.push("flavor_history", "earl grey").unwrap();
+
+        // Get the ID of the second entry
+        let target_id = match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => entries[1].id,
+            _ => panic!("Expected history"),
+        };
+
+        let hits = store
+            .get_entries_by_id("flavor_history", &[target_id])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, target_id);
+        assert_eq!(hits[0].value, "lapsang");
+    }
+
+    #[test]
+    fn get_by_id_single_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        let hits = store.get_entries_by_id("tags", &[2]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, 2);
+        assert_eq!(hits[0].value, "beta");
+    }
+
+    #[test]
+    fn get_by_id_range_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        let hits = store.get_entries_by_id("tags", &[1, 2, 3]).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].value, "alpha");
+        assert_eq!(hits[1].value, "beta");
+        assert_eq!(hits[2].value, "gamma");
+    }
+
+    #[test]
+    fn get_by_id_multi_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        let hits = store.get_entries_by_id("tags", &[1, 3]).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].value, "alpha");
+        assert_eq!(hits[1].value, "gamma");
+    }
+
+    #[test]
+    fn get_by_id_partial_match() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+
+        // Request IDs 1, 2, 99 — only 1 and 2 exist
+        let hits = store.get_entries_by_id("tags", &[1, 2, 99]).unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn get_by_id_all_not_found() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+
+        let hits = store.get_entries_by_id("tags", &[99, 100]).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn get_by_id_type_mismatch_counter() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.get_entries_by_id("warmth", &[1]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn get_by_id_type_mismatch_string() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.get_entries_by_id("current_mood", &[1]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn get_by_id_type_mismatch_state() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.get_entries_by_id("tensor", &[1]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn get_by_id_empty_history() {
+        let (store, _dir) = setup_store(test_schema());
+        let hits = store
+            .get_entries_by_id("flavor_history", &[1])
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn get_by_id_empty_list() {
+        let (store, _dir) = setup_store(test_schema());
+        let hits = store.get_entries_by_id("tags", &[1]).unwrap();
+        assert!(hits.is_empty());
     }
 
     // -- Count operations --
