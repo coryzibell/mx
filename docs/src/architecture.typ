@@ -196,8 +196,8 @@ handler, because it has two distinct modes selected by the `--encode-only` flag:
 Most commands exit 0 on success or propagate an `anyhow::Error` (which prints
 the error chain to stderr and exits non-zero). The `kv` subcommand is the
 exception: it uses typed exit codes (0 = OK, 1 = key not found, 2 = type
-mismatch, 3 = schema missing) so callers can distinguish failure modes
-programmatically.
+mismatch, 3 = schema missing, 4 = invalid input) so callers can distinguish
+failure modes programmatically.
 
 
 // =========================================================================

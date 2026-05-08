@@ -137,6 +137,11 @@ mx kv count shipped --day 2026-05-07
 # Time range composes with --count (filter first, then limit)
 mx kv last shipped --month 2026-04 --count 5
 
+# Entry lookup by ID on history/list keys
+mx kv get shipped --id 35
+mx kv get shipped --id 35-64
+mx kv get shipped --id 1,5,12,35
+
 # Random sampling from history/list keys
 mx kv random shipped --count 5
 mx kv random ideas --count 1

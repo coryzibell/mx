@@ -71,6 +71,7 @@ and history with time-based queries.
 mx kv set session.goal "ship the docs"
 mx kv get session.goal
 mx kv push decisions "chose Typst over markdown"
+mx kv get shipped --id 35-64
 ```
 
 == Installation

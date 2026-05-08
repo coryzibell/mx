@@ -97,17 +97,37 @@ KV commands use structured exit codes for scripting:
 
 / `0`: Success.
 / `1`: Key not found (or no data yet for that key).
-/ `2`: Type mismatch (e.g., `inc` on a string key).
+/ `2`: Type mismatch (e.g., `inc` on a string key, or `get --id` on a non-history/list key).
 / `3`: Schema file not found.
+/ `4`: Invalid input (e.g., non-numeric ID in `--id` spec, reversed range, empty spec).
 
 == Basic operations
 
 #command(
   "mx kv get <key>",
-  [Get the current value for a key. Prints the raw value for strings and
-  counters. For history and list types, prints all entries with IDs and
-  timestamps. For state types, prints fields as JSON.],
+  [Get the current value of a key, or look up specific entries by ID.
+
+  Without `--id`, prints the full current value: raw text for strings and
+  counters, all entries with IDs and timestamps for history and list types,
+  and fields as JSON for state types.
+
+  With `--id`, retrieves specific entries from a history or list by their
+  numeric ID. Three ID formats are supported:
+
+  / Single ID: `--id 35` -- returns exactly one entry.
+  / Range: `--id 35-64` -- returns all entries with IDs 35 through 64 inclusive. Maximum range size is 10,000 entries.
+  / Comma-separated: `--id 1,5,12` -- returns the listed entries. Duplicates are ignored.
+
+  Formats cannot be combined (e.g., `--id 1,5-10` is not valid). If any
+  requested IDs are not found, a note listing the missing IDs is printed to
+  stderr. The found entries are still printed to stdout.
+
+  The `--id` flag only works on history and list types. Using it on a
+  string, counter, or state key returns exit code 2 (type mismatch).
+  Parse failures (non-numeric IDs, reversed ranges, empty specs) return
+  exit code 4 (invalid input).],
   flags: (
+    ([`--id <spec>`], [string], [Entry ID (`35`), range (`35-64`), or comma-separated IDs (`1,5,12`)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
   ),
   examples: (
@@ -115,6 +135,10 @@ KV commands use structured exit codes for scripting:
     "mx kv get builds",
     "mx kv get decisions",
     "mx kv get context --memory",
+    "mx kv get shipped --id 35",
+    "mx kv get shipped --id 35-64",
+    "mx kv get shipped --id 1,5,12,35",
+    "mx kv get shipped --id 35 --memory",
   ),
 )
 
@@ -186,7 +210,8 @@ History and list types both store timestamped entries with auto-assigned IDs.
 The difference is semantic: history is append-only (newest first, no pop),
 while lists support push/pop and maintain insertion order.
 
-Both types support `push`, `last`, `search`, `count`, `random`, and `remove`.
+Both types support `push`, `last`, `search`, `count`, `random`, `remove`, and
+entry lookup by ID via `get --id`.
 Only lists support `pop`. Only history supports `since` (time-based queries).
 
 === push
