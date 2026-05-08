@@ -340,6 +340,8 @@ struct ParsedCommit {
     parent_hashes: String,
     author: String,
     date: String,
+    committer: String,
+    commit_date: String,
     raw_subject: String,
     decoded: DecodedCommit,
     diff_block: Option<String>,
@@ -532,7 +534,7 @@ fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
     use std::process::Command;
 
     let harvest_format =
-        "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
+        "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%cn <%ce>%n%cd%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
 
     let mut cmd = Command::new("git");
     cmd.arg("log");
@@ -579,7 +581,7 @@ fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
         };
 
         let header_lines: Vec<&str> = header_part.lines().collect();
-        if header_lines.len() < 7 {
+        if header_lines.len() < 9 {
             continue;
         }
 
@@ -589,7 +591,9 @@ fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
         let parent_hashes = header_lines[3].to_string();
         let author = header_lines[4].to_string();
         let date = header_lines[5].to_string();
-        let raw_subject = header_lines[6..].join("\n");
+        let committer = header_lines[6].to_string();
+        let commit_date = header_lines[7].to_string();
+        let raw_subject = header_lines[8..].join("\n");
 
         let decoded = try_decode_commit_body(body_part);
 
@@ -600,6 +604,8 @@ fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
             parent_hashes,
             author,
             date,
+            committer,
+            commit_date,
             raw_subject,
             decoded,
             diff_block: None,
@@ -711,20 +717,27 @@ fn display_subject(commit: &ParsedCommit) -> String {
             .unwrap_or("")
             .to_string()
     } else {
-        commit.raw_subject.clone()
+        // For non-decoded commits, the decoded.subject holds the passthrough
+        // text which may be multi-line. Take only the first line as subject.
+        commit
+            .decoded
+            .subject
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 }
 
-/// Get the full display body: decoded body if available, else empty.
+/// Get the full display body: decoded body if available, else raw body
+/// from non-decoded commits (plain git commits can have multi-line bodies).
 fn display_body(commit: &ParsedCommit) -> Option<String> {
-    if commit.decoded.was_decoded {
-        // Lines beyond the first form the body
-        let lines: Vec<&str> = commit.decoded.subject.lines().collect();
-        if lines.len() > 1 {
-            Some(lines[1..].join("\n"))
-        } else {
-            None
-        }
+    // Lines beyond the first form the body, whether decoded or not.
+    // For non-decoded commits, decoded.subject holds the passthrough
+    // text (the full raw body from %b), which can be multi-line.
+    let lines: Vec<&str> = commit.decoded.subject.lines().collect();
+    if lines.len() > 1 {
+        Some(lines[1..].join("\n"))
     } else {
         None
     }
@@ -814,7 +827,7 @@ fn render_format_short(commits: &[ParsedCommit]) {
     let mut out = stdout.lock();
 
     for commit in commits {
-        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.short_hash);
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.full_hash);
         let _ = writeln!(out, "Author: {}", commit.author);
         let _ = writeln!(out);
         let subject = display_subject(commit);
@@ -874,8 +887,8 @@ fn render_format_full(commits: &[ParsedCommit]) {
             let _ = writeln!(out, "Merge:  {}", commit.parent_hashes);
         }
         let _ = writeln!(out, "Author: {}", commit.author);
-        // git's `full` format shows "Commit:" instead of "Date:"
-        let _ = writeln!(out, "Commit: {}", commit.author);
+        // git's `full` format shows "Commit:" with the committer identity
+        let _ = writeln!(out, "Commit: {}", commit.committer);
         let _ = writeln!(out);
         let subject = display_subject(commit);
         let _ = writeln!(out, "    {}", subject);
@@ -910,8 +923,8 @@ fn render_format_fuller(commits: &[ParsedCommit]) {
         }
         let _ = writeln!(out, "Author:     {}", commit.author);
         let _ = writeln!(out, "AuthorDate: {}", commit.date);
-        let _ = writeln!(out, "Commit:     {}", commit.author);
-        let _ = writeln!(out, "CommitDate: {}", commit.date);
+        let _ = writeln!(out, "Commit:     {}", commit.committer);
+        let _ = writeln!(out, "CommitDate: {}", commit.commit_date);
         let _ = writeln!(out);
         let subject = display_subject(commit);
         let _ = writeln!(out, "    {}", subject);
@@ -954,9 +967,8 @@ pub(crate) fn handle_log(args: Vec<String>) -> Result<()> {
         eprintln!("note: custom --format bypasses message decoding");
         let mut cmd = Command::new("git");
         cmd.arg("log");
-        if let Some(c) = opts.count {
-            cmd.arg(format!("-{}", c));
-        }
+        let effective_count = opts.count.unwrap_or(10);
+        cmd.arg(format!("-{}", effective_count));
         cmd.arg(format!("--format={}", fmt));
         match opts.diff_mode {
             DiffMode::Stat => {
@@ -986,16 +998,19 @@ pub(crate) fn handle_log(args: Vec<String>) -> Result<()> {
         eprintln!("note: --graph bypasses message decoding");
         let mut cmd = Command::new("git");
         cmd.arg("log");
-        if let Some(c) = opts.count {
-            cmd.arg(format!("-{}", c));
-        }
+        let effective_count = opts.count.unwrap_or(10);
+        cmd.arg(format!("-{}", effective_count));
         cmd.arg("--graph");
         match opts.display_mode {
             LogDisplayMode::Oneline => {
                 cmd.arg("--oneline");
             }
             LogDisplayMode::Full => {
-                cmd.arg("--format=full");
+                // mx's `Full` mode is its own display (decoded body with
+                // full header). When falling through to raw git for
+                // --graph, map to git's default (medium), not git's
+                // `full` which is a different thing.
+                cmd.arg("--format=medium");
             }
             LogDisplayMode::FormatShort => {
                 cmd.arg("--format=short");
