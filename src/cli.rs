@@ -109,17 +109,8 @@ pub enum Commands {
         args: Vec<String>,
     },
 
-    /// Decoded git log (decodes encoded commit messages)
+    /// Decoded git log (transparently decodes encoded commit messages)
     Log {
-        /// Number of commits to show
-        #[arg(short = 'n', long, default_value = "10")]
-        count: usize,
-
-        /// Show full commit details
-        #[arg(long)]
-        full: bool,
-
-        /// Pass through additional git log arguments
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

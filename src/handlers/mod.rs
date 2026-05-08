@@ -329,30 +329,224 @@ pub(crate) fn handle_wiki(cmd: WikiCommands) -> Result<()> {
     }
 }
 
-/// Handle mx log - decoded git log
-pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> Result<()> {
+// ─── mx log: data structures ───────────────────────────────────────
+
+/// A single commit harvested from `git log` structured output.
+#[derive(Debug)]
+struct ParsedCommit {
+    full_hash: String,
+    short_hash: String,
+    decorations: String,
+    parent_hashes: String,
+    author: String,
+    date: String,
+    raw_subject: String,
+    decoded: DecodedCommit,
+    diff_block: Option<String>,
+}
+
+/// How to display the log output.
+#[derive(Debug, Clone, PartialEq)]
+enum LogDisplayMode {
+    /// Default: `<short-hash> <decoded-subject>` (backward compat)
+    Compact,
+    /// `--full`: full header + decoded body (backward compat)
+    Full,
+    /// `--oneline`: `<short-hash> <decorations> <decoded-subject>`
+    Oneline,
+    /// `--format=short` / `--pretty=short`
+    FormatShort,
+    /// `--format=medium` / `--pretty=medium` (git's default)
+    FormatMedium,
+    /// `--format=full` / `--pretty=full`
+    FormatFull,
+    /// `--format=fuller` / `--pretty=fuller`
+    FormatFuller,
+    /// Custom format string -- passthrough to raw git
+    CustomFormat(String),
+}
+
+/// Whether to attach diff output and in what form.
+#[derive(Debug, Clone, PartialEq)]
+enum DiffMode {
+    None,
+    Stat,
+    ShortStat,
+    Patch,
+}
+
+/// Parsed result of the user's CLI args for `mx log`.
+#[derive(Debug)]
+struct LogOptions {
+    count: Option<usize>,
+    display_mode: LogDisplayMode,
+    diff_mode: DiffMode,
+    decorate: Option<bool>,
+    filter_args: Vec<String>,
+}
+
+/// Parse raw CLI args into structured `LogOptions`.
+///
+/// We intercept display/diff/count args and pass everything else
+/// through as git filter args.
+fn parse_log_args(args: Vec<String>) -> LogOptions {
+    let mut count: Option<usize> = None;
+    let mut display_mode = LogDisplayMode::Compact;
+    let mut diff_mode = DiffMode::None;
+    let mut decorate: Option<bool> = None;
+    let mut filter_args: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+
+        // ── count: -N shorthand ─────────────────────────────────
+        // Must come before general flag checks. Matches `-3`, `-10`, etc.
+        if arg.starts_with('-')
+            && !arg.starts_with("--")
+            && arg.len() > 1
+            && arg[1..].chars().all(|c| c.is_ascii_digit())
+        {
+            count = arg[1..].parse().ok();
+            i += 1;
+            continue;
+        }
+
+        // ── count: -n N, -nN, --max-count=N ────────────────────
+        if arg == "-n" {
+            if i + 1 < args.len() {
+                count = args[i + 1].parse().ok();
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if arg.starts_with("-n") && !arg.starts_with("--") && arg.len() > 2 {
+            count = arg[2..].parse().ok();
+            i += 1;
+            continue;
+        }
+        if let Some(val) = arg.strip_prefix("--max-count=") {
+            count = val.parse().ok();
+            i += 1;
+            continue;
+        }
+
+        // ── display mode: --oneline ────────────────────────────
+        if arg == "--oneline" {
+            display_mode = LogDisplayMode::Oneline;
+            i += 1;
+            continue;
+        }
+
+        // ── display mode: --full (mx-specific, backward compat) ─
+        if arg == "--full" {
+            display_mode = LogDisplayMode::Full;
+            i += 1;
+            continue;
+        }
+
+        // ── display mode: --format=<X> / --pretty=<X> ──────────
+        if let Some(val) = arg
+            .strip_prefix("--format=")
+            .or_else(|| arg.strip_prefix("--pretty="))
+        {
+            display_mode = match val {
+                "oneline" => LogDisplayMode::Oneline,
+                "short" => LogDisplayMode::FormatShort,
+                "medium" => LogDisplayMode::FormatMedium,
+                "full" => LogDisplayMode::FormatFull,
+                "fuller" => LogDisplayMode::FormatFuller,
+                other => LogDisplayMode::CustomFormat(other.to_string()),
+            };
+            i += 1;
+            continue;
+        }
+        // Bare --format / --pretty followed by a separate arg
+        if arg == "--format" || arg == "--pretty" {
+            if i + 1 < args.len() {
+                let val = &args[i + 1];
+                display_mode = match val.as_str() {
+                    "oneline" => LogDisplayMode::Oneline,
+                    "short" => LogDisplayMode::FormatShort,
+                    "medium" => LogDisplayMode::FormatMedium,
+                    "full" => LogDisplayMode::FormatFull,
+                    "fuller" => LogDisplayMode::FormatFuller,
+                    other => LogDisplayMode::CustomFormat(other.to_string()),
+                };
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── diff mode ──────────────────────────────────────────
+        if arg == "--stat" {
+            diff_mode = DiffMode::Stat;
+            i += 1;
+            continue;
+        }
+        if arg == "--shortstat" {
+            diff_mode = DiffMode::ShortStat;
+            i += 1;
+            continue;
+        }
+        if arg == "-p" || arg == "--patch" {
+            diff_mode = DiffMode::Patch;
+            i += 1;
+            continue;
+        }
+
+        // ── decorate ───────────────────────────────────────────
+        if arg == "--decorate" {
+            decorate = Some(true);
+            i += 1;
+            continue;
+        }
+        if arg == "--no-decorate" {
+            decorate = Some(false);
+            i += 1;
+            continue;
+        }
+
+        // ── everything else: filter passthrough ────────────────
+        filter_args.push(arg.clone());
+        i += 1;
+    }
+
+    LogOptions {
+        count,
+        display_mode,
+        diff_mode,
+        decorate,
+        filter_args,
+    }
+}
+
+// ─── mx log: harvest ───────────────────────────────────────────────
+
+/// Harvest commit data via a single structured `git log` call.
+fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
     use std::process::Command;
 
-    // Build git log command
-    let format = if full {
-        // Full format: hash, author, date, subject, body
-        "%H%n%an <%ae>%n%ad%n%s%n%b%n---END---"
-    } else {
-        // Compact format: short hash, subject, body (for decoding)
-        "%h%n%s%n%b%n---END---"
-    };
+    let harvest_format = "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
 
     let mut cmd = Command::new("git");
-    cmd.args([
-        "log",
-        &format!("-{}", count),
-        &format!("--format={}", format),
-    ]);
+    cmd.arg("log");
 
-    // Add any extra arguments
-    for arg in &extra_args {
+    let effective_count = opts.count.unwrap_or(10);
+    cmd.arg(format!("-{}", effective_count));
+
+    cmd.arg(format!("--format={}", harvest_format));
+
+    // Pass through filter args
+    for arg in &opts.filter_args {
         cmd.arg(arg);
     }
+
+    cmd.stderr(std::process::Stdio::inherit());
 
     let output = cmd.output().context("Failed to run git log")?;
 
@@ -363,82 +557,483 @@ pub(crate) fn handle_log(count: usize, full: bool, extra_args: Vec<String>) -> R
         );
     }
 
-    let log_output = String::from_utf8_lossy(&output.stdout);
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut commits = Vec::new();
 
-    // Parse and decode each commit
-    for commit_block in log_output.split("---END---") {
-        let commit_block = commit_block.trim();
-        if commit_block.is_empty() {
+    for block in raw.split("---MX-LOG-END---") {
+        let block = block.trim();
+        if block.is_empty() {
             continue;
         }
 
-        let lines: Vec<&str> = commit_block.lines().collect();
+        // Strip the leading sentinel
+        let block = block.strip_prefix("---MX-LOG---").unwrap_or(block);
+        let block = block.trim();
 
-        if full {
-            // Full format: hash, author, date, subject, body...
-            if lines.len() >= 4 {
-                let hash = lines[0];
-                let author = lines[1];
-                let date = lines[2];
-                let subject = lines[3];
-                let body: String = lines[4..].join("\n");
-
-                println!("\x1b[33mcommit {}\x1b[0m", hash);
-                println!("Author: {}", author);
-                println!("Date:   {}", date);
-                println!();
-
-                // Try to decode the subject (title)
-                println!("    {}", subject);
-
-                // Try to decode the body
-                if !body.trim().is_empty() {
-                    let result = try_decode_commit_body(&body);
-                    println!();
-                    for line in result.subject.lines() {
-                        println!("    {}", line);
-                    }
-                    // If decoding succeeded AND there was post-footer
-                    // content (dejavu marker or user-appended note),
-                    // render it beneath the decoded subject in dim
-                    // style. The dim ANSI sequence (\x1b[2m) matches
-                    // the existing yellow-hash convention -- raw
-                    // escapes inline rather than a `colored` crate --
-                    // and visually marks the content as "extra,
-                    // post-footer" without hiding it.
-                    if let Some(trailing) = result.trailing.as_deref() {
-                        println!();
-                        for line in trailing.lines() {
-                            println!("    \x1b[2m{}\x1b[0m", line);
-                        }
-                    }
-                }
-                println!();
-            }
+        // Split on body sentinel
+        let (header_part, body_part) = if let Some(idx) = block.find("---MX-BODY---") {
+            (&block[..idx], block[idx + "---MX-BODY---".len()..].trim())
         } else {
-            // Compact format: short hash, subject, body...
-            if lines.len() >= 2 {
-                let hash = lines[0];
-                let subject = lines[1];
-                let body: String = lines[2..].join("\n");
+            (block, "")
+        };
 
-                // Try to decode the body. Compact format is one line
-                // per commit, so trailing post-footer content is not
-                // shown here -- use `mx log --full` to see it.
-                let result = try_decode_commit_body(&body);
-                let display = if result.was_decoded {
-                    result.subject
-                } else {
-                    // Not encoded, show original subject
-                    subject.to_string()
-                };
+        let header_lines: Vec<&str> = header_part.lines().collect();
+        if header_lines.len() < 7 {
+            continue;
+        }
 
-                // Truncate for display
-                let display_truncated = safe_truncate(&display, 72);
+        let full_hash = header_lines[0].to_string();
+        let short_hash = header_lines[1].to_string();
+        let decorations = header_lines[2].to_string();
+        let parent_hashes = header_lines[3].to_string();
+        let author = header_lines[4].to_string();
+        let date = header_lines[5].to_string();
+        let raw_subject = header_lines[6..].join("\n");
 
-                println!("\x1b[33m{}\x1b[0m {}", hash, display_truncated);
+        let decoded = try_decode_commit_body(body_part);
+
+        commits.push(ParsedCommit {
+            full_hash,
+            short_hash,
+            decorations,
+            parent_hashes,
+            author,
+            date,
+            raw_subject,
+            decoded,
+            diff_block: None,
+        });
+    }
+
+    Ok(commits)
+}
+
+// ─── mx log: diff attachment ───────────────────────────────────────
+
+/// Attach diff blocks to commits by running a second git log pass.
+fn attach_diffs(commits: &mut [ParsedCommit], opts: &LogOptions) -> Result<()> {
+    use std::process::Command;
+
+    if opts.diff_mode == DiffMode::None || commits.is_empty() {
+        return Ok(());
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("log");
+
+    let effective_count = opts.count.unwrap_or(10);
+    cmd.arg(format!("-{}", effective_count));
+
+    cmd.arg("--format=---MX-DIFF--%H");
+
+    match opts.diff_mode {
+        DiffMode::Stat => {
+            cmd.arg("--stat");
+        }
+        DiffMode::ShortStat => {
+            cmd.arg("--shortstat");
+        }
+        DiffMode::Patch => {
+            cmd.arg("-p");
+        }
+        DiffMode::None => unreachable!(),
+    }
+
+    for arg in &opts.filter_args {
+        cmd.arg(arg);
+    }
+
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let output = cmd.output().context("Failed to run git log (diff pass)")?;
+
+    if !output.status.success() {
+        // Non-fatal: we still have the decoded headers
+        return Ok(());
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+
+    // Build a map from hash -> diff content
+    let mut diff_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    for block in raw.split("---MX-DIFF--") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        // First line is the hash, rest is the diff
+        let first_newline = block.find('\n');
+        let hash = match first_newline {
+            Some(idx) => block[..idx].trim().to_string(),
+            None => block.trim().to_string(),
+        };
+        let diff_content = match first_newline {
+            Some(idx) => block[idx + 1..].to_string(),
+            None => String::new(),
+        };
+        if !hash.is_empty() {
+            diff_map.insert(hash, diff_content);
+        }
+    }
+
+    // Attach to commits
+    for commit in commits.iter_mut() {
+        if let Some(diff) = diff_map.remove(&commit.full_hash) {
+            commit.diff_block = Some(diff);
+        }
+    }
+
+    Ok(())
+}
+
+// ─── mx log: rendering ────────────────────────────────────────────
+
+/// Format decoration string like git does: ` (HEAD -> main, origin/main)`
+fn format_decorations(decorations: &str) -> String {
+    let d = decorations.trim();
+    if d.is_empty() {
+        return String::new();
+    }
+    format!(" \x1b[33m(\x1b[0m{}\x1b[33m)\x1b[0m", d)
+}
+
+/// Get the display subject: decoded first line if available, else raw subject.
+fn display_subject(commit: &ParsedCommit) -> String {
+    if commit.decoded.was_decoded {
+        // Use the first line of the decoded body as the subject
+        commit
+            .decoded
+            .subject
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    } else {
+        commit.raw_subject.clone()
+    }
+}
+
+/// Get the full display body: decoded body if available, else empty.
+fn display_body(commit: &ParsedCommit) -> Option<String> {
+    if commit.decoded.was_decoded {
+        // Lines beyond the first form the body
+        let lines: Vec<&str> = commit.decoded.subject.lines().collect();
+        if lines.len() > 1 {
+            Some(lines[1..].join("\n"))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Render commits in Compact mode (default).
+fn render_compact(commits: &[ParsedCommit]) {
+    for commit in commits {
+        let subject = display_subject(commit);
+        let truncated = safe_truncate(&subject, 72);
+        println!("\x1b[33m{}\x1b[0m {}", commit.short_hash, truncated);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                println!("{}", diff_trimmed);
             }
         }
+    }
+}
+
+/// Render commits in Full mode (--full, backward compat).
+fn render_full(commits: &[ParsedCommit]) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for commit in commits {
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.full_hash);
+        if commit.parent_hashes.split_whitespace().count() >= 2 {
+            let _ = writeln!(out, "Merge:  {}", commit.parent_hashes);
+        }
+        let _ = writeln!(out, "Author: {}", commit.author);
+        let _ = writeln!(out, "Date:   {}", commit.date);
+        let _ = writeln!(out);
+
+        // Print decoded message
+        if commit.decoded.was_decoded {
+            for line in commit.decoded.subject.lines() {
+                let _ = writeln!(out, "    {}", line);
+            }
+            if let Some(trailing) = commit.decoded.trailing.as_deref() {
+                let _ = writeln!(out);
+                for line in trailing.lines() {
+                    let _ = writeln!(out, "    \x1b[2m{}\x1b[0m", line);
+                }
+            }
+        } else {
+            let _ = writeln!(out, "    {}", commit.raw_subject);
+        }
+        let _ = writeln!(out);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                let _ = writeln!(out, "{}", diff_trimmed);
+                let _ = writeln!(out);
+            }
+        }
+    }
+}
+
+/// Render commits in Oneline mode.
+fn render_oneline(commits: &[ParsedCommit], show_decorate: bool) {
+    for commit in commits {
+        let subject = display_subject(commit);
+        let deco = if show_decorate {
+            format_decorations(&commit.decorations)
+        } else {
+            String::new()
+        };
+        println!(
+            "\x1b[33m{}\x1b[0m{} {}",
+            commit.short_hash, deco, subject
+        );
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                println!("{}", diff_trimmed);
+            }
+        }
+    }
+}
+
+/// Render commits in git's `short` format.
+fn render_format_short(commits: &[ParsedCommit]) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for commit in commits {
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.short_hash);
+        let _ = writeln!(out, "Author: {}", commit.author);
+        let _ = writeln!(out);
+        let subject = display_subject(commit);
+        let _ = writeln!(out, "    {}", subject);
+        let _ = writeln!(out);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                let _ = writeln!(out, "{}", diff_trimmed);
+                let _ = writeln!(out);
+            }
+        }
+    }
+}
+
+/// Render commits in git's `medium` format (git's default).
+fn render_format_medium(commits: &[ParsedCommit]) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for commit in commits {
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.full_hash);
+        let _ = writeln!(out, "Author: {}", commit.author);
+        let _ = writeln!(out, "Date:   {}", commit.date);
+        let _ = writeln!(out);
+        let subject = display_subject(commit);
+        let _ = writeln!(out, "    {}", subject);
+        if let Some(body) = display_body(commit) {
+            let _ = writeln!(out);
+            for line in body.lines() {
+                let _ = writeln!(out, "    {}", line);
+            }
+        }
+        let _ = writeln!(out);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                let _ = writeln!(out, "{}", diff_trimmed);
+                let _ = writeln!(out);
+            }
+        }
+    }
+}
+
+/// Render commits in git's `full` format.
+fn render_format_full(commits: &[ParsedCommit]) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for commit in commits {
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.full_hash);
+        if commit.parent_hashes.split_whitespace().count() >= 2 {
+            let _ = writeln!(out, "Merge:  {}", commit.parent_hashes);
+        }
+        let _ = writeln!(out, "Author: {}", commit.author);
+        // git's `full` format shows "Commit:" instead of "Date:"
+        let _ = writeln!(out, "Commit: {}", commit.author);
+        let _ = writeln!(out);
+        let subject = display_subject(commit);
+        let _ = writeln!(out, "    {}", subject);
+        if let Some(body) = display_body(commit) {
+            let _ = writeln!(out);
+            for line in body.lines() {
+                let _ = writeln!(out, "    {}", line);
+            }
+        }
+        let _ = writeln!(out);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                let _ = writeln!(out, "{}", diff_trimmed);
+                let _ = writeln!(out);
+            }
+        }
+    }
+}
+
+/// Render commits in git's `fuller` format.
+fn render_format_fuller(commits: &[ParsedCommit]) {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    for commit in commits {
+        let _ = writeln!(out, "\x1b[33mcommit {}\x1b[0m", commit.full_hash);
+        if commit.parent_hashes.split_whitespace().count() >= 2 {
+            let _ = writeln!(out, "Merge:      {}", commit.parent_hashes);
+        }
+        let _ = writeln!(out, "Author:     {}", commit.author);
+        let _ = writeln!(out, "AuthorDate: {}", commit.date);
+        let _ = writeln!(out, "Commit:     {}", commit.author);
+        let _ = writeln!(out, "CommitDate: {}", commit.date);
+        let _ = writeln!(out);
+        let subject = display_subject(commit);
+        let _ = writeln!(out, "    {}", subject);
+        if let Some(body) = display_body(commit) {
+            let _ = writeln!(out);
+            for line in body.lines() {
+                let _ = writeln!(out, "    {}", line);
+            }
+        }
+        let _ = writeln!(out);
+
+        if let Some(ref diff) = commit.diff_block {
+            let diff_trimmed = diff.trim();
+            if !diff_trimmed.is_empty() {
+                let _ = writeln!(out, "{}", diff_trimmed);
+                let _ = writeln!(out);
+            }
+        }
+    }
+}
+
+// ─── mx log: main handler ─────────────────────────────────────────
+
+/// Handle `mx log` -- decoded git log with full git-log parity.
+///
+/// Four-phase architecture:
+///   1. Parse args into LogOptions
+///   2. Harvest commits via structured git log
+///   3. Attach diffs (conditional)
+///   4. Render via our own formatters (with decoded messages)
+///
+/// Custom --format / --graph: passthrough to raw git with a stderr note.
+pub(crate) fn handle_log(args: Vec<String>) -> Result<()> {
+    use std::process::Command;
+
+    let opts = parse_log_args(args);
+
+    // ── CustomFormat / --graph: passthrough ─────────────────────
+    if let LogDisplayMode::CustomFormat(ref fmt) = opts.display_mode {
+        eprintln!("note: custom --format bypasses message decoding");
+        let mut cmd = Command::new("git");
+        cmd.arg("log");
+        if let Some(c) = opts.count {
+            cmd.arg(format!("-{}", c));
+        }
+        cmd.arg(format!("--format={}", fmt));
+        match opts.diff_mode {
+            DiffMode::Stat => { cmd.arg("--stat"); }
+            DiffMode::ShortStat => { cmd.arg("--shortstat"); }
+            DiffMode::Patch => { cmd.arg("-p"); }
+            DiffMode::None => {}
+        }
+        for arg in &opts.filter_args {
+            cmd.arg(arg);
+        }
+        cmd.stderr(std::process::Stdio::inherit());
+        let status = cmd.status().context("Failed to run git log")?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
+    // Check if --graph was in filter_args (passthrough)
+    if opts.filter_args.iter().any(|a| a == "--graph") {
+        eprintln!("note: --graph bypasses message decoding");
+        let mut cmd = Command::new("git");
+        cmd.arg("log");
+        if let Some(c) = opts.count {
+            cmd.arg(format!("-{}", c));
+        }
+        cmd.arg("--graph");
+        match opts.display_mode {
+            LogDisplayMode::Oneline => { cmd.arg("--oneline"); }
+            LogDisplayMode::Full => { cmd.arg("--format=full"); }
+            LogDisplayMode::FormatShort => { cmd.arg("--format=short"); }
+            LogDisplayMode::FormatMedium => { cmd.arg("--format=medium"); }
+            LogDisplayMode::FormatFull => { cmd.arg("--format=full"); }
+            LogDisplayMode::FormatFuller => { cmd.arg("--format=fuller"); }
+            _ => {}
+        }
+        match opts.diff_mode {
+            DiffMode::Stat => { cmd.arg("--stat"); }
+            DiffMode::ShortStat => { cmd.arg("--shortstat"); }
+            DiffMode::Patch => { cmd.arg("-p"); }
+            DiffMode::None => {}
+        }
+        for arg in &opts.filter_args {
+            if arg == "--graph" {
+                continue; // already added
+            }
+            cmd.arg(arg);
+        }
+        cmd.stderr(std::process::Stdio::inherit());
+        let status = cmd.status().context("Failed to run git log")?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        return Ok(());
+    }
+
+    // ── Phase 1-2: Harvest + Decode ────────────────────────────
+    let mut commits = harvest_commits(&opts)?;
+
+    // ── Phase 3: Attach diffs ──────────────────────────────────
+    attach_diffs(&mut commits, &opts)?;
+
+    // ── Phase 4: Render ────────────────────────────────────────
+    let show_decorate = opts.decorate.unwrap_or(true);
+
+    match opts.display_mode {
+        LogDisplayMode::Compact => render_compact(&commits),
+        LogDisplayMode::Full => render_full(&commits),
+        LogDisplayMode::Oneline => render_oneline(&commits, show_decorate),
+        LogDisplayMode::FormatShort => render_format_short(&commits),
+        LogDisplayMode::FormatMedium => render_format_medium(&commits),
+        LogDisplayMode::FormatFull => render_format_full(&commits),
+        LogDisplayMode::FormatFuller => render_format_fuller(&commits),
+        LogDisplayMode::CustomFormat(_) => unreachable!("handled above"),
     }
 
     Ok(())
@@ -664,6 +1259,7 @@ fn is_footer_line(line: &str) -> bool {
 /// 3. **Not decoded** (`was_decoded == false`): the message had no
 ///    recognizable footer (or decode failed). `subject` holds the
 ///    trimmed original message; `trailing` is always `None`.
+#[derive(Debug)]
 pub(crate) struct DecodedCommit {
     /// The decoded message body (when `was_decoded`) or the trimmed
     /// original text (when not).
@@ -1250,5 +1846,181 @@ mod codex_archive_validation_tests {
             "save alias must produce the same error as archive: \
              archive={archive_err:?}, save={save_err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_log_args_tests {
+    use super::*;
+
+    fn args(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn dash_n_shorthand() {
+        let opts = parse_log_args(args(&["-3"]));
+        assert_eq!(opts.count, Some(3));
+        assert_eq!(opts.display_mode, LogDisplayMode::Compact);
+        assert_eq!(opts.diff_mode, DiffMode::None);
+    }
+
+    #[test]
+    fn dash_n_space_count() {
+        let opts = parse_log_args(args(&["-n", "5"]));
+        assert_eq!(opts.count, Some(5));
+    }
+
+    #[test]
+    fn dash_n_joined_count() {
+        let opts = parse_log_args(args(&["-n5"]));
+        assert_eq!(opts.count, Some(5));
+    }
+
+    #[test]
+    fn max_count_equals() {
+        let opts = parse_log_args(args(&["--max-count=7"]));
+        assert_eq!(opts.count, Some(7));
+    }
+
+    #[test]
+    fn oneline_mode() {
+        let opts = parse_log_args(args(&["--oneline"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::Oneline);
+    }
+
+    #[test]
+    fn full_mode() {
+        let opts = parse_log_args(args(&["--full"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::Full);
+    }
+
+    #[test]
+    fn stat_diff_mode() {
+        let opts = parse_log_args(args(&["--stat"]));
+        assert_eq!(opts.diff_mode, DiffMode::Stat);
+    }
+
+    #[test]
+    fn shortstat_diff_mode() {
+        let opts = parse_log_args(args(&["--shortstat"]));
+        assert_eq!(opts.diff_mode, DiffMode::ShortStat);
+    }
+
+    #[test]
+    fn patch_diff_mode() {
+        let opts = parse_log_args(args(&["-p"]));
+        assert_eq!(opts.diff_mode, DiffMode::Patch);
+
+        let opts2 = parse_log_args(args(&["--patch"]));
+        assert_eq!(opts2.diff_mode, DiffMode::Patch);
+    }
+
+    #[test]
+    fn format_short() {
+        let opts = parse_log_args(args(&["--format=short"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatShort);
+    }
+
+    #[test]
+    fn format_medium() {
+        let opts = parse_log_args(args(&["--format=medium"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatMedium);
+    }
+
+    #[test]
+    fn format_full_preset() {
+        let opts = parse_log_args(args(&["--format=full"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatFull);
+    }
+
+    #[test]
+    fn format_fuller() {
+        let opts = parse_log_args(args(&["--format=fuller"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatFuller);
+    }
+
+    #[test]
+    fn pretty_equals_format() {
+        let opts = parse_log_args(args(&["--pretty=short"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatShort);
+    }
+
+    #[test]
+    fn custom_format() {
+        let opts = parse_log_args(args(&["--format=%H %s"]));
+        assert_eq!(
+            opts.display_mode,
+            LogDisplayMode::CustomFormat("%H %s".to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_args() {
+        let opts = parse_log_args(args(&["--oneline", "-5", "--author=foo"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::Oneline);
+        assert_eq!(opts.count, Some(5));
+        assert!(opts.filter_args.contains(&"--author=foo".to_string()));
+    }
+
+    #[test]
+    fn no_args_defaults() {
+        let opts = parse_log_args(args(&[]));
+        assert_eq!(opts.count, None);
+        assert_eq!(opts.display_mode, LogDisplayMode::Compact);
+        assert_eq!(opts.diff_mode, DiffMode::None);
+        assert!(opts.filter_args.is_empty());
+        assert!(opts.decorate.is_none());
+    }
+
+    #[test]
+    fn filter_args_pass_through() {
+        let opts = parse_log_args(args(&[
+            "--since=2024-01-01",
+            "--author=alice",
+            "--all",
+            "--",
+            "src/main.rs",
+        ]));
+        assert_eq!(opts.filter_args.len(), 5);
+        assert!(opts.filter_args.contains(&"--since=2024-01-01".to_string()));
+        assert!(opts.filter_args.contains(&"--author=alice".to_string()));
+        assert!(opts.filter_args.contains(&"--all".to_string()));
+        // "--" is a pathspec separator and should pass through
+        assert!(opts.filter_args.contains(&"--".to_string()));
+        assert!(opts.filter_args.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn decorate_flags() {
+        let opts1 = parse_log_args(args(&["--decorate"]));
+        assert_eq!(opts1.decorate, Some(true));
+
+        let opts2 = parse_log_args(args(&["--no-decorate"]));
+        assert_eq!(opts2.decorate, Some(false));
+    }
+
+    #[test]
+    fn double_digit_count() {
+        let opts = parse_log_args(args(&["-10"]));
+        assert_eq!(opts.count, Some(10));
+    }
+
+    #[test]
+    fn format_oneline_maps_to_oneline_mode() {
+        let opts = parse_log_args(args(&["--format=oneline"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::Oneline);
+    }
+
+    #[test]
+    fn bare_format_with_separate_arg() {
+        let opts = parse_log_args(args(&["--format", "medium"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatMedium);
+    }
+
+    #[test]
+    fn bare_pretty_with_separate_arg() {
+        let opts = parse_log_args(args(&["--pretty", "fuller"]));
+        assert_eq!(opts.display_mode, LogDisplayMode::FormatFuller);
     }
 }

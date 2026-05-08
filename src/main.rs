@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         Commands::Codex { command } => handle_codex(command),
         Commands::Convert { command } => handle_convert(command),
         Commands::Show { args } => handle_show(args),
-        Commands::Log { count, full, args } => handle_log(count, full, args),
+        Commands::Log { args } => handle_log(args),
         Commands::State { command } => handle_state(command),
         Commands::Kv { command } => {
             let code = handle_kv(command, cli.verbose)?;
