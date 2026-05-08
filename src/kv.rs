@@ -1319,10 +1319,7 @@ pub struct TimeRange {
 pub fn parse_day(s: &str) -> Result<TimeRange> {
     let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .with_context(|| format!("Invalid day format '{}', expected YYYY-MM-DD", s))?;
-    let from = date
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc();
+    let from = date.and_hms_opt(0, 0, 0).unwrap().and_utc();
     let to = date
         .succ_opt()
         .with_context(|| format!("Day overflow for '{}'", s))?
@@ -1370,7 +1367,10 @@ pub fn parse_week(s: &str) -> Result<TimeRange> {
     // Expect format like "2026-W17"
     let parts: Vec<&str> = s.split("-W").collect();
     if parts.len() != 2 {
-        bail!("Invalid week format '{}', expected YYYY-Www (e.g. 2026-W17)", s);
+        bail!(
+            "Invalid week format '{}', expected YYYY-Www (e.g. 2026-W17)",
+            s
+        );
     }
     let year: i32 = parts[0]
         .parse()
@@ -2197,7 +2197,9 @@ max_entries = 5
             .push_with_ts("flavor_history", "lapsang", ts1)
             .unwrap();
 
-        let result = store.count("flavor_history", Some("bergamot"), None).unwrap();
+        let result = store
+            .count("flavor_history", Some("bergamot"), None)
+            .unwrap();
         assert_eq!(result.matched, 2);
         assert_eq!(result.total, Some(3)); // 2 of 3 match
         assert!(result.latest_ts.is_some());
@@ -3170,12 +3172,8 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store
-            .push_with_ts("flavor_history", "a", ts)
-            .unwrap();
-        store
-            .push_with_ts("flavor_history", "b", ts)
-            .unwrap();
+        store.push_with_ts("flavor_history", "a", ts).unwrap();
+        store.push_with_ts("flavor_history", "b", ts).unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         // Both entries match the range, but count=1 limits output
@@ -3251,9 +3249,7 @@ max_entries = 5
         store
             .push_with_ts("flavor_history", "april", ts_apr)
             .unwrap();
-        store
-            .push_with_ts("flavor_history", "may", ts_may)
-            .unwrap();
+        store.push_with_ts("flavor_history", "may", ts_may).unwrap();
 
         let range = parse_month("2026-04").unwrap();
         let result = store.count("flavor_history", None, Some(&range)).unwrap();

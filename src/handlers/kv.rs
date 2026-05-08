@@ -238,8 +238,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             memory,
             time_range,
         } => {
-            let range = resolve_time_range(&time_range)
-                .map_err(KvError::Other)?;
+            let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
             match store.last(&key, count, range.as_ref()) {
                 Ok(items) => {
                     for item in &items {
@@ -328,8 +327,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             memory,
             time_range,
         } => {
-            let range = resolve_time_range(&time_range)
-                .map_err(KvError::Other)?;
+            let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
             match store.search(&key, &query, range.as_ref()) {
                 Ok(hits) => {
                     if hits.is_empty() {
@@ -358,8 +356,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             value,
             time_range,
         } => {
-            let range = resolve_time_range(&time_range)
-                .map_err(KvError::Other)?;
+            let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
             match store.count(&key, value.as_deref(), range.as_ref()) {
                 Ok(result) => {
                     match result.total {
