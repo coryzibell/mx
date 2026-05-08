@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "mx")]
@@ -1631,6 +1631,33 @@ pub enum DumpFormat {
     Compact,
 }
 
+/// Time-range filters for kv `last`, `search`, and `count` subcommands.
+///
+/// All flags are mutually exclusive: `--day`, `--month`, `--week` conflict
+/// with each other and with `--from`/`--to`.
+#[derive(Args, Clone, Default, Debug)]
+pub struct TimeRangeArgs {
+    /// Filter by specific day (YYYY-MM-DD, UTC)
+    #[arg(long, conflicts_with_all = ["month", "week", "range_from", "range_to"])]
+    pub day: Option<String>,
+
+    /// Filter by month (YYYY-MM, UTC)
+    #[arg(long, conflicts_with_all = ["day", "week", "range_from", "range_to"])]
+    pub month: Option<String>,
+
+    /// Filter by ISO week (YYYY-Www, e.g. 2026-W17)
+    #[arg(long, conflicts_with_all = ["day", "month", "range_from", "range_to"])]
+    pub week: Option<String>,
+
+    /// Start of date range, inclusive (YYYY-MM-DD, UTC)
+    #[arg(long = "from", conflicts_with_all = ["day", "month", "week"])]
+    pub range_from: Option<String>,
+
+    /// End of date range, inclusive (YYYY-MM-DD, UTC)
+    #[arg(long = "to", conflicts_with_all = ["day", "month", "week"])]
+    pub range_to: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum KvCommands {
     /// Get the current value for a key
@@ -1706,6 +1733,9 @@ pub enum KvCommands {
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        #[command(flatten)]
+        time_range: TimeRangeArgs,
     },
 
     /// Get history entries since a time reference (ISO-8601 or relative: 1h, 7d, 2w, 30m)
@@ -1766,6 +1796,9 @@ pub enum KvCommands {
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        #[command(flatten)]
+        time_range: TimeRangeArgs,
     },
 
     /// Count entries in a list/history, optionally filtered
@@ -1775,6 +1808,9 @@ pub enum KvCommands {
 
         /// Count only entries matching this substring
         value: Option<String>,
+
+        #[command(flatten)]
+        time_range: TimeRangeArgs,
     },
 
     /// List all defined keys with their types

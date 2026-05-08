@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::cli::TimeRangeArgs;
 
 /// Per-process flag so the legacy `~/.crewu/kv/` warning prints at most once,
 /// even if both schema and data fall back to the legacy location.
@@ -807,13 +809,22 @@ impl KvStore {
     }
 
     /// Get the last N entries from a history or list, formatted with IDs and timestamps.
-    pub fn last(&self, key: &str, count: usize) -> Result<Vec<String>, KvError> {
+    ///
+    /// When `range` is provided, entries are filtered by timestamp first, then
+    /// the `count` limit is applied to the filtered set.
+    pub fn last(
+        &self,
+        key: &str,
+        count: usize,
+        range: Option<&TimeRange>,
+    ) -> Result<Vec<String>, KvError> {
         let def = self.key_def(key)?;
 
         match def.value_type {
             ValueType::History => match self.data.entries.get(key) {
                 Some(DataValue::History { entries, .. }) => Ok(entries
                     .iter()
+                    .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
                     .take(count)
                     .map(|e| format!("{}: {} ({})", e.id, e.value, e.ts))
                     .collect()),
@@ -821,8 +832,12 @@ impl KvStore {
             },
             ValueType::List => match self.data.entries.get(key) {
                 Some(DataValue::List { items, .. }) => {
-                    let start = items.len().saturating_sub(count);
-                    Ok(items[start..]
+                    let filtered: Vec<_> = items
+                        .iter()
+                        .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
+                        .collect();
+                    let start = filtered.len().saturating_sub(count);
+                    Ok(filtered[start..]
                         .iter()
                         .map(|e| {
                             if e.ts.is_empty() {
@@ -941,7 +956,14 @@ impl KvStore {
     }
 
     /// Search entries in a list or history by case-insensitive substring.
-    pub fn search(&self, key: &str, query: &str) -> Result<Vec<SearchHit>, KvError> {
+    ///
+    /// When `range` is provided, only entries within the time range are searched.
+    pub fn search(
+        &self,
+        key: &str,
+        query: &str,
+        range: Option<&TimeRange>,
+    ) -> Result<Vec<SearchHit>, KvError> {
         let def = self.key_def(key)?;
         match def.value_type {
             ValueType::History | ValueType::List => {}
@@ -960,7 +982,9 @@ impl KvStore {
         match self.data.entries.get(key) {
             Some(DataValue::History { entries, .. }) => {
                 for e in entries {
-                    if e.value.to_lowercase().contains(&query_lower) {
+                    if range.is_none_or(|r| ts_in_range(&e.ts, r))
+                        && e.value.to_lowercase().contains(&query_lower)
+                    {
                         hits.push(SearchHit {
                             id: e.id,
                             value: e.value.clone(),
@@ -971,7 +995,9 @@ impl KvStore {
             }
             Some(DataValue::List { items, .. }) => {
                 for e in items {
-                    if e.value.to_lowercase().contains(&query_lower) {
+                    if range.is_none_or(|r| ts_in_range(&e.ts, r))
+                        && e.value.to_lowercase().contains(&query_lower)
+                    {
                         hits.push(SearchHit {
                             id: e.id,
                             value: e.value.clone(),
@@ -986,8 +1012,17 @@ impl KvStore {
         Ok(hits)
     }
 
-    /// Count entries in a list or history, optionally filtered by substring.
-    pub fn count(&self, key: &str, value: Option<&str>) -> Result<CountResult, KvError> {
+    /// Count entries in a list or history, optionally filtered by substring and/or time range.
+    ///
+    /// When `range` is provided, only entries within the time range are counted.
+    /// The `total` field in the result reflects entries that passed the time filter
+    /// (when a value filter is also active).
+    pub fn count(
+        &self,
+        key: &str,
+        value: Option<&str>,
+        range: Option<&TimeRange>,
+    ) -> Result<CountResult, KvError> {
         let def = self.key_def(key)?;
         match def.value_type {
             ValueType::History | ValueType::List => {}
@@ -1009,6 +1044,9 @@ impl KvStore {
         match self.data.entries.get(key) {
             Some(DataValue::History { entries, .. }) => {
                 for e in entries {
+                    if !range.is_none_or(|r| ts_in_range(&e.ts, r)) {
+                        continue;
+                    }
                     entry_total += 1;
                     let is_match = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
@@ -1024,6 +1062,9 @@ impl KvStore {
             }
             Some(DataValue::List { items, .. }) => {
                 for e in items {
+                    if !range.is_none_or(|r| ts_in_range(&e.ts, r)) {
+                        continue;
+                    }
                     entry_total += 1;
                     let is_match = match &query_lower {
                         Some(q) => e.value.to_lowercase().contains(q),
@@ -1262,6 +1303,172 @@ pub fn parse_relative_time(s: &str) -> Result<DateTime<Utc>> {
 }
 
 // ---------------------------------------------------------------------------
+// Time-range queries
+// ---------------------------------------------------------------------------
+
+/// Half-open time range `[from, to)` in UTC.
+#[derive(Debug, Clone)]
+pub struct TimeRange {
+    /// Inclusive lower bound.
+    pub from: DateTime<Utc>,
+    /// Exclusive upper bound.
+    pub to: DateTime<Utc>,
+}
+
+/// Parse `YYYY-MM-DD` into a day range `[start_of_day, start_of_next_day)`.
+pub fn parse_day(s: &str) -> Result<TimeRange> {
+    let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .with_context(|| format!("Invalid day format '{}', expected YYYY-MM-DD", s))?;
+    let from = date
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let to = date
+        .succ_opt()
+        .with_context(|| format!("Day overflow for '{}'", s))?
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    Ok(TimeRange { from, to })
+}
+
+/// Parse `YYYY-MM` into a month range `[first_of_month, first_of_next_month)`.
+pub fn parse_month(s: &str) -> Result<TimeRange> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 2 {
+        bail!("Invalid month format '{}', expected YYYY-MM", s);
+    }
+    let year: i32 = parts[0]
+        .parse()
+        .with_context(|| format!("Invalid year in month '{}'", s))?;
+    let month: u32 = parts[1]
+        .parse()
+        .with_context(|| format!("Invalid month number in '{}'", s))?;
+    if !(1..=12).contains(&month) {
+        bail!("Month out of range in '{}'", s);
+    }
+
+    let from_date = NaiveDate::from_ymd_opt(year, month, 1)
+        .with_context(|| format!("Invalid month '{}'", s))?;
+    let from = from_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    // First of next month (handle December -> January rollover)
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let to_date = NaiveDate::from_ymd_opt(next_year, next_month, 1)
+        .with_context(|| format!("Month overflow for '{}'", s))?;
+    let to = to_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    Ok(TimeRange { from, to })
+}
+
+/// Parse `YYYY-Www` (ISO week) into a range `[Monday, next_Monday)`.
+pub fn parse_week(s: &str) -> Result<TimeRange> {
+    // Expect format like "2026-W17"
+    let parts: Vec<&str> = s.split("-W").collect();
+    if parts.len() != 2 {
+        bail!("Invalid week format '{}', expected YYYY-Www (e.g. 2026-W17)", s);
+    }
+    let year: i32 = parts[0]
+        .parse()
+        .with_context(|| format!("Invalid year in week '{}'", s))?;
+    let week: u32 = parts[1]
+        .parse()
+        .with_context(|| format!("Invalid week number in '{}'", s))?;
+    if week == 0 || week > 53 {
+        bail!("Week number out of range in '{}' (must be 1-53)", s);
+    }
+
+    let from_date = NaiveDate::from_isoywd_opt(year, week, chrono::Weekday::Mon)
+        .with_context(|| format!("Invalid ISO week '{}'", s))?;
+    let from = from_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    let to_date = from_date + chrono::Duration::days(7);
+    let to = to_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    Ok(TimeRange { from, to })
+}
+
+/// Parse an explicit `--from`/`--to` date range.
+///
+/// - Both provided: `[from, to+1day)` (inclusive of the to-date).
+/// - `from` only: `[from, now)`.
+/// - `to` only: `[epoch, to+1day)`.
+pub fn parse_date_range(from: Option<&str>, to: Option<&str>) -> Result<TimeRange> {
+    let range_from = match from {
+        Some(s) => {
+            let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("Invalid --from date '{}', expected YYYY-MM-DD", s))?;
+            date.and_hms_opt(0, 0, 0).unwrap().and_utc()
+        }
+        None => {
+            // Beginning of time (Unix epoch)
+            DateTime::UNIX_EPOCH
+        }
+    };
+
+    let range_to = match to {
+        Some(s) => {
+            let date = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("Invalid --to date '{}', expected YYYY-MM-DD", s))?;
+            // Inclusive: end of that day = start of next day
+            let next = date
+                .succ_opt()
+                .with_context(|| format!("Date overflow for --to '{}'", s))?;
+            next.and_hms_opt(0, 0, 0).unwrap().and_utc()
+        }
+        None => Utc::now(),
+    };
+
+    if range_from >= range_to {
+        bail!(
+            "--from ({}) must be before --to ({})",
+            range_from.format("%Y-%m-%d"),
+            range_to.format("%Y-%m-%d")
+        );
+    }
+
+    Ok(TimeRange {
+        from: range_from,
+        to: range_to,
+    })
+}
+
+/// Top-level resolver: convert CLI `TimeRangeArgs` into an optional `TimeRange`.
+///
+/// Returns `Ok(None)` when no time-range flags were provided.
+pub fn resolve_time_range(args: &TimeRangeArgs) -> Result<Option<TimeRange>> {
+    if let Some(ref day) = args.day {
+        return parse_day(day).map(Some);
+    }
+    if let Some(ref month) = args.month {
+        return parse_month(month).map(Some);
+    }
+    if let Some(ref week) = args.week {
+        return parse_week(week).map(Some);
+    }
+    if args.range_from.is_some() || args.range_to.is_some() {
+        return parse_date_range(args.range_from.as_deref(), args.range_to.as_deref()).map(Some);
+    }
+    Ok(None)
+}
+
+/// Check whether a timestamp string falls within a `TimeRange`.
+///
+/// Unparseable or empty timestamps never match.
+pub fn ts_in_range(ts: &str, range: &TimeRange) -> bool {
+    DateTime::parse_from_rfc3339(ts)
+        .map(|t| {
+            let t = t.with_timezone(&Utc);
+            t >= range.from && t < range.to
+        })
+        .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
 // Display helpers (for CLI output)
 // ---------------------------------------------------------------------------
 
@@ -1474,12 +1681,12 @@ max_entries = 5
         store.push("flavor_history", "bergamot").unwrap();
         store.push("flavor_history", "lapsang").unwrap();
 
-        let last = store.last("flavor_history", 1).unwrap();
+        let last = store.last("flavor_history", 1, None).unwrap();
         assert_eq!(last.len(), 1);
         // last now includes id and ts
         assert!(last[0].contains("lapsang"));
 
-        let last2 = store.last("flavor_history", 2).unwrap();
+        let last2 = store.last("flavor_history", 2, None).unwrap();
         assert_eq!(last2.len(), 2);
     }
 
@@ -1532,7 +1739,7 @@ max_entries = 5
         store.push("tags", "beta").unwrap();
         store.push("tags", "gamma").unwrap();
 
-        let last = store.last("tags", 2).unwrap();
+        let last = store.last("tags", 2, None).unwrap();
         assert_eq!(last.len(), 2);
         assert!(last[0].contains("beta"));
         assert!(last[1].contains("gamma"));
@@ -1776,7 +1983,7 @@ max_entries = 5
     #[test]
     fn last_on_empty_returns_empty() {
         let (store, _dir) = setup_store(test_schema());
-        let last = store.last("flavor_history", 5).unwrap();
+        let last = store.last("flavor_history", 5, None).unwrap();
         assert!(last.is_empty());
     }
 
@@ -1899,7 +2106,7 @@ max_entries = 5
         store.push("tags", "focus").unwrap();
         store.push("tags", "rust-tools").unwrap();
 
-        let hits = store.search("tags", "rust").unwrap();
+        let hits = store.search("tags", "rust", None).unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].value, "rust-lang");
         assert_eq!(hits[1].value, "rust-tools");
@@ -1912,7 +2119,7 @@ max_entries = 5
         store.push("flavor_history", "lapsang").unwrap();
         store.push("flavor_history", "bergamot vanilla").unwrap();
 
-        let hits = store.search("flavor_history", "bergamot").unwrap();
+        let hits = store.search("flavor_history", "bergamot", None).unwrap();
         assert_eq!(hits.len(), 2);
     }
 
@@ -1923,7 +2130,7 @@ max_entries = 5
         store.push("tags", "RUST-tools").unwrap();
         store.push("tags", "python").unwrap();
 
-        let hits = store.search("tags", "rust").unwrap();
+        let hits = store.search("tags", "rust", None).unwrap();
         assert_eq!(hits.len(), 2);
     }
 
@@ -1932,14 +2139,14 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.push("tags", "alpha").unwrap();
 
-        let hits = store.search("tags", "zzz").unwrap();
+        let hits = store.search("tags", "zzz", None).unwrap();
         assert!(hits.is_empty());
     }
 
     #[test]
     fn search_type_mismatch() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.search("warmth", "x");
+        let result = store.search("warmth", "x", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -1953,7 +2160,7 @@ max_entries = 5
         store.push("tags", "b").unwrap();
         store.push("tags", "c").unwrap();
 
-        let result = store.count("tags", None).unwrap();
+        let result = store.count("tags", None, None).unwrap();
         assert_eq!(result.matched, 3);
         assert!(result.total.is_none()); // no filter => no total
     }
@@ -1965,7 +2172,7 @@ max_entries = 5
         store.push("tags", "focus").unwrap();
         store.push("tags", "rust-tools").unwrap();
 
-        let result = store.count("tags", Some("rust")).unwrap();
+        let result = store.count("tags", Some("rust"), None).unwrap();
         assert_eq!(result.matched, 2);
         assert_eq!(result.total, Some(3)); // 2 of 3 match
     }
@@ -1990,7 +2197,7 @@ max_entries = 5
             .push_with_ts("flavor_history", "lapsang", ts1)
             .unwrap();
 
-        let result = store.count("flavor_history", Some("bergamot")).unwrap();
+        let result = store.count("flavor_history", Some("bergamot"), None).unwrap();
         assert_eq!(result.matched, 2);
         assert_eq!(result.total, Some(3)); // 2 of 3 match
         assert!(result.latest_ts.is_some());
@@ -2000,7 +2207,7 @@ max_entries = 5
     #[test]
     fn count_empty() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.count("tags", None).unwrap();
+        let result = store.count("tags", None, None).unwrap();
         assert_eq!(result.matched, 0);
         assert!(result.total.is_none());
         assert!(result.latest_ts.is_none());
@@ -2009,7 +2216,7 @@ max_entries = 5
     #[test]
     fn count_filtered_empty_total() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.count("tags", Some("rust")).unwrap();
+        let result = store.count("tags", Some("rust"), None).unwrap();
         assert_eq!(result.matched, 0);
         assert_eq!(result.total, Some(0)); // 0 of 0
     }
@@ -2017,7 +2224,7 @@ max_entries = 5
     #[test]
     fn count_type_mismatch() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.count("warmth", None);
+        let result = store.count("warmth", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2741,5 +2948,315 @@ max_entries = 5
             "unexpected default path: {}",
             path.display()
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Time-range parsing
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_day_valid() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-25");
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-04-26");
+    }
+
+    #[test]
+    fn parse_day_invalid_format() {
+        assert!(parse_day("04-25-2026").is_err());
+        assert!(parse_day("2026/04/25").is_err());
+        assert!(parse_day("not-a-date").is_err());
+    }
+
+    #[test]
+    fn parse_month_valid() {
+        let range = parse_month("2026-04").unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-01");
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-05-01");
+    }
+
+    #[test]
+    fn parse_month_december_rollover() {
+        let range = parse_month("2026-12").unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-12-01");
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2027-01-01");
+    }
+
+    #[test]
+    fn parse_month_invalid_format() {
+        assert!(parse_month("2026").is_err());
+        assert!(parse_month("2026-13").is_err());
+        assert!(parse_month("2026-00").is_err());
+        assert!(parse_month("not-a-month").is_err());
+    }
+
+    #[test]
+    fn parse_week_valid() {
+        let range = parse_week("2026-W17").unwrap();
+        // ISO week 17 of 2026 starts on Monday 2026-04-20
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-20");
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-04-27");
+    }
+
+    #[test]
+    fn parse_week_1() {
+        let range = parse_week("2026-W01").unwrap();
+        // ISO week 1 of 2026 starts on Monday 2025-12-29
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2025-12-29");
+        let diff = range.to - range.from;
+        assert_eq!(diff.num_days(), 7);
+    }
+
+    #[test]
+    fn parse_week_invalid_format() {
+        assert!(parse_week("2026-17").is_err());
+        assert!(parse_week("2026-W00").is_err());
+        assert!(parse_week("not-a-week").is_err());
+    }
+
+    #[test]
+    fn parse_date_range_both_provided() {
+        let range = parse_date_range(Some("2026-04-01"), Some("2026-04-15")).unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-01");
+        // to is inclusive of the end date, so upper bound is start of next day
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-04-16");
+    }
+
+    #[test]
+    fn parse_date_range_from_only() {
+        let range = parse_date_range(Some("2026-04-01"), None).unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-01");
+        // to defaults to now, so it should be roughly today
+        let diff = Utc::now() - range.to;
+        assert!(diff.num_seconds().abs() < 5);
+    }
+
+    #[test]
+    fn parse_date_range_to_only() {
+        let range = parse_date_range(None, Some("2026-04-15")).unwrap();
+        assert_eq!(range.from, DateTime::UNIX_EPOCH);
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-04-16");
+    }
+
+    #[test]
+    fn parse_date_range_from_after_to_errors() {
+        let result = parse_date_range(Some("2026-04-15"), Some("2026-04-01"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_time_range_no_flags() {
+        let args = TimeRangeArgs::default();
+        assert!(resolve_time_range(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_time_range_day() {
+        let args = TimeRangeArgs {
+            day: Some("2026-04-25".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap().unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-25");
+    }
+
+    #[test]
+    fn resolve_time_range_month() {
+        let args = TimeRangeArgs {
+            month: Some("2026-04".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap().unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-01");
+    }
+
+    #[test]
+    fn resolve_time_range_week() {
+        let args = TimeRangeArgs {
+            week: Some("2026-W17".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap().unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-20");
+    }
+
+    #[test]
+    fn resolve_time_range_from_to() {
+        let args = TimeRangeArgs {
+            range_from: Some("2026-04-01".to_string()),
+            range_to: Some("2026-04-15".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap().unwrap();
+        assert_eq!(range.from.format("%Y-%m-%d").to_string(), "2026-04-01");
+        assert_eq!(range.to.format("%Y-%m-%d").to_string(), "2026-04-16");
+    }
+
+    // -----------------------------------------------------------------
+    // ts_in_range
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn ts_in_range_inside() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert!(ts_in_range("2026-04-25T12:00:00+00:00", &range));
+    }
+
+    #[test]
+    fn ts_in_range_at_lower_boundary() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert!(ts_in_range("2026-04-25T00:00:00+00:00", &range));
+    }
+
+    #[test]
+    fn ts_in_range_at_upper_boundary_excluded() {
+        let range = parse_day("2026-04-25").unwrap();
+        // Upper bound is exclusive, so midnight of the next day is out
+        assert!(!ts_in_range("2026-04-26T00:00:00+00:00", &range));
+    }
+
+    #[test]
+    fn ts_in_range_outside() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert!(!ts_in_range("2026-04-24T23:59:59+00:00", &range));
+        assert!(!ts_in_range("2026-04-26T00:00:01+00:00", &range));
+    }
+
+    #[test]
+    fn ts_in_range_empty_ts() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert!(!ts_in_range("", &range));
+    }
+
+    #[test]
+    fn ts_in_range_invalid_ts() {
+        let range = parse_day("2026-04-25").unwrap();
+        assert!(!ts_in_range("not-a-timestamp", &range));
+    }
+
+    // -----------------------------------------------------------------
+    // Time-range integration with last/search/count
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn last_with_time_range_filters_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-24T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "inside", ts_in)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "outside", ts_out)
+            .unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let results = store.last("flavor_history", 10, Some(&range)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("inside"));
+    }
+
+    #[test]
+    fn last_with_time_range_composes_with_count() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "a", ts)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "b", ts)
+            .unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        // Both entries match the range, but count=1 limits output
+        let results = store.last("flavor_history", 1, Some(&range)).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_with_time_range_filters() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store.push_with_ts("tags", "rust-in", ts_in).unwrap();
+        store.push_with_ts("tags", "rust-out", ts_out).unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let hits = store.search("tags", "rust", Some(&range)).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].value, "rust-in");
+    }
+
+    #[test]
+    fn count_with_time_range_filters() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "bergamot", ts_in)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "lapsang", ts_in)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "bergamot earl", ts_out)
+            .unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        // Count all in range (no value filter)
+        let result = store.count("flavor_history", None, Some(&range)).unwrap();
+        assert_eq!(result.matched, 2);
+
+        // Count with value filter + time range
+        let result = store
+            .count("flavor_history", Some("bergamot"), Some(&range))
+            .unwrap();
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.total, Some(2)); // 1 of 2 in-range entries match
+    }
+
+    #[test]
+    fn count_with_month_range() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_apr = DateTime::parse_from_rfc3339("2026-04-15T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_may = DateTime::parse_from_rfc3339("2026-05-02T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "april", ts_apr)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "may", ts_may)
+            .unwrap();
+
+        let range = parse_month("2026-04").unwrap();
+        let result = store.count("flavor_history", None, Some(&range)).unwrap();
+        assert_eq!(result.matched, 1);
     }
 }

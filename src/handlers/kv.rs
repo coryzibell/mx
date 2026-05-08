@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::cli::{DumpFormat, KvCommands};
-use crate::kv::{self, KvError, KvStore};
+use crate::kv::{self, KvError, KvStore, resolve_time_range};
 
 /// Map a KvError to the appropriate exit code.
 fn exit_code_for(err: &KvError) -> Option<i32> {
@@ -232,18 +232,27 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Last { key, count, memory } => match store.last(&key, count) {
-            Ok(items) => {
-                for item in &items {
-                    println!("{}", item);
+        KvCommands::Last {
+            key,
+            count,
+            memory,
+            time_range,
+        } => {
+            let range = resolve_time_range(&time_range)
+                .map_err(KvError::Other)?;
+            match store.last(&key, count, range.as_ref()) {
+                Ok(items) => {
+                    for item in &items {
+                        println!("{}", item);
+                    }
+                    if memory {
+                        resolve_memory(&store, &key, verbose);
+                    }
+                    Ok(kv::EXIT_OK)
                 }
-                if memory {
-                    resolve_memory(&store, &key, verbose);
-                }
-                Ok(kv::EXIT_OK)
+                Err(e) => handle_kv_err(e),
             }
-            Err(e) => handle_kv_err(e),
-        },
+        }
 
         KvCommands::Since {
             key,
@@ -313,58 +322,75 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
-        KvCommands::Search { key, query, memory } => match store.search(&key, &query) {
-            Ok(hits) => {
-                if hits.is_empty() {
-                    eprintln!("No matching entries");
-                    Ok(kv::EXIT_OK)
-                } else {
-                    for hit in &hits {
-                        if hit.ts.is_empty() {
-                            println!("{}: {}", hit.id, hit.value);
-                        } else {
-                            println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+        KvCommands::Search {
+            key,
+            query,
+            memory,
+            time_range,
+        } => {
+            let range = resolve_time_range(&time_range)
+                .map_err(KvError::Other)?;
+            match store.search(&key, &query, range.as_ref()) {
+                Ok(hits) => {
+                    if hits.is_empty() {
+                        eprintln!("No matching entries");
+                        Ok(kv::EXIT_OK)
+                    } else {
+                        for hit in &hits {
+                            if hit.ts.is_empty() {
+                                println!("{}: {}", hit.id, hit.value);
+                            } else {
+                                println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+                            }
                         }
+                        if memory {
+                            resolve_memory(&store, &key, verbose);
+                        }
+                        Ok(kv::EXIT_OK)
                     }
-                    if memory {
-                        resolve_memory(&store, &key, verbose);
-                    }
-                    Ok(kv::EXIT_OK)
                 }
+                Err(e) => handle_kv_err(e),
             }
-            Err(e) => handle_kv_err(e),
-        },
+        }
 
-        KvCommands::Count { key, value } => match store.count(&key, value.as_deref()) {
-            Ok(result) => {
-                match result.total {
-                    Some(total) => {
-                        // Filtered: show matched/total (pct%) — latest: ...
-                        let pct = if total == 0 {
-                            0
-                        } else {
-                            ((result.matched as f64 / total as f64) * 100.0).round() as u64
-                        };
-                        match result.latest_ts {
-                            Some(ts) => println!(
-                                "{}/{} ({}%) \u{2014} latest: {}",
-                                result.matched, total, pct, ts
-                            ),
-                            None => println!("{}/{} ({}%)", result.matched, total, pct),
+        KvCommands::Count {
+            key,
+            value,
+            time_range,
+        } => {
+            let range = resolve_time_range(&time_range)
+                .map_err(KvError::Other)?;
+            match store.count(&key, value.as_deref(), range.as_ref()) {
+                Ok(result) => {
+                    match result.total {
+                        Some(total) => {
+                            // Filtered: show matched/total (pct%) — latest: ...
+                            let pct = if total == 0 {
+                                0
+                            } else {
+                                ((result.matched as f64 / total as f64) * 100.0).round() as u64
+                            };
+                            match result.latest_ts {
+                                Some(ts) => println!(
+                                    "{}/{} ({}%) \u{2014} latest: {}",
+                                    result.matched, total, pct, ts
+                                ),
+                                None => println!("{}/{} ({}%)", result.matched, total, pct),
+                            }
+                        }
+                        None => {
+                            // Unfiltered: preserve original format
+                            match result.latest_ts {
+                                Some(ts) => println!("{} (latest: {})", result.matched, ts),
+                                None => println!("{}", result.matched),
+                            }
                         }
                     }
-                    None => {
-                        // Unfiltered: preserve original format
-                        match result.latest_ts {
-                            Some(ts) => println!("{} (latest: {})", result.matched, ts),
-                            None => println!("{}", result.matched),
-                        }
-                    }
+                    Ok(kv::EXIT_OK)
                 }
-                Ok(kv::EXIT_OK)
+                Err(e) => handle_kv_err(e),
             }
-            Err(e) => handle_kv_err(e),
-        },
+        }
 
         KvCommands::Keys => {
             let keys = store.keys();
