@@ -39,12 +39,30 @@ mx commit --encode-only --title "refactor store" --body "split surreal and sqlit
 
 ### Decoded Git Log
 
+`mx log` has full parity with `git log` -- every display flag, format preset, and filter option works with transparent decoding.
+
 ```bash
-# Last 10 commits, decoded
+# Last 10 commits, decoded (default)
 mx log
 
-# Last 20 commits with full details
-mx log -n 20 --full
+# Last 3 commits (-N shorthand, like git log -3)
+mx log -3
+
+# One-line format with ref decorations
+mx log --oneline
+
+# Full details with diffstat
+mx log -n 5 --full --stat
+
+# Format presets: short, medium, full, fuller
+mx log --format=fuller -3
+
+# Filter by author, date, path
+mx log --author="charlie" --since="1 week ago"
+mx log -- src/handlers/
+
+# Full patch output
+mx log -p -3
 ```
 
 ### Decoded Git Show

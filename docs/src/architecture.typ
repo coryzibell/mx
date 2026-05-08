@@ -652,21 +652,35 @@ pub struct EncodedCommit {
 
 === `handlers/mod.rs` -- the decoding pipeline
 
-`mx log` and `mx show` decode commits by:
+`mx log` uses a four-phase architecture:
 
-+ Running the underlying git command (`git log` or `git show`) with a
-  structured format.
-+ For each commit body, calling `try_decode_commit_body()`.
-+ The function scans for the last footer-shaped line (validated against the
-  known compression algorithm vocabulary).
-+ Everything above the footer is the encoded payload; everything below is
-  trailing content (dejavu markers, user-appended notes).
-+ `commit::decode_body()` looks up the dictionary from the footer, decodes, and
-  decompresses.
++ *Parse* -- raw CLI arguments (received as trailing varargs) are parsed into a
+  structured `LogOptions` with separate fields for count, display mode
+  (`Compact`, `Full`, `Oneline`, format presets, or custom format string), diff
+  mode (`None`, `Stat`, `ShortStat`, `Patch`), decorate preference, and filter
+  arguments. Custom `--format` strings and `--graph` are detected here and
+  trigger a passthrough to raw `git log` with a stderr note.
++ *Harvest* -- a single `git log` call with a structured format string
+  retrieves commit metadata (full hash, short hash, decorations, parents,
+  author, date, committer, commit date, subject, body). Each commit body is
+  decoded via `try_decode_commit_body()`.
++ *Attach diffs* -- if a diff mode was requested, a second `git log` call
+  retrieves the diff output. Each diff block is matched to its corresponding
+  commit by hash and attached as a string field.
++ *Render* -- the display mode selects a renderer. Each renderer prints the
+  decoded message with the appropriate header format, followed by any attached
+  diff output.
 
-The scan uses a "last wins" heuristic: if multiple footer-shaped lines appear
-(e.g., from a user-amended commit that quotes a prior footer), the last one is
-used.
+The `-n`/`--count` and `--full` flags are not clap-managed -- they are parsed
+internally from the trailing varargs, following the same pattern as `mx show`.
+
+`try_decode_commit_body()` scans for the last footer-shaped line (validated
+against the known compression algorithm vocabulary). Everything above the
+footer is the encoded payload; everything below is trailing content (dejavu
+markers, user-appended notes). `commit::decode_body()` looks up the dictionary
+from the footer, decodes, and decompresses. The scan uses a "last wins"
+heuristic: if multiple footer-shaped lines appear (e.g., from a user-amended
+commit that quotes a prior footer), the last one is used.
 
 `handle_show()` uses a two-pass approach: Pass 1 retrieves commit metadata
 and the encoded message (with `--no-patch`), decodes it, and prints the

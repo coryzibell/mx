@@ -146,9 +146,12 @@ Any arguments not listed here are passed directly to `git show`.
 + `mx log` decodes the commit history (replaces `git log`).
 + `mx show` decodes individual commit details (replaces `git show`).
 
-All three use the same decoding pipeline: read the footer tag, look up the
-dictionary, decompress, and display the original message. Non-encoded
-commits pass through unchanged in all three commands.
+Both `mx log` and `mx show` have full parity with their git counterparts.
+Every flag that `git log` or `git show` accepts works with the mx versions,
+with transparent decoding applied to encoded messages. `mx log` supports
+`--oneline`, `--stat`, `-p`, format presets (`short`, `medium`, `full`,
+`fuller`), and all git log filter flags (`--author`, `--since`, `-- <path>`,
+etc.). Non-encoded commits pass through unchanged in all three commands.
 
 For the full encoding specification, see #link("commit.html")[commit].
-For the decoding pipeline details, see #link("log.html")[log].
+For the full flag reference and architecture details, see #link("log.html")[log].

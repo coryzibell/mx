@@ -49,10 +49,16 @@ something like `[sha256:ocean|zstd:forest]`.
 mx log
 ```
 
-This shows the last 10 commits with decoded messages. For more detail:
+This shows the last 10 commits with decoded messages. `mx log` has full parity
+with `git log` -- use any display or filter flag you already know:
 
 ```bash
-mx log -n 20 --full
+mx log -3                          # last 3 commits (-N shorthand)
+mx log --oneline                   # one-line format with ref decorations
+mx log --stat                      # include diffstat per commit
+mx log -n 5 --full                 # full details for the last 5
+mx log --format=fuller -3          # git's fuller format, decoded
+mx log --author="charlie" -p       # filter by author, show patches
 ```
 
 To inspect a single commit (decoded replacement for `git show`):
