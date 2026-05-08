@@ -533,8 +533,7 @@ fn parse_log_args(args: Vec<String>) -> LogOptions {
 fn harvest_commits(opts: &LogOptions) -> Result<Vec<ParsedCommit>> {
     use std::process::Command;
 
-    let harvest_format =
-        "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%cn <%ce>%n%cd%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
+    let harvest_format = "---MX-LOG---%n%H%n%h%n%D%n%p%n%an <%ae>%n%ad%n%cn <%ce>%n%cd%n%s%n---MX-BODY---%n%b%n---MX-LOG-END---";
 
     let mut cmd = Command::new("git");
     cmd.arg("log");
