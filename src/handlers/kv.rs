@@ -118,10 +118,13 @@ fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
     } else if spec.contains('-') {
         // Range
         let parts: Vec<&str> = spec.splitn(2, '-').collect();
-        let start: u64 = parts[0]
-            .trim()
-            .parse()
-            .map_err(|_| format!("invalid range start '{}' in spec '{}'", parts[0].trim(), spec))?;
+        let start: u64 = parts[0].trim().parse().map_err(|_| {
+            format!(
+                "invalid range start '{}' in spec '{}'",
+                parts[0].trim(),
+                spec
+            )
+        })?;
         let end: u64 = parts[1]
             .trim()
             .parse()
@@ -135,9 +138,7 @@ fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
         (start..=end).collect()
     } else {
         // Single ID
-        let id: u64 = spec
-            .parse()
-            .map_err(|_| format!("invalid ID '{}'", spec))?;
+        let id: u64 = spec.parse().map_err(|_| format!("invalid ID '{}'", spec))?;
         vec![id]
     };
 
@@ -185,8 +186,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         // Report missing IDs
                         let found_ids: std::collections::HashSet<u64> =
                             hits.iter().map(|h| h.id).collect();
-                        let missing: Vec<u64> =
-                            ids.iter().filter(|id| !found_ids.contains(id)).copied().collect();
+                        let missing: Vec<u64> = ids
+                            .iter()
+                            .filter(|id| !found_ids.contains(id))
+                            .copied()
+                            .collect();
                         if !missing.is_empty() {
                             let missing_str: Vec<String> =
                                 missing.iter().map(|id| id.to_string()).collect();

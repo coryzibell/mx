@@ -2409,9 +2409,7 @@ max_entries = 5
     #[test]
     fn get_by_id_empty_history() {
         let (store, _dir) = setup_store(test_schema());
-        let hits = store
-            .get_entries_by_id("flavor_history", &[1])
-            .unwrap();
+        let hits = store.get_entries_by_id("flavor_history", &[1]).unwrap();
         assert!(hits.is_empty());
     }
 
