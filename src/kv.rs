@@ -866,6 +866,88 @@ impl KvStore {
         }
     }
 
+    /// Get random entries from a history or list, formatted with IDs and timestamps.
+    ///
+    /// When `range` is provided, entries are filtered by timestamp first, then
+    /// `count` random items are sampled from the filtered set. If fewer entries
+    /// are available than requested, all matching entries are returned and a note
+    /// is printed to stderr.
+    pub fn random(
+        &self,
+        key: &str,
+        count: usize,
+        range: Option<&TimeRange>,
+    ) -> Result<Vec<String>, KvError> {
+        use rand::seq::IndexedRandom;
+
+        let def = self.key_def(key)?;
+
+        // Shared sampling + formatting closure. Takes a filtered vec of
+        // (value, id, ts) tuples and returns formatted strings.
+        let sample = |filtered: Vec<(&str, u64, &str)>, count: usize| -> Vec<String> {
+            if filtered.is_empty() {
+                return vec![];
+            }
+            let take = count.min(filtered.len());
+            let mut rng = rand::rng();
+            let chosen: Vec<_> = filtered.choose_multiple(&mut rng, take).collect();
+            chosen
+                .into_iter()
+                .map(|(value, id, ts)| {
+                    if ts.is_empty() {
+                        format!("{}: {}", id, value)
+                    } else {
+                        format!("{}: {} ({})", id, value, ts)
+                    }
+                })
+                .collect()
+        };
+
+        match def.value_type {
+            ValueType::History => match self.data.entries.get(key) {
+                Some(DataValue::History { entries, .. }) => {
+                    let filtered: Vec<_> = entries
+                        .iter()
+                        .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
+                        .map(|e| (e.value.as_str(), e.id, e.ts.as_str()))
+                        .collect();
+                    let available = filtered.len();
+                    if available > 0 && available < count {
+                        eprintln!(
+                            "note: only {} entries available (requested {})",
+                            available, count
+                        );
+                    }
+                    Ok(sample(filtered, count))
+                }
+                _ => Ok(vec![]),
+            },
+            ValueType::List => match self.data.entries.get(key) {
+                Some(DataValue::List { items, .. }) => {
+                    let filtered: Vec<_> = items
+                        .iter()
+                        .filter(|e| range.is_none_or(|r| ts_in_range(&e.ts, r)))
+                        .map(|e| (e.value.as_str(), e.id, e.ts.as_str()))
+                        .collect();
+                    let available = filtered.len();
+                    if available > 0 && available < count {
+                        eprintln!(
+                            "note: only {} entries available (requested {})",
+                            available, count
+                        );
+                    }
+                    Ok(sample(filtered, count))
+                }
+                _ => Ok(vec![]),
+            },
+            _ => Err(KvError::TypeMismatch {
+                key: key.to_string(),
+                expected: "history or list".to_string(),
+                got: def.value_type.to_string(),
+            }),
+        }
+    }
+
     /// Get history entries since a given time reference.
     pub fn since(&self, key: &str, timeref: &str) -> Result<Vec<&HistoryEntry>, KvError> {
         self.assert_type(key, ValueType::History)?;
@@ -1457,6 +1539,11 @@ pub fn resolve_time_range(args: &TimeRangeArgs) -> Result<Option<TimeRange>> {
     }
     if let Some(ref week) = args.week {
         return parse_week(week).map(Some);
+    }
+    if let Some(ref since) = args.since {
+        let from = parse_timeref(since)?;
+        let to = Utc::now();
+        return Ok(Some(TimeRange { from, to }));
     }
     if args.range_from.is_some() || args.range_to.is_some() {
         return parse_date_range(args.range_from.as_deref(), args.range_to.as_deref()).map(Some);
@@ -3315,5 +3402,133 @@ max_entries = 5
         let range = parse_month("2026-04").unwrap();
         let result = store.count("flavor_history", None, Some(&range)).unwrap();
         assert_eq!(result.matched, 1);
+    }
+
+    // -- Random sampling --
+
+    #[test]
+    fn random_on_empty_returns_empty() {
+        let (store, _dir) = setup_store(test_schema());
+        let results = store.random("flavor_history", 5, None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn random_returns_requested_count() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+        store.push("tags", "gamma").unwrap();
+
+        let results = store.random("tags", 2, None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn random_returns_all_when_count_exceeds_available() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha").unwrap();
+        store.push("tags", "beta").unwrap();
+
+        let results = store.random("tags", 10, None).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn random_type_mismatch_on_counter() {
+        let (store, _dir) = setup_store(test_schema());
+        let result = store.random("warmth", 1, None);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            KvError::TypeMismatch { key, .. } => assert_eq!(key, "warmth"),
+            other => panic!("Expected TypeMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn random_works_on_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let ts = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store.push_with_ts("flavor_history", "bergamot", ts).unwrap();
+        store.push_with_ts("flavor_history", "vanilla", ts).unwrap();
+
+        let results = store.random("flavor_history", 1, None).unwrap();
+        assert_eq!(results.len(), 1);
+        // Result must contain one of the pushed values
+        assert!(results[0].contains("bergamot") || results[0].contains("vanilla"));
+    }
+
+    #[test]
+    fn random_with_time_range_filters() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-20T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store.push_with_ts("tags", "inside", ts_in).unwrap();
+        store.push_with_ts("tags", "outside", ts_out).unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let results = store.random("tags", 10, Some(&range)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("inside"));
+    }
+
+    #[test]
+    fn random_with_time_range_filters_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts_in = DateTime::parse_from_rfc3339("2026-04-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts_out = DateTime::parse_from_rfc3339("2026-04-24T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store.push_with_ts("flavor_history", "inside", ts_in).unwrap();
+        store.push_with_ts("flavor_history", "outside", ts_out).unwrap();
+
+        let range = parse_day("2026-04-25").unwrap();
+        let results = store.random("flavor_history", 10, Some(&range)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].contains("inside"));
+    }
+
+    // -- --since resolver --
+
+    #[test]
+    fn resolve_time_range_since_relative() {
+        let args = TimeRangeArgs {
+            since: Some("1h".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap();
+        assert!(range.is_some());
+        let range = range.unwrap();
+        // "since 1h" means from ~1 hour ago to now
+        let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+        // Allow a few seconds of drift
+        assert!((range.from - one_hour_ago).num_seconds().abs() < 5);
+        assert!((range.to - Utc::now()).num_seconds().abs() < 5);
+    }
+
+    #[test]
+    fn resolve_time_range_since_days() {
+        let args = TimeRangeArgs {
+            since: Some("30d".to_string()),
+            ..Default::default()
+        };
+        let range = resolve_time_range(&args).unwrap();
+        assert!(range.is_some());
+        let range = range.unwrap();
+        let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
+        assert!((range.from - thirty_days_ago).num_seconds().abs() < 5);
     }
 }

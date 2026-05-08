@@ -253,6 +253,27 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
+        KvCommands::Random {
+            key,
+            count,
+            memory,
+            time_range,
+        } => {
+            let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
+            match store.random(&key, count, range.as_ref()) {
+                Ok(items) => {
+                    for item in &items {
+                        println!("{}", item);
+                    }
+                    if memory {
+                        resolve_memory(&store, &key, verbose);
+                    }
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
         KvCommands::Since {
             key,
             timeref,
