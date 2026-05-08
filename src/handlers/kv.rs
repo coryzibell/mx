@@ -196,8 +196,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         }
 
                         // Report missing IDs
-                        let found_ids: HashSet<u64> =
-                            hits.iter().map(|h| h.id).collect();
+                        let found_ids: HashSet<u64> = hits.iter().map(|h| h.id).collect();
                         let missing: Vec<u64> = ids
                             .iter()
                             .filter(|id| !found_ids.contains(id))
