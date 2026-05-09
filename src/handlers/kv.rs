@@ -352,14 +352,17 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         }
                     };
                     if !val.is_object() {
-                        eprintln!("Error: --data must be a JSON object, got {}", match val {
-                            serde_json::Value::Array(_) => "array",
-                            serde_json::Value::String(_) => "string",
-                            serde_json::Value::Number(_) => "number",
-                            serde_json::Value::Bool(_) => "boolean",
-                            serde_json::Value::Null => "null",
-                            _ => "non-object",
-                        });
+                        eprintln!(
+                            "Error: --data must be a JSON object, got {}",
+                            match val {
+                                serde_json::Value::Array(_) => "array",
+                                serde_json::Value::String(_) => "string",
+                                serde_json::Value::Number(_) => "number",
+                                serde_json::Value::Bool(_) => "boolean",
+                                serde_json::Value::Null => "null",
+                                _ => "non-object",
+                            }
+                        );
                         return Ok(kv::EXIT_INVALID_INPUT);
                     }
                     Some(val)
@@ -383,7 +386,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 if entry.ts.is_empty() {
                     println!("{}: {}{}", entry.id, entry.value, data_suffix);
                 } else {
-                    println!("{}: {} ({}){}", entry.id, entry.value, entry.ts, data_suffix);
+                    println!(
+                        "{}: {} ({}){}",
+                        entry.id, entry.value, entry.ts, data_suffix
+                    );
                 }
                 Ok(kv::EXIT_OK)
             }

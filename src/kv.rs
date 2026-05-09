@@ -2341,7 +2341,9 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.push("flavor_history", "bergamot", None).unwrap();
         store.push("flavor_history", "lapsang", None).unwrap();
-        store.push("flavor_history", "bergamot vanilla", None).unwrap();
+        store
+            .push("flavor_history", "bergamot vanilla", None)
+            .unwrap();
 
         let result = store
             .remove("flavor_history", Some("bergamot"), None, false)
@@ -2395,9 +2397,13 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.push("flavor_history", "bergamot", None).unwrap();
         store.push("flavor_history", "lapsang", None).unwrap();
-        store.push("flavor_history", "bergamot vanilla", None).unwrap();
+        store
+            .push("flavor_history", "bergamot vanilla", None)
+            .unwrap();
 
-        let hits = store.search("flavor_history", Some("bergamot"), None, &[]).unwrap();
+        let hits = store
+            .search("flavor_history", Some("bergamot"), None, &[])
+            .unwrap();
         assert_eq!(hits.len(), 2);
     }
 
@@ -3598,10 +3604,14 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store.push_with_ts("tags", "rust-in", ts_in, None).unwrap();
-        store.push_with_ts("tags", "rust-out", ts_out, None).unwrap();
+        store
+            .push_with_ts("tags", "rust-out", ts_out, None)
+            .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
-        let hits = store.search("tags", Some("rust"), Some(&range), &[]).unwrap();
+        let hits = store
+            .search("tags", Some("rust"), Some(&range), &[])
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].value, "rust-in");
     }
@@ -3619,7 +3629,9 @@ max_entries = 5
 
         store.push_with_ts("tags", "inside", ts_in, None).unwrap();
         store.push_with_ts("tags", "outside", ts_out, None).unwrap();
-        store.push_with_ts("tags", "also-inside", ts_in, None).unwrap();
+        store
+            .push_with_ts("tags", "also-inside", ts_in, None)
+            .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.last("tags", 10, Some(&range), &[]).unwrap();
@@ -3682,7 +3694,9 @@ max_entries = 5
 
         let range = parse_day("2026-04-25").unwrap();
         // Count all in range (no value filter)
-        let result = store.count("flavor_history", None, Some(&range), &[]).unwrap();
+        let result = store
+            .count("flavor_history", None, Some(&range), &[])
+            .unwrap();
         assert_eq!(result.matched, 2);
 
         // Count with value filter + time range
@@ -3707,10 +3721,14 @@ max_entries = 5
         store
             .push_with_ts("flavor_history", "april", ts_apr, None)
             .unwrap();
-        store.push_with_ts("flavor_history", "may", ts_may, None).unwrap();
+        store
+            .push_with_ts("flavor_history", "may", ts_may, None)
+            .unwrap();
 
         let range = parse_month("2026-04").unwrap();
-        let result = store.count("flavor_history", None, Some(&range), &[]).unwrap();
+        let result = store
+            .count("flavor_history", None, Some(&range), &[])
+            .unwrap();
         assert_eq!(result.matched, 1);
     }
 
@@ -3765,7 +3783,9 @@ max_entries = 5
         store
             .push_with_ts("flavor_history", "bergamot", ts, None)
             .unwrap();
-        store.push_with_ts("flavor_history", "vanilla", ts, None).unwrap();
+        store
+            .push_with_ts("flavor_history", "vanilla", ts, None)
+            .unwrap();
 
         let results = store.random("flavor_history", 1, None, &[]).unwrap();
         assert_eq!(results.len(), 1);
@@ -3812,7 +3832,9 @@ max_entries = 5
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
-        let results = store.random("flavor_history", 10, Some(&range), &[]).unwrap();
+        let results = store
+            .random("flavor_history", 10, Some(&range), &[])
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].contains("inside"));
     }
@@ -3986,10 +4008,7 @@ max_entries = 5
     #[test]
     fn where_matches_empty_clauses() {
         assert!(where_matches(&None, &[]));
-        assert!(where_matches(
-            &Some(serde_json::json!({"a": "b"})),
-            &[]
-        ));
+        assert!(where_matches(&Some(serde_json::json!({"a": "b"})), &[]));
     }
 
     #[test]
@@ -4169,9 +4188,7 @@ max_entries = 5
 
         let clauses = vec![("status".to_string(), "active".to_string())];
         // Text query "rust" AND where status=active
-        let hits = store
-            .search("tags", Some("rust"), None, &clauses)
-            .unwrap();
+        let hits = store.search("tags", Some("rust"), None, &clauses).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].value, "rust-fix");
     }
@@ -4180,18 +4197,10 @@ max_entries = 5
     fn search_with_only_where_no_query() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push(
-                "tags",
-                "a",
-                Some(serde_json::json!({"type": "bug"})),
-            )
+            .push("tags", "a", Some(serde_json::json!({"type": "bug"})))
             .unwrap();
         store
-            .push(
-                "tags",
-                "b",
-                Some(serde_json::json!({"type": "feature"})),
-            )
+            .push("tags", "b", Some(serde_json::json!({"type": "feature"})))
             .unwrap();
 
         let clauses = vec![("type".to_string(), "bug".to_string())];
@@ -4233,25 +4242,13 @@ max_entries = 5
     fn last_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push(
-                "tags",
-                "a",
-                Some(serde_json::json!({"status": "active"})),
-            )
+            .push("tags", "a", Some(serde_json::json!({"status": "active"})))
             .unwrap();
         store
-            .push(
-                "tags",
-                "b",
-                Some(serde_json::json!({"status": "closed"})),
-            )
+            .push("tags", "b", Some(serde_json::json!({"status": "closed"})))
             .unwrap();
         store
-            .push(
-                "tags",
-                "c",
-                Some(serde_json::json!({"status": "active"})),
-            )
+            .push("tags", "c", Some(serde_json::json!({"status": "active"})))
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
@@ -4307,25 +4304,13 @@ max_entries = 5
     fn count_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push(
-                "tags",
-                "a",
-                Some(serde_json::json!({"status": "active"})),
-            )
+            .push("tags", "a", Some(serde_json::json!({"status": "active"})))
             .unwrap();
         store
-            .push(
-                "tags",
-                "b",
-                Some(serde_json::json!({"status": "closed"})),
-            )
+            .push("tags", "b", Some(serde_json::json!({"status": "closed"})))
             .unwrap();
         store
-            .push(
-                "tags",
-                "c",
-                Some(serde_json::json!({"status": "active"})),
-            )
+            .push("tags", "c", Some(serde_json::json!({"status": "active"})))
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
@@ -4340,9 +4325,7 @@ max_entries = 5
     fn search_hits_carry_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active"});
-        store
-            .push("tags", "item", Some(data.clone()))
-            .unwrap();
+        store.push("tags", "item", Some(data.clone())).unwrap();
 
         let hits = store.search("tags", Some("item"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -4353,9 +4336,7 @@ max_entries = 5
     fn get_entries_by_id_carries_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": "high"});
-        store
-            .push("tags", "item", Some(data.clone()))
-            .unwrap();
+        store.push("tags", "item", Some(data.clone())).unwrap();
 
         let hits = store.get_entries_by_id("tags", &[1]).unwrap();
         assert_eq!(hits.len(), 1);
