@@ -1130,10 +1130,10 @@ impl KvStore {
                     if !range.is_none_or(|r| ts_in_range(&e.ts, r)) {
                         continue;
                     }
-                    if let Some(ref q) = query_lower {
-                        if !e.value.to_lowercase().contains(q) {
-                            continue;
-                        }
+                    if let Some(ref q) = query_lower
+                        && !e.value.to_lowercase().contains(q)
+                    {
+                        continue;
                     }
                     if !where_matches(&e.data, where_clauses) {
                         continue;
@@ -1151,10 +1151,10 @@ impl KvStore {
                     if !range.is_none_or(|r| ts_in_range(&e.ts, r)) {
                         continue;
                     }
-                    if let Some(ref q) = query_lower {
-                        if !e.value.to_lowercase().contains(q) {
-                            continue;
-                        }
+                    if let Some(ref q) = query_lower
+                        && !e.value.to_lowercase().contains(q)
+                    {
+                        continue;
                     }
                     if !where_matches(&e.data, where_clauses) {
                         continue;
