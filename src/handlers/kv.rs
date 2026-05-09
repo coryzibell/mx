@@ -157,6 +157,20 @@ fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
     Ok(ids)
 }
 
+/// Parse `--where` clause strings into `(key, value)` tuples.
+///
+/// Each clause is split on the first `=` character. Clauses without `=` are
+/// silently skipped (the CLI layer already validates format in practice).
+fn parse_where_clauses(clauses: &[String]) -> Vec<(String, String)> {
+    clauses
+        .iter()
+        .filter_map(|clause| {
+            let (k, v) = clause.split_once('=')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
 pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     let mut store = match KvStore::from_env() {
@@ -188,10 +202,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         // History entries always have a timestamp; list entries may not.
                         // We check for empty ts to handle both types uniformly.
                         for hit in &hits {
+                            let data_suffix = kv::format_data_suffix(&hit.data);
                             if hit.ts.is_empty() {
-                                println!("{}: {}", hit.id, hit.value);
+                                println!("{}: {}{}", hit.id, hit.value, data_suffix);
                             } else {
-                                println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+                                println!("{}: {} ({}){}", hit.id, hit.value, hit.ts, data_suffix);
                             }
                         }
 
@@ -325,21 +340,50 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Push { key, value } => match store.push(&key, &value) {
-            Ok(()) => {
-                store.save()?;
-                Ok(kv::EXIT_OK)
+        KvCommands::Push { key, value, data } => {
+            // Parse --data as JSON object if provided
+            let parsed_data = match data {
+                Some(ref json_str) => {
+                    let val: serde_json::Value = match serde_json::from_str(json_str) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("Error: invalid JSON for --data: {}", e);
+                            return Ok(kv::EXIT_INVALID_INPUT);
+                        }
+                    };
+                    if !val.is_object() {
+                        eprintln!("Error: --data must be a JSON object, got {}", match val {
+                            serde_json::Value::Array(_) => "array",
+                            serde_json::Value::String(_) => "string",
+                            serde_json::Value::Number(_) => "number",
+                            serde_json::Value::Bool(_) => "boolean",
+                            serde_json::Value::Null => "null",
+                            _ => "non-object",
+                        });
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                    Some(val)
+                }
+                None => None,
+            };
+
+            match store.push(&key, &value, parsed_data) {
+                Ok(()) => {
+                    store.save()?;
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
             }
-            Err(e) => handle_kv_err(e),
-        },
+        }
 
         KvCommands::Pop { key } => match store.pop(&key) {
             Ok(Some(entry)) => {
                 store.save()?;
+                let data_suffix = kv::format_data_suffix(&entry.data);
                 if entry.ts.is_empty() {
-                    println!("{}: {}", entry.id, entry.value);
+                    println!("{}: {}{}", entry.id, entry.value, data_suffix);
                 } else {
-                    println!("{}: {} ({})", entry.id, entry.value, entry.ts);
+                    println!("{}: {} ({}){}", entry.id, entry.value, entry.ts, data_suffix);
                 }
                 Ok(kv::EXIT_OK)
             }
@@ -354,10 +398,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            where_clauses,
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            match store.last(&key, count, range.as_ref()) {
+            let parsed_where = parse_where_clauses(&where_clauses);
+            match store.last(&key, count, range.as_ref(), &parsed_where) {
                 Ok(items) => {
                     for item in &items {
                         println!("{}", item);
@@ -375,10 +421,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            where_clauses,
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            match store.random(&key, count, range.as_ref()) {
+            let parsed_where = parse_where_clauses(&where_clauses);
+            match store.random(&key, count, range.as_ref(), &parsed_where) {
                 Ok(items) => {
                     for item in &items {
                         println!("{}", item);
@@ -399,7 +447,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         } => match store.since(&key, &timeref) {
             Ok(entries) => {
                 for entry in &entries {
-                    println!("{}: {} ({})", entry.id, entry.value, entry.ts);
+                    println!(
+                        "{}: {} ({}){}",
+                        entry.id,
+                        entry.value,
+                        entry.ts,
+                        kv::format_data_suffix(&entry.data)
+                    );
                 }
                 if memory {
                     resolve_memory(&store, &key, verbose);
@@ -464,20 +518,30 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             query,
             memory,
+            where_clauses,
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            match store.search(&key, &query, range.as_ref()) {
+            let parsed_where = parse_where_clauses(&where_clauses);
+
+            // Must have at least a query or where clauses
+            if query.is_none() && parsed_where.is_empty() {
+                eprintln!("Error: provide a search query or --where filters");
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            match store.search(&key, query.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(hits) => {
                     if hits.is_empty() {
                         eprintln!("No matching entries");
                         Ok(kv::EXIT_OK)
                     } else {
                         for hit in &hits {
+                            let data_suffix = kv::format_data_suffix(&hit.data);
                             if hit.ts.is_empty() {
-                                println!("{}: {}", hit.id, hit.value);
+                                println!("{}: {}{}", hit.id, hit.value, data_suffix);
                             } else {
-                                println!("{}: {} ({})", hit.id, hit.value, hit.ts);
+                                println!("{}: {} ({}){}", hit.id, hit.value, hit.ts, data_suffix);
                             }
                         }
                         if memory {
@@ -493,10 +557,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         KvCommands::Count {
             key,
             value,
+            where_clauses,
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            match store.count(&key, value.as_deref(), range.as_ref()) {
+            let parsed_where = parse_where_clauses(&where_clauses);
+            match store.count(&key, value.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(result) => {
                     match result.total {
                         Some(total) => {
@@ -645,5 +711,43 @@ mod tests {
     #[test]
     fn parse_range_too_large() {
         assert!(parse_id_spec("1-20000").is_err());
+    }
+
+    // -- parse_where_clauses --
+
+    #[test]
+    fn parse_where_clauses_basic() {
+        let clauses = vec!["status=active".to_string(), "priority=high".to_string()];
+        let parsed = parse_where_clauses(&clauses);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], ("status".to_string(), "active".to_string()));
+        assert_eq!(parsed[1], ("priority".to_string(), "high".to_string()));
+    }
+
+    #[test]
+    fn parse_where_clauses_value_with_equals() {
+        // Value might contain = sign (split on first only)
+        let clauses = vec!["query=key=value".to_string()];
+        let parsed = parse_where_clauses(&clauses);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0], ("query".to_string(), "key=value".to_string()));
+    }
+
+    #[test]
+    fn parse_where_clauses_empty() {
+        let clauses: Vec<String> = vec![];
+        let parsed = parse_where_clauses(&clauses);
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn parse_where_clauses_skips_invalid() {
+        let clauses = vec![
+            "valid=clause".to_string(),
+            "noequalssign".to_string(),
+            "also=valid".to_string(),
+        ];
+        let parsed = parse_where_clauses(&clauses);
+        assert_eq!(parsed.len(), 2);
     }
 }

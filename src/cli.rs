@@ -1729,6 +1729,10 @@ pub enum KvCommands {
 
         /// Value to push
         value: String,
+
+        /// Attach structured JSON data to this entry
+        #[arg(long)]
+        data: Option<String>,
     },
 
     /// Pop the last value from a list
@@ -1749,6 +1753,10 @@ pub enum KvCommands {
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        /// Filter by structured data fields (key=value, repeatable)
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
 
         #[command(flatten)]
         time_range: TimeRangeArgs,
@@ -1801,17 +1809,21 @@ pub enum KvCommands {
         all: bool,
     },
 
-    /// Search entries in a list/history by substring
+    /// Search entries in a list/history by substring and/or structured data filters
     Search {
         /// Key name
         key: String,
 
-        /// Search query (case-insensitive substring)
-        query: String,
+        /// Search query (case-insensitive substring match on entry values)
+        query: Option<String>,
 
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        /// Filter by structured data fields (key=value, repeatable)
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
 
         #[command(flatten)]
         time_range: TimeRangeArgs,
@@ -1830,6 +1842,10 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
+        /// Filter by structured data fields (key=value, repeatable)
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
+
         #[command(flatten)]
         time_range: TimeRangeArgs,
     },
@@ -1841,6 +1857,10 @@ pub enum KvCommands {
 
         /// Count only entries matching this substring
         value: Option<String>,
+
+        /// Filter by structured data fields (key=value, repeatable)
+        #[arg(long = "where")]
+        where_clauses: Vec<String>,
 
         #[command(flatten)]
         time_range: TimeRangeArgs,
