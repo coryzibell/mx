@@ -978,9 +978,7 @@ impl KvStore {
             let chosen: Vec<_> = filtered.choose_multiple(&mut rng, take).collect();
             chosen
                 .into_iter()
-                .map(|(value, id, hash, ts, data)| {
-                    format_entry_line(*id, hash, value, ts, data)
-                })
+                .map(|(value, id, hash, ts, data)| format_entry_line(*id, hash, value, ts, data))
                 .collect()
         };
 
@@ -993,7 +991,15 @@ impl KvStore {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| (e.value.as_str(), e.id, e.hash.as_str(), e.ts.as_str(), &e.data))
+                        .map(|e| {
+                            (
+                                e.value.as_str(),
+                                e.id,
+                                e.hash.as_str(),
+                                e.ts.as_str(),
+                                &e.data,
+                            )
+                        })
                         .collect();
                     let available = filtered.len();
                     if available == 0 && !entries.is_empty() {
@@ -1016,7 +1022,15 @@ impl KvStore {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| (e.value.as_str(), e.id, e.hash.as_str(), e.ts.as_str(), &e.data))
+                        .map(|e| {
+                            (
+                                e.value.as_str(),
+                                e.id,
+                                e.hash.as_str(),
+                                e.ts.as_str(),
+                                &e.data,
+                            )
+                        })
                         .collect();
                     let available = filtered.len();
                     if available == 0 && !items.is_empty() {
@@ -1098,7 +1112,9 @@ impl KvStore {
                 if let Some(id_ref) = by_id {
                     let pos = match id_ref {
                         IdRef::Numeric(id) => entries.iter().position(|e| e.id == *id),
-                        IdRef::Hash(h) => entries.iter().position(|e| e.hash.starts_with(h.as_str())),
+                        IdRef::Hash(h) => {
+                            entries.iter().position(|e| e.hash.starts_with(h.as_str()))
+                        }
                     };
                     if let Some(pos) = pos {
                         removed.push(entries.remove(pos).value);
@@ -1260,9 +1276,7 @@ impl KvStore {
             if numeric_ids.contains(&id) {
                 return true;
             }
-            hash_prefixes
-                .iter()
-                .any(|prefix| hash.starts_with(prefix))
+            hash_prefixes.iter().any(|prefix| hash.starts_with(prefix))
         };
 
         let mut hits = Vec::new();
@@ -1813,7 +1827,13 @@ pub fn ts_in_range(ts: &str, range: &TimeRange) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Format a single entry line with numeric ID, hash, value, optional timestamp, and data suffix.
-pub fn format_entry_line(id: u64, hash: &str, value: &str, ts: &str, data: &Option<serde_json::Value>) -> String {
+pub fn format_entry_line(
+    id: u64,
+    hash: &str,
+    value: &str,
+    ts: &str,
+    data: &Option<serde_json::Value>,
+) -> String {
     let data_suffix = format_data_suffix(data);
     if ts.is_empty() {
         format!("{} [kv-{}]: {}{}", id, hash, value, data_suffix)
@@ -2350,7 +2370,9 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "alpha-2", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, false).unwrap();
+        let result = store
+            .remove("tags", Some("alpha"), None::<&IdRef>, false)
+            .unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "alpha");
 
@@ -2372,7 +2394,9 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "alpha-2", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, true).unwrap();
+        let result = store
+            .remove("tags", Some("alpha"), None::<&IdRef>, true)
+            .unwrap();
         assert_eq!(result.removed.len(), 2);
 
         match store.get("tags").unwrap() {
@@ -2397,7 +2421,9 @@ max_entries = 5
             _ => panic!("Expected list"),
         };
 
-        let result = store.remove("tags", None, Some(&IdRef::Numeric(beta_id)), false).unwrap();
+        let result = store
+            .remove("tags", None, Some(&IdRef::Numeric(beta_id)), false)
+            .unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "beta");
     }
@@ -2430,7 +2456,9 @@ max_entries = 5
         store.push("tags", "Alpha", None).unwrap();
         store.push("tags", "beta", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, false).unwrap();
+        let result = store
+            .remove("tags", Some("alpha"), None::<&IdRef>, false)
+            .unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "Alpha");
     }
@@ -2777,7 +2805,9 @@ max_entries = 5
         store.push("tags", "c", None).unwrap();
 
         // Remove "b"
-        store.remove("tags", Some("b"), None::<&IdRef>, false).unwrap();
+        store
+            .remove("tags", Some("b"), None::<&IdRef>, false)
+            .unwrap();
 
         // Push "d" — should get id=4, not reuse id=2
         store.push("tags", "d", None).unwrap();
@@ -4600,10 +4630,7 @@ max_entries = 5
         let hits = store
             .get_entries_by_id(
                 "tags",
-                &[
-                    IdRef::Numeric(r1.id),
-                    IdRef::Hash(r2.hash.clone()),
-                ],
+                &[IdRef::Numeric(r1.id), IdRef::Hash(r2.hash.clone())],
             )
             .unwrap();
         assert_eq!(hits.len(), 2);

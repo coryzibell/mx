@@ -220,17 +220,25 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 match store.get_entries_by_id(&key, &ids) {
                     Ok(hits) => {
                         for hit in &hits {
-                            println!("{}", kv::format_entry_line(hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data));
+                            println!(
+                                "{}",
+                                kv::format_entry_line(
+                                    hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                )
+                            );
                         }
 
                         // Report missing IDs
                         let found_numeric: HashSet<u64> = hits.iter().map(|h| h.id).collect();
-                        let found_hashes: Vec<&str> = hits.iter().map(|h| h.hash.as_str()).collect();
+                        let found_hashes: Vec<&str> =
+                            hits.iter().map(|h| h.hash.as_str()).collect();
                         let missing: Vec<String> = ids
                             .iter()
                             .filter(|id_ref| match id_ref {
                                 IdRef::Numeric(n) => !found_numeric.contains(n),
-                                IdRef::Hash(h) => !found_hashes.iter().any(|fh| fh.starts_with(h.as_str())),
+                                IdRef::Hash(h) => {
+                                    !found_hashes.iter().any(|fh| fh.starts_with(h.as_str()))
+                                }
                             })
                             .map(|id_ref| match id_ref {
                                 IdRef::Numeric(n) => n.to_string(),
@@ -401,7 +409,16 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         KvCommands::Pop { key } => match store.pop(&key) {
             Ok(Some(entry)) => {
                 store.save()?;
-                println!("{}", kv::format_entry_line(entry.id, &entry.hash, &entry.value, &entry.ts, &entry.data));
+                println!(
+                    "{}",
+                    kv::format_entry_line(
+                        entry.id,
+                        &entry.hash,
+                        &entry.value,
+                        &entry.ts,
+                        &entry.data
+                    )
+                );
                 Ok(kv::EXIT_OK)
             }
             Ok(None) => {
@@ -476,7 +493,16 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         } => match store.since(&key, &timeref) {
             Ok(entries) => {
                 for entry in &entries {
-                    println!("{}", kv::format_entry_line(entry.id, &entry.hash, &entry.value, &entry.ts, &entry.data));
+                    println!(
+                        "{}",
+                        kv::format_entry_line(
+                            entry.id,
+                            &entry.hash,
+                            &entry.value,
+                            &entry.ts,
+                            &entry.data
+                        )
+                    );
                 }
                 if memory {
                     resolve_memory(&store, &key, verbose);
@@ -522,15 +548,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
             // Parse --id as an IdRef (numeric or hash)
             let id_ref = match &id {
-                Some(id_str) => {
-                    match parse_single_id(id_str) {
-                        Ok(r) => Some(r),
-                        Err(msg) => {
-                            eprintln!("Error: {}", msg);
-                            return Ok(kv::EXIT_INVALID_INPUT);
-                        }
+                Some(id_str) => match parse_single_id(id_str) {
+                    Ok(r) => Some(r),
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
                     }
-                }
+                },
                 None => None,
             };
             match store.remove(&key, value.as_deref(), id_ref.as_ref(), all) {
@@ -579,7 +603,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         Ok(kv::EXIT_OK)
                     } else {
                         for hit in &hits {
-                            println!("{}", kv::format_entry_line(hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data));
+                            println!(
+                                "{}",
+                                kv::format_entry_line(
+                                    hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                )
+                            );
                         }
                         if memory {
                             resolve_memory(&store, &key, verbose);
