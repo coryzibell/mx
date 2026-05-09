@@ -1800,9 +1800,9 @@ pub enum KvCommands {
         /// Value substring to match (omit if using --id)
         value: Option<String>,
 
-        /// Remove by entry ID
+        /// Remove by entry ID (numeric) or hash (kv-XXXX)
         #[arg(long)]
-        id: Option<u64>,
+        id: Option<String>,
 
         /// Remove all matches (default: first match only)
         #[arg(long)]

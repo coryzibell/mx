@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
+use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -333,6 +334,7 @@ impl<'de> Deserialize<'de> for DataValue {
                             next_id += 1;
                             ListEntry {
                                 id: next_id,
+                                hash: String::new(),
                                 value: s,
                                 ts: String::new(),
                                 data: None,
@@ -353,6 +355,8 @@ impl<'de> Deserialize<'de> for DataValue {
 pub struct HistoryEntry {
     #[serde(default)]
     pub id: u64,
+    #[serde(default)]
+    pub hash: String,
     pub value: String,
     pub ts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -362,6 +366,8 @@ pub struct HistoryEntry {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ListEntry {
     pub id: u64,
+    #[serde(default)]
+    pub hash: String,
     pub value: String,
     pub ts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +384,7 @@ pub struct RemoveResult {
 #[derive(Debug)]
 pub struct SearchHit {
     pub id: u64,
+    pub hash: String,
     pub value: String,
     pub ts: String,
     pub data: Option<serde_json::Value>,
@@ -391,6 +398,38 @@ pub struct CountResult {
     /// Total entries for the key. Present only when a value filter was applied.
     pub total: Option<usize>,
     pub latest_ts: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Hash ID generation
+// ---------------------------------------------------------------------------
+
+/// Generate a short, stable base58 hash for a kv entry.
+///
+/// Input: `"{key}:{ts}:{id}"` hashed with blake3, first 4 bytes encoded as
+/// base58.  Produces a ~5-6 character alphanumeric string.
+pub fn generate_entry_hash(key: &str, ts: &str, id: u64) -> String {
+    let input = format!("{}:{}:{}", key, ts, id);
+    let hash_bytes = hash(input.as_bytes(), HashAlgorithm::Blake3);
+    let registry = DictionaryRegistry::load_default().expect("base-d dictionaries");
+    let dict = registry.dictionary("base58").expect("base58 dictionary");
+    let full = encode(&hash_bytes[..4], &dict);
+    // base58 of 4 bytes is 5-6 chars; return as-is
+    full
+}
+
+/// Result of a push operation, carrying both the numeric and hash IDs.
+#[derive(Debug, Clone)]
+pub struct PushResult {
+    pub id: u64,
+    pub hash: String,
+}
+
+/// Reference to a kv entry by either its numeric ID or its hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdRef {
+    Numeric(u64),
+    Hash(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +451,7 @@ impl KvStore {
         let schema: Schema = toml::from_str(&schema_str)
             .with_context(|| format!("Failed to parse schema: {}", schema_path.display()))?;
 
-        let data = if data_path.exists() {
+        let mut data = if data_path.exists() {
             let data_str = fs::read_to_string(data_path)
                 .with_context(|| format!("Failed to read data: {}", data_path.display()))?;
             serde_json::from_str(&data_str)
@@ -420,6 +459,27 @@ impl KvStore {
         } else {
             DataFile::default()
         };
+
+        // Back-fill hashes for entries loaded without one (pre-hash data).
+        for (key, value) in &mut data.entries {
+            match value {
+                DataValue::History { entries, .. } => {
+                    for e in entries.iter_mut() {
+                        if e.hash.is_empty() {
+                            e.hash = generate_entry_hash(key, &e.ts, e.id);
+                        }
+                    }
+                }
+                DataValue::List { items, .. } => {
+                    for e in items.iter_mut() {
+                        if e.hash.is_empty() {
+                            e.hash = generate_entry_hash(key, &e.ts, e.id);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
 
         Ok(KvStore {
             schema,
@@ -724,7 +784,7 @@ impl KvStore {
         key: &str,
         value: &str,
         data: Option<serde_json::Value>,
-    ) -> Result<(), KvError> {
+    ) -> Result<PushResult, KvError> {
         self.push_with_ts(key, value, Utc::now(), data)
     }
 
@@ -735,8 +795,9 @@ impl KvStore {
         value: &str,
         ts: DateTime<Utc>,
         data: Option<serde_json::Value>,
-    ) -> Result<(), KvError> {
+    ) -> Result<PushResult, KvError> {
         let def = self.key_def(key)?.clone();
+        let ts_str = ts.to_rfc3339();
 
         match def.value_type {
             ValueType::History => {
@@ -749,12 +810,14 @@ impl KvStore {
                 match entry {
                     DataValue::History { entries, .. } => {
                         let next_id = entries.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                        let hash = generate_entry_hash(key, &ts_str, next_id);
                         entries.insert(
                             0,
                             HistoryEntry {
                                 id: next_id,
+                                hash: hash.clone(),
                                 value: value.to_string(),
-                                ts: ts.to_rfc3339(),
+                                ts: ts_str,
                                 data,
                             },
                         );
@@ -762,13 +825,12 @@ impl KvStore {
                         if let Some(max) = def.max_entries {
                             entries.truncate(max);
                         }
+                        Ok(PushResult { id: next_id, hash })
                     }
-                    _ => {
-                        return Err(KvError::Other(anyhow::anyhow!(
-                            "Data corruption: key '{}' has wrong runtime type",
-                            key
-                        )));
-                    }
+                    _ => Err(KvError::Other(anyhow::anyhow!(
+                        "Data corruption: key '{}' has wrong runtime type",
+                        key
+                    ))),
                 }
             }
             ValueType::List => {
@@ -781,10 +843,12 @@ impl KvStore {
                 match entry {
                     DataValue::List { items, .. } => {
                         let next_id = items.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+                        let hash = generate_entry_hash(key, &ts_str, next_id);
                         items.push(ListEntry {
                             id: next_id,
+                            hash: hash.clone(),
                             value: value.to_string(),
-                            ts: ts.to_rfc3339(),
+                            ts: ts_str,
                             data,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
@@ -793,25 +857,20 @@ impl KvStore {
                         {
                             items.drain(0..items.len() - max);
                         }
+                        Ok(PushResult { id: next_id, hash })
                     }
-                    _ => {
-                        return Err(KvError::Other(anyhow::anyhow!(
-                            "Data corruption: key '{}' has wrong runtime type",
-                            key
-                        )));
-                    }
+                    _ => Err(KvError::Other(anyhow::anyhow!(
+                        "Data corruption: key '{}' has wrong runtime type",
+                        key
+                    ))),
                 }
             }
-            _ => {
-                return Err(KvError::TypeMismatch {
-                    key: key.to_string(),
-                    expected: "history or list".to_string(),
-                    got: def.value_type.to_string(),
-                });
-            }
+            _ => Err(KvError::TypeMismatch {
+                key: key.to_string(),
+                expected: "history or list".to_string(),
+                got: def.value_type.to_string(),
+            }),
         }
-
-        Ok(())
     }
 
     /// Pop the last item from a list. History is append-only.
@@ -858,15 +917,7 @@ impl KvStore {
                     let start = filtered.len().saturating_sub(count);
                     Ok(filtered[start..]
                         .iter()
-                        .map(|e| {
-                            format!(
-                                "{}: {} ({}){}",
-                                e.id,
-                                e.value,
-                                e.ts,
-                                format_data_suffix(&e.data)
-                            )
-                        })
+                        .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
                         .collect())
                 }
                 _ => Ok(vec![]),
@@ -883,19 +934,7 @@ impl KvStore {
                     let start = filtered.len().saturating_sub(count);
                     Ok(filtered[start..]
                         .iter()
-                        .map(|e| {
-                            if e.ts.is_empty() {
-                                format!("{}: {}{}", e.id, e.value, format_data_suffix(&e.data))
-                            } else {
-                                format!(
-                                    "{}: {} ({}){}",
-                                    e.id,
-                                    e.value,
-                                    e.ts,
-                                    format_data_suffix(&e.data)
-                                )
-                            }
-                        })
+                        .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
                         .collect())
                 }
                 _ => Ok(vec![]),
@@ -927,8 +966,8 @@ impl KvStore {
         let def = self.key_def(key)?;
 
         // Shared sampling + formatting closure. Takes a filtered vec of
-        // (value, id, ts, data) tuples and returns formatted strings.
-        let sample = |filtered: Vec<(&str, u64, &str, &Option<serde_json::Value>)>,
+        // (value, id, hash, ts, data) tuples and returns formatted strings.
+        let sample = |filtered: Vec<(&str, u64, &str, &str, &Option<serde_json::Value>)>,
                       n: usize|
          -> Vec<String> {
             if filtered.is_empty() {
@@ -939,12 +978,8 @@ impl KvStore {
             let chosen: Vec<_> = filtered.choose_multiple(&mut rng, take).collect();
             chosen
                 .into_iter()
-                .map(|(value, id, ts, data)| {
-                    if ts.is_empty() {
-                        format!("{}: {}{}", id, value, format_data_suffix(data))
-                    } else {
-                        format!("{}: {} ({}){}", id, value, ts, format_data_suffix(data))
-                    }
+                .map(|(value, id, hash, ts, data)| {
+                    format_entry_line(*id, hash, value, ts, data)
                 })
                 .collect()
         };
@@ -958,7 +993,7 @@ impl KvStore {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| (e.value.as_str(), e.id, e.ts.as_str(), &e.data))
+                        .map(|e| (e.value.as_str(), e.id, e.hash.as_str(), e.ts.as_str(), &e.data))
                         .collect();
                     let available = filtered.len();
                     if available == 0 && !entries.is_empty() {
@@ -981,7 +1016,7 @@ impl KvStore {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| (e.value.as_str(), e.id, e.ts.as_str(), &e.data))
+                        .map(|e| (e.value.as_str(), e.id, e.hash.as_str(), e.ts.as_str(), &e.data))
                         .collect();
                     let available = filtered.len();
                     if available == 0 && !items.is_empty() {
@@ -1032,16 +1067,16 @@ impl KvStore {
         Ok(())
     }
 
-    /// Remove entries from a list or history by value substring or by ID.
+    /// Remove entries from a list or history by value substring or by ID ref.
     ///
-    /// - `by_id`: if Some, remove the entry with that ID (ignores `value` and `all`).
+    /// - `by_id`: if Some, remove the entry matching that `IdRef` (ignores `value` and `all`).
     /// - `value`: substring match (case-insensitive).
     /// - `all`: if true, remove all matches; otherwise remove only the first match.
     pub fn remove(
         &mut self,
         key: &str,
         value: Option<&str>,
-        by_id: Option<u64>,
+        by_id: Option<&IdRef>,
         all: bool,
     ) -> Result<RemoveResult, KvError> {
         let def = self.key_def(key)?;
@@ -1060,8 +1095,12 @@ impl KvStore {
 
         match self.data.entries.get_mut(key) {
             Some(DataValue::History { entries, .. }) => {
-                if let Some(id) = by_id {
-                    if let Some(pos) = entries.iter().position(|e| e.id == id) {
+                if let Some(id_ref) = by_id {
+                    let pos = match id_ref {
+                        IdRef::Numeric(id) => entries.iter().position(|e| e.id == *id),
+                        IdRef::Hash(h) => entries.iter().position(|e| e.hash.starts_with(h.as_str())),
+                    };
+                    if let Some(pos) = pos {
                         removed.push(entries.remove(pos).value);
                     }
                 } else if let Some(query) = value {
@@ -1078,8 +1117,12 @@ impl KvStore {
                 }
             }
             Some(DataValue::List { items, .. }) => {
-                if let Some(id) = by_id {
-                    if let Some(pos) = items.iter().position(|e| e.id == id) {
+                if let Some(id_ref) = by_id {
+                    let pos = match id_ref {
+                        IdRef::Numeric(id) => items.iter().position(|e| e.id == *id),
+                        IdRef::Hash(h) => items.iter().position(|e| e.hash.starts_with(h.as_str())),
+                    };
+                    if let Some(pos) = pos {
                         removed.push(items.remove(pos).value);
                     }
                 } else if let Some(query) = value {
@@ -1145,6 +1188,7 @@ impl KvStore {
                     }
                     hits.push(SearchHit {
                         id: e.id,
+                        hash: e.hash.clone(),
                         value: e.value.clone(),
                         ts: e.ts.clone(),
                         data: e.data.clone(),
@@ -1166,6 +1210,7 @@ impl KvStore {
                     }
                     hits.push(SearchHit {
                         id: e.id,
+                        hash: e.hash.clone(),
                         value: e.value.clone(),
                         ts: e.ts.clone(),
                         data: e.data.clone(),
@@ -1178,11 +1223,12 @@ impl KvStore {
         Ok(hits)
     }
 
-    /// Look up entries by ID in a history or list.
+    /// Look up entries by ID (numeric or hash) in a history or list.
     ///
     /// Returns matching entries as `SearchHit`s (same struct used by `search`).
+    /// Hash matching is prefix-based: `"A3f"` matches an entry with hash `"A3fBx2"`.
     /// Only works on History and List types; returns TypeMismatch for others.
-    pub fn get_entries_by_id(&self, key: &str, ids: &[u64]) -> Result<Vec<SearchHit>, KvError> {
+    pub fn get_entries_by_id(&self, key: &str, ids: &[IdRef]) -> Result<Vec<SearchHit>, KvError> {
         let def = self.key_def(key)?;
         match def.value_type {
             ValueType::History | ValueType::List => {}
@@ -1195,15 +1241,39 @@ impl KvStore {
             }
         }
 
-        let id_set: HashSet<u64> = ids.iter().copied().collect();
+        let numeric_ids: HashSet<u64> = ids
+            .iter()
+            .filter_map(|r| match r {
+                IdRef::Numeric(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let hash_prefixes: Vec<&str> = ids
+            .iter()
+            .filter_map(|r| match r {
+                IdRef::Hash(h) => Some(h.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        let matches_entry = |id: u64, hash: &str| -> bool {
+            if numeric_ids.contains(&id) {
+                return true;
+            }
+            hash_prefixes
+                .iter()
+                .any(|prefix| hash.starts_with(prefix))
+        };
+
         let mut hits = Vec::new();
 
         match self.data.entries.get(key) {
             Some(DataValue::History { entries, .. }) => {
                 for e in entries {
-                    if id_set.contains(&e.id) {
+                    if matches_entry(e.id, &e.hash) {
                         hits.push(SearchHit {
                             id: e.id,
+                            hash: e.hash.clone(),
                             value: e.value.clone(),
                             ts: e.ts.clone(),
                             data: e.data.clone(),
@@ -1213,9 +1283,10 @@ impl KvStore {
             }
             Some(DataValue::List { items, .. }) => {
                 for e in items {
-                    if id_set.contains(&e.id) {
+                    if matches_entry(e.id, &e.hash) {
                         hits.push(SearchHit {
                             id: e.id,
+                            hash: e.hash.clone(),
                             value: e.value.clone(),
                             ts: e.ts.clone(),
                             data: e.data.clone(),
@@ -1741,6 +1812,16 @@ pub fn ts_in_range(ts: &str, range: &TimeRange) -> bool {
 // Display helpers (for CLI output)
 // ---------------------------------------------------------------------------
 
+/// Format a single entry line with numeric ID, hash, value, optional timestamp, and data suffix.
+pub fn format_entry_line(id: u64, hash: &str, value: &str, ts: &str, data: &Option<serde_json::Value>) -> String {
+    let data_suffix = format_data_suffix(data);
+    if ts.is_empty() {
+        format!("{} [kv-{}]: {}{}", id, hash, value, data_suffix)
+    } else {
+        format!("{} [kv-{}]: {} ({}){}", id, hash, value, ts, data_suffix)
+    }
+}
+
 /// Format a DataValue for human-readable CLI output.
 pub fn format_value(value: &DataValue) -> String {
     match value {
@@ -1748,15 +1829,7 @@ pub fn format_value(value: &DataValue) -> String {
         DataValue::String { value } => value.clone(),
         DataValue::History { entries, .. } => entries
             .iter()
-            .map(|e| {
-                format!(
-                    "{}: {} ({}){}",
-                    e.id,
-                    e.value,
-                    e.ts,
-                    format_data_suffix(&e.data)
-                )
-            })
+            .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
             .collect::<Vec<_>>()
             .join("\n"),
         DataValue::State { fields, .. } => {
@@ -1764,19 +1837,7 @@ pub fn format_value(value: &DataValue) -> String {
         }
         DataValue::List { items, .. } => items
             .iter()
-            .map(|e| {
-                if e.ts.is_empty() {
-                    format!("{}: {}{}", e.id, e.value, format_data_suffix(&e.data))
-                } else {
-                    format!(
-                        "{}: {} ({}){}",
-                        e.id,
-                        e.value,
-                        e.ts,
-                        format_data_suffix(&e.data)
-                    )
-                }
-            })
+            .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
             .collect::<Vec<_>>()
             .join("\n"),
     }
@@ -2289,7 +2350,7 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "alpha-2", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None, false).unwrap();
+        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, false).unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "alpha");
 
@@ -2311,7 +2372,7 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "alpha-2", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None, true).unwrap();
+        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, true).unwrap();
         assert_eq!(result.removed.len(), 2);
 
         match store.get("tags").unwrap() {
@@ -2336,7 +2397,7 @@ max_entries = 5
             _ => panic!("Expected list"),
         };
 
-        let result = store.remove("tags", None, Some(beta_id), false).unwrap();
+        let result = store.remove("tags", None, Some(&IdRef::Numeric(beta_id)), false).unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "beta");
     }
@@ -2351,7 +2412,7 @@ max_entries = 5
             .unwrap();
 
         let result = store
-            .remove("flavor_history", Some("bergamot"), None, false)
+            .remove("flavor_history", Some("bergamot"), None::<&IdRef>, false)
             .unwrap();
         assert_eq!(result.removed.len(), 1);
 
@@ -2369,7 +2430,7 @@ max_entries = 5
         store.push("tags", "Alpha", None).unwrap();
         store.push("tags", "beta", None).unwrap();
 
-        let result = store.remove("tags", Some("alpha"), None, false).unwrap();
+        let result = store.remove("tags", Some("alpha"), None::<&IdRef>, false).unwrap();
         assert_eq!(result.removed.len(), 1);
         assert_eq!(result.removed[0], "Alpha");
     }
@@ -2377,7 +2438,7 @@ max_entries = 5
     #[test]
     fn remove_type_mismatch() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.remove("warmth", Some("x"), None, false);
+        let result = store.remove("warmth", Some("x"), None::<&IdRef>, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2456,7 +2517,7 @@ max_entries = 5
         };
 
         let hits = store
-            .get_entries_by_id("flavor_history", &[target_id])
+            .get_entries_by_id("flavor_history", &[IdRef::Numeric(target_id)])
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, target_id);
@@ -2476,7 +2537,9 @@ max_entries = 5
             _ => panic!("Expected list"),
         };
 
-        let hits = store.get_entries_by_id("tags", &[target_id]).unwrap();
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(target_id)])
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, target_id);
         assert_eq!(hits[0].value, "beta");
@@ -2489,7 +2552,12 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "gamma", None).unwrap();
 
-        let hits = store.get_entries_by_id("tags", &[1, 2, 3]).unwrap();
+        let hits = store
+            .get_entries_by_id(
+                "tags",
+                &[IdRef::Numeric(1), IdRef::Numeric(2), IdRef::Numeric(3)],
+            )
+            .unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].value, "alpha");
         assert_eq!(hits[1].value, "beta");
@@ -2503,7 +2571,9 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
         store.push("tags", "gamma", None).unwrap();
 
-        let hits = store.get_entries_by_id("tags", &[1, 3]).unwrap();
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(1), IdRef::Numeric(3)])
+            .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].value, "alpha");
         assert_eq!(hits[1].value, "gamma");
@@ -2516,7 +2586,12 @@ max_entries = 5
         store.push("tags", "beta", None).unwrap();
 
         // Request IDs 1, 2, 99 — only 1 and 2 exist
-        let hits = store.get_entries_by_id("tags", &[1, 2, 99]).unwrap();
+        let hits = store
+            .get_entries_by_id(
+                "tags",
+                &[IdRef::Numeric(1), IdRef::Numeric(2), IdRef::Numeric(99)],
+            )
+            .unwrap();
         assert_eq!(hits.len(), 2);
     }
 
@@ -2525,14 +2600,16 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.push("tags", "alpha", None).unwrap();
 
-        let hits = store.get_entries_by_id("tags", &[99, 100]).unwrap();
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(99), IdRef::Numeric(100)])
+            .unwrap();
         assert!(hits.is_empty());
     }
 
     #[test]
     fn get_by_id_type_mismatch_counter() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.get_entries_by_id("warmth", &[1]);
+        let result = store.get_entries_by_id("warmth", &[IdRef::Numeric(1)]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2540,7 +2617,7 @@ max_entries = 5
     #[test]
     fn get_by_id_type_mismatch_string() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.get_entries_by_id("current_mood", &[1]);
+        let result = store.get_entries_by_id("current_mood", &[IdRef::Numeric(1)]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2548,7 +2625,7 @@ max_entries = 5
     #[test]
     fn get_by_id_type_mismatch_state() {
         let (store, _dir) = setup_store(test_schema());
-        let result = store.get_entries_by_id("tensor", &[1]);
+        let result = store.get_entries_by_id("tensor", &[IdRef::Numeric(1)]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2556,14 +2633,18 @@ max_entries = 5
     #[test]
     fn get_by_id_empty_history() {
         let (store, _dir) = setup_store(test_schema());
-        let hits = store.get_entries_by_id("flavor_history", &[1]).unwrap();
+        let hits = store
+            .get_entries_by_id("flavor_history", &[IdRef::Numeric(1)])
+            .unwrap();
         assert!(hits.is_empty());
     }
 
     #[test]
     fn get_by_id_empty_list() {
         let (store, _dir) = setup_store(test_schema());
-        let hits = store.get_entries_by_id("tags", &[1]).unwrap();
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(1)])
+            .unwrap();
         assert!(hits.is_empty());
     }
 
@@ -2696,7 +2777,7 @@ max_entries = 5
         store.push("tags", "c", None).unwrap();
 
         // Remove "b"
-        store.remove("tags", Some("b"), None, false).unwrap();
+        store.remove("tags", Some("b"), None::<&IdRef>, false).unwrap();
 
         // Push "d" — should get id=4, not reuse id=2
         store.push("tags", "d", None).unwrap();
@@ -2819,8 +2900,11 @@ max_entries = 5
         store.push_with_ts("tags", "rust", ts, None).unwrap();
 
         let output = format_value(store.get("tags").unwrap());
-        assert!(output.contains("1: focus"));
-        assert!(output.contains("2: rust"));
+        // New format: "1 [kv-XXXX]: focus (ts)"
+        assert!(output.contains("1 [kv-"));
+        assert!(output.contains("]: focus"));
+        assert!(output.contains("2 [kv-"));
+        assert!(output.contains("]: rust"));
         assert!(output.contains("2026-04-22"));
     }
 
@@ -4343,7 +4427,9 @@ max_entries = 5
         let data = serde_json::json!({"priority": "high"});
         store.push("tags", "item", Some(data.clone())).unwrap();
 
-        let hits = store.get_entries_by_id("tags", &[1]).unwrap();
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(1)])
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].data, Some(data));
     }
@@ -4400,5 +4486,227 @@ max_entries = 5
         let items = store.last("tags", 1, None, &[]).unwrap();
         assert_eq!(items.len(), 1);
         assert!(items[0].contains("{\"x\":1}"));
+    }
+
+    // -- Hash ID tests --
+
+    #[test]
+    fn push_returns_push_result_with_hash_and_id() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+        assert_eq!(result.id, 1);
+        assert!(!result.hash.is_empty());
+        // Hash should be 5-6 base58 chars
+        assert!(result.hash.len() >= 4);
+        assert!(result.hash.len() <= 8);
+    }
+
+    #[test]
+    fn hash_is_stable_same_inputs() {
+        // generate_entry_hash is deterministic
+        let h1 = generate_entry_hash("tags", "2026-05-08T00:00:00+00:00", 1);
+        let h2 = generate_entry_hash("tags", "2026-05-08T00:00:00+00:00", 1);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn hash_is_unique_different_inputs() {
+        let h1 = generate_entry_hash("tags", "2026-05-08T00:00:00+00:00", 1);
+        let h2 = generate_entry_hash("tags", "2026-05-08T00:00:00+00:00", 2);
+        let h3 = generate_entry_hash("other", "2026-05-08T00:00:00+00:00", 1);
+        assert_ne!(h1, h2);
+        assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn backfill_old_entries_get_hashes_on_load() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Write old-format data with no hash field
+        let old_data = r#"{
+            "_schema": "test",
+            "_updated": "2026-05-08T00:00:00+00:00",
+            "tags": {
+                "items": [
+                    {"id": 1, "value": "alpha", "ts": "2026-05-08T00:00:00+00:00"},
+                    {"id": 2, "value": "beta", "ts": "2026-05-08T00:01:00+00:00"}
+                ]
+            }
+        }"#;
+        fs::write(&data_path, old_data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+        match store.data.entries.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert!(!items[0].hash.is_empty(), "hash should be back-filled");
+                assert!(!items[1].hash.is_empty(), "hash should be back-filled");
+                // Hashes should differ
+                assert_ne!(items[0].hash, items[1].hash);
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn get_by_numeric_id_still_works() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(result.id)])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].value, "alpha");
+    }
+
+    #[test]
+    fn get_by_hash_works() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Hash(result.hash.clone())])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].value, "alpha");
+        assert_eq!(hits[0].hash, result.hash);
+    }
+
+    #[test]
+    fn get_by_hash_prefix_works() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        // Use first 3 chars as prefix
+        let prefix = &result.hash[..3];
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Hash(prefix.to_string())])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].value, "alpha");
+    }
+
+    #[test]
+    fn get_by_mixed_id_types() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let r1 = store.push("tags", "alpha", None).unwrap();
+        let r2 = store.push("tags", "beta", None).unwrap();
+
+        let hits = store
+            .get_entries_by_id(
+                "tags",
+                &[
+                    IdRef::Numeric(r1.id),
+                    IdRef::Hash(r2.hash.clone()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn remove_by_hash_works() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha", None).unwrap();
+        let r2 = store.push("tags", "beta", None).unwrap();
+        store.push("tags", "gamma", None).unwrap();
+
+        let result = store
+            .remove("tags", None, Some(&IdRef::Hash(r2.hash.clone())), false)
+            .unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0], "beta");
+
+        // Verify beta is gone
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].value, "alpha");
+                assert_eq!(items[1].value, "gamma");
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn hash_appears_in_last_output() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        let items = store.last("tags", 1, None, &[]).unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(
+            items[0].contains(&format!("[kv-{}]", result.hash)),
+            "output should contain hash: {}",
+            items[0]
+        );
+    }
+
+    #[test]
+    fn hash_appears_in_search_output() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        let hits = store.search("tags", Some("alpha"), None, &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].hash, result.hash);
+    }
+
+    #[test]
+    fn hash_stored_on_entry_structs() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None).unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].hash, result.hash);
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn hash_stored_on_history_entry() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("flavor_history", "bergamot", None).unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries[0].hash, result.hash);
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn hash_persists_through_save_load() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        let hash;
+        {
+            let mut store = KvStore::load(&schema_path, &data_path).unwrap();
+            let result = store.push("tags", "alpha", None).unwrap();
+            hash = result.hash;
+            store.save().unwrap();
+        }
+
+        // Reload and verify hash persisted
+        let store2 = KvStore::load(&schema_path, &data_path).unwrap();
+        match store2.data.entries.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].hash, hash);
+            }
+            _ => panic!("Expected list"),
+        }
     }
 }
