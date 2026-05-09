@@ -65,13 +65,16 @@ mx codex read <archive-id> --clean
 === Local key-value store
 
 #link("kv.html")[KV] provides fast per-agent state: counters, strings, lists,
-and history with time-based queries.
+and history with time-based queries and structured data filtering.
 
 ```bash
 mx kv set session.goal "ship the docs"
 mx kv get session.goal
 mx kv push decisions "chose Typst over markdown"
 mx kv get shipped --id 35-64
+mx kv push projects "palmtop DSI fix" \
+  --data '{"tags":["palmtop","i915"],"status":"active"}'
+mx kv search projects --where status=active
 ```
 
 == Installation

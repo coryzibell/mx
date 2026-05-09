@@ -125,6 +125,17 @@ mx kv inc builds
 mx kv push decisions "chose Typst for docs"
 mx kv last decisions --count 5
 
+# Structured data on entries
+mx kv push projects "palmtop DSI fix" \
+  --data '{"tags":["palmtop","i915"],"status":"active"}'
+
+# Query by structured data with --where
+mx kv search projects --where status=active
+mx kv search projects "DSI" --where status=active
+mx kv search projects --where tags=palmtop --where status=active
+mx kv last projects --where status=active --count 5
+mx kv count projects --where status=active
+
 # Time-range queries on history/list keys
 mx kv last shipped --day 2026-04-25
 mx kv last shipped --month 2026-04
@@ -147,6 +158,8 @@ mx kv random shipped --count 5
 mx kv random ideas --count 1
 mx kv random shipped --count 3 --since 30d
 ```
+
+Entries can carry structured JSON data via `--data` on push. Query entries by data fields with `--where key=value` (available on `search`, `last`, `random`, `count`). Multiple `--where` flags are ANDed. Supports exact string match, array-contains, and numeric/boolean comparison on top-level fields.
 
 Time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) are available on `last`, `search`, `count`, and `random`. All dates are UTC. The `--since` flag accepts relative times (`30d`, `1w`, `2h`, `30m`) and ISO-8601 timestamps. For a standalone relative-time query on history keys, use `mx kv since`.
 

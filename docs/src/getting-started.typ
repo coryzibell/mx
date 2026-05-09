@@ -129,8 +129,8 @@ mx codex search "migration"
 === KV
 
 The #link("kv.html")[kv] store provides fast local state per agent. Counters,
-strings, lists, and history with time-based queries. Schema-driven with
-defaults.
+strings, lists, and history with time-based queries and structured data
+filtering. Schema-driven with defaults.
 
 ```bash
 mx kv set session.goal "ship the docs"
@@ -140,6 +140,12 @@ mx kv last decisions --count 5
 mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
 mx kv random decisions --count 3
+
+# Attach structured data and query it
+mx kv push projects "palmtop DSI fix" \
+  --data '{"tags":["palmtop","i915"],"status":"active"}'
+mx kv search projects --where status=active
+mx kv search projects "DSI" --where tags=palmtop
 ```
 
 === State

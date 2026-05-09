@@ -583,8 +583,8 @@ Supported types:
   table.header([*Type*], [*Behavior*]),
   [`counter`], [Integer with optional `min`/`max` bounds. Supports `inc`, `dec`, `set`, `get`],
   [`string`], [Simple string value. Supports `set`, `get`],
-  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
-  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
+  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. Entries can carry optional structured JSON data (`--data` on push, `--where` on queries). The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
+  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. Entries can carry optional structured JSON data. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
   [`state`], [Named fields (like a struct). Supports `set <key> <field> <value>`, `get`],
 )
 
@@ -593,6 +593,12 @@ Supported types:
 The data file at `$MX_HOME/kv/data/{agent}.json` holds current values. All
 writes are atomic: serialize to a temp file, fsync, rename. The format is a
 flat JSON object keyed by the key names from the schema.
+
+History and list entries are stored as objects with `id`, `value`, `ts`, and an
+optional `data` field (arbitrary JSON object for structured metadata). The
+`data` field uses `#[serde(default, skip_serializing_if = "Option::is_none")]`
+for backward compatibility -- files written before structured data was added
+deserialize cleanly without migration.
 
 === Per-agent keying
 

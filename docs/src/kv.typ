@@ -7,6 +7,7 @@ for operational state that needs to be fast and local. Counters, strings, lists,
 timestamped history, and structured state fields -- all backed by a TOML schema
 file and a JSON data file. No networking, no database. Reads and writes are
 direct file operations with atomic saves (serialize to tmp, fsync, rename).
+History and list entries can carry structured JSON data for queryable metadata.
 
 Use KV for state that lives within a single agent session or across sessions:
 build counters, track decisions as a history log, maintain a todo list, or
@@ -21,8 +22,8 @@ Every key has a type declared in the schema. Five types are supported:
 
 / string: A single text value. Has an optional `default`.
 / counter: An integer with optional `min`, `max`, and `default`. Clamped on every write.
-/ history: A timestamped append-only log. Newest entries first. Has an optional `max_entries` cap that drops the oldest entries on overflow.
-/ list: An ordered collection with timestamps. Supports push and pop. Also has an optional `max_entries` cap.
+/ history: A timestamped append-only log. Newest entries first. Has an optional `max_entries` cap that drops the oldest entries on overflow. Entries can carry optional structured JSON data.
+/ list: An ordered collection with timestamps. Supports push and pop. Also has an optional `max_entries` cap. Entries can carry optional structured JSON data.
 / state: A structured record with named fields. Fields are declared in the schema and validated on write.
 
 === Schema files
@@ -211,7 +212,8 @@ The difference is semantic: history is append-only (newest first, no pop),
 while lists support push/pop and maintain insertion order.
 
 Both types support `push`, `last`, `search`, `count`, `random`, `remove`, and
-entry lookup by ID via `get --id`.
+entry lookup by ID via `get --id`. Both support structured data on entries
+(`--data` on push) and structured data filtering (`--where` on queries).
 Only lists support `pop`. Only history supports `since` (time-based queries).
 
 === push
@@ -226,10 +228,20 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   truncated after the push.
 
   For *list* keys, new entries are appended to the end. The same
-  `max_entries` truncation applies, dropping from the front.],
+  `max_entries` truncation applies, dropping from the front.
+
+  Use `--data` to attach a JSON object to the entry. The data is stored
+  alongside the value and timestamp, and is displayed inline in output.
+  See #link(<structured-data>)[Structured data] for details and query
+  examples.],
+  flags: (
+    ([`--data <json>`], [string], [Attach a JSON object to the entry. Must be a valid JSON object (not an array, string, or other type).]),
+  ),
   examples: (
     "mx kv push decisions \"chose Typst for docs\"",
     "mx kv push todos \"write tests for kv handler\"",
+    "mx kv push projects \"palmtop DSI fix\" --data '{\"tags\":[\"palmtop\",\"i915\"],\"status\":\"active\"}'",
+    "mx kv push shipped \"v0.1.156\" --data '{\"pr\":305,\"scope\":\"kv\"}'",
   ),
 )
 
@@ -258,10 +270,15 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   first). For list keys, "last" means the tail of the list.
 
   Time-range flags narrow the result set before `--count` is applied. See
-  #link(<time-range-queries>)[Time-range queries] for details and examples.],
+  #link(<time-range-queries>)[Time-range queries] for details and examples.
+
+  The `--where` flag filters entries by structured data fields. Multiple
+  `--where` flags are ANDed. See #link(<structured-data>)[Structured data]
+  for filtering semantics.],
   flags: (
     ([`--count <n>`], [integer], [Number of entries to return (default: 1)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Entries from a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Entries from a specific month (UTC)]),
     ([`--week <YYYY-Www>`], [string], [Entries from an ISO week, Monday to Sunday]),
@@ -277,6 +294,8 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv last shipped --month 2026-04",
     "mx kv last shipped --month 2026-04 --count 5",
     "mx kv last shipped --since 1w",
+    "mx kv last projects --where status=active",
+    "mx kv last projects --where status=active --count 3",
   ),
 )
 
@@ -305,14 +324,23 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 === search
 
 #command(
-  "mx kv search <key> <query>",
-  [Search entries in a list or history by case-insensitive substring match.
-  Prints matching entries with their ID, value, and timestamp.
+  "mx kv search <key> [query]",
+  [Search entries in a list or history by case-insensitive substring match
+  and/or structured data filters. Prints matching entries with their ID,
+  value, timestamp, and any attached data.
+
+  The text query is optional when `--where` filters are provided. You can
+  search by text alone, by structured data alone, or by both. At least one
+  of a text query or `--where` filter must be given.
+
+  Multiple `--where` flags are ANDed. See
+  #link(<structured-data>)[Structured data] for filtering semantics.
 
   Time-range flags narrow the search to entries within the specified period.
   See #link(<time-range-queries>)[Time-range queries] for details.],
   flags: (
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Search within a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Search within a specific month (UTC)]),
     ([`--week <YYYY-Www>`], [string], [Search within an ISO week, Monday to Sunday]),
@@ -325,6 +353,9 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv search todos \"test\"",
     "mx kv search shipped \"feature\" --month 2026-04",
     "mx kv search shipped \"feature\" --since 30d",
+    "mx kv search projects --where status=active",
+    "mx kv search projects \"DSI\" --where status=active",
+    "mx kv search projects --where tags=palmtop --where status=active",
   ),
 )
 
@@ -332,20 +363,25 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 
 #command(
   "mx kv count <key> [value]",
-  [Count entries in a list or history. Without a value filter, prints the
-  total count. With a value filter, prints the matched count, total, and
-  percentage.
+  [Count entries in a list or history. Without a value filter or `--where`,
+  prints the total count. With a value filter, `--where`, or both, prints
+  the matched count, total, and percentage.
 
   Unfiltered output: `<count>` or `<count> (latest: <timestamp>)`.
 
   Filtered output: `<matched>/<total> (<pct>%) --- latest: <timestamp>`.
 
   The percentage display makes it easy to gauge ratios at a glance -- for
-  example, what fraction of your decisions mentioned a particular topic.
+  example, what fraction of your decisions mentioned a particular topic,
+  or how many entries have `status=active` in their structured data.
+
+  Multiple `--where` flags are ANDed. See
+  #link(<structured-data>)[Structured data] for filtering semantics.
 
   Time-range flags restrict the count to entries within the specified period.
   See #link(<time-range-queries>)[Time-range queries] for details.],
   flags: (
+    ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Count within a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Count within a specific month (UTC)]),
     ([`--week <YYYY-Www>`], [string], [Count within an ISO week, Monday to Sunday]),
@@ -360,6 +396,8 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv count shipped --day 2026-05-07",
     "mx kv count shipped --from 2026-04-01 --to 2026-04-15",
     "mx kv count shipped --since 1w",
+    "mx kv count projects --where status=active",
+    "mx kv count projects --where status=active --since 30d",
   ),
 )
 
@@ -374,12 +412,16 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   a large history), or building variety into automated workflows.
 
   When fewer entries are available than requested, all matching entries are
-  returned and a note is printed to stderr. If a time range is specified,
-  entries are filtered first, then random sampling is applied to the
-  filtered set.],
+  returned and a note is printed to stderr. If a time range or `--where`
+  filter is specified, entries are filtered first, then random sampling is
+  applied to the filtered set.
+
+  Multiple `--where` flags are ANDed. See
+  #link(<structured-data>)[Structured data] for filtering semantics.],
   flags: (
     ([`--count <n>`], [integer], [Number of random entries to return (default: 1, must be >= 1)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Sample from entries on a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Sample from entries in a specific month (UTC)]),
     ([`--week <YYYY-Www>`], [string], [Sample from entries in an ISO week, Monday to Sunday]),
@@ -393,6 +435,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv random ideas --count 1",
     "mx kv random shipped --count 3 --since 30d",
     "mx kv random decisions --month 2026-04 --count 3",
+    "mx kv random projects --where status=active --count 3",
   ),
 )
 
@@ -508,6 +551,103 @@ sampling, or when you need it on a list key.
 #note[Time-range flags (`--day`, `--month`, `--week`, `--since`,
 `--from`/`--to`) are available on `last`, `search`, `count`, and `random`.
 The `since` subcommand is unchanged and continues to work for history keys.]
+
+== Structured data <structured-data>
+
+History and list entries can carry structured JSON data alongside their text
+value. This turns each entry from a plain string into a string with queryable
+metadata -- tags, status, priority, or any key-value pairs relevant to the
+domain.
+
+=== Pushing data
+
+Use `--data` on `push` to attach a JSON object to the entry:
+
+```bash
+mx kv push projects "palmtop DSI fix" \
+  --data '{"tags":["palmtop","i915"],"status":"active"}'
+
+mx kv push shipped "v0.1.156" \
+  --data '{"pr":305,"scope":"kv"}'
+```
+
+The data must be a valid JSON object. Arrays, strings, numbers, and other
+non-object JSON types are rejected. If `--data` is omitted, the entry has no
+structured data (backward compatible with all existing entries).
+
+=== Output format
+
+Entries with structured data display the JSON inline after the timestamp:
+
+```
+42: palmtop DSI fix (2026-05-08T14:30:00Z) {"tags":["palmtop","i915"],"status":"active"}
+43: display rotation patch (2026-05-08T15:00:00Z)
+```
+
+Entries without data look exactly as they always have. The data suffix appears
+on all commands that display entries: `get`, `last`, `search`, `since`, `pop`,
+`random`, and `dump`.
+
+=== Filtering with `--where`
+
+The `--where` flag queries entries by their structured data fields. It is
+available on `search`, `last`, `random`, and `count`.
+
+```bash
+# Exact match on a string field
+mx kv search projects --where status=active
+
+# Array-contains: matches if the array includes the value
+mx kv search projects --where tags=palmtop
+
+# Combine text search with structured data filter
+mx kv search projects "DSI" --where status=active
+
+# Multiple --where flags are ANDed
+mx kv search projects --where tags=palmtop --where status=active
+
+# Works on last, random, and count too
+mx kv last projects --where status=active --count 5
+mx kv random projects --where status=active --count 3
+mx kv count projects --where status=active
+```
+
+=== Matching semantics
+
+Each `--where` clause has the form `key=value` (split on the first `=`). The
+match is evaluated against the top-level fields of the entry's JSON data:
+
+/ String field: The field value must equal the clause value exactly.
+/ Array field: The array must contain a string element equal to the clause value.
+/ Number field: The field's string representation must equal the clause value (e.g., `--where pr=305`).
+/ Boolean field: Matches against `true` or `false` as strings.
+/ Missing field: Does not match. Entries without data never match any `--where` clause.
+
+Only top-level fields are supported. Dot-path traversal (e.g.,
+`--where nested.field=value`) is not available.
+
+When multiple `--where` clauses are given, ALL must match (AND logic). There is
+no OR operator -- use separate queries if you need union semantics.
+
+=== Combining with other filters
+
+The `--where` flag composes with both text queries and time-range flags. All
+filters are applied together:
+
+```bash
+# Text + where + time range: all three must match
+mx kv search projects "DSI" --where status=active --since 30d
+```
+
+Filter application order: time range first, then `--where`, then text query.
+The `--count` limit is applied last.
+
+=== Backward compatibility
+
+Structured data is fully backward compatible. Existing data files written
+before this feature was added continue to work without migration. Entries
+without data are simply treated as having no structured fields -- they will
+not match any `--where` clause, but they are otherwise unaffected.
 
 == Management
 
