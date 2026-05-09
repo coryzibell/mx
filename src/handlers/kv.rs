@@ -159,16 +159,22 @@ fn parse_id_spec(spec: &str) -> Result<Vec<u64>, String> {
 
 /// Parse `--where` clause strings into `(key, value)` tuples.
 ///
-/// Each clause is split on the first `=` character. Clauses without `=` are
-/// silently skipped (the CLI layer already validates format in practice).
-fn parse_where_clauses(clauses: &[String]) -> Vec<(String, String)> {
-    clauses
-        .iter()
-        .filter_map(|clause| {
-            let (k, v) = clause.split_once('=')?;
-            Some((k.to_string(), v.to_string()))
-        })
-        .collect()
+/// Each clause is split on the first `=` character. A clause without `=`
+/// returns an error describing the expected format.
+fn parse_where_clauses(clauses: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut result = Vec::with_capacity(clauses.len());
+    for clause in clauses {
+        match clause.split_once('=') {
+            Some((k, v)) => result.push((k.to_string(), v.to_string())),
+            None => {
+                return Err(format!(
+                    "invalid --where clause '{}': expected format key=value",
+                    clause
+                ));
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
@@ -360,7 +366,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                 serde_json::Value::Number(_) => "number",
                                 serde_json::Value::Bool(_) => "boolean",
                                 serde_json::Value::Null => "null",
-                                _ => "non-object",
+                                serde_json::Value::Object(_) => unreachable!(),
                             }
                         );
                         return Ok(kv::EXIT_INVALID_INPUT);
@@ -408,7 +414,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            let parsed_where = parse_where_clauses(&where_clauses);
+            let parsed_where = match parse_where_clauses(&where_clauses) {
+                Ok(w) => w,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            };
             match store.last(&key, count, range.as_ref(), &parsed_where) {
                 Ok(items) => {
                     for item in &items {
@@ -431,7 +443,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            let parsed_where = parse_where_clauses(&where_clauses);
+            let parsed_where = match parse_where_clauses(&where_clauses) {
+                Ok(w) => w,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            };
             match store.random(&key, count, range.as_ref(), &parsed_where) {
                 Ok(items) => {
                     for item in &items {
@@ -528,7 +546,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            let parsed_where = parse_where_clauses(&where_clauses);
+            let parsed_where = match parse_where_clauses(&where_clauses) {
+                Ok(w) => w,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            };
 
             // Must have at least a query or where clauses
             if query.is_none() && parsed_where.is_empty() {
@@ -567,7 +591,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             time_range,
         } => {
             let range = resolve_time_range(&time_range).map_err(KvError::Other)?;
-            let parsed_where = parse_where_clauses(&where_clauses);
+            let parsed_where = match parse_where_clauses(&where_clauses) {
+                Ok(w) => w,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            };
             match store.count(&key, value.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(result) => {
                     match result.total {
@@ -724,7 +754,7 @@ mod tests {
     #[test]
     fn parse_where_clauses_basic() {
         let clauses = vec!["status=active".to_string(), "priority=high".to_string()];
-        let parsed = parse_where_clauses(&clauses);
+        let parsed = parse_where_clauses(&clauses).unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0], ("status".to_string(), "active".to_string()));
         assert_eq!(parsed[1], ("priority".to_string(), "high".to_string()));
@@ -734,7 +764,7 @@ mod tests {
     fn parse_where_clauses_value_with_equals() {
         // Value might contain = sign (split on first only)
         let clauses = vec!["query=key=value".to_string()];
-        let parsed = parse_where_clauses(&clauses);
+        let parsed = parse_where_clauses(&clauses).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0], ("query".to_string(), "key=value".to_string()));
     }
@@ -742,18 +772,19 @@ mod tests {
     #[test]
     fn parse_where_clauses_empty() {
         let clauses: Vec<String> = vec![];
-        let parsed = parse_where_clauses(&clauses);
+        let parsed = parse_where_clauses(&clauses).unwrap();
         assert!(parsed.is_empty());
     }
 
     #[test]
-    fn parse_where_clauses_skips_invalid() {
+    fn parse_where_clauses_rejects_invalid() {
         let clauses = vec![
             "valid=clause".to_string(),
             "noequalssign".to_string(),
             "also=valid".to_string(),
         ];
-        let parsed = parse_where_clauses(&clauses);
-        assert_eq!(parsed.len(), 2);
+        let err = parse_where_clauses(&clauses).unwrap_err();
+        assert!(err.contains("noequalssign"));
+        assert!(err.contains("expected format key=value"));
     }
 }

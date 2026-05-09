@@ -1754,7 +1754,7 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
-        /// Filter by structured data fields (key=value, repeatable)
+        /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
 
@@ -1821,7 +1821,7 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
-        /// Filter by structured data fields (key=value, repeatable)
+        /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
 
@@ -1842,7 +1842,7 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
-        /// Filter by structured data fields (key=value, repeatable)
+        /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
 
@@ -1858,7 +1858,7 @@ pub enum KvCommands {
         /// Count only entries matching this substring
         value: Option<String>,
 
-        /// Filter by structured data fields (key=value, repeatable)
+        /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
 

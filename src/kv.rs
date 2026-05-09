@@ -261,6 +261,11 @@ enum RawListItem {
 }
 
 /// Mirror of DataValue for deserialization, with backward compat glue.
+///
+/// The `data` field on `HistoryEntry` and `ListEntry` was added after initial
+/// release. Backward compatibility for files written before that field existed
+/// is handled by `#[serde(default)]` on each entry struct's `data` field, so
+/// `DataValueDe` itself needs no special handling for it.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum DataValueDe {
@@ -750,7 +755,7 @@ impl KvStore {
                                 id: next_id,
                                 value: value.to_string(),
                                 ts: ts.to_rfc3339(),
-                                data: data.clone(),
+                                data,
                             },
                         );
                         // Drop oldest at max_entries
