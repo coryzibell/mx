@@ -1009,10 +1009,7 @@ impl KvStore {
             }
             let take = n.min(filtered.len());
             let mut rng = rand::rng();
-            filtered
-                .choose_multiple(&mut rng, take)
-                .cloned()
-                .collect()
+            filtered.choose_multiple(&mut rng, take).cloned().collect()
         }
 
         match def.value_type {
@@ -1591,14 +1588,13 @@ impl KvStore {
                             0 => None,
                             1 => {
                                 // Re-find to satisfy borrow checker (collected vec consumes &mut)
-                                entries
-                                    .iter_mut()
-                                    .find(|e| e.hash.starts_with(h.as_str()))
+                                entries.iter_mut().find(|e| e.hash.starts_with(h.as_str()))
                             }
                             n => {
                                 return Err(KvError::Other(anyhow::anyhow!(
                                     "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                    h, n
+                                    h,
+                                    n
                                 )));
                             }
                         }
@@ -1611,7 +1607,8 @@ impl KvStore {
                     }
                     None => Err(KvError::Other(anyhow::anyhow!(
                         "entry not found for ID {:?} in key '{}'",
-                        id, key
+                        id,
+                        key
                     ))),
                 }
             }
@@ -1625,15 +1622,12 @@ impl KvStore {
                             .collect();
                         match matches.len() {
                             0 => None,
-                            1 => {
-                                items
-                                    .iter_mut()
-                                    .find(|e| e.hash.starts_with(h.as_str()))
-                            }
+                            1 => items.iter_mut().find(|e| e.hash.starts_with(h.as_str())),
                             n => {
                                 return Err(KvError::Other(anyhow::anyhow!(
                                     "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                    h, n
+                                    h,
+                                    n
                                 )));
                             }
                         }
@@ -1646,7 +1640,8 @@ impl KvStore {
                     }
                     None => Err(KvError::Other(anyhow::anyhow!(
                         "entry not found for ID {:?} in key '{}'",
-                        id, key
+                        id,
+                        key
                     ))),
                 }
             }
@@ -2215,7 +2210,9 @@ max_entries = 5
     #[test]
     fn history_push_and_last() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store.push("flavor_history", "lapsang", None, None).unwrap();
 
         let last = store.last("flavor_history", 1, None, &[]).unwrap();
@@ -2290,7 +2287,9 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         // max_entries = 5
         for i in 0..8 {
-            store.push("tags", &format!("item_{}", i), None, None).unwrap();
+            store
+                .push("tags", &format!("item_{}", i), None, None)
+                .unwrap();
         }
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -2386,7 +2385,9 @@ max_entries = 5
         store.data.schema_id = "test".to_string();
         store.inc("warmth", 7).unwrap();
         store.set("current_mood", "happy", None).unwrap();
-        store.push("flavor_history", "earl grey", None, None).unwrap();
+        store
+            .push("flavor_history", "earl grey", None, None)
+            .unwrap();
         store.save().unwrap();
 
         // Reload and verify
@@ -2603,7 +2604,9 @@ max_entries = 5
     #[test]
     fn remove_history_by_value() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store.push("flavor_history", "lapsang", None, None).unwrap();
         store
             .push("flavor_history", "bergamot vanilla", None, None)
@@ -2661,7 +2664,9 @@ max_entries = 5
     #[test]
     fn search_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store.push("flavor_history", "lapsang", None, None).unwrap();
         store
             .push("flavor_history", "bergamot vanilla", None, None)
@@ -2706,9 +2711,13 @@ max_entries = 5
     #[test]
     fn get_by_id_single_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store.push("flavor_history", "lapsang", None, None).unwrap();
-        store.push("flavor_history", "earl grey", None, None).unwrap();
+        store
+            .push("flavor_history", "earl grey", None, None)
+            .unwrap();
 
         // Get the ID of the second entry
         let target_id = match store.get("flavor_history").unwrap() {
@@ -3113,7 +3122,9 @@ max_entries = 5
     #[test]
     fn format_value_history_shows_ids() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
 
         let output = format_value(store.get("flavor_history").unwrap());
         // Should contain "N: bergamot (timestamp)"
@@ -3129,8 +3140,12 @@ max_entries = 5
         let ts = DateTime::parse_from_rfc3339("2026-04-22T14:15:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "dsi-panel", ts, None, None).unwrap();
-        store.push_with_ts("tags", "anytype", ts, None, None).unwrap();
+        store
+            .push_with_ts("tags", "dsi-panel", ts, None, None)
+            .unwrap();
+        store
+            .push_with_ts("tags", "anytype", ts, None, None)
+            .unwrap();
 
         let compact = store.dump_compact();
         assert!(compact.contains("tags=[dsi-panel@14:15,anytype@14:15]"));
@@ -3143,7 +3158,9 @@ max_entries = 5
     #[test]
     fn set_get_memory_on_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
 
         // Initially no memory pointer
         assert_eq!(store.get_memory("flavor_history").unwrap(), None);
@@ -3214,7 +3231,9 @@ max_entries = 5
     #[test]
     fn clear_memory_with_empty_string() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
 
         // Set then clear
         store
@@ -3247,7 +3266,9 @@ max_entries = 5
     #[test]
     fn memory_not_serialized_when_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
 
@@ -3408,7 +3429,9 @@ max_entries = 5
     #[test]
     fn memory_survives_push() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
@@ -3426,7 +3449,9 @@ max_entries = 5
     #[test]
     fn memory_survives_reset() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
@@ -3874,8 +3899,12 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("flavor_history", "a", ts, None, None).unwrap();
-        store.push_with_ts("flavor_history", "b", ts, None, None).unwrap();
+        store
+            .push_with_ts("flavor_history", "a", ts, None, None)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "b", ts, None, None)
+            .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         // Both entries match the range, but count=1 limits output
@@ -3894,7 +3923,9 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "rust-in", ts_in, None, None).unwrap();
+        store
+            .push_with_ts("tags", "rust-in", ts_in, None, None)
+            .unwrap();
         store
             .push_with_ts("tags", "rust-out", ts_out, None, None)
             .unwrap();
@@ -3918,8 +3949,12 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "inside", ts_in, None, None).unwrap();
-        store.push_with_ts("tags", "outside", ts_out, None, None).unwrap();
+        store
+            .push_with_ts("tags", "inside", ts_in, None, None)
+            .unwrap();
+        store
+            .push_with_ts("tags", "outside", ts_out, None, None)
+            .unwrap();
         store
             .push_with_ts("tags", "also-inside", ts_in, None, None)
             .unwrap();
@@ -4095,8 +4130,12 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "inside", ts_in, None, None).unwrap();
-        store.push_with_ts("tags", "outside", ts_out, None, None).unwrap();
+        store
+            .push_with_ts("tags", "inside", ts_in, None, None)
+            .unwrap();
+        store
+            .push_with_ts("tags", "outside", ts_out, None, None)
+            .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.random("tags", 10, Some(&range), &[]).unwrap();
@@ -4169,7 +4208,9 @@ max_entries = 5
     fn push_with_data_stores_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active", "tags": ["rust", "kv"]});
-        store.push("tags", "my-item", Some(data.clone()), None).unwrap();
+        store
+            .push("tags", "my-item", Some(data.clone()), None)
+            .unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4215,7 +4256,9 @@ max_entries = 5
     fn data_round_trip_through_save() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": 1, "tags": ["a", "b"]});
-        store.push("tags", "item", Some(data.clone()), None).unwrap();
+        store
+            .push("tags", "item", Some(data.clone()), None)
+            .unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
 
@@ -4500,7 +4543,12 @@ max_entries = 5
             .push("tags", "a", Some(serde_json::json!({"type": "bug"})), None)
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"type": "feature"})), None)
+            .push(
+                "tags",
+                "b",
+                Some(serde_json::json!({"type": "feature"})),
+                None,
+            )
             .unwrap();
 
         let clauses = vec![("type".to_string(), "bug".to_string())];
@@ -4544,13 +4592,28 @@ max_entries = 5
     fn last_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"status": "active"})), None)
+            .push(
+                "tags",
+                "a",
+                Some(serde_json::json!({"status": "active"})),
+                None,
+            )
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"status": "closed"})), None)
+            .push(
+                "tags",
+                "b",
+                Some(serde_json::json!({"status": "closed"})),
+                None,
+            )
             .unwrap();
         store
-            .push("tags", "c", Some(serde_json::json!({"status": "active"})), None)
+            .push(
+                "tags",
+                "c",
+                Some(serde_json::json!({"status": "active"})),
+                None,
+            )
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
@@ -4609,13 +4672,28 @@ max_entries = 5
     fn count_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"status": "active"})), None)
+            .push(
+                "tags",
+                "a",
+                Some(serde_json::json!({"status": "active"})),
+                None,
+            )
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"status": "closed"})), None)
+            .push(
+                "tags",
+                "b",
+                Some(serde_json::json!({"status": "closed"})),
+                None,
+            )
             .unwrap();
         store
-            .push("tags", "c", Some(serde_json::json!({"status": "active"})), None)
+            .push(
+                "tags",
+                "c",
+                Some(serde_json::json!({"status": "active"})),
+                None,
+            )
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
@@ -4630,7 +4708,9 @@ max_entries = 5
     fn search_hits_carry_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active"});
-        store.push("tags", "item", Some(data.clone()), None).unwrap();
+        store
+            .push("tags", "item", Some(data.clone()), None)
+            .unwrap();
 
         let hits = store.search("tags", Some("item"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -4641,7 +4721,9 @@ max_entries = 5
     fn get_entries_by_id_carries_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": "high"});
-        store.push("tags", "item", Some(data.clone()), None).unwrap();
+        store
+            .push("tags", "item", Some(data.clone()), None)
+            .unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Numeric(1)])
@@ -4913,7 +4995,9 @@ max_entries = 5
     #[test]
     fn hash_stored_on_history_entry() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("flavor_history", "bergamot", None, None).unwrap();
+        let result = store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -5006,7 +5090,11 @@ max_entries = 5
         let result = store.push("tags", "alpha", None, None).unwrap();
 
         store
-            .set_entry_memory("tags", &IdRef::Numeric(result.id), Some("kn-set1".to_string()))
+            .set_entry_memory(
+                "tags",
+                &IdRef::Numeric(result.id),
+                Some("kn-set1".to_string()),
+            )
             .unwrap();
 
         match store.get("tags").unwrap() {
@@ -5043,8 +5131,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.push("tags", "alpha", None, None).unwrap();
 
-        let result =
-            store.set_entry_memory("tags", &IdRef::Numeric(999), Some("kn-x".to_string()));
+        let result = store.set_entry_memory("tags", &IdRef::Numeric(999), Some("kn-x".to_string()));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("entry not found"));
     }
@@ -5052,7 +5139,9 @@ max_entries = 5
     #[test]
     fn set_entry_memory_history_by_numeric_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("flavor_history", "bergamot", None, None).unwrap();
+        let result = store
+            .push("flavor_history", "bergamot", None, None)
+            .unwrap();
 
         store
             .set_entry_memory(
@@ -5185,8 +5274,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         store.inc("warmth", 1).unwrap();
 
-        let result =
-            store.set_entry_memory("warmth", &IdRef::Numeric(1), Some("kn-x".to_string()));
+        let result = store.set_entry_memory("warmth", &IdRef::Numeric(1), Some("kn-x".to_string()));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }

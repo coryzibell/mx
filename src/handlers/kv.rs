@@ -392,7 +392,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Push { key, value, data, memory } => {
+        KvCommands::Push {
+            key,
+            value,
+            data,
+            memory,
+        } => {
             // Parse --data as JSON object if provided
             let parsed_data = match data {
                 Some(ref json_str) => {
