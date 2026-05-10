@@ -1630,6 +1630,15 @@ pub enum ContentTypesCommands {
     },
 }
 
+/// Key type for `kv push --create`.
+#[derive(Clone, Debug, ValueEnum)]
+pub enum CreateType {
+    /// History (append-only, timestamped)
+    History,
+    /// List (push/pop, ordered)
+    List,
+}
+
 /// Output format for `kv dump`.
 #[derive(Clone, Debug, ValueEnum)]
 pub enum DumpFormat {
@@ -1744,7 +1753,7 @@ pub enum KvCommands {
 
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
-        create: Option<String>,
+        create: Option<CreateType>,
 
         /// Maximum entries for the new key (only with --create)
         #[arg(long, requires = "create")]

@@ -657,6 +657,12 @@ impl KvStore {
         if key.is_empty() {
             return Err(KvError::Other(anyhow::anyhow!("key name cannot be empty")));
         }
+        if key.len() > 128 {
+            return Err(KvError::Other(anyhow::anyhow!(
+                "key name too long ({} chars, max 128)",
+                key.len()
+            )));
+        }
         if key.contains('.') {
             return Err(KvError::Other(anyhow::anyhow!(
                 "key name '{}' cannot contain dots -- they require TOML quoting and create confusion",
@@ -688,14 +694,6 @@ impl KvStore {
         value_type: &str,
         max_entries: Option<usize>,
     ) -> Result<(), KvError> {
-        // Validate type
-        if value_type != "history" && value_type != "list" {
-            return Err(KvError::Other(anyhow::anyhow!(
-                "--create type must be 'history' or 'list', got '{}'",
-                value_type
-            )));
-        }
-
         // Validate key name
         Self::validate_key_name(key)?;
 
@@ -728,6 +726,7 @@ impl KvStore {
                 e
             ))
         })?;
+        drop(f);
 
         // Re-read and re-parse the schema to update in-memory state
         let schema_str = fs::read_to_string(&self.schema_path).map_err(|e| {
@@ -5519,15 +5518,9 @@ max_entries = 5
         assert_eq!(store.schema.keys["tags"].value_type, original_type);
     }
 
-    #[test]
-    fn add_key_to_schema_invalid_type_rejected() {
-        let (mut store, _dir) = setup_store(test_schema());
-
-        let err = store
-            .add_key_to_schema("stuff", "counter", None)
-            .unwrap_err();
-        assert!(err.to_string().contains("'history' or 'list'"));
-    }
+    // Type validation for --create is now enforced by clap's ValueEnum
+    // (CreateType), so there is no add_key_to_schema_invalid_type_rejected
+    // test -- invalid types cannot reach add_key_to_schema.
 
     #[test]
     fn add_key_to_schema_dotted_name_rejected() {
@@ -5613,5 +5606,61 @@ max_entries = 5
             .add_key_to_schema("my-key_v2", "history", None)
             .unwrap();
         assert!(store.schema.keys.contains_key("my-key_v2"));
+    }
+
+    #[test]
+    fn add_key_to_schema_name_too_long_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let long_name = "a".repeat(129);
+
+        let err = store
+            .add_key_to_schema(&long_name, "history", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("key name too long"));
+        assert!(err.to_string().contains("129 chars"));
+        assert!(err.to_string().contains("max 128"));
+    }
+
+    #[test]
+    fn add_key_to_schema_max_length_accepted() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let max_name = "a".repeat(128);
+
+        store
+            .add_key_to_schema(&max_name, "history", None)
+            .unwrap();
+        assert!(store.schema.keys.contains_key(max_name.as_str()));
+    }
+
+    #[test]
+    fn add_key_to_schema_without_trailing_newline() {
+        // S2: Schema file without trailing newline should still produce valid TOML
+        // after add_key_to_schema appends a new key block.
+        let schema_no_newline = "[keys.existing]\ntype = \"history\"";
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        // Write schema WITHOUT trailing newline
+        fs::write(&schema_path, schema_no_newline).unwrap();
+
+        let mut store = KvStore::load(&schema_path, &data_path).unwrap();
+        assert!(store.schema.keys.contains_key("existing"));
+
+        // Add a new key -- should not corrupt the file
+        store
+            .add_key_to_schema("newkey", "list", None)
+            .unwrap();
+
+        // Both keys should be present after re-parse
+        assert!(store.schema.keys.contains_key("existing"));
+        assert!(store.schema.keys.contains_key("newkey"));
+        assert_eq!(store.schema.keys["existing"].value_type, ValueType::History);
+        assert_eq!(store.schema.keys["newkey"].value_type, ValueType::List);
+
+        // Verify file on disk is valid TOML by reloading
+        let store2 = KvStore::load(&schema_path, &data_path).unwrap();
+        assert!(store2.schema.keys.contains_key("existing"));
+        assert!(store2.schema.keys.contains_key("newkey"));
     }
 }

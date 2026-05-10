@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::cli::{DumpFormat, KvCommands};
+use crate::cli::{CreateType, DumpFormat, KvCommands};
 use crate::kv::{self, IdRef, KvError, KvStore, resolve_time_range};
 
 /// Map a KvError to the appropriate exit code.
@@ -400,11 +400,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             max_entries,
         } => {
             // Handle --create: auto-add key to schema if missing
-            if let Some(ref type_str) = create {
-                if type_str != "history" && type_str != "list" {
-                    eprintln!("Error: --create type must be 'history' or 'list'");
-                    return Ok(kv::EXIT_INVALID_INPUT);
-                }
+            if let Some(ref create_type) = create {
+                let type_str = match create_type {
+                    CreateType::History => "history",
+                    CreateType::List => "list",
+                };
                 if !store.schema.keys.contains_key(&key)
                     && let Err(e) = store.add_key_to_schema(&key, type_str, max_entries)
                 {
