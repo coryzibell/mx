@@ -5300,8 +5300,11 @@ max_entries = 5
         }
 
         // Setting memory by the shared prefix "XYZ" should return an ambiguity error.
-        let result =
-            store.set_entry_memory("tags", &IdRef::Hash("XYZ".to_string()), Some("kn-x".to_string()));
+        let result = store.set_entry_memory(
+            "tags",
+            &IdRef::Hash("XYZ".to_string()),
+            Some("kn-x".to_string()),
+        );
         assert!(result.is_err(), "expected ambiguity error");
         let err_msg = result.unwrap_err().to_string();
         assert!(
