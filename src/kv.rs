@@ -5586,9 +5586,7 @@ max_entries = 5
         store.save().unwrap();
 
         // Now add a new key to schema
-        store
-            .add_key_to_schema("jokes", "list", None)
-            .unwrap();
+        store.add_key_to_schema("jokes", "list", None).unwrap();
 
         // Original keys should all still be present and correct
         assert_eq!(store.schema.keys["warmth"].value_type, ValueType::Counter);
