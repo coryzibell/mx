@@ -415,9 +415,8 @@ pub struct CountResult {
 pub fn generate_entry_hash(key: &str, ts: &str, id: u64) -> String {
     let input = format!("{}:{}:{}", key, ts, id);
     let hash_bytes = hash(input.as_bytes(), HashAlgorithm::Blake3);
-    let registry = DICT_REGISTRY.get_or_init(|| {
-        DictionaryRegistry::load_default().expect("base-d dictionaries")
-    });
+    let registry = DICT_REGISTRY
+        .get_or_init(|| DictionaryRegistry::load_default().expect("base-d dictionaries"));
     let dict = registry.dictionary("base58").expect("base58 dictionary");
     encode(&hash_bytes[..4], &dict)
 }
@@ -1138,7 +1137,8 @@ impl KvStore {
                                 n => {
                                     return Err(KvError::Other(anyhow::anyhow!(
                                         "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                        h, n
+                                        h,
+                                        n
                                     )));
                                 }
                             }
@@ -1177,7 +1177,8 @@ impl KvStore {
                                 n => {
                                     return Err(KvError::Other(anyhow::anyhow!(
                                         "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                        h, n
+                                        h,
+                                        n
                                     )));
                                 }
                             }
