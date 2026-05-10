@@ -1700,6 +1700,10 @@ pub enum KvCommands {
         /// Link a memory entry (kn- ID) to this key, or "" to clear
         #[arg(long)]
         memory: Option<String>,
+
+        /// Target a specific entry by ID (numeric or kv-HASH) for --memory
+        #[arg(long)]
+        id: Option<String>,
     },
 
     /// Increment a counter
@@ -1733,6 +1737,10 @@ pub enum KvCommands {
         /// Attach structured JSON data to this entry
         #[arg(long)]
         data: Option<String>,
+
+        /// Link a memory entry (kn- ID) to this entry
+        #[arg(long)]
+        memory: Option<String>,
     },
 
     /// Pop the last value from a list

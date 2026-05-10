@@ -342,6 +342,7 @@ impl<'de> Deserialize<'de> for DataValue {
                                 value: s,
                                 ts: String::new(),
                                 data: None,
+                                memory: None,
                             }
                         }
                     })
@@ -365,6 +366,8 @@ pub struct HistoryEntry {
     pub ts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -376,6 +379,8 @@ pub struct ListEntry {
     pub ts: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
 }
 
 /// Remove result for the CLI layer to format output.
@@ -385,13 +390,14 @@ pub struct RemoveResult {
 }
 
 /// Search result entry.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SearchHit {
     pub id: u64,
     pub hash: String,
     pub value: String,
     pub ts: String,
     pub data: Option<serde_json::Value>,
+    pub memory: Option<String>,
 }
 
 /// Count result.
@@ -796,8 +802,9 @@ impl KvStore {
         key: &str,
         value: &str,
         data: Option<serde_json::Value>,
+        memory: Option<String>,
     ) -> Result<PushResult, KvError> {
-        self.push_with_ts(key, value, Utc::now(), data)
+        self.push_with_ts(key, value, Utc::now(), data, memory)
     }
 
     /// Push with an explicit timestamp (used by tests).
@@ -807,6 +814,7 @@ impl KvStore {
         value: &str,
         ts: DateTime<Utc>,
         data: Option<serde_json::Value>,
+        memory: Option<String>,
     ) -> Result<PushResult, KvError> {
         let def = self.key_def(key)?.clone();
         let ts_str = ts.to_rfc3339();
@@ -831,6 +839,7 @@ impl KvStore {
                                 value: value.to_string(),
                                 ts: ts_str,
                                 data,
+                                memory,
                             },
                         );
                         // Drop oldest at max_entries
@@ -862,6 +871,7 @@ impl KvStore {
                             value: value.to_string(),
                             ts: ts_str,
                             data,
+                            memory,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
@@ -899,7 +909,7 @@ impl KvStore {
         }
     }
 
-    /// Get the last N entries from a history or list, formatted with IDs and timestamps.
+    /// Get the last N entries from a history or list as `SearchHit`s.
     ///
     /// When `range` is provided, entries are filtered by timestamp first, then
     /// the `count` limit is applied to the filtered set.
@@ -910,7 +920,7 @@ impl KvStore {
         count: usize,
         range: Option<&TimeRange>,
         where_clauses: &[(String, String)],
-    ) -> Result<Vec<String>, KvError> {
+    ) -> Result<Vec<SearchHit>, KvError> {
         let def = self.key_def(key)?;
 
         match def.value_type {
@@ -929,7 +939,14 @@ impl KvStore {
                     let start = filtered.len().saturating_sub(count);
                     Ok(filtered[start..]
                         .iter()
-                        .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
+                        .map(|e| SearchHit {
+                            id: e.id,
+                            hash: e.hash.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
+                        })
                         .collect())
                 }
                 _ => Ok(vec![]),
@@ -946,7 +963,14 @@ impl KvStore {
                     let start = filtered.len().saturating_sub(count);
                     Ok(filtered[start..]
                         .iter()
-                        .map(|e| format_entry_line(e.id, &e.hash, &e.value, &e.ts, &e.data))
+                        .map(|e| SearchHit {
+                            id: e.id,
+                            hash: e.hash.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
+                        })
                         .collect())
                 }
                 _ => Ok(vec![]),
@@ -959,7 +983,7 @@ impl KvStore {
         }
     }
 
-    /// Get random entries from a history or list, formatted with IDs and timestamps.
+    /// Get random entries from a history or list as `SearchHit`s.
     ///
     /// When `range` is provided, entries are filtered by timestamp first, then
     /// `count` random items are sampled from the filtered set. If fewer entries
@@ -972,45 +996,41 @@ impl KvStore {
         count: usize,
         range: Option<&TimeRange>,
         where_clauses: &[(String, String)],
-    ) -> Result<Vec<String>, KvError> {
+    ) -> Result<Vec<SearchHit>, KvError> {
         use rand::seq::IndexedRandom;
 
         let def = self.key_def(key)?;
 
-        // Shared sampling + formatting closure. Takes a filtered vec of
-        // (value, id, hash, ts, data) tuples and returns formatted strings.
-        let sample = |filtered: Vec<(&str, u64, &str, &str, &Option<serde_json::Value>)>,
-                      n: usize|
-         -> Vec<String> {
+        /// Shared sampling helper. Takes a filtered vec of `SearchHit` references
+        /// and returns `count` randomly chosen hits (cloned).
+        fn sample_hits(filtered: &[SearchHit], n: usize) -> Vec<SearchHit> {
             if filtered.is_empty() {
                 return vec![];
             }
             let take = n.min(filtered.len());
             let mut rng = rand::rng();
-            let chosen: Vec<_> = filtered.choose_multiple(&mut rng, take).collect();
-            chosen
-                .into_iter()
-                .map(|(value, id, hash, ts, data)| format_entry_line(*id, hash, value, ts, data))
+            filtered
+                .choose_multiple(&mut rng, take)
+                .cloned()
                 .collect()
-        };
+        }
 
         match def.value_type {
             ValueType::History => match self.data.entries.get(key) {
                 Some(DataValue::History { entries, .. }) => {
-                    let filtered: Vec<_> = entries
+                    let filtered: Vec<SearchHit> = entries
                         .iter()
                         .filter(|e| {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| {
-                            (
-                                e.value.as_str(),
-                                e.id,
-                                e.hash.as_str(),
-                                e.ts.as_str(),
-                                &e.data,
-                            )
+                        .map(|e| SearchHit {
+                            id: e.id,
+                            hash: e.hash.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
                         })
                         .collect();
                     let available = filtered.len();
@@ -1022,26 +1042,25 @@ impl KvStore {
                             available, count
                         );
                     }
-                    Ok(sample(filtered, count))
+                    Ok(sample_hits(&filtered, count))
                 }
                 _ => Ok(vec![]),
             },
             ValueType::List => match self.data.entries.get(key) {
                 Some(DataValue::List { items, .. }) => {
-                    let filtered: Vec<_> = items
+                    let filtered: Vec<SearchHit> = items
                         .iter()
                         .filter(|e| {
                             range.is_none_or(|r| ts_in_range(&e.ts, r))
                                 && where_matches(&e.data, where_clauses)
                         })
-                        .map(|e| {
-                            (
-                                e.value.as_str(),
-                                e.id,
-                                e.hash.as_str(),
-                                e.ts.as_str(),
-                                &e.data,
-                            )
+                        .map(|e| SearchHit {
+                            id: e.id,
+                            hash: e.hash.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
                         })
                         .collect();
                     let available = filtered.len();
@@ -1053,7 +1072,7 @@ impl KvStore {
                             available, count
                         );
                     }
-                    Ok(sample(filtered, count))
+                    Ok(sample_hits(&filtered, count))
                 }
                 _ => Ok(vec![]),
             },
@@ -1254,6 +1273,7 @@ impl KvStore {
                         value: e.value.clone(),
                         ts: e.ts.clone(),
                         data: e.data.clone(),
+                        memory: e.memory.clone(),
                     });
                 }
             }
@@ -1276,6 +1296,7 @@ impl KvStore {
                         value: e.value.clone(),
                         ts: e.ts.clone(),
                         data: e.data.clone(),
+                        memory: e.memory.clone(),
                     });
                 }
             }
@@ -1337,6 +1358,7 @@ impl KvStore {
                             value: e.value.clone(),
                             ts: e.ts.clone(),
                             data: e.data.clone(),
+                            memory: e.memory.clone(),
                         });
                     }
                 }
@@ -1350,6 +1372,7 @@ impl KvStore {
                             value: e.value.clone(),
                             ts: e.ts.clone(),
                             data: e.data.clone(),
+                            memory: e.memory.clone(),
                         });
                     }
                 }
@@ -1527,6 +1550,110 @@ impl KvStore {
                 })
             }
             None => Ok(None),
+        }
+    }
+
+    /// Set or clear the memory pointer on a specific entry within a history or list.
+    ///
+    /// Pass `None` (or `Some("")`) to clear the pointer.
+    /// Returns `KvError::Other` if the entry is not found.
+    pub fn set_entry_memory(
+        &mut self,
+        key: &str,
+        id: &IdRef,
+        memory: Option<String>,
+    ) -> Result<(), KvError> {
+        let def = self.key_def(key)?;
+        match def.value_type {
+            ValueType::History | ValueType::List => {}
+            _ => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list".to_string(),
+                    got: def.value_type.to_string(),
+                });
+            }
+        }
+
+        // Normalize empty string to None (clearing the link)
+        let memory = memory.filter(|s| !s.is_empty());
+
+        match self.data.entries.get_mut(key) {
+            Some(DataValue::History { entries, .. }) => {
+                let entry = match id {
+                    IdRef::Numeric(n) => entries.iter_mut().find(|e| e.id == *n),
+                    IdRef::Hash(h) => {
+                        let matches: Vec<_> = entries
+                            .iter_mut()
+                            .filter(|e| e.hash.starts_with(h.as_str()))
+                            .collect();
+                        match matches.len() {
+                            0 => None,
+                            1 => {
+                                // Re-find to satisfy borrow checker (collected vec consumes &mut)
+                                entries
+                                    .iter_mut()
+                                    .find(|e| e.hash.starts_with(h.as_str()))
+                            }
+                            n => {
+                                return Err(KvError::Other(anyhow::anyhow!(
+                                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                                    h, n
+                                )));
+                            }
+                        }
+                    }
+                };
+                match entry {
+                    Some(e) => {
+                        e.memory = memory;
+                        Ok(())
+                    }
+                    None => Err(KvError::Other(anyhow::anyhow!(
+                        "entry not found for ID {:?} in key '{}'",
+                        id, key
+                    ))),
+                }
+            }
+            Some(DataValue::List { items, .. }) => {
+                let entry = match id {
+                    IdRef::Numeric(n) => items.iter_mut().find(|e| e.id == *n),
+                    IdRef::Hash(h) => {
+                        let matches: Vec<_> = items
+                            .iter_mut()
+                            .filter(|e| e.hash.starts_with(h.as_str()))
+                            .collect();
+                        match matches.len() {
+                            0 => None,
+                            1 => {
+                                items
+                                    .iter_mut()
+                                    .find(|e| e.hash.starts_with(h.as_str()))
+                            }
+                            n => {
+                                return Err(KvError::Other(anyhow::anyhow!(
+                                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                                    h, n
+                                )));
+                            }
+                        }
+                    }
+                };
+                match entry {
+                    Some(e) => {
+                        e.memory = memory;
+                        Ok(())
+                    }
+                    None => Err(KvError::Other(anyhow::anyhow!(
+                        "entry not found for ID {:?} in key '{}'",
+                        id, key
+                    ))),
+                }
+            }
+            _ => Err(KvError::Other(anyhow::anyhow!(
+                "key '{}' has no entries",
+                key
+            ))),
         }
     }
 
@@ -2088,13 +2215,12 @@ max_entries = 5
     #[test]
     fn history_push_and_last() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
-        store.push("flavor_history", "lapsang", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store.push("flavor_history", "lapsang", None, None).unwrap();
 
         let last = store.last("flavor_history", 1, None, &[]).unwrap();
         assert_eq!(last.len(), 1);
-        // last now includes id and ts
-        assert!(last[0].contains("lapsang"));
+        assert_eq!(last[0].value, "lapsang");
 
         let last2 = store.last("flavor_history", 2, None, &[]).unwrap();
         assert_eq!(last2.len(), 2);
@@ -2104,10 +2230,10 @@ max_entries = 5
     fn history_max_entries_overflow() {
         let (mut store, _dir) = setup_store(test_schema());
         // max_entries = 3
-        store.push("flavor_history", "a", None).unwrap();
-        store.push("flavor_history", "b", None).unwrap();
-        store.push("flavor_history", "c", None).unwrap();
-        store.push("flavor_history", "d", None).unwrap();
+        store.push("flavor_history", "a", None, None).unwrap();
+        store.push("flavor_history", "b", None, None).unwrap();
+        store.push("flavor_history", "c", None, None).unwrap();
+        store.push("flavor_history", "d", None, None).unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -2129,10 +2255,10 @@ max_entries = 5
         let new_time = Utc::now() - chrono::Duration::minutes(10);
 
         store
-            .push_with_ts("flavor_history", "old_one", old_time, None)
+            .push_with_ts("flavor_history", "old_one", old_time, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "new_one", new_time, None)
+            .push_with_ts("flavor_history", "new_one", new_time, None, None)
             .unwrap();
 
         let results = store.since("flavor_history", "1h").unwrap();
@@ -2145,14 +2271,14 @@ max_entries = 5
     #[test]
     fn list_push_pop_last() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         let last = store.last("tags", 2, None, &[]).unwrap();
         assert_eq!(last.len(), 2);
-        assert!(last[0].contains("beta"));
-        assert!(last[1].contains("gamma"));
+        assert_eq!(last[0].value, "beta");
+        assert_eq!(last[1].value, "gamma");
 
         let popped = store.pop("tags").unwrap();
         assert!(popped.is_some());
@@ -2164,7 +2290,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         // max_entries = 5
         for i in 0..8 {
-            store.push("tags", &format!("item_{}", i), None).unwrap();
+            store.push("tags", &format!("item_{}", i), None, None).unwrap();
         }
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -2189,7 +2315,7 @@ max_entries = 5
     #[test]
     fn type_mismatch_push_on_counter() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("warmth", "value", None);
+        let result = store.push("warmth", "value", None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -2235,7 +2361,7 @@ max_entries = 5
     #[test]
     fn reset_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "test", None).unwrap();
+        store.push("flavor_history", "test", None, None).unwrap();
         store.reset("flavor_history").unwrap();
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => assert!(entries.is_empty()),
@@ -2260,7 +2386,7 @@ max_entries = 5
         store.data.schema_id = "test".to_string();
         store.inc("warmth", 7).unwrap();
         store.set("current_mood", "happy", None).unwrap();
-        store.push("flavor_history", "earl grey", None).unwrap();
+        store.push("flavor_history", "earl grey", None, None).unwrap();
         store.save().unwrap();
 
         // Reload and verify
@@ -2287,8 +2413,8 @@ max_entries = 5
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None).unwrap();
-        store.push_with_ts("tags", "rust", ts, None).unwrap();
+        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
+        store.push_with_ts("tags", "rust", ts, None, None).unwrap();
 
         let compact = store.dump_compact();
 
@@ -2315,7 +2441,7 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None)
+            .push_with_ts("flavor_history", "bergamot", ts, None, None)
             .unwrap();
 
         let compact = store.dump_compact();
@@ -2412,9 +2538,9 @@ max_entries = 5
     #[test]
     fn remove_list_by_value_first_match() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "alpha-2", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha-2", None, None).unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, false)
@@ -2436,9 +2562,9 @@ max_entries = 5
     #[test]
     fn remove_list_by_value_all_matches() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "alpha-2", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha-2", None, None).unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, true)
@@ -2457,9 +2583,9 @@ max_entries = 5
     #[test]
     fn remove_list_by_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         // Get the ID of "beta"
         let beta_id = match store.get("tags").unwrap() {
@@ -2477,10 +2603,10 @@ max_entries = 5
     #[test]
     fn remove_history_by_value() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
-        store.push("flavor_history", "lapsang", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store.push("flavor_history", "lapsang", None, None).unwrap();
         store
-            .push("flavor_history", "bergamot vanilla", None)
+            .push("flavor_history", "bergamot vanilla", None, None)
             .unwrap();
 
         let result = store
@@ -2499,8 +2625,8 @@ max_entries = 5
     #[test]
     fn remove_case_insensitive() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "Alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
+        store.push("tags", "Alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, false)
@@ -2522,9 +2648,9 @@ max_entries = 5
     #[test]
     fn search_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "rust-lang", None).unwrap();
-        store.push("tags", "focus", None).unwrap();
-        store.push("tags", "rust-tools", None).unwrap();
+        store.push("tags", "rust-lang", None, None).unwrap();
+        store.push("tags", "focus", None, None).unwrap();
+        store.push("tags", "rust-tools", None, None).unwrap();
 
         let hits = store.search("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(hits.len(), 2);
@@ -2535,10 +2661,10 @@ max_entries = 5
     #[test]
     fn search_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
-        store.push("flavor_history", "lapsang", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store.push("flavor_history", "lapsang", None, None).unwrap();
         store
-            .push("flavor_history", "bergamot vanilla", None)
+            .push("flavor_history", "bergamot vanilla", None, None)
             .unwrap();
 
         let hits = store
@@ -2550,9 +2676,9 @@ max_entries = 5
     #[test]
     fn search_case_insensitive() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "Rust", None).unwrap();
-        store.push("tags", "RUST-tools", None).unwrap();
-        store.push("tags", "python", None).unwrap();
+        store.push("tags", "Rust", None, None).unwrap();
+        store.push("tags", "RUST-tools", None, None).unwrap();
+        store.push("tags", "python", None, None).unwrap();
 
         let hits = store.search("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(hits.len(), 2);
@@ -2561,7 +2687,7 @@ max_entries = 5
     #[test]
     fn search_no_matches() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
 
         let hits = store.search("tags", Some("zzz"), None, &[]).unwrap();
         assert!(hits.is_empty());
@@ -2580,9 +2706,9 @@ max_entries = 5
     #[test]
     fn get_by_id_single_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
-        store.push("flavor_history", "lapsang", None).unwrap();
-        store.push("flavor_history", "earl grey", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
+        store.push("flavor_history", "lapsang", None, None).unwrap();
+        store.push("flavor_history", "earl grey", None, None).unwrap();
 
         // Get the ID of the second entry
         let target_id = match store.get("flavor_history").unwrap() {
@@ -2601,9 +2727,9 @@ max_entries = 5
     #[test]
     fn get_by_id_single_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         // Read the actual ID of the second entry from the store
         let target_id = match store.get("tags").unwrap() {
@@ -2622,9 +2748,9 @@ max_entries = 5
     #[test]
     fn get_by_id_range_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id(
@@ -2641,9 +2767,9 @@ max_entries = 5
     #[test]
     fn get_by_id_multi_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Numeric(1), IdRef::Numeric(3)])
@@ -2656,8 +2782,8 @@ max_entries = 5
     #[test]
     fn get_by_id_partial_match() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
 
         // Request IDs 1, 2, 99 — only 1 and 2 exist
         let hits = store
@@ -2672,7 +2798,7 @@ max_entries = 5
     #[test]
     fn get_by_id_all_not_found() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Numeric(99), IdRef::Numeric(100)])
@@ -2727,9 +2853,9 @@ max_entries = 5
     #[test]
     fn count_list_total() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None).unwrap();
-        store.push("tags", "b", None).unwrap();
-        store.push("tags", "c", None).unwrap();
+        store.push("tags", "a", None, None).unwrap();
+        store.push("tags", "b", None, None).unwrap();
+        store.push("tags", "c", None, None).unwrap();
 
         let result = store.count("tags", None, None, &[]).unwrap();
         assert_eq!(result.matched, 3);
@@ -2739,9 +2865,9 @@ max_entries = 5
     #[test]
     fn count_list_filtered() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "rust-lang", None).unwrap();
-        store.push("tags", "focus", None).unwrap();
-        store.push("tags", "rust-tools", None).unwrap();
+        store.push("tags", "rust-lang", None, None).unwrap();
+        store.push("tags", "focus", None, None).unwrap();
+        store.push("tags", "rust-tools", None, None).unwrap();
 
         let result = store.count("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(result.matched, 2);
@@ -2759,13 +2885,13 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts1, None)
+            .push_with_ts("flavor_history", "bergamot", ts1, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot vanilla", ts2, None)
+            .push_with_ts("flavor_history", "bergamot vanilla", ts2, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "lapsang", ts1, None)
+            .push_with_ts("flavor_history", "lapsang", ts1, None, None)
             .unwrap();
 
         let result = store
@@ -2807,9 +2933,9 @@ max_entries = 5
     #[test]
     fn history_ids_auto_increment() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "a", None).unwrap();
-        store.push("flavor_history", "b", None).unwrap();
-        store.push("flavor_history", "c", None).unwrap();
+        store.push("flavor_history", "a", None, None).unwrap();
+        store.push("flavor_history", "b", None, None).unwrap();
+        store.push("flavor_history", "c", None, None).unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -2829,9 +2955,9 @@ max_entries = 5
     #[test]
     fn list_ids_auto_increment() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None).unwrap();
-        store.push("tags", "b", None).unwrap();
-        store.push("tags", "c", None).unwrap();
+        store.push("tags", "a", None, None).unwrap();
+        store.push("tags", "b", None, None).unwrap();
+        store.push("tags", "c", None, None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -2846,9 +2972,9 @@ max_entries = 5
     #[test]
     fn list_ids_stable_after_remove() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None).unwrap();
-        store.push("tags", "b", None).unwrap();
-        store.push("tags", "c", None).unwrap();
+        store.push("tags", "a", None, None).unwrap();
+        store.push("tags", "b", None, None).unwrap();
+        store.push("tags", "c", None, None).unwrap();
 
         // Remove "b"
         store
@@ -2856,7 +2982,7 @@ max_entries = 5
             .unwrap();
 
         // Push "d" — should get id=4, not reuse id=2
-        store.push("tags", "d", None).unwrap();
+        store.push("tags", "d", None, None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -2952,7 +3078,7 @@ max_entries = 5
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None).unwrap();
+        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -2972,8 +3098,8 @@ max_entries = 5
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None).unwrap();
-        store.push_with_ts("tags", "rust", ts, None).unwrap();
+        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
+        store.push_with_ts("tags", "rust", ts, None, None).unwrap();
 
         let output = format_value(store.get("tags").unwrap());
         // New format: "1 [kv-XXXX]: focus (ts)"
@@ -2987,7 +3113,7 @@ max_entries = 5
     #[test]
     fn format_value_history_shows_ids() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
 
         let output = format_value(store.get("flavor_history").unwrap());
         // Should contain "N: bergamot (timestamp)"
@@ -3003,8 +3129,8 @@ max_entries = 5
         let ts = DateTime::parse_from_rfc3339("2026-04-22T14:15:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "dsi-panel", ts, None).unwrap();
-        store.push_with_ts("tags", "anytype", ts, None).unwrap();
+        store.push_with_ts("tags", "dsi-panel", ts, None, None).unwrap();
+        store.push_with_ts("tags", "anytype", ts, None, None).unwrap();
 
         let compact = store.dump_compact();
         assert!(compact.contains("tags=[dsi-panel@14:15,anytype@14:15]"));
@@ -3017,7 +3143,7 @@ max_entries = 5
     #[test]
     fn set_get_memory_on_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
 
         // Initially no memory pointer
         assert_eq!(store.get_memory("flavor_history").unwrap(), None);
@@ -3041,7 +3167,7 @@ max_entries = 5
     #[test]
     fn set_get_memory_on_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
 
         store
             .set_memory("tags", Some("kn-def456".to_string()))
@@ -3088,7 +3214,7 @@ max_entries = 5
     #[test]
     fn clear_memory_with_empty_string() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
 
         // Set then clear
         store
@@ -3109,7 +3235,7 @@ max_entries = 5
     #[test]
     fn clear_memory_with_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
 
         store
             .set_memory("tags", Some("kn-abc123".to_string()))
@@ -3121,7 +3247,7 @@ max_entries = 5
     #[test]
     fn memory_not_serialized_when_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
 
@@ -3223,7 +3349,7 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None)
+            .push_with_ts("flavor_history", "bergamot", ts, None, None)
             .unwrap();
         store
             .set_memory("flavor_history", Some("kn-def456".to_string()))
@@ -3249,7 +3375,7 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None)
+            .push_with_ts("flavor_history", "bergamot", ts, None, None)
             .unwrap();
         // No memory pointer set
 
@@ -3282,13 +3408,13 @@ max_entries = 5
     #[test]
     fn memory_survives_push() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
 
         // Push another entry
-        store.push("flavor_history", "lapsang", None).unwrap();
+        store.push("flavor_history", "lapsang", None, None).unwrap();
 
         // Memory pointer should still be set
         assert_eq!(
@@ -3300,7 +3426,7 @@ max_entries = 5
     #[test]
     fn memory_survives_reset() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "bergamot", None).unwrap();
+        store.push("flavor_history", "bergamot", None, None).unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
@@ -3728,16 +3854,16 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "inside", ts_in, None)
+            .push_with_ts("flavor_history", "inside", ts_in, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "outside", ts_out, None)
+            .push_with_ts("flavor_history", "outside", ts_out, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.last("flavor_history", 10, Some(&range), &[]).unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("inside"));
+        assert_eq!(results[0].value, "inside");
     }
 
     #[test]
@@ -3748,8 +3874,8 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("flavor_history", "a", ts, None).unwrap();
-        store.push_with_ts("flavor_history", "b", ts, None).unwrap();
+        store.push_with_ts("flavor_history", "a", ts, None, None).unwrap();
+        store.push_with_ts("flavor_history", "b", ts, None, None).unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         // Both entries match the range, but count=1 limits output
@@ -3768,9 +3894,9 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "rust-in", ts_in, None).unwrap();
+        store.push_with_ts("tags", "rust-in", ts_in, None, None).unwrap();
         store
-            .push_with_ts("tags", "rust-out", ts_out, None)
+            .push_with_ts("tags", "rust-out", ts_out, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -3792,22 +3918,22 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "inside", ts_in, None).unwrap();
-        store.push_with_ts("tags", "outside", ts_out, None).unwrap();
+        store.push_with_ts("tags", "inside", ts_in, None, None).unwrap();
+        store.push_with_ts("tags", "outside", ts_out, None, None).unwrap();
         store
-            .push_with_ts("tags", "also-inside", ts_in, None)
+            .push_with_ts("tags", "also-inside", ts_in, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.last("tags", 10, Some(&range), &[]).unwrap();
         assert_eq!(results.len(), 2);
-        assert!(results[0].contains("inside"));
-        assert!(results[1].contains("also-inside"));
+        assert_eq!(results[0].value, "inside");
+        assert_eq!(results[1].value, "also-inside");
 
         // count limit applies after time filter
         let results = store.last("tags", 1, Some(&range), &[]).unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("also-inside"));
+        assert_eq!(results[0].value, "also-inside");
     }
 
     #[test]
@@ -3822,10 +3948,10 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot-in", ts_in, None)
+            .push_with_ts("flavor_history", "bergamot-in", ts_in, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot-out", ts_out, None)
+            .push_with_ts("flavor_history", "bergamot-out", ts_out, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -3848,13 +3974,13 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts_in, None)
+            .push_with_ts("flavor_history", "bergamot", ts_in, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "lapsang", ts_in, None)
+            .push_with_ts("flavor_history", "lapsang", ts_in, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot earl", ts_out, None)
+            .push_with_ts("flavor_history", "bergamot earl", ts_out, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -3884,10 +4010,10 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "april", ts_apr, None)
+            .push_with_ts("flavor_history", "april", ts_apr, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "may", ts_may, None)
+            .push_with_ts("flavor_history", "may", ts_may, None, None)
             .unwrap();
 
         let range = parse_month("2026-04").unwrap();
@@ -3909,9 +4035,9 @@ max_entries = 5
     #[test]
     fn random_returns_requested_count() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         let results = store.random("tags", 2, None, &[]).unwrap();
         assert_eq!(results.len(), 2);
@@ -3920,8 +4046,8 @@ max_entries = 5
     #[test]
     fn random_returns_all_when_count_exceeds_available() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
 
         let results = store.random("tags", 10, None, &[]).unwrap();
         assert_eq!(results.len(), 2);
@@ -3946,16 +4072,16 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None)
+            .push_with_ts("flavor_history", "bergamot", ts, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "vanilla", ts, None)
+            .push_with_ts("flavor_history", "vanilla", ts, None, None)
             .unwrap();
 
         let results = store.random("flavor_history", 1, None, &[]).unwrap();
         assert_eq!(results.len(), 1);
-        // Result must contain one of the pushed values
-        assert!(results[0].contains("bergamot") || results[0].contains("vanilla"));
+        // Result must be one of the pushed values
+        assert!(results[0].value == "bergamot" || results[0].value == "vanilla");
     }
 
     #[test]
@@ -3969,13 +4095,13 @@ max_entries = 5
             .unwrap()
             .with_timezone(&Utc);
 
-        store.push_with_ts("tags", "inside", ts_in, None).unwrap();
-        store.push_with_ts("tags", "outside", ts_out, None).unwrap();
+        store.push_with_ts("tags", "inside", ts_in, None, None).unwrap();
+        store.push_with_ts("tags", "outside", ts_out, None, None).unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
         let results = store.random("tags", 10, Some(&range), &[]).unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("inside"));
+        assert_eq!(results[0].value, "inside");
     }
 
     #[test]
@@ -3990,10 +4116,10 @@ max_entries = 5
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "inside", ts_in, None)
+            .push_with_ts("flavor_history", "inside", ts_in, None, None)
             .unwrap();
         store
-            .push_with_ts("flavor_history", "outside", ts_out, None)
+            .push_with_ts("flavor_history", "outside", ts_out, None, None)
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -4001,7 +4127,7 @@ max_entries = 5
             .random("flavor_history", 10, Some(&range), &[])
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert!(results[0].contains("inside"));
+        assert_eq!(results[0].value, "inside");
     }
 
     // -- --since resolver --
@@ -4043,7 +4169,7 @@ max_entries = 5
     fn push_with_data_stores_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active", "tags": ["rust", "kv"]});
-        store.push("tags", "my-item", Some(data.clone())).unwrap();
+        store.push("tags", "my-item", Some(data.clone()), None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4058,7 +4184,7 @@ max_entries = 5
     #[test]
     fn push_without_data_stores_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "bare-item", None).unwrap();
+        store.push("tags", "bare-item", None, None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4074,7 +4200,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"mood": "focused"});
         store
-            .push("flavor_history", "bergamot", Some(data.clone()))
+            .push("flavor_history", "bergamot", Some(data.clone()), None)
             .unwrap();
 
         match store.get("flavor_history").unwrap() {
@@ -4089,7 +4215,7 @@ max_entries = 5
     fn data_round_trip_through_save() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": 1, "tags": ["a", "b"]});
-        store.push("tags", "item", Some(data.clone())).unwrap();
+        store.push("tags", "item", Some(data.clone()), None).unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
 
@@ -4260,6 +4386,7 @@ max_entries = 5
                 "tags",
                 "task-1",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
         store
@@ -4267,6 +4394,7 @@ max_entries = 5
                 "tags",
                 "task-2",
                 Some(serde_json::json!({"status": "closed"})),
+                None,
             )
             .unwrap();
         store
@@ -4274,6 +4402,7 @@ max_entries = 5
                 "tags",
                 "task-3",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
 
@@ -4292,6 +4421,7 @@ max_entries = 5
                 "tags",
                 "item-a",
                 Some(serde_json::json!({"labels": ["bug", "urgent"]})),
+                None,
             )
             .unwrap();
         store
@@ -4299,6 +4429,7 @@ max_entries = 5
                 "tags",
                 "item-b",
                 Some(serde_json::json!({"labels": ["feature"]})),
+                None,
             )
             .unwrap();
 
@@ -4311,12 +4442,13 @@ max_entries = 5
     #[test]
     fn search_with_where_excludes_entries_without_data() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "no-data", None).unwrap();
+        store.push("tags", "no-data", None, None).unwrap();
         store
             .push(
                 "tags",
                 "has-data",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
 
@@ -4334,6 +4466,7 @@ max_entries = 5
                 "tags",
                 "rust-fix",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
         store
@@ -4341,6 +4474,7 @@ max_entries = 5
                 "tags",
                 "rust-feature",
                 Some(serde_json::json!({"status": "closed"})),
+                None,
             )
             .unwrap();
         store
@@ -4348,6 +4482,7 @@ max_entries = 5
                 "tags",
                 "python-fix",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
 
@@ -4362,10 +4497,10 @@ max_entries = 5
     fn search_with_only_where_no_query() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"type": "bug"})))
+            .push("tags", "a", Some(serde_json::json!({"type": "bug"})), None)
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"type": "feature"})))
+            .push("tags", "b", Some(serde_json::json!({"type": "feature"})), None)
             .unwrap();
 
         let clauses = vec![("type".to_string(), "bug".to_string())];
@@ -4382,6 +4517,7 @@ max_entries = 5
                 "tags",
                 "match-both",
                 Some(serde_json::json!({"status": "active", "priority": "high"})),
+                None,
             )
             .unwrap();
         store
@@ -4389,6 +4525,7 @@ max_entries = 5
                 "tags",
                 "match-one",
                 Some(serde_json::json!({"status": "active", "priority": "low"})),
+                None,
             )
             .unwrap();
 
@@ -4407,20 +4544,20 @@ max_entries = 5
     fn last_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"status": "active"})))
+            .push("tags", "a", Some(serde_json::json!({"status": "active"})), None)
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"status": "closed"})))
+            .push("tags", "b", Some(serde_json::json!({"status": "closed"})), None)
             .unwrap();
         store
-            .push("tags", "c", Some(serde_json::json!({"status": "active"})))
+            .push("tags", "c", Some(serde_json::json!({"status": "active"})), None)
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
         let items = store.last("tags", 10, None, &clauses).unwrap();
         assert_eq!(items.len(), 2);
-        assert!(items[0].contains("a"));
-        assert!(items[1].contains("c"));
+        assert_eq!(items[0].value, "a");
+        assert_eq!(items[1].value, "c");
     }
 
     // -- random with where_clauses --
@@ -4433,6 +4570,7 @@ max_entries = 5
                 "tags",
                 "active-1",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
         store
@@ -4440,6 +4578,7 @@ max_entries = 5
                 "tags",
                 "closed-1",
                 Some(serde_json::json!({"status": "closed"})),
+                None,
             )
             .unwrap();
         store
@@ -4447,6 +4586,7 @@ max_entries = 5
                 "tags",
                 "active-2",
                 Some(serde_json::json!({"status": "active"})),
+                None,
             )
             .unwrap();
 
@@ -4456,9 +4596,9 @@ max_entries = 5
         // All returned items should contain "active-"
         for item in &items {
             assert!(
-                item.contains("active-"),
+                item.value.contains("active-"),
                 "Expected active item, got: {}",
-                item
+                item.value
             );
         }
     }
@@ -4469,13 +4609,13 @@ max_entries = 5
     fn count_with_where() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"status": "active"})))
+            .push("tags", "a", Some(serde_json::json!({"status": "active"})), None)
             .unwrap();
         store
-            .push("tags", "b", Some(serde_json::json!({"status": "closed"})))
+            .push("tags", "b", Some(serde_json::json!({"status": "closed"})), None)
             .unwrap();
         store
-            .push("tags", "c", Some(serde_json::json!({"status": "active"})))
+            .push("tags", "c", Some(serde_json::json!({"status": "active"})), None)
             .unwrap();
 
         let clauses = vec![("status".to_string(), "active".to_string())];
@@ -4490,7 +4630,7 @@ max_entries = 5
     fn search_hits_carry_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active"});
-        store.push("tags", "item", Some(data.clone())).unwrap();
+        store.push("tags", "item", Some(data.clone()), None).unwrap();
 
         let hits = store.search("tags", Some("item"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -4501,7 +4641,7 @@ max_entries = 5
     fn get_entries_by_id_carries_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": "high"});
-        store.push("tags", "item", Some(data.clone())).unwrap();
+        store.push("tags", "item", Some(data.clone()), None).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Numeric(1)])
@@ -4534,7 +4674,7 @@ max_entries = 5
     fn format_value_includes_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"k": "v"});
-        store.push("tags", "item", Some(data)).unwrap();
+        store.push("tags", "item", Some(data), None).unwrap();
 
         let formatted = format_value(store.get("tags").unwrap());
         assert!(formatted.contains("{\"k\":\"v\"}"));
@@ -4543,7 +4683,7 @@ max_entries = 5
     #[test]
     fn format_value_no_data_unchanged() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "plain-item", None).unwrap();
+        store.push("tags", "plain-item", None, None).unwrap();
 
         let formatted = format_value(store.get("tags").unwrap());
         assert!(formatted.contains("plain-item"));
@@ -4557,11 +4697,11 @@ max_entries = 5
     fn last_output_includes_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"x": 1});
-        store.push("tags", "item", Some(data)).unwrap();
+        store.push("tags", "item", Some(data), None).unwrap();
 
         let items = store.last("tags", 1, None, &[]).unwrap();
         assert_eq!(items.len(), 1);
-        assert!(items[0].contains("{\"x\":1}"));
+        assert_eq!(items[0].data, Some(serde_json::json!({"x": 1})));
     }
 
     // -- Hash ID tests --
@@ -4569,7 +4709,7 @@ max_entries = 5
     #[test]
     fn push_returns_push_result_with_hash_and_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
         assert_eq!(result.id, 1);
         assert!(!result.hash.is_empty());
         // Hash should be 5-6 base58 chars
@@ -4631,7 +4771,7 @@ max_entries = 5
     #[test]
     fn get_by_numeric_id_still_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Numeric(result.id)])
@@ -4643,7 +4783,7 @@ max_entries = 5
     #[test]
     fn get_by_hash_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Hash(result.hash.clone())])
@@ -4656,7 +4796,7 @@ max_entries = 5
     #[test]
     fn get_by_hash_prefix_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         // Use first 3 chars as prefix
         let prefix = &result.hash[..3];
@@ -4670,8 +4810,8 @@ max_entries = 5
     #[test]
     fn get_by_mixed_id_types() {
         let (mut store, _dir) = setup_store(test_schema());
-        let r1 = store.push("tags", "alpha", None).unwrap();
-        let r2 = store.push("tags", "beta", None).unwrap();
+        let r1 = store.push("tags", "alpha", None, None).unwrap();
+        let r2 = store.push("tags", "beta", None, None).unwrap();
 
         let hits = store
             .get_entries_by_id(
@@ -4685,9 +4825,9 @@ max_entries = 5
     #[test]
     fn remove_by_hash_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        let r2 = store.push("tags", "beta", None).unwrap();
-        store.push("tags", "gamma", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        let r2 = store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "gamma", None, None).unwrap();
 
         let result = store
             .remove("tags", None, Some(&IdRef::Hash(r2.hash.clone())), false)
@@ -4709,8 +4849,8 @@ max_entries = 5
     #[test]
     fn remove_by_ambiguous_hash_prefix_errors() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None).unwrap();
-        store.push("tags", "beta", None).unwrap();
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
 
         // Manually set both entries to share a hash prefix.
         match store.data.entries.get_mut("tags").unwrap() {
@@ -4740,21 +4880,17 @@ max_entries = 5
     #[test]
     fn hash_appears_in_last_output() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         let items = store.last("tags", 1, None, &[]).unwrap();
         assert_eq!(items.len(), 1);
-        assert!(
-            items[0].contains(&format!("[kv-{}]", result.hash)),
-            "output should contain hash: {}",
-            items[0]
-        );
+        assert_eq!(items[0].hash, result.hash);
     }
 
     #[test]
     fn hash_appears_in_search_output() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         let hits = store.search("tags", Some("alpha"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -4764,7 +4900,7 @@ max_entries = 5
     #[test]
     fn hash_stored_on_entry_structs() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None).unwrap();
+        let result = store.push("tags", "alpha", None, None).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4777,7 +4913,7 @@ max_entries = 5
     #[test]
     fn hash_stored_on_history_entry() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("flavor_history", "bergamot", None).unwrap();
+        let result = store.push("flavor_history", "bergamot", None, None).unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -4799,7 +4935,7 @@ max_entries = 5
         let hash;
         {
             let mut store = KvStore::load(&schema_path, &data_path).unwrap();
-            let result = store.push("tags", "alpha", None).unwrap();
+            let result = store.push("tags", "alpha", None, None).unwrap();
             hash = result.hash;
             store.save().unwrap();
         }
@@ -4809,6 +4945,273 @@ max_entries = 5
         match store2.data.entries.get("tags").unwrap() {
             DataValue::List { items, .. } => {
                 assert_eq!(items[0].hash, hash);
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    // -- Per-entry memory tests --
+
+    #[test]
+    fn push_with_memory_stores_on_entry() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .push("tags", "linked-item", None, Some("kn-abc123".to_string()))
+            .unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].memory, Some("kn-abc123".to_string()));
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn push_without_memory_has_none() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "plain-item", None, None).unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert!(items[0].memory.is_none());
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn push_history_with_memory() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .push(
+                "flavor_history",
+                "bergamot",
+                None,
+                Some("kn-hist123".to_string()),
+            )
+            .unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries[0].memory, Some("kn-hist123".to_string()));
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn set_entry_memory_by_numeric_id() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None, None).unwrap();
+
+        store
+            .set_entry_memory("tags", &IdRef::Numeric(result.id), Some("kn-set1".to_string()))
+            .unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].memory, Some("kn-set1".to_string()));
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn set_entry_memory_by_hash() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("tags", "alpha", None, None).unwrap();
+
+        store
+            .set_entry_memory(
+                "tags",
+                &IdRef::Hash(result.hash.clone()),
+                Some("kn-hash1".to_string()),
+            )
+            .unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].memory, Some("kn-hash1".to_string()));
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn set_entry_memory_not_found_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha", None, None).unwrap();
+
+        let result =
+            store.set_entry_memory("tags", &IdRef::Numeric(999), Some("kn-x".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("entry not found"));
+    }
+
+    #[test]
+    fn set_entry_memory_history_by_numeric_id() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.push("flavor_history", "bergamot", None, None).unwrap();
+
+        store
+            .set_entry_memory(
+                "flavor_history",
+                &IdRef::Numeric(result.id),
+                Some("kn-hist-set".to_string()),
+            )
+            .unwrap();
+
+        match store.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries[0].memory, Some("kn-hist-set".to_string()));
+            }
+            _ => panic!("Expected history"),
+        }
+    }
+
+    #[test]
+    fn per_entry_memory_in_search_hit() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .push("tags", "linked", None, Some("kn-search1".to_string()))
+            .unwrap();
+        store.push("tags", "plain", None, None).unwrap();
+
+        let hits = store.search("tags", Some("linked"), None, &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, Some("kn-search1".to_string()));
+
+        let hits = store.search("tags", Some("plain"), None, &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].memory.is_none());
+    }
+
+    #[test]
+    fn last_returns_search_hit_with_memory() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .push("tags", "with-mem", None, Some("kn-last1".to_string()))
+            .unwrap();
+        store.push("tags", "without-mem", None, None).unwrap();
+
+        let hits = store.last("tags", 2, None, &[]).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].memory, Some("kn-last1".to_string()));
+        assert!(hits[1].memory.is_none());
+    }
+
+    #[test]
+    fn random_returns_search_hit_with_memory() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .push("tags", "only-item", None, Some("kn-rand1".to_string()))
+            .unwrap();
+
+        let hits = store.random("tags", 1, None, &[]).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, Some("kn-rand1".to_string()));
+    }
+
+    #[test]
+    fn backward_compat_data_without_memory_field() {
+        // Simulate old data without memory field on entries
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        // Write data file without memory field on entries
+        let old_data = r#"{
+            "_schema": "test",
+            "_updated": "2026-01-01T00:00:00Z",
+            "tags": {
+                "items": [
+                    {"id": 1, "hash": "abc", "value": "old-item", "ts": "2026-01-01T00:00:00Z"}
+                ]
+            }
+        }"#;
+        fs::write(&data_path, old_data).unwrap();
+
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+        match store.data.entries.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].value, "old-item");
+                assert!(items[0].memory.is_none());
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn clear_entry_memory_with_empty_string() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store
+            .push("tags", "alpha", None, Some("kn-clear1".to_string()))
+            .unwrap();
+
+        // Set memory to empty string should clear it
+        store
+            .set_entry_memory("tags", &IdRef::Numeric(result.id), Some("".to_string()))
+            .unwrap();
+
+        match store.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert!(items[0].memory.is_none());
+            }
+            _ => panic!("Expected list"),
+        }
+    }
+
+    #[test]
+    fn get_entries_by_id_carries_memory() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let r1 = store
+            .push("tags", "with-mem", None, Some("kn-byid1".to_string()))
+            .unwrap();
+        store.push("tags", "without", None, None).unwrap();
+
+        let hits = store
+            .get_entries_by_id("tags", &[IdRef::Numeric(r1.id)])
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].memory, Some("kn-byid1".to_string()));
+    }
+
+    #[test]
+    fn set_entry_memory_type_mismatch() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.inc("warmth", 1).unwrap();
+
+        let result =
+            store.set_entry_memory("warmth", &IdRef::Numeric(1), Some("kn-x".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn entry_memory_persists_through_save_reload() {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("test.schema.toml");
+        let data_path = dir.path().join("test.data.json");
+
+        let mut f = fs::File::create(&schema_path).unwrap();
+        f.write_all(test_schema().as_bytes()).unwrap();
+
+        {
+            let mut store = KvStore::load(&schema_path, &data_path).unwrap();
+            store
+                .push("tags", "persistent", None, Some("kn-persist".to_string()))
+                .unwrap();
+            store.save().unwrap();
+        }
+
+        let store2 = KvStore::load(&schema_path, &data_path).unwrap();
+        match store2.data.entries.get("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                assert_eq!(items[0].memory, Some("kn-persist".to_string()));
             }
             _ => panic!("Expected list"),
         }
