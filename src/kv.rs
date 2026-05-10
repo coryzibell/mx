@@ -5460,7 +5460,7 @@ max_entries = 5
     #[test]
     fn add_key_to_schema_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        assert!(store.schema.keys.get("puns").is_none());
+        assert!(!store.schema.keys.contains_key("puns"));
 
         store.add_key_to_schema("puns", "history", None).unwrap();
 
@@ -5479,7 +5479,7 @@ max_entries = 5
     #[test]
     fn add_key_to_schema_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        assert!(store.schema.keys.get("items").is_none());
+        assert!(!store.schema.keys.contains_key("items"));
 
         store.add_key_to_schema("items", "list", None).unwrap();
 
@@ -5509,7 +5509,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
 
         // "tags" already exists as a list in the test schema
-        assert!(store.schema.keys.get("tags").is_some());
+        assert!(store.schema.keys.contains_key("tags"));
         let original_type = store.schema.keys["tags"].value_type;
 
         // Should succeed silently without changing anything
@@ -5612,6 +5612,6 @@ max_entries = 5
         store
             .add_key_to_schema("my-key_v2", "history", None)
             .unwrap();
-        assert!(store.schema.keys.get("my-key_v2").is_some());
+        assert!(store.schema.keys.contains_key("my-key_v2"));
     }
 }

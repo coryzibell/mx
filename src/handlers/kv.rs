@@ -405,10 +405,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     eprintln!("Error: --create type must be 'history' or 'list'");
                     return Ok(kv::EXIT_INVALID_INPUT);
                 }
-                if store.schema.keys.get(&key).is_none() {
-                    if let Err(e) = store.add_key_to_schema(&key, type_str, max_entries) {
-                        return handle_kv_err(e);
-                    }
+                if !store.schema.keys.contains_key(&key)
+                    && let Err(e) = store.add_key_to_schema(&key, type_str, max_entries)
+                {
+                    return handle_kv_err(e);
                 }
                 // If key already exists, silently ignore --create
             }
