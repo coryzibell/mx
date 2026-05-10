@@ -1702,7 +1702,7 @@ pub enum KvCommands {
         memory: Option<String>,
 
         /// Target a specific entry by ID (numeric or kv-HASH) for --memory
-        #[arg(long)]
+        #[arg(long, requires = "memory")]
         id: Option<String>,
     },
 

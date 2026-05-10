@@ -114,6 +114,10 @@ pub enum KvError {
         got: String,
     },
     SchemaMissing(PathBuf),
+    EntryNotFound {
+        key: String,
+        id: String,
+    },
     Other(anyhow::Error),
 }
 
@@ -130,6 +134,9 @@ impl std::fmt::Display for KvError {
             }
             KvError::SchemaMissing(path) => {
                 write!(f, "Schema file not found: {}", path.display())
+            }
+            KvError::EntryNotFound { key, id } => {
+                write!(f, "Entry not found: ID {} in key '{}'", id, key)
             }
             KvError::Other(e) => write!(f, "{}", e),
         }
@@ -1553,7 +1560,7 @@ impl KvStore {
     /// Set or clear the memory pointer on a specific entry within a history or list.
     ///
     /// Pass `None` (or `Some("")`) to clear the pointer.
-    /// Returns `KvError::Other` if the entry is not found.
+    /// Returns `KvError::EntryNotFound` if the entry is not found.
     pub fn set_entry_memory(
         &mut self,
         key: &str,
@@ -1605,11 +1612,10 @@ impl KvStore {
                         e.memory = memory;
                         Ok(())
                     }
-                    None => Err(KvError::Other(anyhow::anyhow!(
-                        "entry not found for ID {:?} in key '{}'",
-                        id,
-                        key
-                    ))),
+                    None => Err(KvError::EntryNotFound {
+                        key: key.to_string(),
+                        id: format!("{:?}", id),
+                    }),
                 }
             }
             Some(DataValue::List { items, .. }) => {
@@ -1638,17 +1644,16 @@ impl KvStore {
                         e.memory = memory;
                         Ok(())
                     }
-                    None => Err(KvError::Other(anyhow::anyhow!(
-                        "entry not found for ID {:?} in key '{}'",
-                        id,
-                        key
-                    ))),
+                    None => Err(KvError::EntryNotFound {
+                        key: key.to_string(),
+                        id: format!("{:?}", id),
+                    }),
                 }
             }
-            _ => Err(KvError::Other(anyhow::anyhow!(
-                "key '{}' has no entries",
-                key
-            ))),
+            _ => Err(KvError::EntryNotFound {
+                key: key.to_string(),
+                id: format!("{:?}", id),
+            }),
         }
     }
 
@@ -5133,7 +5138,7 @@ max_entries = 5
 
         let result = store.set_entry_memory("tags", &IdRef::Numeric(999), Some("kn-x".to_string()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("entry not found"));
+        assert!(result.unwrap_err().to_string().contains("Entry not found"));
     }
 
     #[test]
@@ -5277,6 +5282,38 @@ max_entries = 5
         let result = store.set_entry_memory("warmth", &IdRef::Numeric(1), Some("kn-x".to_string()));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
+    }
+
+    #[test]
+    fn set_entry_memory_ambiguous_hash_prefix_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+
+        // Manually set both entries to share a hash prefix.
+        match store.data.entries.get_mut("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                items[0].hash = "XYZaaa1".to_string();
+                items[1].hash = "XYZaaa2".to_string();
+            }
+            _ => panic!("Expected list"),
+        }
+
+        // Setting memory by the shared prefix "XYZ" should return an ambiguity error.
+        let result =
+            store.set_entry_memory("tags", &IdRef::Hash("XYZ".to_string()), Some("kn-x".to_string()));
+        assert!(result.is_err(), "expected ambiguity error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ambiguous"),
+            "error should mention ambiguity, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("matches 2 entries"),
+            "error should report match count, got: {}",
+            err_msg
+        );
     }
 
     #[test]

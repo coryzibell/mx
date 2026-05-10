@@ -13,6 +13,7 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::KeyNotFound(_) => Some(kv::EXIT_KEY_NOT_FOUND),
         KvError::TypeMismatch { .. } => Some(kv::EXIT_TYPE_MISMATCH),
         KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
+        KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::Other(_) => None,
     }
 }
@@ -290,11 +291,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             id,
         } => {
             // Per-entry memory: --id + --memory targets a specific entry
+            // (clap enforces that --id requires --memory at parse time)
             if let Some(ref id_str) = id {
-                if memory.is_none() {
-                    eprintln!("Error: --id requires --memory");
-                    return Ok(kv::EXIT_INVALID_INPUT);
-                }
                 let id_ref = match parse_single_id(id_str) {
                     Ok(r) => r,
                     Err(msg) => {
@@ -483,8 +481,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                 hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                             )
                         );
-                        if memory && let Some(ref mem) = hit.memory {
-                            print_resolved_memory(mem, verbose);
+                        if memory {
+                            if let Some(ref mem) = hit.memory {
+                                print_resolved_memory(mem, verbose);
+                            } else if hit.value.starts_with("kn-") {
+                                print_resolved_memory(&hit.value, verbose);
+                            }
                         }
                     }
                     if memory {
@@ -520,8 +522,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                 hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                             )
                         );
-                        if memory && let Some(ref mem) = hit.memory {
-                            print_resolved_memory(mem, verbose);
+                        if memory {
+                            if let Some(ref mem) = hit.memory {
+                                print_resolved_memory(mem, verbose);
+                            } else if hit.value.starts_with("kn-") {
+                                print_resolved_memory(&hit.value, verbose);
+                            }
                         }
                     }
                     if memory {
@@ -550,8 +556,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             &entry.data
                         )
                     );
-                    if memory && let Some(ref mem) = entry.memory {
-                        print_resolved_memory(mem, verbose);
+                    if memory {
+                        if let Some(ref mem) = entry.memory {
+                            print_resolved_memory(mem, verbose);
+                        } else if entry.value.starts_with("kn-") {
+                            print_resolved_memory(&entry.value, verbose);
+                        }
                     }
                 }
                 if memory {
@@ -659,8 +669,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                     hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                                 )
                             );
-                            if memory && let Some(ref mem) = hit.memory {
-                                print_resolved_memory(mem, verbose);
+                            if memory {
+                                if let Some(ref mem) = hit.memory {
+                                    print_resolved_memory(mem, verbose);
+                                } else if hit.value.starts_with("kn-") {
+                                    print_resolved_memory(&hit.value, verbose);
+                                }
                             }
                         }
                         if memory {
