@@ -20,6 +20,10 @@ use crate::cli::TimeRangeArgs;
 /// even if both schema and data fall back to the legacy location.
 static LEGACY_KV_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
 
+/// Cached dictionary registry for hash generation -- avoids re-allocating
+/// the HashMap on every `generate_entry_hash` call.
+static DICT_REGISTRY: OnceLock<DictionaryRegistry> = OnceLock::new();
+
 /// The single legacy-fallback warning copy. Lives here so the schema and data
 /// resolvers cannot drift apart.
 const LEGACY_KV_WARNING: &str = "note: reading kv from `~/.crewu/kv/` -- this default is moving to \
@@ -411,11 +415,11 @@ pub struct CountResult {
 pub fn generate_entry_hash(key: &str, ts: &str, id: u64) -> String {
     let input = format!("{}:{}:{}", key, ts, id);
     let hash_bytes = hash(input.as_bytes(), HashAlgorithm::Blake3);
-    let registry = DictionaryRegistry::load_default().expect("base-d dictionaries");
+    let registry = DICT_REGISTRY.get_or_init(|| {
+        DictionaryRegistry::load_default().expect("base-d dictionaries")
+    });
     let dict = registry.dictionary("base58").expect("base58 dictionary");
-    let full = encode(&hash_bytes[..4], &dict);
-    // base58 of 4 bytes is 5-6 chars; return as-is
-    full
+    encode(&hash_bytes[..4], &dict)
 }
 
 /// Result of a push operation, carrying both the numeric and hash IDs.
@@ -461,12 +465,14 @@ impl KvStore {
         };
 
         // Back-fill hashes for entries loaded without one (pre-hash data).
+        let mut needs_save = false;
         for (key, value) in &mut data.entries {
             match value {
                 DataValue::History { entries, .. } => {
                     for e in entries.iter_mut() {
                         if e.hash.is_empty() {
                             e.hash = generate_entry_hash(key, &e.ts, e.id);
+                            needs_save = true;
                         }
                     }
                 }
@@ -474,6 +480,7 @@ impl KvStore {
                     for e in items.iter_mut() {
                         if e.hash.is_empty() {
                             e.hash = generate_entry_hash(key, &e.ts, e.id);
+                            needs_save = true;
                         }
                     }
                 }
@@ -481,11 +488,17 @@ impl KvStore {
             }
         }
 
-        Ok(KvStore {
+        let mut store = KvStore {
             schema,
             data,
             data_path: data_path.to_path_buf(),
-        })
+        };
+
+        if needs_save {
+            store.save()?;
+        }
+
+        Ok(store)
     }
 
     /// Load from environment variables. Resolves {agent} placeholder.
@@ -1113,7 +1126,22 @@ impl KvStore {
                     let pos = match id_ref {
                         IdRef::Numeric(id) => entries.iter().position(|e| e.id == *id),
                         IdRef::Hash(h) => {
-                            entries.iter().position(|e| e.hash.starts_with(h.as_str()))
+                            let matches: Vec<usize> = entries
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| e.hash.starts_with(h.as_str()))
+                                .map(|(i, _)| i)
+                                .collect();
+                            match matches.len() {
+                                0 => None,
+                                1 => Some(matches[0]),
+                                n => {
+                                    return Err(KvError::Other(anyhow::anyhow!(
+                                        "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                                        h, n
+                                    )));
+                                }
+                            }
                         }
                     };
                     if let Some(pos) = pos {
@@ -1136,7 +1164,24 @@ impl KvStore {
                 if let Some(id_ref) = by_id {
                     let pos = match id_ref {
                         IdRef::Numeric(id) => items.iter().position(|e| e.id == *id),
-                        IdRef::Hash(h) => items.iter().position(|e| e.hash.starts_with(h.as_str())),
+                        IdRef::Hash(h) => {
+                            let matches: Vec<usize> = items
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, e)| e.hash.starts_with(h.as_str()))
+                                .map(|(i, _)| i)
+                                .collect();
+                            match matches.len() {
+                                0 => None,
+                                1 => Some(matches[0]),
+                                n => {
+                                    return Err(KvError::Other(anyhow::anyhow!(
+                                        "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                                        h, n
+                                    )));
+                                }
+                            }
+                        }
                     };
                     if let Some(pos) = pos {
                         removed.push(items.remove(pos).value);
@@ -4658,6 +4703,37 @@ max_entries = 5
             }
             _ => panic!("Expected list"),
         }
+    }
+
+    #[test]
+    fn remove_by_ambiguous_hash_prefix_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("tags", "alpha", None).unwrap();
+        store.push("tags", "beta", None).unwrap();
+
+        // Manually set both entries to share a hash prefix.
+        match store.data.entries.get_mut("tags").unwrap() {
+            DataValue::List { items, .. } => {
+                items[0].hash = "ABCxyz1".to_string();
+                items[1].hash = "ABCxyz2".to_string();
+            }
+            _ => panic!("Expected list"),
+        }
+
+        // Removing by the shared prefix "ABC" should return an ambiguity error.
+        let result = store.remove("tags", None, Some(&IdRef::Hash("ABC".to_string())), false);
+        assert!(result.is_err(), "expected ambiguity error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("ambiguous"),
+            "error should mention ambiguity, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("matches 2 entries"),
+            "error should report match count, got: {}",
+            err_msg
+        );
     }
 
     #[test]
