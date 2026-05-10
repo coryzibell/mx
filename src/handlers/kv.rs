@@ -14,6 +14,7 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::TypeMismatch { .. } => Some(kv::EXIT_TYPE_MISMATCH),
         KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
         KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
+        KvError::AmbiguousHash { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::Other(_) => None,
     }
 }

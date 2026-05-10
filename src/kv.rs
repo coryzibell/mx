@@ -118,6 +118,10 @@ pub enum KvError {
         key: String,
         id: String,
     },
+    AmbiguousHash {
+        prefix: String,
+        count: usize,
+    },
     Other(anyhow::Error),
 }
 
@@ -137,6 +141,13 @@ impl std::fmt::Display for KvError {
             }
             KvError::EntryNotFound { key, id } => {
                 write!(f, "Entry not found: ID {} in key '{}'", id, key)
+            }
+            KvError::AmbiguousHash { prefix, count } => {
+                write!(
+                    f,
+                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                    prefix, count
+                )
             }
             KvError::Other(e) => write!(f, "{}", e),
         }
@@ -1158,11 +1169,10 @@ impl KvStore {
                                 0 => None,
                                 1 => Some(matches[0]),
                                 n => {
-                                    return Err(KvError::Other(anyhow::anyhow!(
-                                        "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                        h,
-                                        n
-                                    )));
+                                    return Err(KvError::AmbiguousHash {
+                                        prefix: h.clone(),
+                                        count: n,
+                                    });
                                 }
                             }
                         }
@@ -1198,11 +1208,10 @@ impl KvStore {
                                 0 => None,
                                 1 => Some(matches[0]),
                                 n => {
-                                    return Err(KvError::Other(anyhow::anyhow!(
-                                        "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                        h,
-                                        n
-                                    )));
+                                    return Err(KvError::AmbiguousHash {
+                                        prefix: h.clone(),
+                                        count: n,
+                                    });
                                 }
                             }
                         }
@@ -1598,11 +1607,10 @@ impl KvStore {
                                 entries.iter_mut().find(|e| e.hash.starts_with(h.as_str()))
                             }
                             n => {
-                                return Err(KvError::Other(anyhow::anyhow!(
-                                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                    h,
-                                    n
-                                )));
+                                return Err(KvError::AmbiguousHash {
+                                    prefix: h.clone(),
+                                    count: n,
+                                });
                             }
                         }
                     }
@@ -1630,11 +1638,10 @@ impl KvStore {
                             0 => None,
                             1 => items.iter_mut().find(|e| e.hash.starts_with(h.as_str())),
                             n => {
-                                return Err(KvError::Other(anyhow::anyhow!(
-                                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
-                                    h,
-                                    n
-                                )));
+                                return Err(KvError::AmbiguousHash {
+                                    prefix: h.clone(),
+                                    count: n,
+                                });
                             }
                         }
                     }
