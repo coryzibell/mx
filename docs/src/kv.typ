@@ -22,8 +22,8 @@ Every key has a type declared in the schema. Five types are supported:
 
 / string: A single text value. Has an optional `default`.
 / counter: An integer with optional `min`, `max`, and `default`. Clamped on every write.
-/ history: A timestamped append-only log. Newest entries first. Has an optional `max_entries` cap that drops the oldest entries on overflow. Entries can carry optional structured JSON data.
-/ list: An ordered collection with timestamps. Supports push and pop. Also has an optional `max_entries` cap. Entries can carry optional structured JSON data.
+/ history: A timestamped append-only log. Newest entries first. Has an optional `max_entries` cap that drops the oldest entries on overflow. Each entry gets a numeric ID and a stable hash ID. Entries can carry optional structured JSON data.
+/ list: An ordered collection with timestamps. Supports push and pop. Also has an optional `max_entries` cap. Each entry gets a numeric ID and a stable hash ID. Entries can carry optional structured JSON data.
 / state: A structured record with named fields. Fields are declared in the schema and validated on write.
 
 === Schema files
@@ -100,7 +100,7 @@ KV commands use structured exit codes for scripting:
 / `1`: Key not found (or no data yet for that key).
 / `2`: Type mismatch (e.g., `inc` on a string key, or `get --id` on a non-history/list key).
 / `3`: Schema file not found.
-/ `4`: Invalid input (e.g., non-numeric ID in `--id` spec, reversed range, empty spec).
+/ `4`: Invalid input (e.g., reversed range, empty spec, empty hash after `kv-` prefix).
 
 == Basic operations
 
@@ -112,23 +112,23 @@ KV commands use structured exit codes for scripting:
   counters, all entries with IDs and timestamps for history and list types,
   and fields as JSON for state types.
 
-  With `--id`, retrieves specific entries from a history or list by their
-  numeric ID. Three ID formats are supported:
+  With `--id`, retrieves specific entries from a history or list by numeric
+  ID or hash ID. Four ID formats are supported:
 
-  / Single ID: `--id 35` -- returns exactly one entry.
-  / Range: `--id 35-64` -- returns all entries with IDs 35 through 64 inclusive. Maximum range size is 10,000 entries.
-  / Comma-separated: `--id 1,5,12` -- returns the listed entries. Duplicates are ignored.
+  / Single numeric ID: `--id 35` -- returns exactly one entry.
+  / Single hash ID: `--id kv-A3fB` -- returns the entry matching that hash. Hash matching is prefix-based: `kv-A3f` will match if the prefix is unambiguous.
+  / Numeric range: `--id 35-64` -- returns all entries with numeric IDs 35 through 64 inclusive. Maximum range size is 10,000 entries. Ranges are numeric only.
+  / Comma-separated: `--id 1,kv-A3fB,12` -- returns the listed entries. Numeric and hash IDs can be mixed freely in comma lists.
 
-  Formats cannot be combined (e.g., `--id 1,5-10` is not valid). If any
-  requested IDs are not found, a note listing the missing IDs is printed to
-  stderr. The found entries are still printed to stdout.
+  If any requested IDs are not found, a note listing the missing IDs is
+  printed to stderr. The found entries are still printed to stdout.
 
   The `--id` flag only works on history and list types. Using it on a
   string, counter, or state key returns exit code 2 (type mismatch).
-  Parse failures (non-numeric IDs, reversed ranges, empty specs) return
-  exit code 4 (invalid input).],
+  Parse failures (reversed ranges, empty specs) return exit code 4
+  (invalid input).],
   flags: (
-    ([`--id <spec>`], [string], [Entry ID (`35`), range (`35-64`), or comma-separated IDs (`1,5,12`)]),
+    ([`--id <spec>`], [string], [Entry ID: numeric (`35`), hash (`kv-A3fB`), range (`35-64`), or comma-separated (`1,kv-A3fB,12`)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
   ),
   examples: (
@@ -137,8 +137,9 @@ KV commands use structured exit codes for scripting:
     "mx kv get decisions",
     "mx kv get context --memory",
     "mx kv get shipped --id 35",
+    "mx kv get shipped --id kv-A3fB",
     "mx kv get shipped --id 35-64",
-    "mx kv get shipped --id 1,5,12,35",
+    "mx kv get shipped --id 1,kv-A3fB,12",
     "mx kv get shipped --id 35 --memory",
   ),
 )
@@ -211,6 +212,11 @@ History and list types both store timestamped entries with auto-assigned IDs.
 The difference is semantic: history is append-only (newest first, no pop),
 while lists support push/pop and maintain insertion order.
 
+Every entry gets two identifiers: a numeric ID (sequential, per-key) and a
+hash ID (a stable base58 string prefixed with `kv-`, e.g. `kv-A3fB`). Both
+can be used anywhere an ID is accepted. See #link(<hash-ids>)[Hash IDs] for
+details.
+
 Both types support `push`, `last`, `search`, `count`, `random`, `remove`, and
 entry lookup by ID via `get --id`. Both support structured data on entries
 (`--data` on push) and structured data filtering (`--where` on queries).
@@ -221,7 +227,15 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 #command(
   "mx kv push <key> <value>",
   [Push a value onto a history or list key. The entry is automatically
-  timestamped and assigned a unique ID.
+  timestamped and assigned both a numeric ID and a hash ID.
+
+  On success, prints the new entry's identifiers:
+
+  ```
+  kv-A3fB (42)
+  ```
+
+  Hash first (the primary stable identifier), numeric ID in parentheses.
 
   For *history* keys, new entries are inserted at the front (newest first).
   If the key has a `max_entries` schema constraint, the oldest entries are
@@ -249,8 +263,9 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 
 #command(
   "mx kv pop <key>",
-  [Pop the last item from a list key. Prints the removed entry with its ID,
-  value, and timestamp. Returns silently if the list is empty.
+  [Pop the last item from a list key. Prints the removed entry with its
+  numeric ID, hash ID, value, and timestamp. Returns silently if the list
+  is empty.
 
   Only works on list types. History keys are append-only and do not support
   pop.],
@@ -264,7 +279,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 #command(
   "mx kv last <key>",
   [Get the last N entries from a history or list key. Entries are printed
-  with their ID, value, and timestamp.
+  with their numeric ID, hash ID, value, and timestamp.
 
   For history keys, "last" means the most recent (entries are stored newest
   first). For list keys, "last" means the tail of the list.
@@ -309,7 +324,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   - Relative: `30m` (minutes), `1h` (hours), `7d` (days), `2w` (weeks)
   - Absolute: ISO-8601 format (e.g., `2025-01-15T10:00:00Z`)
 
-  Entries are printed with their ID, value, and timestamp.],
+  Entries are printed with their numeric ID, hash ID, value, and timestamp.],
   flags: (
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
   ),
@@ -326,8 +341,8 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 #command(
   "mx kv search <key> [query]",
   [Search entries in a list or history by case-insensitive substring match
-  and/or structured data filters. Prints matching entries with their ID,
-  value, timestamp, and any attached data.
+  and/or structured data filters. Prints matching entries with their numeric
+  ID, hash ID, value, timestamp, and any attached data.
 
   The text query is optional when `--where` filters are provided. You can
   search by text alone, by structured data alone, or by both. At least one
@@ -406,7 +421,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 #command(
   "mx kv random <key>",
   [Get N random entries from a history or list key. Entries are printed
-  with their ID, value, and timestamp.
+  with their numeric ID, hash ID, value, and timestamp.
 
   Useful for inspiration (pick a random idea), spot-checking (sample from
   a large history), or building variety into automated workflows.
@@ -443,18 +458,23 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
 
 #command(
   "mx kv remove <key> [value]",
-  [Remove entries from a list or history by value substring or by numeric ID.
+  [Remove entries from a list or history by value substring or by ID.
   You must provide either a value substring or `--id`.
+
+  The `--id` flag accepts a numeric ID (`7`) or a hash ID (`kv-A3fB`).
+  Hash matching is prefix-based -- if the prefix is ambiguous (matches
+  multiple entries), an error is returned asking for more characters.
 
   By default, only the first match is removed. Use `--all` to remove every
   matching entry.],
   flags: (
-    ([`--id <n>`], [integer], [Remove the entry with this specific ID]),
+    ([`--id <spec>`], [string], [Remove the entry with this numeric ID or hash ID (`kv-XXXX`)]),
     ([`--all`], [flag], [Remove all matching entries (default: first match only)]),
   ),
   examples: (
     "mx kv remove todos \"write tests\"",
     "mx kv remove todos --id 7",
+    "mx kv remove todos --id kv-A3fB",
     "mx kv remove decisions \"typo\" --all",
   ),
 )
@@ -577,15 +597,16 @@ structured data (backward compatible with all existing entries).
 
 === Output format
 
-Entries with structured data display the JSON inline after the timestamp:
+Entries display the numeric ID, hash ID in brackets, value, timestamp, and any
+structured data:
 
 ```
-42: palmtop DSI fix (2026-05-08T14:30:00Z) {"tags":["palmtop","i915"],"status":"active"}
-43: display rotation patch (2026-05-08T15:00:00Z)
+42 [kv-A3fB]: palmtop DSI fix (2026-05-08T14:30:00Z) {"tags":["palmtop","i915"],"status":"active"}
+43 [kv-B7xQ]: display rotation patch (2026-05-08T15:00:00Z)
 ```
 
-Entries without data look exactly as they always have. The data suffix appears
-on all commands that display entries: `get`, `last`, `search`, `since`, `pop`,
+Entries without data omit the trailing JSON. This format appears on all
+commands that display entries: `get`, `last`, `search`, `since`, `pop`,
 `random`, and `dump`.
 
 === Filtering with `--where`
@@ -648,6 +669,69 @@ Structured data is fully backward compatible. Existing data files written
 before this feature was added continue to work without migration. Entries
 without data are simply treated as having no structured fields -- they will
 not match any `--where` clause, but they are otherwise unaffected.
+
+== Hash IDs <hash-ids>
+
+Every history and list entry has a stable hash ID in addition to its numeric
+ID. Hash IDs are short base58 strings (4--6 characters) prefixed with `kv-`
+for visual identification, e.g. `kv-A3fB`.
+
+=== Generation
+
+The hash is generated from `blake3(key + timestamp + id)`, with the first 4
+bytes encoded as base58 via base-d. This produces ~11 million unique addresses
+per key -- sufficient for typical KV usage. The hash is deterministic: the
+same key, timestamp, and numeric ID always produce the same hash.
+
+=== Push output
+
+`mx kv push` prints the new entry's identifiers on success:
+
+```
+kv-A3fB (42)
+```
+
+Hash first (the primary stable identifier), numeric ID in parentheses. This
+makes it easy to capture the hash for later use in scripts or follow-up
+commands.
+
+=== Dual addressing
+
+Anywhere a numeric ID is accepted, a hash ID also works:
+
+```bash
+# Get by hash
+mx kv get shipped --id kv-A3fB
+
+# Get by numeric (still works)
+mx kv get shipped --id 42
+
+# Mix in comma lists
+mx kv get shipped --id 42,kv-A3fB,15
+
+# Remove by hash
+mx kv remove shipped --id kv-A3fB
+```
+
+Numeric ranges remain numeric only (`35-64`). Hash IDs cannot be used in
+ranges because they are not ordered.
+
+=== Prefix matching
+
+Hash lookups are prefix-based: `kv-A3f` will match an entry with hash
+`A3fBx2` as long as the prefix uniquely identifies one entry. If the prefix
+is ambiguous (matches multiple entries), an error is returned:
+
+```
+Error: hash prefix 'kv-A3' is ambiguous: matches 3 entries, provide more characters
+```
+
+=== Backward compatibility
+
+Old data files written before hash IDs existed are back-filled automatically
+on first load. The store generates hashes for all entries that lack one,
+saves the file, and continues normally. This is a one-time migration -- no
+manual action is needed.
 
 == Management
 

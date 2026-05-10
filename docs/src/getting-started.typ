@@ -135,11 +135,11 @@ filtering. Schema-driven with defaults.
 ```bash
 mx kv set session.goal "ship the docs"
 mx kv inc builds
-mx kv push decisions "chose Typst for docs"
+mx kv push decisions "chose Typst for docs"  # prints: kv-A3fB (1)
 mx kv last decisions --count 5
 mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
-mx kv random decisions --count 3
+mx kv get decisions --id kv-A3fB              # look up by hash ID
 
 # Attach structured data and query it
 mx kv push projects "palmtop DSI fix" \

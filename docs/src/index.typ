@@ -70,7 +70,8 @@ and history with time-based queries and structured data filtering.
 ```bash
 mx kv set session.goal "ship the docs"
 mx kv get session.goal
-mx kv push decisions "chose Typst over markdown"
+mx kv push decisions "chose Typst over markdown"  # prints: kv-A3fB (1)
+mx kv get shipped --id kv-A3fB
 mx kv get shipped --id 35-64
 mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'
