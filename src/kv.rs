@@ -5626,9 +5626,7 @@ max_entries = 5
         let (mut store, _dir) = setup_store(test_schema());
         let max_name = "a".repeat(128);
 
-        store
-            .add_key_to_schema(&max_name, "history", None)
-            .unwrap();
+        store.add_key_to_schema(&max_name, "history", None).unwrap();
         assert!(store.schema.keys.contains_key(max_name.as_str()));
     }
 
@@ -5648,9 +5646,7 @@ max_entries = 5
         assert!(store.schema.keys.contains_key("existing"));
 
         // Add a new key -- should not corrupt the file
-        store
-            .add_key_to_schema("newkey", "list", None)
-            .unwrap();
+        store.add_key_to_schema("newkey", "list", None).unwrap();
 
         // Both keys should be present after re-parse
         assert!(store.schema.keys.contains_key("existing"));
