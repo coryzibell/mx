@@ -609,6 +609,17 @@ files written before these fields existed are back-filled on first load
 (hashes are generated, data and memory default to `None`) and saved
 automatically.
 
+=== Schema mutation
+
+The `KvStore` struct holds a `schema_path` field alongside the existing
+`data_path`. The `add_key_to_schema()` method validates the key name
+(alphanumeric, underscores, hyphens; max 128 chars; no dots), appends a
+`[keys.<name>]` block to the TOML file without reformatting existing
+content, and re-parses the file to update the in-memory `Schema`. This is
+exposed through `push --create <type>` at the CLI layer, where the handler
+calls `add_key_to_schema` before the normal push path. If the key already
+exists, the method is a no-op.
+
 === Per-agent keying
 
 The active agent is determined by the `MX_CURRENT_AGENT` environment variable.

@@ -86,6 +86,14 @@ Schema fields:
 / `max_entries`: Optional. Maximum entries for history and list types. Oldest entries are dropped when exceeded. Omit to allow unbounded growth.
 / `fields`: Optional. List of valid field names for state types. Writes to unlisted fields are rejected.
 
+=== Auto-creating keys
+
+Keys can be added to the schema on the fly with `mx kv push --create`.
+When a key does not exist in the schema, `--create history` or
+`--create list` appends a new `[keys.<name>]` block to the TOML file
+and reloads the in-memory schema. This avoids manual schema editing for
+simple cases. See #link(<push>)[push] for details and validation rules.
+
 === Agent keying
 
 All KV operations require `MX_CURRENT_AGENT` to be set. Each agent gets its
@@ -234,7 +242,7 @@ entry lookup by ID via `get --id`. Both support structured data on entries
 (`--data` on push) and structured data filtering (`--where` on queries).
 Only lists support `pop`. Only history supports `since` (time-based queries).
 
-=== push
+=== push <push>
 
 #command(
   "mx kv push <key> <value>",
@@ -265,10 +273,27 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   graph. This sets a per-entry memory pointer (a `kn-` ID) that is
   resolved when `--memory` is passed to read commands. See
   #link(<per-entry-memory>)[Per-entry memory links] for the full
-  resolution hierarchy.],
+  resolution hierarchy.
+
+  Use `--create` to auto-add the key to the schema if it does not already
+  exist. Pass the type as the value: `--create history` or `--create list`.
+  Only `history` and `list` types are accepted (those are the types that
+  support `push`). If the key already exists in the schema, `--create` is
+  silently ignored -- this makes it safe to use unconditionally in scripts
+  without checking whether the key has been defined yet.
+
+  The optional `--max-entries` flag sets the entry cap for the new key.
+  It requires `--create` and has no effect if the key already exists.
+
+  Key names are validated on creation: alphanumeric characters, underscores,
+  and hyphens only, maximum 128 characters. Dots are rejected because they
+  conflict with TOML key quoting. The new key block is appended to the
+  schema file without reformatting existing content.],
   flags: (
     ([`--data <json>`], [string], [Attach a JSON object to the entry. Must be a valid JSON object (not an array, string, or other type).]),
     ([`--memory <kn-id>`], [string], [Link this entry to a memory knowledge node (e.g. `kn-abc123`). Resolved when `--memory` is passed on read commands.]),
+    ([`--create <type>`], [enum], [Auto-create the key in the schema if missing. Accepted types: `history`, `list`. Silently ignored if the key already exists.]),
+    ([`--max-entries <n>`], [integer], [Maximum entries for the new key (only valid with `--create`). Oldest entries are dropped when exceeded.]),
   ),
   examples: (
     "mx kv push decisions \"chose Typst for docs\"",
@@ -276,6 +301,8 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv push projects \"palmtop DSI fix\" --data '{\"tags\":[\"palmtop\",\"i915\"],\"status\":\"active\"}'",
     "mx kv push shipped \"v0.1.156\" --data '{\"pr\":305,\"scope\":\"kv\"}'",
     "mx kv push decisions \"adopted per-entry memory links\" --memory kn-abc123",
+    "mx kv push puns \"the joke\" --create history",
+    "mx kv push ideas \"wild thought\" --create list --max-entries 500",
   ),
 )
 

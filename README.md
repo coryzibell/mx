@@ -125,6 +125,10 @@ mx kv inc builds
 mx kv push decisions "chose Typst for docs"    # prints: kv-A3fB (1)
 mx kv last decisions --count 5
 
+# Auto-create a key in the schema and push in one step
+mx kv push puns "the joke" --create history
+mx kv push ideas "wild thought" --create list --max-entries 500
+
 # Structured data on entries
 mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'

@@ -73,6 +73,7 @@ mx kv get session.goal
 mx kv push decisions "chose Typst over markdown"  # prints: kv-A3fB (1)
 mx kv get shipped --id kv-A3fB
 mx kv get shipped --id 35-64
+mx kv push puns "the joke" --create history        # auto-adds key to schema
 mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'
 mx kv search projects --where status=active

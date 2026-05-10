@@ -141,6 +141,10 @@ mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
 mx kv get decisions --id kv-A3fB              # look up by hash ID
 
+# Auto-create a key in the schema and push in one step
+mx kv push puns "the joke" --create history
+mx kv push ideas "wild thought" --create list --max-entries 500
+
 # Link entries to the memory graph
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123
