@@ -100,7 +100,7 @@ KV commands use structured exit codes for scripting:
 / `1`: Key not found (or no data yet for that key).
 / `2`: Type mismatch (e.g., `inc` on a string key, or `get --id` on a non-history/list key).
 / `3`: Schema file not found.
-/ `4`: Invalid input (e.g., reversed range, empty spec, empty hash after `kv-` prefix).
+/ `4`: Invalid input (e.g., reversed range, empty spec, empty hash after `kv-` prefix, entry not found by ID, ambiguous hash prefix).
 
 == Basic operations
 
@@ -146,7 +146,8 @@ KV commands use structured exit codes for scripting:
 
 #command(
   "mx kv set <key> <value> [field_value]",
-  [Set a value for a string, counter, or state key.
+  [Set a value for a string, counter, or state key, or link a specific
+  entry to a memory node.
 
   For *string* keys: `mx kv set <key> <value>` sets the value directly.
 
@@ -154,9 +155,17 @@ KV commands use structured exit codes for scripting:
   and clamps to min/max.
 
   For *state* keys: `mx kv set <key> <field> <value>` sets a single field.
-  The field name must be declared in the schema.],
+  The field name must be declared in the schema.
+
+  With `--id` and `--memory`, links an existing history or list entry to a
+  memory knowledge node. The `--id` flag accepts a numeric ID (`17`) or a
+  hash ID (`kv-A3fB`). Hash matching is prefix-based -- an ambiguous
+  prefix returns an error asking for more characters. `--id` requires
+  `--memory`; it cannot be used alone. Pass an empty string
+  (`--memory ""`) to clear a per-entry link.],
   flags: (
-    ([`--memory <kn-id>`], [string], [Link a memory entry (kn- ID) to this key, or `""` to clear]),
+    ([`--memory <kn-id>`], [string], [Link a memory entry (kn- ID) to this key or entry, or `""` to clear]),
+    ([`--id <spec>`], [string], [Target a specific entry by numeric ID or hash ID (requires `--memory`)]),
   ),
   examples: (
     "mx kv set session_goal \"ship the docs\"",
@@ -165,6 +174,9 @@ KV commands use structured exit codes for scripting:
     "mx kv set context phase \"writing\"",
     "mx kv set decisions --memory kn-abc123",
     "mx kv set decisions --memory \"\"",
+    "mx kv set decisions --id 17 --memory kn-abc123",
+    "mx kv set decisions --id kv-A3fB --memory kn-def456",
+    "mx kv set decisions --id 17 --memory \"\"",
   ),
 )
 
@@ -247,15 +259,23 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   Use `--data` to attach a JSON object to the entry. The data is stored
   alongside the value and timestamp, and is displayed inline in output.
   See #link(<structured-data>)[Structured data] for details and query
-  examples.],
+  examples.
+
+  Use `--memory` to link the new entry to a knowledge node in the memory
+  graph. This sets a per-entry memory pointer (a `kn-` ID) that is
+  resolved when `--memory` is passed to read commands. See
+  #link(<per-entry-memory>)[Per-entry memory links] for the full
+  resolution hierarchy.],
   flags: (
     ([`--data <json>`], [string], [Attach a JSON object to the entry. Must be a valid JSON object (not an array, string, or other type).]),
+    ([`--memory <kn-id>`], [string], [Link this entry to a memory knowledge node (e.g. `kn-abc123`). Resolved when `--memory` is passed on read commands.]),
   ),
   examples: (
     "mx kv push decisions \"chose Typst for docs\"",
     "mx kv push todos \"write tests for kv handler\"",
     "mx kv push projects \"palmtop DSI fix\" --data '{\"tags\":[\"palmtop\",\"i915\"],\"status\":\"active\"}'",
     "mx kv push shipped \"v0.1.156\" --data '{\"pr\":305,\"scope\":\"kv\"}'",
+    "mx kv push decisions \"adopted per-entry memory links\" --memory kn-abc123",
   ),
 )
 
@@ -781,7 +801,7 @@ When a memory link is set, commands that read the key (`get`, `last`, `since`,
 `search`, `random`, `dump`) can resolve the link with `--memory`, which fetches
 the linked entry from SurrealDB and prints its title, category, and body.
 
-=== Setting a memory link
+=== Key-level memory links
 
 ```bash
 # Link a key to a memory entry
@@ -791,9 +811,57 @@ mx kv set decisions --memory kn-abc123
 mx kv set decisions --memory ""
 ```
 
-Memory links are stored in the JSON data file alongside the key's entries.
-They survive resets -- `mx kv reset` clears the data but preserves the memory
-pointer.
+Key-level memory links are stored in the JSON data file alongside the key's
+entries. They survive resets -- `mx kv reset` clears the data but preserves
+the memory pointer.
+
+=== Per-entry memory links <per-entry-memory>
+
+Individual history and list entries can carry their own memory link. This
+allows different entries within the same key to reference different knowledge
+nodes.
+
+*Set at creation time:*
+
+```bash
+# Link a new entry to a knowledge node on push
+mx kv push decisions "adopted per-entry memory links" --memory kn-abc123
+```
+
+*Set on an existing entry:*
+
+```bash
+# Link by numeric ID
+mx kv set decisions --id 17 --memory kn-abc123
+
+# Link by hash ID
+mx kv set decisions --id kv-A3fB --memory kn-def456
+
+# Clear a per-entry link
+mx kv set decisions --id 17 --memory ""
+```
+
+The `--id` flag on `set` requires `--memory` -- it cannot be used alone.
+Hash matching is prefix-based: `kv-A3f` matches if the prefix uniquely
+identifies one entry. If the prefix is ambiguous, an error is returned.
+If the entry is not found, exit code 4 (invalid input) is returned.
+
+=== Resolution hierarchy
+
+When `--memory` is passed on a read command, memory links are resolved in
+priority order:
+
++ *Per-entry `memory` field* -- if the entry has its own memory link, that
+  link is resolved and displayed. This is the highest priority.
++ *Legacy `kn-` value* -- if the entry's value string starts with `kn-`,
+  it is treated as a memory reference and resolved. This provides backward
+  compatibility with entries that stored knowledge node IDs as their value.
++ *Key-level memory* -- after all entries are printed, the key-level memory
+  pointer (if any) is resolved once at the end.
+
+Per-entry memory wins. An entry with a `memory` field set will use that link
+regardless of whether the key itself also has a memory pointer. The key-level
+link serves as a fallback that applies to the key as a whole.
 
 === Resolving memory links
 
@@ -803,6 +871,9 @@ mx kv get decisions --memory
 
 # Show the last 5 entries plus linked memory
 mx kv last decisions --count 5 --memory
+
+# Look up a specific entry and resolve its memory link
+mx kv get decisions --id 17 --memory
 
 # Dump everything with all memory links resolved
 mx kv dump --memory

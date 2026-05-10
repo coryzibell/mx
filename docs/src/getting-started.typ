@@ -141,6 +141,11 @@ mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
 mx kv get decisions --id kv-A3fB              # look up by hash ID
 
+# Link entries to the memory graph
+mx kv push decisions "adopted memory links" --memory kn-abc123
+mx kv set decisions --id 17 --memory kn-abc123
+mx kv last decisions --count 3 --memory       # resolves linked entries
+
 # Attach structured data and query it
 mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'

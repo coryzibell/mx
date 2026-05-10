@@ -76,6 +76,8 @@ mx kv get shipped --id 35-64
 mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'
 mx kv search projects --where status=active
+mx kv push decisions "adopted memory links" --memory kn-abc123
+mx kv set decisions --id 17 --memory kn-abc123
 ```
 
 == Installation

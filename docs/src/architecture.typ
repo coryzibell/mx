@@ -197,7 +197,11 @@ Most commands exit 0 on success or propagate an `anyhow::Error` (which prints
 the error chain to stderr and exits non-zero). The `kv` subcommand is the
 exception: it uses typed exit codes (0 = OK, 1 = key not found, 2 = type
 mismatch, 3 = schema missing, 4 = invalid input) so callers can distinguish
-failure modes programmatically.
+failure modes programmatically. The `KvError` enum covers five typed variants:
+`KeyNotFound`, `TypeMismatch`, `SchemaMissing`, `EntryNotFound` (a specific
+entry ID was not found within a key), and `AmbiguousHash` (a hash prefix
+matched multiple entries). Both `EntryNotFound` and `AmbiguousHash` map to
+exit code 4.
 
 
 // =========================================================================
@@ -595,13 +599,15 @@ writes are atomic: serialize to a temp file, fsync, rename. The format is a
 flat JSON object keyed by the key names from the schema.
 
 History and list entries are stored as objects with `id`, `hash`, `value`,
-`ts`, and an optional `data` field (arbitrary JSON object for structured
-metadata). The `hash` field is a short base58 string generated from
-`blake3(key + timestamp + id)` via base-d, providing a stable identifier
-independent of numeric ordering. Both `hash` and `data` use
-`#[serde(default)]` for backward compatibility -- files written before these
-fields existed are back-filled on first load (hashes are generated, data
-defaults to `None`) and saved automatically.
+`ts`, an optional `data` field (arbitrary JSON object for structured
+metadata), and an optional `memory` field (a `kn-` ID linking the entry to
+a knowledge node in the memory graph). The `hash` field is a short base58
+string generated from `blake3(key + timestamp + id)` via base-d, providing a
+stable identifier independent of numeric ordering. The `hash`, `data`, and
+`memory` fields all use `#[serde(default)]` for backward compatibility --
+files written before these fields existed are back-filled on first load
+(hashes are generated, data and memory default to `None`) and saved
+automatically.
 
 === Per-agent keying
 
@@ -615,7 +621,16 @@ to `~/.crewu/kv/` for migration purposes.
 KV keys can optionally link to a knowledge entry in the SurrealDB store via a
 `kn-` ID reference. This allows an agent to associate fast local state with
 richer knowledge graph entries. The `--memory` flag on `get`, `last`, `since`,
-`search`, and `dump` resolves these references and displays the linked entry.
+`search`, `random`, and `dump` resolves these references and displays the
+linked entry.
+
+Memory links exist at two levels: key-level (one pointer per key) and
+per-entry (one pointer per history or list entry). Per-entry links are set
+via `push --memory` at creation time or `set --id --memory` on existing
+entries. When resolving, per-entry memory wins over a legacy `kn-` value
+prefix, which wins over the key-level fallback. The `SearchHit` struct
+(returned by `last`, `random`, `search`, `since`, and `get --id`) carries the
+per-entry `memory` field for the handler to resolve.
 
 
 // =========================================================================

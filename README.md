@@ -161,11 +161,18 @@ mx kv remove shipped --id kv-A3fB
 mx kv random shipped --count 5
 mx kv random ideas --count 1
 mx kv random shipped --count 3 --since 30d
+
+# Per-entry memory links (bridge KV entries to the knowledge graph)
+mx kv push decisions "adopted memory links" --memory kn-abc123
+mx kv set decisions --id 17 --memory kn-abc123
+mx kv last decisions --count 3 --memory
 ```
 
 Every entry gets a stable hash ID (e.g. `kv-A3fB`) alongside its numeric ID. Push prints both: `kv-A3fB (42)`. Anywhere a numeric ID works, a hash ID also works -- `--id kv-A3fB`, mixed comma lists, remove. Ranges remain numeric only. Old data files are back-filled on first load.
 
 Entries can carry structured JSON data via `--data` on push. Query entries by data fields with `--where key=value` (available on `search`, `last`, `random`, `count`). Multiple `--where` flags are ANDed. Supports exact string match, array-contains, and numeric/boolean comparison on top-level fields.
+
+Individual entries can link to the memory graph via `--memory kn-xxx` on `push` (at creation) or `set --id --memory` (on existing entries). Per-entry memory wins over key-level fallback. Pass `--memory` on read commands (`get`, `last`, `since`, `search`, `random`, `dump`) to resolve linked knowledge entries.
 
 Time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) are available on `last`, `search`, `count`, and `random`. All dates are UTC. The `--since` flag accepts relative times (`30d`, `1w`, `2h`, `30m`) and ISO-8601 timestamps. For a standalone relative-time query on history keys, use `mx kv since`.
 
