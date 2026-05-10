@@ -483,9 +483,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                 hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                             )
                         );
-                        if memory
-                            && let Some(ref mem) = hit.memory
-                        {
+                        if memory && let Some(ref mem) = hit.memory {
                             print_resolved_memory(mem, verbose);
                         }
                     }
@@ -522,9 +520,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                 hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                             )
                         );
-                        if memory
-                            && let Some(ref mem) = hit.memory
-                        {
+                        if memory && let Some(ref mem) = hit.memory {
                             print_resolved_memory(mem, verbose);
                         }
                     }
@@ -554,9 +550,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             &entry.data
                         )
                     );
-                    if memory
-                        && let Some(ref mem) = entry.memory
-                    {
+                    if memory && let Some(ref mem) = entry.memory {
                         print_resolved_memory(mem, verbose);
                     }
                 }
@@ -665,9 +659,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                                     hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
                                 )
                             );
-                            if memory
-                                && let Some(ref mem) = hit.memory
-                            {
+                            if memory && let Some(ref mem) = hit.memory {
                                 print_resolved_memory(mem, verbose);
                             }
                         }
