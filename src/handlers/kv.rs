@@ -396,7 +396,23 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             value,
             data,
             memory,
+            create,
+            max_entries,
         } => {
+            // Handle --create: auto-add key to schema if missing
+            if let Some(ref type_str) = create {
+                if type_str != "history" && type_str != "list" {
+                    eprintln!("Error: --create type must be 'history' or 'list'");
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+                if store.schema.keys.get(&key).is_none() {
+                    if let Err(e) = store.add_key_to_schema(&key, type_str, max_entries) {
+                        return handle_kv_err(e);
+                    }
+                }
+                // If key already exists, silently ignore --create
+            }
+
             // Parse --data as JSON object if provided
             let parsed_data = match data {
                 Some(ref json_str) => {

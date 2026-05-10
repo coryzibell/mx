@@ -1741,6 +1741,14 @@ pub enum KvCommands {
         /// Link a memory entry (kn- ID) to this entry
         #[arg(long)]
         memory: Option<String>,
+
+        /// Auto-create key in schema if missing (type: history or list)
+        #[arg(long, value_name = "TYPE")]
+        create: Option<String>,
+
+        /// Maximum entries for the new key (only with --create)
+        #[arg(long, requires = "create")]
+        max_entries: Option<usize>,
     },
 
     /// Pop the last value from a list

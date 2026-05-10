@@ -467,6 +467,7 @@ pub struct KvStore {
     pub schema: Schema,
     pub data: DataFile,
     pub data_path: PathBuf,
+    pub schema_path: PathBuf,
 }
 
 impl KvStore {
@@ -515,6 +516,7 @@ impl KvStore {
             schema,
             data,
             data_path: data_path.to_path_buf(),
+            schema_path: schema_path.to_path_buf(),
         };
 
         if needs_save {
@@ -644,6 +646,107 @@ impl KvStore {
             });
         }
         Ok(def)
+    }
+
+    /// Validate a key name for schema insertion.
+    ///
+    /// Accepts alphanumeric characters, underscores, and hyphens.
+    /// Rejects names containing dots (TOML quoting issues), empty names,
+    /// and names with other special characters.
+    fn validate_key_name(key: &str) -> Result<(), KvError> {
+        if key.is_empty() {
+            return Err(KvError::Other(anyhow::anyhow!("key name cannot be empty")));
+        }
+        if key.contains('.') {
+            return Err(KvError::Other(anyhow::anyhow!(
+                "key name '{}' cannot contain dots -- they require TOML quoting and create confusion",
+                key
+            )));
+        }
+        if !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(KvError::Other(anyhow::anyhow!(
+                "key name '{}' contains invalid characters -- only alphanumeric, underscores, and hyphens are allowed",
+                key
+            )));
+        }
+        Ok(())
+    }
+
+    /// Add a new key to the schema file and reload the in-memory schema.
+    ///
+    /// Appends a `[keys.<name>]` block to the TOML file (preserving existing
+    /// content exactly) and re-parses the file to update `self.schema`.
+    ///
+    /// Only `history` and `list` types are accepted -- those are the types
+    /// that support `push`.
+    pub fn add_key_to_schema(
+        &mut self,
+        key: &str,
+        value_type: &str,
+        max_entries: Option<usize>,
+    ) -> Result<(), KvError> {
+        // Validate type
+        if value_type != "history" && value_type != "list" {
+            return Err(KvError::Other(anyhow::anyhow!(
+                "--create type must be 'history' or 'list', got '{}'",
+                value_type
+            )));
+        }
+
+        // Validate key name
+        Self::validate_key_name(key)?;
+
+        // Double-check: don't overwrite existing keys
+        if self.schema.keys.contains_key(key) {
+            return Ok(());
+        }
+
+        // Build the TOML block to append
+        let mut block = format!("\n[keys.{}]\ntype = \"{}\"\n", key, value_type);
+        if let Some(max) = max_entries {
+            block.push_str(&format!("max_entries = {}\n", max));
+        }
+
+        // Append to the schema file
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.schema_path)
+            .map_err(|e| {
+                KvError::Other(anyhow::anyhow!(
+                    "failed to open schema file for append: {}: {}",
+                    self.schema_path.display(),
+                    e
+                ))
+            })?;
+        f.write_all(block.as_bytes()).map_err(|e| {
+            KvError::Other(anyhow::anyhow!(
+                "failed to write to schema file: {}: {}",
+                self.schema_path.display(),
+                e
+            ))
+        })?;
+
+        // Re-read and re-parse the schema to update in-memory state
+        let schema_str = fs::read_to_string(&self.schema_path).map_err(|e| {
+            KvError::Other(anyhow::anyhow!(
+                "failed to re-read schema file after append: {}: {}",
+                self.schema_path.display(),
+                e
+            ))
+        })?;
+        let schema: Schema = toml::from_str(&schema_str).map_err(|e| {
+            KvError::Other(anyhow::anyhow!(
+                "failed to re-parse schema file after append: {}: {}",
+                self.schema_path.display(),
+                e
+            ))
+        })?;
+        self.schema = schema;
+
+        Ok(())
     }
 
     /// Get the default DataValue for a key based on its schema definition.
@@ -5350,5 +5453,167 @@ max_entries = 5
             }
             _ => panic!("Expected list"),
         }
+    }
+
+    // -- add_key_to_schema --
+
+    #[test]
+    fn add_key_to_schema_history() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert!(store.schema.keys.get("puns").is_none());
+
+        store.add_key_to_schema("puns", "history", None).unwrap();
+
+        // Key should now exist in the in-memory schema
+        let def = store.schema.keys.get("puns").unwrap();
+        assert_eq!(def.value_type, ValueType::History);
+        assert_eq!(def.max_entries, None);
+
+        // Push should now work on the new key
+        store.push("puns", "the joke", None, None).unwrap();
+        let last = store.last("puns", 1, None, &[]).unwrap();
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].value, "the joke");
+    }
+
+    #[test]
+    fn add_key_to_schema_list() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert!(store.schema.keys.get("items").is_none());
+
+        store.add_key_to_schema("items", "list", None).unwrap();
+
+        let def = store.schema.keys.get("items").unwrap();
+        assert_eq!(def.value_type, ValueType::List);
+
+        store.push("items", "apple", None, None).unwrap();
+        let last = store.last("items", 1, None, &[]).unwrap();
+        assert_eq!(last[0].value, "apple");
+    }
+
+    #[test]
+    fn add_key_to_schema_with_max_entries() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        store
+            .add_key_to_schema("puns", "history", Some(500))
+            .unwrap();
+
+        let def = store.schema.keys.get("puns").unwrap();
+        assert_eq!(def.value_type, ValueType::History);
+        assert_eq!(def.max_entries, Some(500));
+    }
+
+    #[test]
+    fn add_key_to_schema_existing_key_is_noop() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // "tags" already exists as a list in the test schema
+        assert!(store.schema.keys.get("tags").is_some());
+        let original_type = store.schema.keys["tags"].value_type;
+
+        // Should succeed silently without changing anything
+        store.add_key_to_schema("tags", "history", None).unwrap();
+
+        // Type should be unchanged
+        assert_eq!(store.schema.keys["tags"].value_type, original_type);
+    }
+
+    #[test]
+    fn add_key_to_schema_invalid_type_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store
+            .add_key_to_schema("stuff", "counter", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("'history' or 'list'"));
+    }
+
+    #[test]
+    fn add_key_to_schema_dotted_name_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store
+            .add_key_to_schema("my.key", "history", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot contain dots"));
+    }
+
+    #[test]
+    fn add_key_to_schema_special_chars_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store
+            .add_key_to_schema("my key!", "history", None)
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn add_key_to_schema_empty_name_rejected() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store.add_key_to_schema("", "history", None).unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn add_key_to_schema_reparsed_correctly() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let original_key_count = store.schema.keys.len();
+
+        store
+            .add_key_to_schema("new_key", "history", Some(50))
+            .unwrap();
+
+        // Should have exactly one more key
+        assert_eq!(store.schema.keys.len(), original_key_count + 1);
+
+        // Reload from disk to verify file was written correctly
+        let store2 = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        assert_eq!(store2.schema.keys.len(), original_key_count + 1);
+        let def = store2.schema.keys.get("new_key").unwrap();
+        assert_eq!(def.value_type, ValueType::History);
+        assert_eq!(def.max_entries, Some(50));
+    }
+
+    #[test]
+    fn add_key_to_schema_preserves_existing_content() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // Push some data to an existing key first
+        store.push("tags", "hello", None, None).unwrap();
+        store.save().unwrap();
+
+        // Now add a new key to schema
+        store
+            .add_key_to_schema("jokes", "list", None)
+            .unwrap();
+
+        // Original keys should all still be present and correct
+        assert_eq!(store.schema.keys["warmth"].value_type, ValueType::Counter);
+        assert_eq!(
+            store.schema.keys["flavor_history"].value_type,
+            ValueType::History
+        );
+        assert_eq!(store.schema.keys["tags"].value_type, ValueType::List);
+        assert_eq!(store.schema.keys["tensor"].value_type, ValueType::State);
+        assert_eq!(
+            store.schema.keys["current_mood"].value_type,
+            ValueType::String
+        );
+
+        // New key should be there too
+        assert_eq!(store.schema.keys["jokes"].value_type, ValueType::List);
+    }
+
+    #[test]
+    fn add_key_hyphen_and_underscore_accepted() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        store
+            .add_key_to_schema("my-key_v2", "history", None)
+            .unwrap();
+        assert!(store.schema.keys.get("my-key_v2").is_some());
     }
 }
