@@ -100,8 +100,8 @@ fn resolve_dump_memories(store: &KvStore, verbose: bool) {
 
 /// Parse a single token into an `IdRef`.
 ///
-/// - Starts with `kv-` -> strip prefix, treat as hash
-/// - Pure digits -> numeric ID
+/// - Starts with `kv-` -> strip prefix, treat as stable ID (`IdRef::Id`)
+/// - Pure digits -> numeric index (`IdRef::Index`)
 /// - Otherwise -> error
 fn parse_single_id(token: &str) -> Result<IdRef, String> {
     let token = token.trim();
@@ -109,22 +109,22 @@ fn parse_single_id(token: &str) -> Result<IdRef, String> {
         if hash.is_empty() {
             return Err("empty hash after 'kv-' prefix".to_string());
         }
-        Ok(IdRef::Hash(hash.to_string()))
+        Ok(IdRef::Id(hash.to_string()))
     } else {
-        let id: u64 = token
+        let idx: u64 = token
             .parse()
             .map_err(|_| format!("invalid ID '{}'", token))?;
-        Ok(IdRef::Numeric(id))
+        Ok(IdRef::Index(idx))
     }
 }
 
 /// Parse an ID specification into a list of `IdRef`s.
 ///
 /// Accepted formats:
-/// - Single numeric ID: "35" -> [Numeric(35)]
-/// - Hash ID: "kv-A3fB" -> [Hash("A3fB")]
-/// - Numeric range: "35-64" -> [Numeric(35), ..., Numeric(64)]
-/// - Comma-separated (can mix): "1,kv-A3fB,12" -> [Numeric(1), Hash("A3fB"), Numeric(12)]
+/// - Single numeric index: "35" -> [Index(35)]
+/// - Stable ID: "kv-A3fB" -> [Id("A3fB")]
+/// - Numeric range: "35-64" -> [Index(35), ..., Index(64)]
+/// - Comma-separated (can mix): "1,kv-A3fB,12" -> [Index(1), Id("A3fB"), Index(12)]
 fn parse_id_spec(spec: &str) -> Result<Vec<IdRef>, String> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -132,12 +132,12 @@ fn parse_id_spec(spec: &str) -> Result<Vec<IdRef>, String> {
     }
 
     if spec.contains(',') {
-        // Comma-separated list (can mix numeric and hash)
+        // Comma-separated list (can mix numeric index and stable ID)
         spec.split(',')
             .map(|s| parse_single_id(s.trim()))
             .collect::<Result<Vec<_>, _>>()
     } else if spec.starts_with("kv-") {
-        // Single hash ID
+        // Single stable ID
         Ok(vec![parse_single_id(spec)?])
     } else if spec.contains('-') {
         // Numeric range
@@ -167,7 +167,7 @@ fn parse_id_spec(spec: &str) -> Result<Vec<IdRef>, String> {
                 MAX_RANGE_SIZE
             ));
         }
-        Ok((start..=end).map(IdRef::Numeric).collect())
+        Ok((start..=end).map(IdRef::Index).collect())
     } else {
         // Single numeric ID
         Ok(vec![parse_single_id(spec)?])
@@ -225,26 +225,27 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             println!(
                                 "{}",
                                 kv::format_entry_line(
-                                    hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                    hit.index, &hit.id, &hit.value, &hit.ts, &hit.data
                                 )
                             );
                         }
 
                         // Report missing IDs
-                        let found_numeric: HashSet<u64> = hits.iter().map(|h| h.id).collect();
-                        let found_hashes: Vec<&str> =
-                            hits.iter().map(|h| h.hash.as_str()).collect();
+                        let found_indexes: HashSet<u64> =
+                            hits.iter().map(|h| h.index).collect();
+                        let found_ids: Vec<&str> =
+                            hits.iter().map(|h| h.id.as_str()).collect();
                         let missing: Vec<String> = ids
                             .iter()
                             .filter(|id_ref| match id_ref {
-                                IdRef::Numeric(n) => !found_numeric.contains(n),
-                                IdRef::Hash(h) => {
-                                    !found_hashes.iter().any(|fh| fh.starts_with(h.as_str()))
+                                IdRef::Index(n) => !found_indexes.contains(n),
+                                IdRef::Id(h) => {
+                                    !found_ids.iter().any(|fid| fid.starts_with(h.as_str()))
                                 }
                             })
                             .map(|id_ref| match id_ref {
-                                IdRef::Numeric(n) => n.to_string(),
-                                IdRef::Hash(h) => format!("kv-{}", h),
+                                IdRef::Index(n) => n.to_string(),
+                                IdRef::Id(h) => format!("kv-{}", h),
                             })
                             .collect();
                         if !missing.is_empty() {
@@ -445,7 +446,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             match store.push(&key, &value, parsed_data, memory) {
                 Ok(result) => {
                     store.save()?;
-                    println!("kv-{} ({})", result.hash, result.id);
+                    println!("kv-{} ({})", result.id, result.index);
                     Ok(kv::EXIT_OK)
                 }
                 Err(e) => handle_kv_err(e),
@@ -458,8 +459,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 println!(
                     "{}",
                     kv::format_entry_line(
-                        entry.id,
-                        &entry.hash,
+                        entry.index,
+                        &entry.id,
                         &entry.value,
                         &entry.ts,
                         &entry.data
@@ -495,7 +496,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         println!(
                             "{}",
                             kv::format_entry_line(
-                                hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                hit.index, &hit.id, &hit.value, &hit.ts, &hit.data
                             )
                         );
                         if memory {
@@ -536,7 +537,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         println!(
                             "{}",
                             kv::format_entry_line(
-                                hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                hit.index, &hit.id, &hit.value, &hit.ts, &hit.data
                             )
                         );
                         if memory {
@@ -566,8 +567,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     println!(
                         "{}",
                         kv::format_entry_line(
-                            entry.id,
-                            &entry.hash,
+                            entry.index,
+                            &entry.id,
                             &entry.value,
                             &entry.ts,
                             &entry.data
@@ -623,7 +624,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 eprintln!("Error: provide either a value substring or --id");
                 return Ok(kv::EXIT_KEY_NOT_FOUND);
             }
-            // Parse --id as an IdRef (numeric or hash)
+            // Parse --id as an IdRef (numeric index or stable ID)
             let id_ref = match &id {
                 Some(id_str) => match parse_single_id(id_str) {
                     Ok(r) => Some(r),
@@ -683,7 +684,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             println!(
                                 "{}",
                                 kv::format_entry_line(
-                                    hit.id, &hit.hash, &hit.value, &hit.ts, &hit.data
+                                    hit.index, &hit.id, &hit.value, &hit.ts, &hit.data
                                 )
                             );
                             if memory {
@@ -772,12 +773,12 @@ mod tests {
 
     #[test]
     fn parse_single_id() {
-        assert_eq!(parse_id_spec("35").unwrap(), vec![IdRef::Numeric(35)]);
+        assert_eq!(parse_id_spec("35").unwrap(), vec![IdRef::Index(35)]);
     }
 
     #[test]
     fn parse_single_id_zero() {
-        assert_eq!(parse_id_spec("0").unwrap(), vec![IdRef::Numeric(0)]);
+        assert_eq!(parse_id_spec("0").unwrap(), vec![IdRef::Index(0)]);
     }
 
     #[test]
@@ -785,18 +786,18 @@ mod tests {
         assert_eq!(
             parse_id_spec("3-7").unwrap(),
             vec![
-                IdRef::Numeric(3),
-                IdRef::Numeric(4),
-                IdRef::Numeric(5),
-                IdRef::Numeric(6),
-                IdRef::Numeric(7),
+                IdRef::Index(3),
+                IdRef::Index(4),
+                IdRef::Index(5),
+                IdRef::Index(6),
+                IdRef::Index(7),
             ]
         );
     }
 
     #[test]
     fn parse_range_single_element() {
-        assert_eq!(parse_id_spec("5-5").unwrap(), vec![IdRef::Numeric(5)]);
+        assert_eq!(parse_id_spec("5-5").unwrap(), vec![IdRef::Index(5)]);
     }
 
     #[test]
@@ -810,7 +811,7 @@ mod tests {
     fn parse_comma_separated() {
         assert_eq!(
             parse_id_spec("1,5,12").unwrap(),
-            vec![IdRef::Numeric(1), IdRef::Numeric(5), IdRef::Numeric(12)]
+            vec![IdRef::Index(1), IdRef::Index(5), IdRef::Index(12)]
         );
     }
 
@@ -818,7 +819,7 @@ mod tests {
     fn parse_comma_separated_with_spaces() {
         assert_eq!(
             parse_id_spec("1, 5, 12").unwrap(),
-            vec![IdRef::Numeric(1), IdRef::Numeric(5), IdRef::Numeric(12)]
+            vec![IdRef::Index(1), IdRef::Index(5), IdRef::Index(12)]
         );
     }
 
@@ -885,7 +886,7 @@ mod tests {
     fn parse_hash_id_single() {
         assert_eq!(
             parse_id_spec("kv-A3fB").unwrap(),
-            vec![IdRef::Hash("A3fB".to_string())]
+            vec![IdRef::Id("A3fB".to_string())]
         );
     }
 
@@ -894,9 +895,9 @@ mod tests {
         assert_eq!(
             parse_id_spec("1,kv-A3fB,12").unwrap(),
             vec![
-                IdRef::Numeric(1),
-                IdRef::Hash("A3fB".to_string()),
-                IdRef::Numeric(12),
+                IdRef::Index(1),
+                IdRef::Id("A3fB".to_string()),
+                IdRef::Index(12),
             ]
         );
     }
