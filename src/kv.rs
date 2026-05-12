@@ -118,7 +118,7 @@ pub enum KvError {
         key: String,
         id: String,
     },
-    AmbiguousHash {
+    AmbiguousId {
         prefix: String,
         count: usize,
     },
@@ -142,10 +142,10 @@ impl std::fmt::Display for KvError {
             KvError::EntryNotFound { key, id } => {
                 write!(f, "Entry not found: ID {} in key '{}'", id, key)
             }
-            KvError::AmbiguousHash { prefix, count } => {
+            KvError::AmbiguousId { prefix, count } => {
                 write!(
                     f,
-                    "hash prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
+                    "ID prefix 'kv-{}' is ambiguous: matches {} entries, provide more characters",
                     prefix, count
                 )
             }
@@ -1278,7 +1278,7 @@ impl KvStore {
                                 0 => None,
                                 1 => Some(matches[0]),
                                 n => {
-                                    return Err(KvError::AmbiguousHash {
+                                    return Err(KvError::AmbiguousId {
                                         prefix: h.clone(),
                                         count: n,
                                     });
@@ -1317,7 +1317,7 @@ impl KvStore {
                                 0 => None,
                                 1 => Some(matches[0]),
                                 n => {
-                                    return Err(KvError::AmbiguousHash {
+                                    return Err(KvError::AmbiguousId {
                                         prefix: h.clone(),
                                         count: n,
                                     });
@@ -1428,7 +1428,7 @@ impl KvStore {
         Ok(hits)
     }
 
-    /// Look up entries by index (numeric) or ID (stable hash) in a history or list.
+    /// Look up entries by index (numeric) or ID (stable ID) in a history or list.
     ///
     /// Returns matching entries as `SearchHit`s (same struct used by `search`).
     /// ID matching is prefix-based: `"A3f"` matches an entry with ID `"A3fBx2"`.
@@ -1716,7 +1716,7 @@ impl KvStore {
                                 entries.iter_mut().find(|e| e.id.starts_with(h.as_str()))
                             }
                             n => {
-                                return Err(KvError::AmbiguousHash {
+                                return Err(KvError::AmbiguousId {
                                     prefix: h.clone(),
                                     count: n,
                                 });
@@ -1747,7 +1747,7 @@ impl KvStore {
                             0 => None,
                             1 => items.iter_mut().find(|e| e.id.starts_with(h.as_str())),
                             n => {
-                                return Err(KvError::AmbiguousHash {
+                                return Err(KvError::AmbiguousId {
                                     prefix: h.clone(),
                                     count: n,
                                 });

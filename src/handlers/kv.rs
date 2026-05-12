@@ -14,7 +14,7 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::TypeMismatch { .. } => Some(kv::EXIT_TYPE_MISMATCH),
         KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
         KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
-        KvError::AmbiguousHash { .. } => Some(kv::EXIT_INVALID_INPUT),
+        KvError::AmbiguousId { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::Other(_) => None,
     }
 }
@@ -105,11 +105,11 @@ fn resolve_dump_memories(store: &KvStore, verbose: bool) {
 /// - Otherwise -> error
 fn parse_single_id(token: &str) -> Result<IdRef, String> {
     let token = token.trim();
-    if let Some(hash) = token.strip_prefix("kv-") {
-        if hash.is_empty() {
-            return Err("empty hash after 'kv-' prefix".to_string());
+    if let Some(id_str) = token.strip_prefix("kv-") {
+        if id_str.is_empty() {
+            return Err("empty ID after 'kv-' prefix".to_string());
         }
-        Ok(IdRef::Id(hash.to_string()))
+        Ok(IdRef::Id(id_str.to_string()))
     } else {
         let idx: u64 = token
             .parse()
@@ -169,7 +169,7 @@ fn parse_id_spec(spec: &str) -> Result<Vec<IdRef>, String> {
         }
         Ok((start..=end).map(IdRef::Index).collect())
     } else {
-        // Single numeric ID
+        // Single numeric index
         Ok(vec![parse_single_id(spec)?])
     }
 }
@@ -878,10 +878,10 @@ mod tests {
         assert!(parse_id_spec("1-20000").is_err());
     }
 
-    // -- hash ID parsing --
+    // -- ID parsing --
 
     #[test]
-    fn parse_hash_id_single() {
+    fn parse_id_single() {
         assert_eq!(
             parse_id_spec("kv-A3fB").unwrap(),
             vec![IdRef::Id("A3fB".to_string())]
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_hash_id_mixed_comma() {
+    fn parse_id_mixed_comma() {
         assert_eq!(
             parse_id_spec("1,kv-A3fB,12").unwrap(),
             vec![
@@ -901,10 +901,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_hash_id_empty_hash() {
+    fn parse_id_empty() {
         let result = parse_id_spec("kv-");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty hash"));
+        assert!(result.unwrap_err().contains("empty ID"));
     }
 
     // -- parse_where_clauses --
