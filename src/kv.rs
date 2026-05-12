@@ -409,13 +409,15 @@ pub struct RemoveResult {
 }
 
 /// Search result entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
     pub index: u64,
     pub id: String,
     pub value: String,
     pub ts: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
 }
 
@@ -5655,5 +5657,223 @@ max_entries = 5
         let store2 = KvStore::load(&schema_path, &data_path).unwrap();
         assert!(store2.schema.keys.contains_key("existing"));
         assert!(store2.schema.keys.contains_key("newkey"));
+    }
+
+    // -- SearchHit JSON serialization --
+
+    #[test]
+    fn search_hit_serializes_all_fields() {
+        let hit = SearchHit {
+            index: 7,
+            id: "A3fB".to_string(),
+            value: "test entry".to_string(),
+            ts: "2026-05-08T12:00:00Z".to_string(),
+            data: Some(serde_json::json!({"status": "active"})),
+            memory: Some("kn-abc123".to_string()),
+        };
+        let json_str = serde_json::to_string_pretty(&hit).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["index"], 7);
+        assert_eq!(parsed["id"], "A3fB");
+        assert_eq!(parsed["value"], "test entry");
+        assert_eq!(parsed["ts"], "2026-05-08T12:00:00Z");
+        assert_eq!(parsed["data"]["status"], "active");
+        assert_eq!(parsed["memory"], "kn-abc123");
+    }
+
+    #[test]
+    fn search_hit_omits_null_data_and_memory() {
+        let hit = SearchHit {
+            index: 1,
+            id: "Bf2C".to_string(),
+            value: "no extras".to_string(),
+            ts: "2026-05-08T12:00:00Z".to_string(),
+            data: None,
+            memory: None,
+        };
+        let json_str = serde_json::to_string(&hit).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(
+            parsed.get("data").is_none(),
+            "data should be omitted when None"
+        );
+        assert!(
+            parsed.get("memory").is_none(),
+            "memory should be omitted when None"
+        );
+        // Required fields are present
+        assert!(parsed.get("index").is_some());
+        assert!(parsed.get("id").is_some());
+        assert!(parsed.get("value").is_some());
+        assert!(parsed.get("ts").is_some());
+    }
+
+    #[test]
+    fn search_hit_vec_serializes_as_json_array() {
+        let hits = vec![
+            SearchHit {
+                index: 1,
+                id: "aaa".to_string(),
+                value: "first".to_string(),
+                ts: "2026-05-08T10:00:00Z".to_string(),
+                data: None,
+                memory: None,
+            },
+            SearchHit {
+                index: 2,
+                id: "bbb".to_string(),
+                value: "second".to_string(),
+                ts: "2026-05-08T11:00:00Z".to_string(),
+                data: Some(serde_json::json!({"priority": "high"})),
+                memory: Some("kn-xyz".to_string()),
+            },
+        ];
+        let json_str = serde_json::to_string_pretty(&hits).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["value"], "first");
+        assert!(arr[0].get("data").is_none());
+        assert_eq!(arr[1]["value"], "second");
+        assert_eq!(arr[1]["data"]["priority"], "high");
+        assert_eq!(arr[1]["memory"], "kn-xyz");
+    }
+
+    #[test]
+    fn search_hit_uses_rust_field_names_not_disk_renames() {
+        // SearchHit deliberately uses Rust field names (index, id) for JSON output,
+        // NOT the on-disk serde rename aliases used by HistoryEntry/ListEntry.
+        let hit = SearchHit {
+            index: 42,
+            id: "test".to_string(),
+            value: "v".to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            data: None,
+            memory: None,
+        };
+        let json_str = serde_json::to_string(&hit).unwrap();
+        assert!(json_str.contains("\"index\""), "should use 'index' not 'i'");
+        assert!(json_str.contains("\"id\""), "should use 'id' not 'h'");
+        assert!(
+            !json_str.contains("\"i\":"),
+            "should NOT use on-disk 'i' alias"
+        );
+        assert!(
+            !json_str.contains("\"h\":"),
+            "should NOT use on-disk 'h' alias"
+        );
+    }
+
+    #[test]
+    fn since_json_uses_search_hit_field_names() {
+        // Verify that converting HistoryEntry to SearchHit for since --json
+        // produces "index" and "id" field names, not the on-disk renames
+        // ("id" for index, "hash" for id) that HistoryEntry uses.
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts = Utc::now() - chrono::Duration::minutes(5);
+        store
+            .push_with_ts("flavor_history", "recent_flavor", ts, None, None)
+            .unwrap();
+
+        let entries = store.since("flavor_history", "1h").unwrap();
+        assert_eq!(entries.len(), 1);
+
+        // Convert to SearchHit (same transform the handler does)
+        let hits: Vec<SearchHit> = entries
+            .iter()
+            .map(|e| SearchHit {
+                index: e.index,
+                id: e.id.clone(),
+                value: e.value.clone(),
+                ts: e.ts.clone(),
+                data: e.data.clone(),
+                memory: e.memory.clone(),
+            })
+            .collect();
+
+        let json_str = serde_json::to_string_pretty(&hits).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        let obj = &parsed[0];
+
+        // Must have "index" (numeric) and "id" (string hash)
+        assert!(
+            obj.get("index").is_some(),
+            "should have 'index' field, got: {}",
+            json_str
+        );
+        assert!(
+            obj.get("id").is_some(),
+            "should have 'id' field, got: {}",
+            json_str
+        );
+        assert!(obj["index"].is_number(), "index should be a number");
+        assert!(obj["id"].is_string(), "id should be a string (hash)");
+
+        // Must NOT have the on-disk rename aliases
+        assert!(
+            obj.get("hash").is_none(),
+            "should NOT have 'hash' field (on-disk alias for id)"
+        );
+
+        // "id" should be the hash, not the numeric index
+        assert_eq!(obj["value"], "recent_flavor");
+    }
+
+    #[test]
+    fn count_json_includes_total_and_latest_ts() {
+        // Verify the count result carries total and latest_ts for filtered queries
+        // so that --json output can include them.
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let ts1 = DateTime::parse_from_rfc3339("2026-04-20T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let ts2 = DateTime::parse_from_rfc3339("2026-04-22T15:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        store
+            .push_with_ts("flavor_history", "bergamot", ts1, None, None)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "lapsang", ts1, None, None)
+            .unwrap();
+        store
+            .push_with_ts("flavor_history", "bergamot earl grey", ts2, None, None)
+            .unwrap();
+
+        let result = store
+            .count("flavor_history", Some("bergamot"), None, &[])
+            .unwrap();
+
+        // Build JSON the same way the handler does
+        let mut json_val = serde_json::json!({"count": result.matched});
+        if let Some(total) = result.total {
+            json_val["total"] = serde_json::json!(total);
+        }
+        if let Some(ref ts) = result.latest_ts {
+            json_val["latest_ts"] = serde_json::json!(ts);
+        }
+
+        let obj: serde_json::Value = json_val;
+
+        assert_eq!(obj["count"], 2, "2 entries match 'bergamot'");
+        assert_eq!(obj["total"], 3, "3 total entries");
+        assert!(
+            obj.get("latest_ts").is_some(),
+            "should include latest_ts for filtered count"
+        );
+        let latest = obj["latest_ts"].as_str().unwrap();
+        assert!(
+            latest.contains("2026-04-22"),
+            "latest_ts should be the most recent matching entry"
+        );
     }
 }

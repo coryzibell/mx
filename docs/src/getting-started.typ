@@ -155,6 +155,10 @@ mx kv push projects "palmtop DSI fix" \
   --data '{"tags":["palmtop","i915"],"status":"active"}'
 mx kv search projects --where status=active
 mx kv search projects "DSI" --where tags=palmtop
+
+# JSON output for scripting and jq piping
+mx kv last projects --count 5 --json | jq '.[].data.status'
+mx kv count shipped --json | jq '.count'
 ```
 
 === State

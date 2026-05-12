@@ -209,7 +209,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     };
 
     match cmd {
-        KvCommands::Get { key, id, memory } => {
+        KvCommands::Get {
+            key,
+            id,
+            memory,
+            json,
+        } => {
             if let Some(id_spec) = id {
                 // ID-based entry lookup on history/list
                 let ids = match parse_id_spec(&id_spec) {
@@ -221,6 +226,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 };
                 match store.get_entries_by_id(&key, &ids) {
                     Ok(hits) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&hits)?);
+                            return Ok(kv::EXIT_OK);
+                        }
+
                         for hit in &hits {
                             println!(
                                 "{}",
@@ -272,6 +282,44 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 // Original scalar get behavior
                 match store.get(&key) {
                     Ok(val) => {
+                        if json {
+                            match val {
+                                kv::DataValue::History { entries, .. } => {
+                                    let hits: Vec<kv::SearchHit> = entries
+                                        .iter()
+                                        .map(|e| kv::SearchHit {
+                                            index: e.index,
+                                            id: e.id.clone(),
+                                            value: e.value.clone(),
+                                            ts: e.ts.clone(),
+                                            data: e.data.clone(),
+                                            memory: e.memory.clone(),
+                                        })
+                                        .collect();
+                                    println!("{}", serde_json::to_string_pretty(&hits)?);
+                                }
+                                kv::DataValue::List { items, .. } => {
+                                    let hits: Vec<kv::SearchHit> = items
+                                        .iter()
+                                        .map(|e| kv::SearchHit {
+                                            index: e.index,
+                                            id: e.id.clone(),
+                                            value: e.value.clone(),
+                                            ts: e.ts.clone(),
+                                            data: e.data.clone(),
+                                            memory: e.memory.clone(),
+                                        })
+                                        .collect();
+                                    println!("{}", serde_json::to_string_pretty(&hits)?);
+                                }
+                                _ => {
+                                    let json_val =
+                                        serde_json::json!({"value": kv::format_value(val)});
+                                    println!("{}", serde_json::to_string_pretty(&json_val)?);
+                                }
+                            }
+                            return Ok(kv::EXIT_OK);
+                        }
                         println!("{}", kv::format_value(val));
                         if memory {
                             resolve_memory(&store, &key, verbose);
@@ -477,6 +525,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -490,6 +539,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.last(&key, count, range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     for hit in &hits {
                         println!(
                             "{}",
@@ -518,6 +571,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -531,6 +585,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.random(&key, count, range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     for hit in &hits {
                         println!(
                             "{}",
@@ -559,8 +617,24 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             timeref,
             memory,
+            json,
         } => match store.since(&key, &timeref) {
             Ok(entries) => {
+                if json {
+                    let hits: Vec<kv::SearchHit> = entries
+                        .iter()
+                        .map(|e| kv::SearchHit {
+                            index: e.index,
+                            id: e.id.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&hits)?);
+                    return Ok(kv::EXIT_OK);
+                }
                 for entry in &entries {
                     println!(
                         "{}",
@@ -654,6 +728,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             query,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -674,6 +749,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
             match store.search(&key, query.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     if hits.is_empty() {
                         eprintln!("No matching entries");
                         Ok(kv::EXIT_OK)
@@ -706,6 +785,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         KvCommands::Count {
             key,
             value,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -719,6 +799,17 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.count(&key, value.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(result) => {
+                    if json {
+                        let mut json_val = serde_json::json!({"count": result.matched});
+                        if let Some(total) = result.total {
+                            json_val["total"] = serde_json::json!(total);
+                        }
+                        if let Some(ref ts) = result.latest_ts {
+                            json_val["latest_ts"] = serde_json::json!(ts);
+                        }
+                        println!("{}", serde_json::to_string_pretty(&json_val)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     match result.total {
                         Some(total) => {
                             // Filtered: show matched/total (pct%) — latest: ...

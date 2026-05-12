@@ -170,6 +170,11 @@ mx kv random shipped --count 3 --since 30d
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123
 mx kv last decisions --count 3 --memory
+
+# JSON output for scripting and jq piping
+mx kv last projects --count 5 --json | jq '.[].data.status'
+mx kv search projects --where status=active --json | jq 'map(.value)'
+mx kv count shipped --json | jq '.count'
 ```
 
 Every entry gets a stable entry ID (e.g. `kv-A3fB`) alongside its numeric index. Push prints both: `kv-A3fB (42)`. Anywhere a numeric index works, an entry ID also works -- `--id kv-A3fB`, mixed comma lists, remove. Ranges remain numeric only. Old data files are back-filled on first load.

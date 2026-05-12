@@ -1693,6 +1693,10 @@ pub enum KvCommands {
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Set a value (string/counter), or set a field on a state type
@@ -1779,6 +1783,10 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
         /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
@@ -1798,6 +1806,10 @@ pub enum KvCommands {
         /// Resolve and display linked memory entry (kn- reference)
         #[arg(long)]
         memory: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Dump all state
@@ -1846,6 +1858,10 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
         /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
@@ -1867,6 +1883,10 @@ pub enum KvCommands {
         #[arg(long)]
         memory: bool,
 
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+
         /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
         where_clauses: Vec<String>,
@@ -1882,6 +1902,10 @@ pub enum KvCommands {
 
         /// Count only entries matching this substring
         value: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
 
         /// Filter by structured data fields (key=value, top-level fields only, repeatable)
         #[arg(long = "where")]
