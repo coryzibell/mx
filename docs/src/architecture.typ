@@ -77,7 +77,7 @@ src/
    memory.rs        # mx memory subcommand handler
    kv.rs            # mx kv subcommand handler
    metadata.rs      # metadata subcommand handler (categories, tags, etc.)
-   state.rs         # mx state subcommand handler
+   state.rs         # mx state subcommand handler (deprecated)
  commit.rs          # encoding pipeline (hash + compress + encode)
  knowledge.rs       # KnowledgeEntry struct (the core data model)
  store.rs           # KnowledgeStore trait (abstract storage interface)
@@ -110,7 +110,7 @@ src/
  kv.rs              # KV store engine (schema TOML + data JSON)
  types.rs           # shared domain types (Agent, Category, Project, etc.)
  display.rs         # safe_truncate, formatting helpers
- tensor.rs          # emotional state tensor encode/decode
+ tensor.rs          # emotional state tensor encode/decode (deprecated, serves mx state)
  github.rs          # GitHub API operations (cleanup, comments)
  sync/              # GitHub sync (issues, wiki)
  convert.rs         # md2yaml / yaml2md conversion

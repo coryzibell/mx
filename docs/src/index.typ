@@ -18,7 +18,7 @@ persistent memory, encoded commits, or session management.
 - #link("memory.html")[Memory] -- knowledge graph operations
 - #link("codex.html")[Codex] -- session archival
 - #link("kv.html")[KV] -- local key-value store
-- #link("state.html")[State] -- emotional state tensors
+- #link("state.html")[State] -- emotional state tensors _(deprecated)_
 - #link("sync.html")[Sync] -- GitHub sync
 - #link("pr.html")[PR] -- pull request merge
 - #link("github.html")[GitHub] -- GitHub operations
