@@ -161,7 +161,12 @@ mx kv last projects --count 5 --json | jq '.[].data.status'
 mx kv count shipped --json | jq '.count'
 ```
 
-=== State
+=== State (deprecated)
+
+#deprecated[
+  `mx state` is deprecated and will be removed in a future release. Use `mx kv`
+  with structured data (`--data`) instead.
+]
 
 The #link("state.html")[state] system encodes emotional state tensors -- multi-
 dimensional values compressed into a compact string format. Used for agent

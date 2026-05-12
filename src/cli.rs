@@ -123,7 +123,7 @@ pub enum Commands {
         args: Vec<String>,
     },
 
-    /// Emotional state tensor operations
+    /// [DEPRECATED] Tensor state encoding and decoding. Use `mx kv` instead.
     State {
         #[command(subcommand)]
         command: StateCommands,
@@ -172,6 +172,7 @@ pub enum ConvertCommands {
 }
 
 #[derive(Subcommand)]
+/// [DEPRECATED] Tensor state subcommands. Use `mx kv` with structured data instead.
 pub enum StateCommands {
     /// Encode state tensor from dimensional values
     Encode {
