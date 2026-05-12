@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::store::KnowledgeStore;
 
@@ -1301,4 +1303,223 @@ fn test_list_all_tags_empty_database() {
 
     let tags = db.list_all_tags(Some("pattern")).unwrap();
     assert!(tags.is_empty());
+}
+
+// =========================================================================
+// GHOST ANCHOR SWEEP TESTS
+// =========================================================================
+
+// ---- Pure function tests (no DB required) ----
+
+#[test]
+fn test_detect_ghosts_finds_missing_anchors() {
+    // Entry references anchors "aaa" and "bbb", but only "aaa" exists.
+    let live_ids: HashSet<String> = ["aaa"].iter().map(|s| s.to_string()).collect();
+    let anchors = vec!["aaa".to_string(), "bbb".to_string()];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert_eq!(ghosts, vec!["bbb"]);
+}
+
+#[test]
+fn test_detect_ghosts_no_false_positives() {
+    // All anchors exist — no ghosts should be reported.
+    let live_ids: HashSet<String> = ["aaa", "bbb", "ccc"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let anchors = vec!["aaa".to_string(), "bbb".to_string()];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert!(
+        ghosts.is_empty(),
+        "No ghosts should be detected when all anchors exist"
+    );
+}
+
+#[test]
+fn test_detect_ghosts_all_anchors_are_ghosts() {
+    // No referenced IDs exist — every anchor is a ghost.
+    let live_ids: HashSet<String> = HashSet::new();
+    let anchors = vec!["aaa".to_string(), "bbb".to_string(), "ccc".to_string()];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert_eq!(ghosts.len(), 3, "All anchors should be ghosts");
+    assert_eq!(ghosts, anchors);
+}
+
+#[test]
+fn test_detect_ghosts_handles_kn_prefix() {
+    // Anchors stored with "kn-" prefix should still be detected against
+    // bare IDs in the live set.
+    let live_ids: HashSet<String> = ["aaa"].iter().map(|s| s.to_string()).collect();
+    let anchors = vec!["kn-aaa".to_string(), "kn-bbb".to_string()];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert_eq!(
+        ghosts,
+        vec!["kn-bbb"],
+        "kn-aaa maps to live 'aaa', kn-bbb is a ghost"
+    );
+}
+
+#[test]
+fn test_detect_ghosts_mixed_prefix_and_bare() {
+    // Mix of prefixed and bare anchors. Both forms should resolve correctly.
+    let live_ids: HashSet<String> = ["aaa", "bbb"].iter().map(|s| s.to_string()).collect();
+    let anchors = vec![
+        "kn-aaa".to_string(), // maps to live "aaa" — not a ghost
+        "bbb".to_string(),    // maps to live "bbb" — not a ghost
+        "ccc".to_string(),    // not in live set — ghost
+        "kn-ddd".to_string(), // maps to bare "ddd", not in live set — ghost
+    ];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert_eq!(ghosts, vec!["ccc", "kn-ddd"]);
+}
+
+#[test]
+fn test_detect_ghosts_empty_anchors() {
+    // Entry with no anchors should produce no ghosts.
+    let live_ids: HashSet<String> = ["aaa"].iter().map(|s| s.to_string()).collect();
+    let anchors: Vec<String> = vec![];
+
+    let ghosts = queries::detect_ghosts(&anchors, &live_ids);
+    assert!(ghosts.is_empty());
+}
+
+// ---- Integration tests (in-memory SurrealDB) ----
+
+#[test]
+fn test_sweep_ghost_anchors_dry_run_does_not_modify() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Create two entries: "target" exists, "ghost" does not.
+    let mut entry_a = make_test_entry("kn-sweep-a", 5, 0.0);
+    entry_a.anchors = vec!["kn-sweep-target".to_string(), "kn-sweep-ghost".to_string()];
+    db.upsert_knowledge(&entry_a).unwrap();
+
+    let entry_target = make_test_entry("kn-sweep-target", 3, 0.0);
+    db.upsert_knowledge(&entry_target).unwrap();
+    // "kn-sweep-ghost" is intentionally NOT created.
+
+    // Dry run
+    let result = db.sweep_ghost_anchors(true).unwrap();
+
+    assert_eq!(result.ghosts_found, 1, "Should detect one ghost anchor");
+    assert_eq!(
+        result.ghosts_removed, 0,
+        "Dry run should not remove anything"
+    );
+    assert!(result.dry_run);
+    assert_eq!(result.affected_entries.len(), 1);
+    assert_eq!(
+        result.affected_entries[0].ghost_anchors,
+        vec!["kn-sweep-ghost"]
+    );
+
+    // Verify anchors were NOT modified
+    let ctx = crate::store::AgentContext::public_only();
+    let unchanged = db.get("kn-sweep-a", &ctx).unwrap().unwrap();
+    assert_eq!(
+        unchanged.anchors.len(),
+        2,
+        "Dry run must not modify anchors"
+    );
+}
+
+#[test]
+fn test_sweep_ghost_anchors_removes_ghosts() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Create entry with one live and one ghost anchor.
+    let mut entry_a = make_test_entry("kn-sweep-rm-a", 5, 0.0);
+    entry_a.anchors = vec![
+        "kn-sweep-rm-live".to_string(),
+        "kn-sweep-rm-dead".to_string(),
+    ];
+    db.upsert_knowledge(&entry_a).unwrap();
+
+    let live_entry = make_test_entry("kn-sweep-rm-live", 3, 0.0);
+    db.upsert_knowledge(&live_entry).unwrap();
+    // "kn-sweep-rm-dead" is intentionally NOT created.
+
+    // Real sweep
+    let result = db.sweep_ghost_anchors(false).unwrap();
+
+    assert_eq!(result.ghosts_found, 1);
+    assert_eq!(result.ghosts_removed, 1);
+    assert!(!result.dry_run);
+
+    // Verify the ghost anchor was actually removed
+    let ctx = crate::store::AgentContext::public_only();
+    let updated = db.get("kn-sweep-rm-a", &ctx).unwrap().unwrap();
+    assert_eq!(
+        updated.anchors.len(),
+        1,
+        "Ghost anchor should have been removed"
+    );
+    assert!(
+        updated.anchors.contains(&"kn-sweep-rm-live".to_string()),
+        "Live anchor should be preserved"
+    );
+}
+
+#[test]
+fn test_sweep_ghost_anchors_all_ghosts_on_entry() {
+    // Edge case: entry where ALL anchors are ghosts.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-sweep-all-ghost", 5, 0.0);
+    entry.anchors = vec!["kn-ghost-x".to_string(), "kn-ghost-y".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+    // Neither ghost-x nor ghost-y exist.
+
+    let result = db.sweep_ghost_anchors(false).unwrap();
+
+    assert_eq!(result.ghosts_found, 2, "Both anchors should be ghosts");
+    assert_eq!(result.ghosts_removed, 2);
+    assert_eq!(result.affected_entries.len(), 1);
+
+    // Verify all anchors were removed
+    let ctx = crate::store::AgentContext::public_only();
+    let updated = db.get("kn-sweep-all-ghost", &ctx).unwrap().unwrap();
+    assert!(
+        updated.anchors.is_empty(),
+        "All ghost anchors should be removed"
+    );
+}
+
+#[test]
+fn test_sweep_ghost_anchors_clean_graph() {
+    // When no ghosts exist, the sweep should report 0 found / 0 removed.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry_a = make_test_entry("kn-clean-a", 5, 0.0);
+    entry_a.anchors = vec!["kn-clean-b".to_string()];
+    db.upsert_knowledge(&entry_a).unwrap();
+
+    let entry_b = make_test_entry("kn-clean-b", 3, 0.0);
+    db.upsert_knowledge(&entry_b).unwrap();
+
+    let result = db.sweep_ghost_anchors(true).unwrap();
+
+    assert_eq!(result.ghosts_found, 0, "Clean graph should have no ghosts");
+    assert_eq!(result.entries_scanned, 1, "One entry has anchors");
+    assert!(result.affected_entries.is_empty());
+}
+
+#[test]
+fn test_sweep_ghost_anchors_no_anchored_entries() {
+    // When no entries have anchors, the sweep should return immediately.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let entry = make_test_entry("kn-no-anchors", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    let result = db.sweep_ghost_anchors(true).unwrap();
+
+    assert_eq!(result.entries_scanned, 0);
+    assert_eq!(result.ghosts_found, 0);
+    assert!(result.affected_entries.is_empty());
 }

@@ -2343,6 +2343,86 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 bail!("Entry '{}' not found", normalized_id);
             }
         }
+
+        MemoryCommands::SweepGhosts { dry_run, json } => {
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            if dry_run {
+                eprintln!("sweep-ghosts: DRY RUN — no changes will be made");
+            } else {
+                eprintln!(
+                    "sweep-ghosts: WARNING — this will modify memory data. Use --dry-run to preview first."
+                );
+            }
+
+            let result = db.sweep_ghost_anchors(dry_run)?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                // Human-readable report
+                println!(
+                    "Ghost anchor sweep{}",
+                    if dry_run { " (dry run)" } else { "" }
+                );
+                println!(
+                    "  Entries scanned (with anchors): {}",
+                    result.entries_scanned
+                );
+                println!("  Ghost references found:         {}", result.ghosts_found);
+                if dry_run {
+                    println!(
+                        "  Ghost references to remove:     {} (dry run, no changes made)",
+                        result.ghosts_found
+                    );
+                } else {
+                    println!(
+                        "  Ghost references removed:       {}",
+                        result.ghosts_removed
+                    );
+                }
+                println!(
+                    "  Entries affected:               {}",
+                    result.affected_entries.len()
+                );
+
+                if !result.affected_entries.is_empty() {
+                    println!();
+                    println!("Affected entries:");
+                    for entry in &result.affected_entries {
+                        let ghost_count = entry.ghost_anchors.len();
+                        println!(
+                            "  {} ({}) — {} ghost anchor{}",
+                            entry.id,
+                            entry.title,
+                            ghost_count,
+                            if ghost_count == 1 { "" } else { "s" }
+                        );
+                        // Show individual ghost IDs — useful for verifying before real run
+                        if verbose {
+                            for ghost in &entry.ghost_anchors {
+                                println!("      ghost: {}", ghost);
+                            }
+                        }
+                    }
+                }
+
+                if dry_run && result.ghosts_found > 0 {
+                    println!();
+                    println!("To apply: hearth mx memory sweep-ghosts (without --dry-run)");
+                } else if !dry_run && result.ghosts_removed > 0 {
+                    println!();
+                    println!(
+                        "Done. {} ghost reference{} removed.",
+                        result.ghosts_removed,
+                        if result.ghosts_removed == 1 { "" } else { "s" }
+                    );
+                } else if result.ghosts_found == 0 {
+                    println!();
+                    println!("Graph is clean. No ghost anchors found.");
+                }
+            }
+        }
     }
 
     Ok(())

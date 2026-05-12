@@ -327,4 +327,8 @@ impl KnowledgeStore for SurrealDatabase {
     fn delete_wake_session(&self, session_id: &str) -> Result<()> {
         self.delete_wake_session(session_id)
     }
+
+    fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<crate::store::GhostSweepResult> {
+        self.sweep_ghost_anchors(dry_run)
+    }
 }

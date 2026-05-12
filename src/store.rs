@@ -426,11 +426,54 @@ pub trait KnowledgeStore {
     fn delete_wake_session(&self, session_id: &str) -> Result<()>;
 
     // =========================================================================
+    // GHOST EDGE REPAIR
+    // =========================================================================
+
+    /// Sweep anchor fields for references to deleted/missing entries.
+    ///
+    /// For each entry with non-empty anchors, checks each anchor ID for
+    /// existence. Ghost references (pointing to entries that no longer exist)
+    /// are either removed (dry_run=false) or reported without modification
+    /// (dry_run=true).
+    ///
+    /// Returns a summary of what was (or would be) cleaned.
+    fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<GhostSweepResult>;
+
+    // =========================================================================
     // MIGRATION & INTROSPECTION
     // =========================================================================
 
     /// List tables (for migration status)
     fn list_tables(&self) -> Result<Vec<String>>;
+}
+
+/// Summary result from a ghost anchor sweep.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GhostSweepResult {
+    /// Total entries scanned (those with at least one anchor)
+    pub entries_scanned: usize,
+    /// Total ghost references found
+    pub ghosts_found: usize,
+    /// Total ghost references removal was attempted for (0 when dry_run=true).
+    /// This counts attempted removals, not confirmed removals — if a database
+    /// update fails for a particular entry, the ghost count for that entry is
+    /// still included here but the anchors may not have been removed.
+    pub ghosts_removed: usize,
+    /// Entries that had at least one ghost anchor (id + count of ghosts)
+    pub affected_entries: Vec<GhostEntry>,
+    /// Whether this was a dry run
+    pub dry_run: bool,
+}
+
+/// One entry affected by the ghost sweep.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GhostEntry {
+    /// Entry ID (kn-prefixed)
+    pub id: String,
+    /// Entry title for context
+    pub title: String,
+    /// Ghost anchor IDs found in this entry
+    pub ghost_anchors: Vec<String>,
 }
 
 /// Factory function to create the SurrealDB store

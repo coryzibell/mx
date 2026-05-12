@@ -1554,6 +1554,13 @@ mod tests {
             fn list_tables(&self) -> Result<Vec<String>> {
                 unreachable!()
             }
+
+            fn sweep_ghost_anchors(
+                &self,
+                _dry_run: bool,
+            ) -> Result<crate::store::GhostSweepResult> {
+                unreachable!()
+            }
         }
     }
 

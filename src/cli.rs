@@ -1068,6 +1068,23 @@ pub enum MemoryCommands {
         format: String,
     },
 
+    /// Sweep ghost anchor references pointing to deleted nodes
+    ///
+    /// Scans all entries with non-empty anchor lists. For each anchor ID,
+    /// checks whether the target entry still exists. Ghost references (pointing
+    /// to deleted or missing entries) are removed from the source entry.
+    ///
+    /// Always run with --dry-run first to preview what will be changed.
+    SweepGhosts {
+        /// Report what would be cleaned without modifying anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON (useful for programmatic processing)
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Reinforce a knowledge entry (increment resonance, update last_activated, increment activation_count)
     Reinforce {
         /// Entry ID to reinforce
