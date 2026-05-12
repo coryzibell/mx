@@ -138,6 +138,7 @@ KV commands use structured exit codes for scripting:
   flags: (
     ([`--id <spec>`], [string], [Entry identifier: numeric index (`35`), entry ID (`kv-A3fB`), range (`35-64`), or comma-separated (`1,kv-A3fB,12`)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--json`], [flag], [Output as JSON. Collections emit a JSON array of entry objects. Scalars emit `{"value": "..."}`. Memory resolution is skipped in JSON mode; the raw `kn-` ID is included in each entry's `memory` field.]),
   ),
   examples: (
     "mx kv get session_goal",
@@ -149,6 +150,8 @@ KV commands use structured exit codes for scripting:
     "mx kv get shipped --id 35-64",
     "mx kv get shipped --id 1,kv-A3fB,12",
     "mx kv get shipped --id 35 --memory",
+    "mx kv get shipped --id 42 --json",
+    "mx kv get shipped --json",
   ),
 )
 
@@ -340,6 +343,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   flags: (
     ([`--count <n>`], [integer], [Number of entries to return (default: 1)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--json`], [flag], [Output as a JSON array of entry objects]),
     ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Entries from a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Entries from a specific month (UTC)]),
@@ -358,6 +362,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv last shipped --since 1w",
     "mx kv last projects --where status=active",
     "mx kv last projects --where status=active --count 3",
+    "mx kv last projects --count 5 --json",
   ),
 )
 
@@ -374,12 +379,14 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   Entries are printed with their numeric index, entry ID, value, and timestamp.],
   flags: (
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--json`], [flag], [Output as a JSON array of entry objects]),
   ),
   examples: (
     "mx kv since decisions 1h",
     "mx kv since decisions 7d",
     "mx kv since decisions 2w --memory",
     "mx kv since decisions 2025-01-15T10:00:00Z",
+    "mx kv since shipped 1w --json",
   ),
 )
 
@@ -402,6 +409,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   See #link(<time-range-queries>)[Time-range queries] for details.],
   flags: (
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--json`], [flag], [Output as a JSON array of entry objects]),
     ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Search within a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Search within a specific month (UTC)]),
@@ -418,6 +426,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv search projects --where status=active",
     "mx kv search projects \"DSI\" --where status=active",
     "mx kv search projects --where tags=palmtop --where status=active",
+    "mx kv search projects --where status=active --json",
   ),
 )
 
@@ -443,6 +452,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   Time-range flags restrict the count to entries within the specified period.
   See #link(<time-range-queries>)[Time-range queries] for details.],
   flags: (
+    ([`--json`], [flag], [Output as JSON: `{"count": N}` with optional `total` and `latest_ts` fields when filtering is active]),
     ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Count within a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Count within a specific month (UTC)]),
@@ -460,6 +470,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv count shipped --since 1w",
     "mx kv count projects --where status=active",
     "mx kv count projects --where status=active --since 30d",
+    "mx kv count shipped --json",
   ),
 )
 
@@ -483,6 +494,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
   flags: (
     ([`--count <n>`], [integer], [Number of random entries to return (default: 1, must be >= 1)]),
     ([`--memory`], [flag], [Resolve and display any linked memory entry]),
+    ([`--json`], [flag], [Output as a JSON array of entry objects]),
     ([`--where <key=value>`], [string], [Filter by structured data field (repeatable, ANDed). Top-level fields only.]),
     ([`--day <YYYY-MM-DD>`], [string], [Sample from entries on a specific day (UTC)]),
     ([`--month <YYYY-MM>`], [string], [Sample from entries in a specific month (UTC)]),
@@ -498,6 +510,7 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv random shipped --count 3 --since 30d",
     "mx kv random decisions --month 2026-04 --count 3",
     "mx kv random projects --where status=active --count 3",
+    "mx kv random ideas --count 3 --json",
   ),
 )
 
@@ -913,3 +926,91 @@ links are supplementary context.
 
 #note[Memory links are only available on history, list, and state types.
 String and counter keys do not support `--memory`.]
+
+== JSON output <json-output>
+
+The `--json` flag outputs results as pretty-printed JSON instead of the
+human-readable format. It is available on six commands: `get`, `last`,
+`search`, `random`, `since`, and `count`.
+
+JSON output is designed for scripting and piping to tools like `jq`. When
+`--json` is active, human formatting is skipped and `--memory` resolution
+is not performed -- the raw `kn-` ID is included in each entry's `memory`
+field for the caller to resolve if needed.
+
+=== Entry format
+
+Commands that return entries (`get`, `last`, `search`, `random`, `since`)
+emit a JSON array of entry objects. Each object has this shape:
+
+```json
+{
+  "index": 42,
+  "id": "A3fB",
+  "value": "palmtop DSI fix",
+  "ts": "2026-05-08T14:30:00+00:00",
+  "data": {"status": "active", "tags": ["palmtop", "i915"]},
+  "memory": "kn-e1f646aa"
+}
+```
+
+/ `index`: Numeric sequence index (integer).
+/ `id`: Stable entry ID (base58 string, without the `kv-` prefix).
+/ `value`: The entry's text value.
+/ `ts`: Timestamp in ISO-8601 format.
+/ `data`: Structured data object, omitted when the entry has no data.
+/ `memory`: Per-entry memory link (`kn-` ID), omitted when not set.
+
+The `data` and `memory` fields are omitted entirely (not `null`) when they
+have no value. This keeps the output clean and avoids forcing callers to
+handle nulls.
+
+=== Special output shapes
+
+`get --json` without `--id` adapts to the key type:
+
+- *History and list keys:* JSON array of all entries (same format as above).
+- *Scalar keys* (string, counter, state): `{"value": "..."}` -- the
+  formatted value as a string.
+
+`count --json` emits a count object:
+
+```json
+{"count": 12}
+```
+
+When filtering is active (value substring, `--where`, or time range), the
+object includes additional context:
+
+```json
+{"count": 5, "total": 12, "latest_ts": "2026-05-08T14:30:00+00:00"}
+```
+
+/ `count`: Number of matched entries (always present).
+/ `total`: Total entries before filtering (present when filtering).
+/ `latest_ts`: Timestamp of the most recent matched entry (present when filtering).
+
+=== Piping to `jq`
+
+The primary use case for `--json` is piping to `jq` for complex queries
+that go beyond what `--where` provides:
+
+```bash
+# Extract all status values
+mx kv last projects --json | jq '.[].data.status'
+
+# Filter by a nested condition
+mx kv search projects --where status=active --json \
+  | jq 'map(select(.data.tags | contains(["rust"])))'
+
+# Get the count as a bare number
+mx kv count shipped --json | jq '.count'
+
+# Build a CSV of shipped items
+mx kv last shipped --count 100 --json \
+  | jq -r '.[] | [.index, .id, .value, .ts] | @csv'
+```
+
+#note[`--json` is available on `get`, `last`, `search`, `random`, `since`,
+and `count`. It is not available on `push`, `pop`, `set`, `inc`, `dec`,
+`remove`, `reset`, `keys`, or `dump` (which already has `--format json`).]

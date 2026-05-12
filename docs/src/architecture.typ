@@ -648,6 +648,13 @@ prefix, which wins over the key-level fallback. The `SearchHit` struct
 (returned by `last`, `random`, `search`, `since`, and `get --id`) carries the
 per-entry `memory` field for the handler to resolve.
 
+`SearchHit` derives `serde::Serialize` to support the `--json` output flag.
+The serialized field names are the Rust struct names (`index`, `id`, `value`,
+`ts`, `data`, `memory`) -- deliberately different from the on-disk
+`serde(rename)` aliases used by `HistoryEntry` and `ListEntry`. The `data`
+and `memory` fields use `#[serde(skip_serializing_if = "Option::is_none")]`
+so they are omitted from JSON output when not set.
+
 
 // =========================================================================
 // BASE-D INTEGRATION

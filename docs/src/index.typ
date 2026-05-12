@@ -79,6 +79,7 @@ mx kv push projects "palmtop DSI fix" \
 mx kv search projects --where status=active
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123
+mx kv last projects --count 5 --json | jq '.[].data.status'
 ```
 
 == Installation
