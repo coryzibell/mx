@@ -152,13 +152,13 @@ mx kv count shipped --day 2026-05-07
 # Time range composes with --count (filter first, then limit)
 mx kv last shipped --month 2026-04 --count 5
 
-# Entry lookup by numeric ID or hash ID
+# Entry lookup by numeric index or entry ID
 mx kv get shipped --id 35
 mx kv get shipped --id kv-A3fB
 mx kv get shipped --id 35-64
 mx kv get shipped --id 1,kv-A3fB,12
 
-# Remove by hash ID
+# Remove by entry ID
 mx kv remove shipped --id kv-A3fB
 
 # Random sampling from history/list keys
@@ -172,7 +172,7 @@ mx kv set decisions --id 17 --memory kn-abc123
 mx kv last decisions --count 3 --memory
 ```
 
-Every entry gets a stable hash ID (e.g. `kv-A3fB`) alongside its numeric ID. Push prints both: `kv-A3fB (42)`. Anywhere a numeric ID works, a hash ID also works -- `--id kv-A3fB`, mixed comma lists, remove. Ranges remain numeric only. Old data files are back-filled on first load.
+Every entry gets a stable entry ID (e.g. `kv-A3fB`) alongside its numeric index. Push prints both: `kv-A3fB (42)`. Anywhere a numeric index works, an entry ID also works -- `--id kv-A3fB`, mixed comma lists, remove. Ranges remain numeric only. Old data files are back-filled on first load.
 
 Entries can carry structured JSON data via `--data` on push. Query entries by data fields with `--where key=value` (available on `search`, `last`, `random`, `count`). Multiple `--where` flags are ANDed. Supports exact string match, array-contains, and numeric/boolean comparison on top-level fields.
 

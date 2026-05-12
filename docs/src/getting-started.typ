@@ -139,7 +139,7 @@ mx kv push decisions "chose Typst for docs"  # prints: kv-A3fB (1)
 mx kv last decisions --count 5
 mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
-mx kv get decisions --id kv-A3fB              # look up by hash ID
+mx kv get decisions --id kv-A3fB              # look up by entry ID
 
 # Auto-create a key in the schema and push in one step
 mx kv push puns "the joke" --create history

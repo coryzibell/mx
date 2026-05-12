@@ -199,8 +199,8 @@ exception: it uses typed exit codes (0 = OK, 1 = key not found, 2 = type
 mismatch, 3 = schema missing, 4 = invalid input) so callers can distinguish
 failure modes programmatically. The `KvError` enum covers five typed variants:
 `KeyNotFound`, `TypeMismatch`, `SchemaMissing`, `EntryNotFound` (a specific
-entry ID was not found within a key), and `AmbiguousHash` (a hash prefix
-matched multiple entries). Both `EntryNotFound` and `AmbiguousHash` map to
+entry ID was not found within a key), and `AmbiguousId` (an ID prefix
+matched multiple entries). Both `EntryNotFound` and `AmbiguousId` map to
 exit code 4.
 
 
@@ -587,8 +587,8 @@ Supported types:
   table.header([*Type*], [*Behavior*]),
   [`counter`], [Integer with optional `min`/`max` bounds. Supports `inc`, `dec`, `set`, `get`],
   [`string`], [Simple string value. Supports `set`, `get`],
-  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. Each entry gets a numeric ID and a stable base58 hash ID (`kv-` prefix). Entries can carry optional structured JSON data (`--data` on push, `--where` on queries). The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
-  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. Each entry gets a numeric ID and a stable base58 hash ID. Entries can carry optional structured JSON data. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
+  [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. Each entry gets a numeric index and a stable base58 entry ID (`kv-` prefix). Entries can carry optional structured JSON data (`--data` on push, `--where` on queries). The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
+  [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. Each entry gets a numeric index and a stable base58 entry ID. Entries can carry optional structured JSON data. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
   [`state`], [Named fields (like a struct). Supports `set <key> <field> <value>`, `get`],
 )
 
@@ -598,16 +598,21 @@ The data file at `$MX_HOME/kv/data/{agent}.json` holds current values. All
 writes are atomic: serialize to a temp file, fsync, rename. The format is a
 flat JSON object keyed by the key names from the schema.
 
-History and list entries are stored as objects with `id`, `hash`, `value`,
-`ts`, an optional `data` field (arbitrary JSON object for structured
-metadata), and an optional `memory` field (a `kn-` ID linking the entry to
-a knowledge node in the memory graph). The `hash` field is a short base58
-string generated from `blake3(key + timestamp + id)` via base-d, providing a
-stable identifier independent of numeric ordering. The `hash`, `data`, and
-`memory` fields all use `#[serde(default)]` for backward compatibility --
-files written before these fields existed are back-filled on first load
-(hashes are generated, data and memory default to `None`) and saved
-automatically.
+History and list entries are stored as objects with `id` (stable entry ID,
+serialized from the `id` field), `hash` (legacy on-disk name for the entry ID,
+read via `serde(rename)`), `value`, `ts`, an optional `data` field (arbitrary
+JSON object for structured metadata), and an optional `memory` field (a `kn-`
+ID linking the entry to a knowledge node in the memory graph). In the Rust
+structs, the numeric sequence number is the `index` field (serialized as `id`
+on disk) and the stable base58 identifier is the `id` field (serialized as
+`hash` on disk). The on-disk names are preserved via `serde(rename)` for
+backward compatibility -- no data migration is needed. The entry ID is a short
+base58 string generated from `blake3(key + timestamp + index)` via base-d,
+providing a stable identifier independent of numeric ordering. The `id`
+(entry ID), `data`, and `memory` fields all use `#[serde(default)]` for
+backward compatibility -- files written before these fields existed are
+back-filled on first load (IDs are generated, data and memory default to
+`None`) and saved automatically.
 
 === Schema mutation
 
