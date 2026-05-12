@@ -8,6 +8,11 @@ pub(crate) fn handle_state(cmd: StateCommands) -> Result<()> {
     use std::io::{self, Read as IoRead};
     use std::path::PathBuf;
 
+    eprintln!(
+        "Warning: `mx state` is deprecated and will be removed in a future release. \
+         Use `mx kv` with structured data instead."
+    );
+
     // Helper to load tensor schema by ID or path. The `--schema` argument
     // accepts either a schema ID (looked up under `$MX_HOME/state/schemas/`)
     // or a direct path to a YAML/JSON schema file.

@@ -2,6 +2,12 @@
 
 #page-header("State", "Emotional state tensors for agent co-regulation.")
 
+#deprecated[
+  `mx state` is deprecated and will be removed in a future release. Use `mx kv`
+  with structured data (`--data`) instead. See the #link("kv.html")[KV documentation]
+  for the replacement workflow.
+]
+
 The state subsystem encodes multidimensional emotional state into compact tensor
 strings. A tensor is a vector of float values (each 0.0--1.0) mapped to named
 dimensions defined by a schema. Schemas are user-authored YAML files; the

@@ -244,8 +244,9 @@ Two env vars were removed in the path-alignment refactor (#259):
 
 - `MX_MEMORY_PATH` -- use `MX_SURREAL_ROOT` instead. Setting the old name now
   emits a one-line stderr note and is otherwise ignored.
-- `MX_STATE_SCHEMA` -- replaced by the `mx state ... --schema {id|path}` CLI
-  flag. The default schema ID is now `tensor` (was `crewu`).
+- `MX_STATE_SCHEMA` (deprecated) -- replaced by the `mx state ... --schema {id|path}` CLI
+  flag. The default schema ID is now `tensor` (was `crewu`). Note: `mx state`
+  itself is deprecated; use `mx kv` with structured data instead.
 
 For the full layout, the complete env-var reference (including SurrealDB
 connection vars, GitHub App auth, and tuning), legacy-fallback behavior, and
