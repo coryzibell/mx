@@ -209,7 +209,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     };
 
     match cmd {
-        KvCommands::Get { key, id, memory } => {
+        KvCommands::Get {
+            key,
+            id,
+            memory,
+            json,
+        } => {
             if let Some(id_spec) = id {
                 // ID-based entry lookup on history/list
                 let ids = match parse_id_spec(&id_spec) {
@@ -221,6 +226,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 };
                 match store.get_entries_by_id(&key, &ids) {
                     Ok(hits) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&hits)?);
+                            return Ok(kv::EXIT_OK);
+                        }
+
                         for hit in &hits {
                             println!(
                                 "{}",
@@ -272,6 +282,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 // Original scalar get behavior
                 match store.get(&key) {
                     Ok(val) => {
+                        if json {
+                            let json_val = serde_json::json!({"value": kv::format_value(val)});
+                            println!("{}", serde_json::to_string_pretty(&json_val)?);
+                            return Ok(kv::EXIT_OK);
+                        }
                         println!("{}", kv::format_value(val));
                         if memory {
                             resolve_memory(&store, &key, verbose);
@@ -477,6 +492,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -490,6 +506,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.last(&key, count, range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     for hit in &hits {
                         println!(
                             "{}",
@@ -518,6 +538,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             count,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -531,6 +552,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.random(&key, count, range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     for hit in &hits {
                         println!(
                             "{}",
@@ -559,8 +584,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             timeref,
             memory,
+            json,
         } => match store.since(&key, &timeref) {
             Ok(entries) => {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                    return Ok(kv::EXIT_OK);
+                }
                 for entry in &entries {
                     println!(
                         "{}",
@@ -654,6 +684,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             key,
             query,
             memory,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -674,6 +705,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
             match store.search(&key, query.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(hits) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&hits)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     if hits.is_empty() {
                         eprintln!("No matching entries");
                         Ok(kv::EXIT_OK)
@@ -706,6 +741,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         KvCommands::Count {
             key,
             value,
+            json,
             where_clauses,
             time_range,
         } => {
@@ -719,6 +755,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
             match store.count(&key, value.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(result) => {
+                    if json {
+                        let json_val = serde_json::json!({"count": result.matched});
+                        println!("{}", serde_json::to_string_pretty(&json_val)?);
+                        return Ok(kv::EXIT_OK);
+                    }
                     match result.total {
                         Some(total) => {
                             // Filtered: show matched/total (pct%) — latest: ...

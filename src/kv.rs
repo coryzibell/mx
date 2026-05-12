@@ -409,13 +409,15 @@ pub struct RemoveResult {
 }
 
 /// Search result entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
     pub index: u64,
     pub id: String,
     pub value: String,
     pub ts: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
 }
 
@@ -5655,5 +5657,102 @@ max_entries = 5
         let store2 = KvStore::load(&schema_path, &data_path).unwrap();
         assert!(store2.schema.keys.contains_key("existing"));
         assert!(store2.schema.keys.contains_key("newkey"));
+    }
+
+    // -- SearchHit JSON serialization --
+
+    #[test]
+    fn search_hit_serializes_all_fields() {
+        let hit = SearchHit {
+            index: 7,
+            id: "A3fB".to_string(),
+            value: "test entry".to_string(),
+            ts: "2026-05-08T12:00:00Z".to_string(),
+            data: Some(serde_json::json!({"status": "active"})),
+            memory: Some("kn-abc123".to_string()),
+        };
+        let json_str = serde_json::to_string_pretty(&hit).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(parsed["index"], 7);
+        assert_eq!(parsed["id"], "A3fB");
+        assert_eq!(parsed["value"], "test entry");
+        assert_eq!(parsed["ts"], "2026-05-08T12:00:00Z");
+        assert_eq!(parsed["data"]["status"], "active");
+        assert_eq!(parsed["memory"], "kn-abc123");
+    }
+
+    #[test]
+    fn search_hit_omits_null_data_and_memory() {
+        let hit = SearchHit {
+            index: 1,
+            id: "Bf2C".to_string(),
+            value: "no extras".to_string(),
+            ts: "2026-05-08T12:00:00Z".to_string(),
+            data: None,
+            memory: None,
+        };
+        let json_str = serde_json::to_string(&hit).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.get("data").is_none(), "data should be omitted when None");
+        assert!(parsed.get("memory").is_none(), "memory should be omitted when None");
+        // Required fields are present
+        assert!(parsed.get("index").is_some());
+        assert!(parsed.get("id").is_some());
+        assert!(parsed.get("value").is_some());
+        assert!(parsed.get("ts").is_some());
+    }
+
+    #[test]
+    fn search_hit_vec_serializes_as_json_array() {
+        let hits = vec![
+            SearchHit {
+                index: 1,
+                id: "aaa".to_string(),
+                value: "first".to_string(),
+                ts: "2026-05-08T10:00:00Z".to_string(),
+                data: None,
+                memory: None,
+            },
+            SearchHit {
+                index: 2,
+                id: "bbb".to_string(),
+                value: "second".to_string(),
+                ts: "2026-05-08T11:00:00Z".to_string(),
+                data: Some(serde_json::json!({"priority": "high"})),
+                memory: Some("kn-xyz".to_string()),
+            },
+        ];
+        let json_str = serde_json::to_string_pretty(&hits).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert!(parsed.is_array());
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["value"], "first");
+        assert!(arr[0].get("data").is_none());
+        assert_eq!(arr[1]["value"], "second");
+        assert_eq!(arr[1]["data"]["priority"], "high");
+        assert_eq!(arr[1]["memory"], "kn-xyz");
+    }
+
+    #[test]
+    fn search_hit_uses_rust_field_names_not_disk_renames() {
+        // SearchHit deliberately uses Rust field names (index, id) for JSON output,
+        // NOT the on-disk serde rename aliases used by HistoryEntry/ListEntry.
+        let hit = SearchHit {
+            index: 42,
+            id: "test".to_string(),
+            value: "v".to_string(),
+            ts: "2026-01-01T00:00:00Z".to_string(),
+            data: None,
+            memory: None,
+        };
+        let json_str = serde_json::to_string(&hit).unwrap();
+        assert!(json_str.contains("\"index\""), "should use 'index' not 'i'");
+        assert!(json_str.contains("\"id\""), "should use 'id' not 'h'");
+        assert!(!json_str.contains("\"i\":"), "should NOT use on-disk 'i' alias");
+        assert!(!json_str.contains("\"h\":"), "should NOT use on-disk 'h' alias");
     }
 }
