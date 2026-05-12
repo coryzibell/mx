@@ -231,10 +231,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         }
 
                         // Report missing IDs
-                        let found_indexes: HashSet<u64> =
-                            hits.iter().map(|h| h.index).collect();
-                        let found_ids: Vec<&str> =
-                            hits.iter().map(|h| h.id.as_str()).collect();
+                        let found_indexes: HashSet<u64> = hits.iter().map(|h| h.index).collect();
+                        let found_ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
                         let missing: Vec<String> = ids
                             .iter()
                             .filter(|id_ref| match id_ref {

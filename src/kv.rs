@@ -967,7 +967,10 @@ impl KvStore {
                         if let Some(max) = def.max_entries {
                             entries.truncate(max);
                         }
-                        Ok(PushResult { index: next_idx, id })
+                        Ok(PushResult {
+                            index: next_idx,
+                            id,
+                        })
                     }
                     _ => Err(KvError::Other(anyhow::anyhow!(
                         "Data corruption: key '{}' has wrong runtime type",
@@ -1000,7 +1003,10 @@ impl KvStore {
                         {
                             items.drain(0..items.len() - max);
                         }
-                        Ok(PushResult { index: next_idx, id })
+                        Ok(PushResult {
+                            index: next_idx,
+                            id,
+                        })
                     }
                     _ => Err(KvError::Other(anyhow::anyhow!(
                         "Data corruption: key '{}' has wrong runtime type",
@@ -2877,10 +2883,7 @@ max_entries = 5
         store.push("tags", "gamma", None, None).unwrap();
 
         let hits = store
-            .get_entries_by_id(
-                "tags",
-                &[IdRef::Index(1), IdRef::Index(2), IdRef::Index(3)],
-            )
+            .get_entries_by_id("tags", &[IdRef::Index(1), IdRef::Index(2), IdRef::Index(3)])
             .unwrap();
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].value, "alpha");
@@ -2966,9 +2969,7 @@ max_entries = 5
     #[test]
     fn get_by_id_empty_list() {
         let (store, _dir) = setup_store(test_schema());
-        let hits = store
-            .get_entries_by_id("tags", &[IdRef::Index(1)])
-            .unwrap();
+        let hits = store.get_entries_by_id("tags", &[IdRef::Index(1)]).unwrap();
         assert!(hits.is_empty());
     }
 
@@ -4840,9 +4841,7 @@ max_entries = 5
             .push("tags", "item", Some(data.clone()), None)
             .unwrap();
 
-        let hits = store
-            .get_entries_by_id("tags", &[IdRef::Index(1)])
-            .unwrap();
+        let hits = store.get_entries_by_id("tags", &[IdRef::Index(1)]).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].data, Some(data));
     }
@@ -5011,10 +5010,7 @@ max_entries = 5
         let r2 = store.push("tags", "beta", None, None).unwrap();
 
         let hits = store
-            .get_entries_by_id(
-                "tags",
-                &[IdRef::Index(r1.index), IdRef::Id(r2.id.clone())],
-            )
+            .get_entries_by_id("tags", &[IdRef::Index(r1.index), IdRef::Id(r2.id.clone())])
             .unwrap();
         assert_eq!(hits.len(), 2);
     }
