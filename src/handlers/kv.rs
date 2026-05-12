@@ -283,8 +283,41 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 match store.get(&key) {
                     Ok(val) => {
                         if json {
-                            let json_val = serde_json::json!({"value": kv::format_value(val)});
-                            println!("{}", serde_json::to_string_pretty(&json_val)?);
+                            match val {
+                                kv::DataValue::History { entries, .. } => {
+                                    let hits: Vec<kv::SearchHit> = entries
+                                        .iter()
+                                        .map(|e| kv::SearchHit {
+                                            index: e.index,
+                                            id: e.id.clone(),
+                                            value: e.value.clone(),
+                                            ts: e.ts.clone(),
+                                            data: e.data.clone(),
+                                            memory: e.memory.clone(),
+                                        })
+                                        .collect();
+                                    println!("{}", serde_json::to_string_pretty(&hits)?);
+                                }
+                                kv::DataValue::List { items, .. } => {
+                                    let hits: Vec<kv::SearchHit> = items
+                                        .iter()
+                                        .map(|e| kv::SearchHit {
+                                            index: e.index,
+                                            id: e.id.clone(),
+                                            value: e.value.clone(),
+                                            ts: e.ts.clone(),
+                                            data: e.data.clone(),
+                                            memory: e.memory.clone(),
+                                        })
+                                        .collect();
+                                    println!("{}", serde_json::to_string_pretty(&hits)?);
+                                }
+                                _ => {
+                                    let json_val =
+                                        serde_json::json!({"value": kv::format_value(val)});
+                                    println!("{}", serde_json::to_string_pretty(&json_val)?);
+                                }
+                            }
                             return Ok(kv::EXIT_OK);
                         }
                         println!("{}", kv::format_value(val));
@@ -588,7 +621,18 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         } => match store.since(&key, &timeref) {
             Ok(entries) => {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&entries)?);
+                    let hits: Vec<kv::SearchHit> = entries
+                        .iter()
+                        .map(|e| kv::SearchHit {
+                            index: e.index,
+                            id: e.id.clone(),
+                            value: e.value.clone(),
+                            ts: e.ts.clone(),
+                            data: e.data.clone(),
+                            memory: e.memory.clone(),
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&hits)?);
                     return Ok(kv::EXIT_OK);
                 }
                 for entry in &entries {
@@ -756,7 +800,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             match store.count(&key, value.as_deref(), range.as_ref(), &parsed_where) {
                 Ok(result) => {
                     if json {
-                        let json_val = serde_json::json!({"count": result.matched});
+                        let mut json_val = serde_json::json!({"count": result.matched});
+                        if let Some(total) = result.total {
+                            json_val["total"] = serde_json::json!(total);
+                        }
+                        if let Some(ref ts) = result.latest_ts {
+                            json_val["latest_ts"] = serde_json::json!(ts);
+                        }
                         println!("{}", serde_json::to_string_pretty(&json_val)?);
                         return Ok(kv::EXIT_OK);
                     }
