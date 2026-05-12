@@ -5695,8 +5695,14 @@ max_entries = 5
         let json_str = serde_json::to_string(&hit).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
-        assert!(parsed.get("data").is_none(), "data should be omitted when None");
-        assert!(parsed.get("memory").is_none(), "memory should be omitted when None");
+        assert!(
+            parsed.get("data").is_none(),
+            "data should be omitted when None"
+        );
+        assert!(
+            parsed.get("memory").is_none(),
+            "memory should be omitted when None"
+        );
         // Required fields are present
         assert!(parsed.get("index").is_some());
         assert!(parsed.get("id").is_some());
@@ -5752,7 +5758,13 @@ max_entries = 5
         let json_str = serde_json::to_string(&hit).unwrap();
         assert!(json_str.contains("\"index\""), "should use 'index' not 'i'");
         assert!(json_str.contains("\"id\""), "should use 'id' not 'h'");
-        assert!(!json_str.contains("\"i\":"), "should NOT use on-disk 'i' alias");
-        assert!(!json_str.contains("\"h\":"), "should NOT use on-disk 'h' alias");
+        assert!(
+            !json_str.contains("\"i\":"),
+            "should NOT use on-disk 'i' alias"
+        );
+        assert!(
+            !json_str.contains("\"h\":"),
+            "should NOT use on-disk 'h' alias"
+        );
     }
 }
