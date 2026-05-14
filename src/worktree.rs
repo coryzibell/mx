@@ -151,9 +151,33 @@ fn parse_pid_from_lock(reason: &str) -> Option<u32> {
     caps.get(1)?.as_str().parse().ok()
 }
 
-/// Check if a PID is alive by probing /proc/{pid}.
+/// Check if a PID is alive.
+///
+/// On Linux, `/proc/{pid}` is authoritative. On other Unix platforms (macOS),
+/// we shell out to `kill -0` which checks process existence without sending a
+/// signal. On Windows the tool is unsupported so we conservatively return false.
 fn pid_is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{}", pid)).exists()
+    #[cfg(target_os = "linux")]
+    {
+        Path::new(&format!("/proc/{}", pid)).exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        #[cfg(unix)]
+        {
+            use std::process::Command as Cmd;
+            Cmd::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            false
+        }
+    }
 }
 
 /// Extract the short branch name from a full ref.
@@ -801,8 +825,10 @@ locked
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_pid_check_alive() {
-        // PID 1 should exist on any Linux system
+        // PID 1 (init/systemd) is always alive on Linux. On macOS CI the runner
+        // may lack permission to signal PID 1, and Windows has no PID 1 at all.
         assert!(pid_is_alive(1));
     }
 }
