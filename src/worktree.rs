@@ -159,9 +159,7 @@ fn pid_is_alive(pid: u32) -> bool {
 /// Extract the short branch name from a full ref.
 /// `refs/heads/feat/foo` -> `feat/foo`
 fn short_branch(refname: &str) -> &str {
-    refname
-        .strip_prefix("refs/heads/")
-        .unwrap_or(refname)
+    refname.strip_prefix("refs/heads/").unwrap_or(refname)
 }
 
 /// Parse owner/repo from a git remote URL.
@@ -236,8 +234,7 @@ fn check_merged_pr(branch: &str, remote_slug: &str) -> Option<u32> {
         return None;
     }
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
 
     let arr = json.as_array()?;
     if arr.is_empty() {
@@ -269,13 +266,16 @@ fn worktree_is_dirty(worktree_path: &Path) -> bool {
     }
 
     let output = Command::new("git")
-        .args(["-C", &worktree_path.to_string_lossy(), "status", "--porcelain"])
+        .args([
+            "-C",
+            &worktree_path.to_string_lossy(),
+            "status",
+            "--porcelain",
+        ])
         .output();
 
     match output {
-        Ok(o) if o.status.success() => {
-            !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-        }
+        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         _ => false, // Can't tell; assume clean
     }
 }
@@ -285,11 +285,7 @@ fn worktree_is_dirty(worktree_path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Clean up a single worktree: unlock, remove, delete branches.
-fn clean_worktree(
-    repo_path: &Path,
-    wt: &Worktree,
-    dry_run: bool,
-) -> Result<()> {
+fn clean_worktree(repo_path: &Path, wt: &Worktree, dry_run: bool) -> Result<()> {
     let branch = wt
         .branch
         .as_deref()
@@ -308,12 +304,7 @@ fn clean_worktree(
 
     // 2. Remove worktree (--force in case directory is already gone)
     let _ = Command::new("git")
-        .args([
-            "worktree",
-            "remove",
-            &wt.path.to_string_lossy(),
-            "--force",
-        ])
+        .args(["worktree", "remove", &wt.path.to_string_lossy(), "--force"])
         .current_dir(repo_path)
         .output();
 
@@ -400,10 +391,7 @@ fn sweep_repo(repo_path: &Path, dry_run: bool, force: bool) -> Result<RepoSweepR
             .unwrap_or("(detached)");
 
         // 2a. Parse PID from lock reason
-        let pid = wt
-            .lock_reason
-            .as_deref()
-            .and_then(parse_pid_from_lock);
+        let pid = wt.lock_reason.as_deref().and_then(parse_pid_from_lock);
 
         // If we can't parse a PID and there's no lock, skip (not ours)
         if pid.is_none() && !wt.locked {
@@ -569,10 +557,7 @@ fn print_repo_result(result: &RepoSweepResult, dry_run: bool) {
                 reason,
             } => {
                 let label = if dry_run { "WOULD SWEEP" } else { "SWEPT" };
-                println!(
-                    "  [{:<12}] {:<26} {:<34} {}",
-                    label, name, branch, reason
-                );
+                println!("  [{:<12}] {:<26} {:<34} {}", label, name, branch, reason);
             }
             SweepAction::Skipped {
                 name,
@@ -580,16 +565,9 @@ fn print_repo_result(result: &RepoSweepResult, dry_run: bool) {
                 reason,
             } => {
                 let label = if dry_run { "WOULD SKIP" } else { "SKIPPED" };
-                println!(
-                    "  [{:<12}] {:<26} {:<34} {}",
-                    label, name, branch, reason
-                );
+                println!("  [{:<12}] {:<26} {:<34} {}", label, name, branch, reason);
             }
-            SweepAction::Alive {
-                name,
-                branch,
-                pid,
-            } => {
+            SweepAction::Alive { name, branch, pid } => {
                 println!(
                     "  [{:<12}] {:<26} {:<34} pid {} alive",
                     "ALIVE", name, branch, pid
@@ -661,11 +639,7 @@ pub fn run_sweep(all: bool, dry_run: bool, force: bool) -> Result<i32> {
         }
     }
 
-    if any_skipped {
-        Ok(2)
-    } else {
-        Ok(0)
-    }
+    if any_skipped { Ok(2) } else { Ok(0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -775,10 +749,7 @@ branch refs/heads/main
         let wts = parse_worktree_list(input);
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].name, "mx");
-        assert_eq!(
-            wts[0].branch.as_deref(),
-            Some("refs/heads/main")
-        );
+        assert_eq!(wts[0].branch.as_deref(), Some("refs/heads/main"));
         assert!(!wts[0].locked);
     }
 
