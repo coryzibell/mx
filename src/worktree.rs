@@ -276,7 +276,7 @@ fn worktree_is_dirty(worktree_path: &Path) -> bool {
 
     match output {
         Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
-        _ => false, // Can't tell; assume clean
+        _ => true, // Can't tell; assume dirty (safe default)
     }
 }
 
