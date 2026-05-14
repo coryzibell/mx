@@ -134,6 +134,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: KvCommands,
     },
+
+    /// Git worktree lifecycle management for Claude Code agent dispatches
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1954,5 +1960,23 @@ pub enum WikiCommands {
         /// Dry run - show what would be synced
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorktreeCommands {
+    /// Clean up stale git worktrees left behind by Claude Code agent dispatches
+    Sweep {
+        /// Sweep all repos under ~/recipes/ (default: current repo only)
+        #[arg(long)]
+        all: bool,
+
+        /// Report what would be cleaned, touch nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Also clean ambiguous worktrees (dirty, unmerged branch on remote)
+        #[arg(long)]
+        force: bool,
     },
 }

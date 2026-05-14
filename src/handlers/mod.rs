@@ -17,6 +17,7 @@ use crate::display::*;
 use crate::github;
 use crate::session;
 use crate::sync;
+use crate::worktree;
 
 pub(crate) fn handle_pr(cmd: PrCommands) -> Result<()> {
     match cmd {
@@ -310,6 +311,22 @@ pub(crate) fn handle_convert(cmd: ConvertCommands) -> Result<()> {
                 bail!("Input path does not exist: {:?}", input_path);
             }
 
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn handle_worktree(cmd: WorktreeCommands) -> Result<()> {
+    match cmd {
+        WorktreeCommands::Sweep {
+            all,
+            dry_run,
+            force,
+        } => {
+            let code = worktree::run_sweep(all, dry_run, force)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
             Ok(())
         }
     }

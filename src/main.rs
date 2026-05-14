@@ -24,6 +24,7 @@ mod types;
 mod wake_chunk;
 mod wake_ritual;
 mod wake_token;
+mod worktree;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -84,6 +85,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::Worktree { command } => handle_worktree(command),
     }
 }
 
