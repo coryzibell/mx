@@ -122,6 +122,9 @@ pub enum KvError {
         prefix: String,
         count: usize,
     },
+    DataValidation {
+        message: String,
+    },
     Other(anyhow::Error),
 }
 
@@ -149,6 +152,7 @@ impl std::fmt::Display for KvError {
                     prefix, count
                 )
             }
+            KvError::DataValidation { message } => write!(f, "{}", message),
             KvError::Other(e) => write!(f, "{}", e),
         }
     }
@@ -199,6 +203,49 @@ pub struct KeyDef {
 
     #[serde(default)]
     pub fields: Option<Vec<String>>,
+
+    /// Optional typed field definitions for `--data` validation.
+    /// When present, `push` validates the data object against these defs.
+    /// When absent, any JSON object is accepted (freeform).
+    #[serde(default)]
+    pub data: Option<BTreeMap<String, DataFieldDef>>,
+}
+
+/// The type of a data field in a schema's `[keys.X.data]` section.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DataFieldType {
+    String,
+    Number,
+    Boolean,
+    Array,
+    Object,
+}
+
+impl std::fmt::Display for DataFieldType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataFieldType::String => write!(f, "string"),
+            DataFieldType::Number => write!(f, "number"),
+            DataFieldType::Boolean => write!(f, "boolean"),
+            DataFieldType::Array => write!(f, "array"),
+            DataFieldType::Object => write!(f, "object"),
+        }
+    }
+}
+
+/// Definition of a single data field within a key's `[keys.X.data]` section.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataFieldDef {
+    #[serde(rename = "type")]
+    pub field_type: DataFieldType,
+
+    #[serde(default)]
+    pub required: bool,
+
+    /// Parsed but not used until Part 3 (migration).
+    #[serde(default)]
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -460,6 +507,98 @@ pub struct PushResult {
 pub enum IdRef {
     Index(u64),
     Id(String),
+}
+
+// ---------------------------------------------------------------------------
+// Data field validation
+// ---------------------------------------------------------------------------
+
+/// Validate a `--data` JSON object against the field definitions from
+/// `[keys.X.data]` in the schema.
+///
+/// Three checks, in order:
+/// 1. No undeclared fields (extra fields that aren't in the schema).
+/// 2. All required fields present.
+/// 3. Each field's JSON type matches its declared type.
+pub fn validate_data(
+    key: &str,
+    data: &serde_json::Value,
+    field_defs: &BTreeMap<String, DataFieldDef>,
+) -> Result<(), KvError> {
+    let obj = match data.as_object() {
+        Some(o) => o,
+        None => {
+            return Err(KvError::DataValidation {
+                message: format!("key '{}': --data must be a JSON object", key),
+            });
+        }
+    };
+
+    // 1. Reject undeclared fields
+    let declared: Vec<&str> = field_defs.keys().map(|s| s.as_str()).collect();
+    let extra: Vec<&str> = obj
+        .keys()
+        .filter(|k| !field_defs.contains_key(k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !extra.is_empty() {
+        return Err(KvError::DataValidation {
+            message: format!(
+                "key '{}': undeclared data fields: {}; declared fields: {}",
+                key,
+                extra.join(", "),
+                declared.join(", "),
+            ),
+        });
+    }
+
+    // 2. Required fields present
+    let missing: Vec<&str> = field_defs
+        .iter()
+        .filter(|(_, d)| d.required)
+        .filter(|(name, _)| !obj.contains_key(name.as_str()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(KvError::DataValidation {
+            message: format!(
+                "key '{}': missing required data fields: {}",
+                key,
+                missing.join(", "),
+            ),
+        });
+    }
+
+    // 3. Type checking
+    for (name, value) in obj {
+        if let Some(def) = field_defs.get(name.as_str()) {
+            let ok = match def.field_type {
+                DataFieldType::String => value.is_string(),
+                DataFieldType::Number => value.is_number(),
+                DataFieldType::Boolean => value.is_boolean(),
+                DataFieldType::Array => value.is_array(),
+                DataFieldType::Object => value.is_object(),
+            };
+            if !ok {
+                let got = match value {
+                    serde_json::Value::Null => "null",
+                    serde_json::Value::Bool(_) => "boolean",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::Object(_) => "object",
+                };
+                return Err(KvError::DataValidation {
+                    message: format!(
+                        "key '{}': field '{}' must be {}, got {}",
+                        key, name, def.field_type, got,
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -940,6 +1079,30 @@ impl KvStore {
         memory: Option<String>,
     ) -> Result<PushResult, KvError> {
         let def = self.key_def(key)?.clone();
+
+        // Validate --data against schema field defs when present.
+        if let Some(ref field_defs) = def.data {
+            match data {
+                Some(ref data_val) => validate_data(key, data_val, field_defs)?,
+                None => {
+                    let required: Vec<&str> = field_defs
+                        .iter()
+                        .filter(|(_, d)| d.required)
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    if !required.is_empty() {
+                        return Err(KvError::DataValidation {
+                            message: format!(
+                                "key '{}': --data is required (schema has required fields: {})",
+                                key,
+                                required.join(", "),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         let ts_str = ts.to_rfc3339();
 
         match def.value_type {
@@ -5875,5 +6038,342 @@ max_entries = 5
             latest.contains("2026-04-22"),
             "latest_ts should be the most recent matching entry"
         );
+    }
+
+    // -- Data field schema parsing --
+
+    fn data_schema() -> &'static str {
+        r#"
+[keys.projects]
+type = "history"
+max_entries = 100
+
+[keys.projects.data]
+status = { type = "string", required = true }
+tags = { type = "array" }
+repo = { type = "string" }
+priority = { type = "number" }
+
+[keys.notes]
+type = "history"
+"#
+    }
+
+    #[test]
+    fn parse_schema_with_data_fields() {
+        let (store, _dir) = setup_store(data_schema());
+        let projects = &store.schema.keys["projects"];
+        let data_defs = projects.data.as_ref().expect("data should be Some");
+        assert_eq!(data_defs.len(), 4);
+        assert_eq!(data_defs["status"].field_type, DataFieldType::String);
+        assert!(data_defs["status"].required);
+        assert_eq!(data_defs["tags"].field_type, DataFieldType::Array);
+        assert!(!data_defs["tags"].required);
+        assert_eq!(data_defs["repo"].field_type, DataFieldType::String);
+        assert_eq!(data_defs["priority"].field_type, DataFieldType::Number);
+    }
+
+    #[test]
+    fn parse_schema_data_field_types() {
+        let schema = r#"
+[keys.all_types]
+type = "history"
+
+[keys.all_types.data]
+s = { type = "string" }
+n = { type = "number" }
+b = { type = "boolean" }
+a = { type = "array" }
+o = { type = "object" }
+"#;
+        let (store, _dir) = setup_store(schema);
+        let defs = store.schema.keys["all_types"]
+            .data
+            .as_ref()
+            .expect("data should be Some");
+        assert_eq!(defs["s"].field_type, DataFieldType::String);
+        assert_eq!(defs["n"].field_type, DataFieldType::Number);
+        assert_eq!(defs["b"].field_type, DataFieldType::Boolean);
+        assert_eq!(defs["a"].field_type, DataFieldType::Array);
+        assert_eq!(defs["o"].field_type, DataFieldType::Object);
+    }
+
+    #[test]
+    fn parse_schema_data_field_required_and_default() {
+        let schema = r#"
+[keys.test]
+type = "history"
+
+[keys.test.data]
+name = { type = "string", required = true, default = "unnamed" }
+opt = { type = "string" }
+"#;
+        let (store, _dir) = setup_store(schema);
+        let defs = store.schema.keys["test"]
+            .data
+            .as_ref()
+            .expect("data should be Some");
+        assert!(defs["name"].required);
+        assert_eq!(defs["name"].default.as_deref(), Some("unnamed"));
+        assert!(!defs["opt"].required);
+        assert!(defs["opt"].default.is_none());
+    }
+
+    #[test]
+    fn parse_schema_without_data_preserves_none() {
+        let (store, _dir) = setup_store(data_schema());
+        assert!(
+            store.schema.keys["notes"].data.is_none(),
+            "key without [data] section should have data: None"
+        );
+    }
+
+    // -- validate_data unit tests --
+
+    fn sample_field_defs() -> BTreeMap<String, DataFieldDef> {
+        let mut m = BTreeMap::new();
+        m.insert(
+            "status".to_string(),
+            DataFieldDef {
+                field_type: DataFieldType::String,
+                required: true,
+                default: None,
+            },
+        );
+        m.insert(
+            "tags".to_string(),
+            DataFieldDef {
+                field_type: DataFieldType::Array,
+                required: false,
+                default: None,
+            },
+        );
+        m.insert(
+            "priority".to_string(),
+            DataFieldDef {
+                field_type: DataFieldType::Number,
+                required: false,
+                default: None,
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn validate_data_accepts_valid() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": "active",
+            "tags": ["a", "b"],
+            "priority": 5
+        });
+        assert!(validate_data("test", &data, &defs).is_ok());
+    }
+
+    #[test]
+    fn validate_data_rejects_extra_field() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": "active",
+            "unknown_field": true
+        });
+        let err = validate_data("test", &data, &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("undeclared"), "error should mention undeclared: {}", msg);
+        assert!(msg.contains("unknown_field"), "error should name the extra field: {}", msg);
+        assert!(msg.contains("priority"), "error should list declared fields: {}", msg);
+    }
+
+    #[test]
+    fn validate_data_rejects_missing_required() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "tags": ["a"]
+        });
+        let err = validate_data("test", &data, &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing required"), "error should say missing required: {}", msg);
+        assert!(msg.contains("status"), "error should name the missing field: {}", msg);
+    }
+
+    #[test]
+    fn validate_data_allows_missing_optional() {
+        let defs = sample_field_defs();
+        // Only the required field is present; optional fields omitted.
+        let data = serde_json::json!({
+            "status": "active"
+        });
+        assert!(validate_data("test", &data, &defs).is_ok());
+    }
+
+    #[test]
+    fn validate_data_rejects_type_mismatch() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": 42
+        });
+        let err = validate_data("test", &data, &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must be string"), "error should say expected type: {}", msg);
+        assert!(msg.contains("got number"), "error should say actual type: {}", msg);
+    }
+
+    #[test]
+    fn validate_data_all_types() {
+        // Correct values for each type
+        let mut defs = BTreeMap::new();
+        defs.insert("s".to_string(), DataFieldDef { field_type: DataFieldType::String, required: false, default: None });
+        defs.insert("n".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
+        defs.insert("b".to_string(), DataFieldDef { field_type: DataFieldType::Boolean, required: false, default: None });
+        defs.insert("a".to_string(), DataFieldDef { field_type: DataFieldType::Array, required: false, default: None });
+        defs.insert("o".to_string(), DataFieldDef { field_type: DataFieldType::Object, required: false, default: None });
+
+        // All correct
+        let data = serde_json::json!({
+            "s": "hello",
+            "n": 3.14,
+            "b": true,
+            "a": [1, 2, 3],
+            "o": {"nested": true}
+        });
+        assert!(validate_data("test", &data, &defs).is_ok());
+
+        // String field gets number
+        let bad = serde_json::json!({ "s": 42 });
+        assert!(validate_data("test", &bad, &defs).is_err());
+
+        // Number field gets string
+        let bad = serde_json::json!({ "n": "nope" });
+        assert!(validate_data("test", &bad, &defs).is_err());
+
+        // Boolean field gets string
+        let bad = serde_json::json!({ "b": "true" });
+        assert!(validate_data("test", &bad, &defs).is_err());
+
+        // Array field gets object
+        let bad = serde_json::json!({ "a": {"not": "array"} });
+        assert!(validate_data("test", &bad, &defs).is_err());
+
+        // Object field gets array
+        let bad = serde_json::json!({ "o": [1, 2] });
+        assert!(validate_data("test", &bad, &defs).is_err());
+    }
+
+    #[test]
+    fn validate_data_empty_object_all_optional() {
+        let mut defs = BTreeMap::new();
+        defs.insert("opt1".to_string(), DataFieldDef { field_type: DataFieldType::String, required: false, default: None });
+        defs.insert("opt2".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
+
+        let data = serde_json::json!({});
+        assert!(validate_data("test", &data, &defs).is_ok());
+    }
+
+    #[test]
+    fn validate_data_empty_object_with_required() {
+        let mut defs = BTreeMap::new();
+        defs.insert("req".to_string(), DataFieldDef { field_type: DataFieldType::String, required: true, default: None });
+        defs.insert("opt".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
+
+        let data = serde_json::json!({});
+        let err = validate_data("test", &data, &defs).unwrap_err();
+        assert!(err.to_string().contains("missing required"));
+        assert!(err.to_string().contains("req"));
+    }
+
+    // -- Integration: push with data validation --
+
+    #[test]
+    fn push_with_valid_data_and_schema() {
+        let (mut store, _dir) = setup_store(data_schema());
+        let data = serde_json::json!({
+            "status": "active",
+            "tags": ["rust"],
+            "repo": "mx",
+            "priority": 1
+        });
+        let result = store.push("projects", "my-project", Some(data.clone()), None);
+        assert!(result.is_ok(), "push with valid data should succeed");
+
+        // Verify the entry is stored
+        match &store.data.entries["projects"] {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].data.as_ref().unwrap(), &data);
+            }
+            _ => panic!("expected History"),
+        }
+    }
+
+    #[test]
+    fn push_with_invalid_data_rejected() {
+        let (mut store, _dir) = setup_store(data_schema());
+        let data = serde_json::json!({
+            "status": 42
+        });
+        let result = store.push("projects", "bad-project", Some(data), None);
+        assert!(result.is_err(), "push with invalid data should fail");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "error should be DataValidation, got: {:?}",
+            err
+        );
+
+        // Verify no entry was stored
+        assert!(
+            !store.data.entries.contains_key("projects"),
+            "rejected push should not create an entry"
+        );
+    }
+
+    #[test]
+    fn push_without_data_when_required() {
+        let (mut store, _dir) = setup_store(data_schema());
+        let result = store.push("projects", "no-data", None, None);
+        assert!(result.is_err(), "push without data when schema has required fields should fail");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--data is required"), "error should mention --data: {}", msg);
+        assert!(msg.contains("status"), "error should name the required field: {}", msg);
+    }
+
+    #[test]
+    fn push_without_data_when_all_optional() {
+        let schema = r#"
+[keys.loose]
+type = "history"
+
+[keys.loose.data]
+note = { type = "string" }
+count = { type = "number" }
+"#;
+        let (mut store, _dir) = setup_store(schema);
+        let result = store.push("loose", "no-data-ok", None, None);
+        assert!(result.is_ok(), "push without data when all fields optional should succeed");
+
+        match &store.data.entries["loose"] {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert!(entries[0].data.is_none(), "data should be None");
+            }
+            _ => panic!("expected History"),
+        }
+    }
+
+    #[test]
+    fn push_without_data_freeform() {
+        let (mut store, _dir) = setup_store(data_schema());
+        // "notes" has no [keys.notes.data] section -- freeform
+        let result = store.push("notes", "anything goes", None, None);
+        assert!(result.is_ok(), "push without data on freeform key should succeed");
+
+        match &store.data.entries["notes"] {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert!(entries[0].data.is_none());
+            }
+            _ => panic!("expected History"),
+        }
     }
 }
