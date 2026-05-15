@@ -1410,6 +1410,7 @@ impl KvStore {
                                 DataFieldType::Array => existing.is_array(),
                                 DataFieldType::Object => existing.is_object(),
                             };
+                            // null is accepted for any field type (treated as absent on read)
                             if !type_ok && !existing.is_null() {
                                 result.warnings.push(format!(
                                     "entry kv-{} ({}): field '{}' has type {} but schema expects {}",
