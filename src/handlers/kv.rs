@@ -15,6 +15,7 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::SchemaMissing(_) => Some(kv::EXIT_SCHEMA_MISSING),
         KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::AmbiguousId { .. } => Some(kv::EXIT_INVALID_INPUT),
+        KvError::DataValidation { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::Other(_) => None,
     }
 }
