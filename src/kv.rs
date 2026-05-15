@@ -513,99 +513,131 @@ pub enum IdRef {
 // Data field validation
 // ---------------------------------------------------------------------------
 
-/// Validate a `--data` JSON object against the field definitions from
-/// `[keys.X.data]` in the schema.
-///
-/// Three checks, in order:
-/// 1. No undeclared fields (extra fields that aren't in the schema).
-/// 2. All required fields present.
-/// 3. Each field's JSON type matches its declared type.
-pub fn validate_data(
-    key: &str,
-    data: &serde_json::Value,
-    field_defs: &BTreeMap<String, DataFieldDef>,
-) -> Result<(), KvError> {
-    let obj = match data.as_object() {
-        Some(o) => o,
-        None => {
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+impl KeyDef {
+    /// Validate `--data` against this key's field definitions.
+    ///
+    /// When `data` is `Some`, validates the object against `self.data` defs.
+    /// When `data` is `None` and required fields exist, returns an error.
+    /// When `self.data` is `None` (freeform), always passes.
+    pub fn validate_data(
+        &self,
+        key: &str,
+        data: &Option<serde_json::Value>,
+    ) -> Result<(), KvError> {
+        let field_defs = match self.data {
+            Some(ref defs) => defs,
+            None => return Ok(()),
+        };
+
+        let obj = match data {
+            Some(val) => match val.as_object() {
+                Some(o) => o,
+                None => {
+                    return Err(KvError::DataValidation {
+                        message: format!("key '{}': --data must be a JSON object", key),
+                    });
+                }
+            },
+            None => {
+                let required: Vec<&str> = field_defs
+                    .iter()
+                    .filter(|(_, d)| d.required)
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if !required.is_empty() {
+                    return Err(KvError::DataValidation {
+                        message: format!(
+                            "key '{}': --data is required (schema has required fields: {})",
+                            key,
+                            required.join(", "),
+                        ),
+                    });
+                }
+                return Ok(());
+            }
+        };
+
+        // Null values are treated as absent — they don't trigger undeclared-field
+        // errors, don't satisfy required-field checks, and skip type checking.
+
+        // 1. Reject undeclared fields (ignoring nulls)
+        let extra: Vec<&str> = obj
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .filter(|(k, _)| !field_defs.contains_key(k.as_str()))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        if !extra.is_empty() {
+            let declared: Vec<&str> = field_defs.keys().map(|s| s.as_str()).collect();
             return Err(KvError::DataValidation {
-                message: format!("key '{}': --data must be a JSON object", key),
+                message: format!(
+                    "key '{}': undeclared data fields: {}; declared fields: {}",
+                    key,
+                    extra.join(", "),
+                    declared.join(", "),
+                ),
             });
         }
-    };
 
-    // Null values are treated as absent — they don't trigger undeclared-field
-    // errors, don't satisfy required-field checks, and skip type checking.
-
-    // 1. Reject undeclared fields (ignoring nulls)
-    let extra: Vec<&str> = obj
-        .iter()
-        .filter(|(_, v)| !v.is_null())
-        .filter(|(k, _)| !field_defs.contains_key(k.as_str()))
-        .map(|(k, _)| k.as_str())
-        .collect();
-    if !extra.is_empty() {
-        let declared: Vec<&str> = field_defs.keys().map(|s| s.as_str()).collect();
-        return Err(KvError::DataValidation {
-            message: format!(
-                "key '{}': undeclared data fields: {}; declared fields: {}",
-                key,
-                extra.join(", "),
-                declared.join(", "),
-            ),
-        });
-    }
-
-    // 2. Required fields present (null counts as absent)
-    let missing: Vec<&str> = field_defs
-        .iter()
-        .filter(|(_, d)| d.required)
-        .filter(|(name, _)| !obj.get(name.as_str()).map_or(false, |v| !v.is_null()))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if !missing.is_empty() {
-        return Err(KvError::DataValidation {
-            message: format!(
-                "key '{}': missing required data fields: {}",
-                key,
-                missing.join(", "),
-            ),
-        });
-    }
-
-    // 3. Type checking (nulls skipped)
-    for (name, value) in obj {
-        if value.is_null() {
-            continue;
+        // 2. Required fields present (null counts as absent)
+        let missing: Vec<&str> = field_defs
+            .iter()
+            .filter(|(_, d)| d.required)
+            .filter(|(name, _)| !obj.get(name.as_str()).map_or(false, |v| !v.is_null()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key '{}': missing required data fields: {}",
+                    key,
+                    missing.join(", "),
+                ),
+            });
         }
-        if let Some(def) = field_defs.get(name.as_str()) {
-            let ok = match def.field_type {
-                DataFieldType::String => value.is_string(),
-                DataFieldType::Number => value.is_number(),
-                DataFieldType::Boolean => value.is_boolean(),
-                DataFieldType::Array => value.is_array(),
-                DataFieldType::Object => value.is_object(),
-            };
-            if !ok {
-                let got = match value {
-                    serde_json::Value::Null => "null",
-                    serde_json::Value::Bool(_) => "boolean",
-                    serde_json::Value::Number(_) => "number",
-                    serde_json::Value::String(_) => "string",
-                    serde_json::Value::Array(_) => "array",
-                    serde_json::Value::Object(_) => "object",
+
+        // 3. Type checking — batch all mismatches (nulls skipped)
+        let bad: Vec<std::string::String> = obj
+            .iter()
+            .filter(|(_, v)| !v.is_null())
+            .filter_map(|(name, value)| {
+                let def = field_defs.get(name.as_str())?;
+                let ok = match def.field_type {
+                    DataFieldType::String => value.is_string(),
+                    DataFieldType::Number => value.is_number(),
+                    DataFieldType::Boolean => value.is_boolean(),
+                    DataFieldType::Array => value.is_array(),
+                    DataFieldType::Object => value.is_object(),
                 };
-                return Err(KvError::DataValidation {
-                    message: format!(
-                        "key '{}': field '{}' must be {}, got {}",
-                        key, name, def.field_type, got,
-                    ),
-                });
-            }
+                if ok {
+                    None
+                } else {
+                    Some(format!(
+                        "'{}' must be {}, got {}",
+                        name, def.field_type, json_type_name(value),
+                    ))
+                }
+            })
+            .collect();
+        if !bad.is_empty() {
+            return Err(KvError::DataValidation {
+                message: format!("key '{}': type errors: {}", key, bad.join("; ")),
+            });
         }
-    }
 
-    Ok(())
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,28 +1119,7 @@ impl KvStore {
     ) -> Result<PushResult, KvError> {
         let def = self.key_def(key)?.clone();
 
-        // Validate --data against schema field defs when present.
-        if let Some(ref field_defs) = def.data {
-            match data {
-                Some(ref data_val) => validate_data(key, data_val, field_defs)?,
-                None => {
-                    let required: Vec<&str> = field_defs
-                        .iter()
-                        .filter(|(_, d)| d.required)
-                        .map(|(n, _)| n.as_str())
-                        .collect();
-                    if !required.is_empty() {
-                        return Err(KvError::DataValidation {
-                            message: format!(
-                                "key '{}': --data is required (schema has required fields: {})",
-                                key,
-                                required.join(", "),
-                            ),
-                        });
-                    }
-                }
-            }
-        }
+        def.validate_data(key, &data)?;
 
         let ts_str = ts.to_rfc3339();
 
@@ -6137,9 +6148,9 @@ opt = { type = "string" }
 
     // -- validate_data unit tests --
 
-    fn sample_field_defs() -> BTreeMap<String, DataFieldDef> {
-        let mut m = BTreeMap::new();
-        m.insert(
+    fn sample_key_def() -> KeyDef {
+        let mut data = BTreeMap::new();
+        data.insert(
             "status".to_string(),
             DataFieldDef {
                 field_type: DataFieldType::String,
@@ -6147,7 +6158,7 @@ opt = { type = "string" }
                 default: None,
             },
         );
-        m.insert(
+        data.insert(
             "tags".to_string(),
             DataFieldDef {
                 field_type: DataFieldType::Array,
@@ -6155,7 +6166,7 @@ opt = { type = "string" }
                 default: None,
             },
         );
-        m.insert(
+        data.insert(
             "priority".to_string(),
             DataFieldDef {
                 field_type: DataFieldType::Number,
@@ -6163,28 +6174,48 @@ opt = { type = "string" }
                 default: None,
             },
         );
-        m
+        KeyDef {
+            value_type: ValueType::History,
+            min: None,
+            max: None,
+            default: None,
+            max_entries: None,
+            fields: None,
+            data: Some(data),
+        }
+    }
+
+    fn key_def_with_data(data: BTreeMap<String, DataFieldDef>) -> KeyDef {
+        KeyDef {
+            value_type: ValueType::History,
+            min: None,
+            max: None,
+            default: None,
+            max_entries: None,
+            fields: None,
+            data: Some(data),
+        }
     }
 
     #[test]
     fn validate_data_accepts_valid() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": "active",
             "tags": ["a", "b"],
             "priority": 5
-        });
-        assert!(validate_data("test", &data, &defs).is_ok());
+        }));
+        assert!(def.validate_data("test", &data).is_ok());
     }
 
     #[test]
     fn validate_data_rejects_extra_field() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": "active",
             "unknown_field": true
-        });
-        let err = validate_data("test", &data, &defs).unwrap_err();
+        }));
+        let err = def.validate_data("test", &data).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("undeclared"), "error should mention undeclared: {}", msg);
         assert!(msg.contains("unknown_field"), "error should name the extra field: {}", msg);
@@ -6193,11 +6224,11 @@ opt = { type = "string" }
 
     #[test]
     fn validate_data_rejects_missing_required() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "tags": ["a"]
-        });
-        let err = validate_data("test", &data, &defs).unwrap_err();
+        }));
+        let err = def.validate_data("test", &data).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing required"), "error should say missing required: {}", msg);
         assert!(msg.contains("status"), "error should name the missing field: {}", msg);
@@ -6205,65 +6236,73 @@ opt = { type = "string" }
 
     #[test]
     fn validate_data_allows_missing_optional() {
-        let defs = sample_field_defs();
-        // Only the required field is present; optional fields omitted.
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": "active"
-        });
-        assert!(validate_data("test", &data, &defs).is_ok());
+        }));
+        assert!(def.validate_data("test", &data).is_ok());
     }
 
     #[test]
     fn validate_data_rejects_type_mismatch() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": 42
-        });
-        let err = validate_data("test", &data, &defs).unwrap_err();
+        }));
+        let err = def.validate_data("test", &data).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("must be string"), "error should say expected type: {}", msg);
         assert!(msg.contains("got number"), "error should say actual type: {}", msg);
     }
 
     #[test]
+    fn validate_data_batches_type_mismatches() {
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
+            "status": 42,
+            "tags": "not-an-array",
+            "priority": true
+        }));
+        let err = def.validate_data("test", &data).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("'status'"), "should name status: {}", msg);
+        assert!(msg.contains("'tags'"), "should name tags: {}", msg);
+        assert!(msg.contains("'priority'"), "should name priority: {}", msg);
+    }
+
+    #[test]
     fn validate_data_all_types() {
-        // Correct values for each type
         let mut defs = BTreeMap::new();
         defs.insert("s".to_string(), DataFieldDef { field_type: DataFieldType::String, required: false, default: None });
         defs.insert("n".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
         defs.insert("b".to_string(), DataFieldDef { field_type: DataFieldType::Boolean, required: false, default: None });
         defs.insert("a".to_string(), DataFieldDef { field_type: DataFieldType::Array, required: false, default: None });
         defs.insert("o".to_string(), DataFieldDef { field_type: DataFieldType::Object, required: false, default: None });
+        let def = key_def_with_data(defs);
 
-        // All correct
-        let data = serde_json::json!({
+        let data = Some(serde_json::json!({
             "s": "hello",
             "n": 3.14,
             "b": true,
             "a": [1, 2, 3],
             "o": {"nested": true}
-        });
-        assert!(validate_data("test", &data, &defs).is_ok());
+        }));
+        assert!(def.validate_data("test", &data).is_ok());
 
-        // String field gets number
-        let bad = serde_json::json!({ "s": 42 });
-        assert!(validate_data("test", &bad, &defs).is_err());
+        let bad = Some(serde_json::json!({ "s": 42 }));
+        assert!(def.validate_data("test", &bad).is_err());
 
-        // Number field gets string
-        let bad = serde_json::json!({ "n": "nope" });
-        assert!(validate_data("test", &bad, &defs).is_err());
+        let bad = Some(serde_json::json!({ "n": "nope" }));
+        assert!(def.validate_data("test", &bad).is_err());
 
-        // Boolean field gets string
-        let bad = serde_json::json!({ "b": "true" });
-        assert!(validate_data("test", &bad, &defs).is_err());
+        let bad = Some(serde_json::json!({ "b": "true" }));
+        assert!(def.validate_data("test", &bad).is_err());
 
-        // Array field gets object
-        let bad = serde_json::json!({ "a": {"not": "array"} });
-        assert!(validate_data("test", &bad, &defs).is_err());
+        let bad = Some(serde_json::json!({ "a": {"not": "array"} }));
+        assert!(def.validate_data("test", &bad).is_err());
 
-        // Object field gets array
-        let bad = serde_json::json!({ "o": [1, 2] });
-        assert!(validate_data("test", &bad, &defs).is_err());
+        let bad = Some(serde_json::json!({ "o": [1, 2] }));
+        assert!(def.validate_data("test", &bad).is_err());
     }
 
     #[test]
@@ -6271,9 +6310,10 @@ opt = { type = "string" }
         let mut defs = BTreeMap::new();
         defs.insert("opt1".to_string(), DataFieldDef { field_type: DataFieldType::String, required: false, default: None });
         defs.insert("opt2".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
+        let def = key_def_with_data(defs);
 
-        let data = serde_json::json!({});
-        assert!(validate_data("test", &data, &defs).is_ok());
+        let data = Some(serde_json::json!({}));
+        assert!(def.validate_data("test", &data).is_ok());
     }
 
     #[test]
@@ -6281,9 +6321,10 @@ opt = { type = "string" }
         let mut defs = BTreeMap::new();
         defs.insert("req".to_string(), DataFieldDef { field_type: DataFieldType::String, required: true, default: None });
         defs.insert("opt".to_string(), DataFieldDef { field_type: DataFieldType::Number, required: false, default: None });
+        let def = key_def_with_data(defs);
 
-        let data = serde_json::json!({});
-        let err = validate_data("test", &data, &defs).unwrap_err();
+        let data = Some(serde_json::json!({}));
+        let err = def.validate_data("test", &data).unwrap_err();
         assert!(err.to_string().contains("missing required"));
         assert!(err.to_string().contains("req"));
     }
@@ -6388,24 +6429,24 @@ count = { type = "number" }
 
     #[test]
     fn validate_data_null_optional_field_treated_as_absent() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": "active",
             "tags": null
-        });
+        }));
         assert!(
-            validate_data("test", &data, &defs).is_ok(),
+            def.validate_data("test", &data).is_ok(),
             "null on optional field should be treated as absent"
         );
     }
 
     #[test]
     fn validate_data_null_required_field_is_missing() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": null
-        });
-        let err = validate_data("test", &data, &defs).unwrap_err();
+        }));
+        let err = def.validate_data("test", &data).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("missing required"), "null on required field = missing: {}", msg);
         assert!(msg.contains("status"), "{}", msg);
@@ -6413,26 +6454,42 @@ count = { type = "number" }
 
     #[test]
     fn validate_data_null_undeclared_field_ignored() {
-        let defs = sample_field_defs();
-        let data = serde_json::json!({
+        let def = sample_key_def();
+        let data = Some(serde_json::json!({
             "status": "active",
             "ghost": null
-        });
+        }));
         assert!(
-            validate_data("test", &data, &defs).is_ok(),
+            def.validate_data("test", &data).is_ok(),
             "null undeclared field should be ignored (treated as absent)"
         );
     }
 
     #[test]
     fn validate_data_rejects_non_object() {
-        let defs = sample_field_defs();
-        let array = serde_json::json!(["not", "an", "object"]);
-        let err = validate_data("test", &array, &defs).unwrap_err();
+        let def = sample_key_def();
+        let array = Some(serde_json::json!(["not", "an", "object"]));
+        let err = def.validate_data("test", &array).unwrap_err();
         assert!(err.to_string().contains("must be a JSON object"));
 
-        let string = serde_json::json!("just a string");
-        let err = validate_data("test", &string, &defs).unwrap_err();
+        let string = Some(serde_json::json!("just a string"));
+        let err = def.validate_data("test", &string).unwrap_err();
         assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn validate_data_none_passes_freeform() {
+        let def = KeyDef {
+            value_type: ValueType::History,
+            min: None,
+            max: None,
+            default: None,
+            max_entries: None,
+            fields: None,
+            data: None,
+        };
+        assert!(def.validate_data("test", &None).is_ok());
+        let data = Some(serde_json::json!({"anything": "goes"}));
+        assert!(def.validate_data("test", &data).is_ok());
     }
 }
