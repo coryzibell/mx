@@ -544,8 +544,8 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 
 /// Parse a raw default-value string into a typed `serde_json::Value`.
 ///
-/// Used by `migrate` to fill missing required fields from schema defaults.
-pub fn parse_default_value(
+/// Used by `migrate` to fill missing fields from schema defaults.
+pub(crate) fn parse_default_value(
     raw: &str,
     field_type: DataFieldType,
 ) -> Result<serde_json::Value, KvError> {
@@ -571,6 +571,21 @@ pub fn parse_default_value(
                 serde_json::from_str(raw).map_err(|e| KvError::DataValidation {
                     message: format!("cannot parse default '{}' as {}: {}", raw, field_type, e),
                 })?;
+            let type_ok = match field_type {
+                DataFieldType::Array => v.is_array(),
+                DataFieldType::Object => v.is_object(),
+                _ => unreachable!(),
+            };
+            if !type_ok {
+                return Err(KvError::DataValidation {
+                    message: format!(
+                        "default '{}' parsed as {} but expected {}",
+                        raw,
+                        json_type_name(&v),
+                        field_type
+                    ),
+                });
+            }
             Ok(v)
         }
     }
@@ -1361,33 +1376,10 @@ impl KvStore {
                         }
                     };
 
-                    // 1. Fill missing required fields that have defaults
+                    // 1. Fill missing fields that have defaults; warn on required without default
                     for (field_name, field_def) in field_defs {
                         if !obj.contains_key(field_name) {
-                            if field_def.required {
-                                if let Some(ref raw_default) = field_def.default {
-                                    match parse_default_value(raw_default, field_def.field_type) {
-                                        Ok(default_val) => {
-                                            if !dry_run {
-                                                obj.insert(field_name.clone(), default_val);
-                                            }
-                                            fields_added.push(field_name.clone());
-                                        }
-                                        Err(e) => {
-                                            result.warnings.push(format!(
-                                                "entry kv-{} ({}): failed to parse default for '{}': {}",
-                                                id, index, field_name, e
-                                            ));
-                                        }
-                                    }
-                                } else {
-                                    result.warnings.push(format!(
-                                        "entry kv-{} ({}): required field '{}' is missing and has no default",
-                                        id, index, field_name
-                                    ));
-                                }
-                            } else if let Some(ref raw_default) = field_def.default {
-                                // Non-required field with a default: also fill it in
+                            if let Some(ref raw_default) = field_def.default {
                                 match parse_default_value(raw_default, field_def.field_type) {
                                     Ok(default_val) => {
                                         if !dry_run {
@@ -1402,6 +1394,11 @@ impl KvStore {
                                         ));
                                     }
                                 }
+                            } else if field_def.required {
+                                result.warnings.push(format!(
+                                    "entry kv-{} ({}): required field '{}' is missing and has no default",
+                                    id, index, field_name
+                                ));
                             }
                         } else {
                             // Field exists -- check type
@@ -7314,5 +7311,102 @@ type = "counter"
             "error should explain: {}",
             msg
         );
+    }
+
+    #[test]
+    fn parse_default_value_object() {
+        let val = parse_default_value("{}", DataFieldType::Object).unwrap();
+        assert_eq!(val, serde_json::json!({}));
+    }
+
+    #[test]
+    fn parse_default_value_type_mismatch() {
+        let err = parse_default_value("[]", DataFieldType::Object);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("expected object"), "error: {}", msg);
+
+        let err = parse_default_value("{}", DataFieldType::Array);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("expected array"), "error: {}", msg);
+    }
+
+    #[test]
+    fn migrate_dry_run_prune_no_mutation() {
+        let (mut store, _dir) = setup_store(migrate_schema());
+        store.data.entries.insert(
+            "projects".to_string(),
+            DataValue::History {
+                entries: vec![HistoryEntry {
+                    index: 1,
+                    id: "abc1".to_string(),
+                    value: "proj-a".to_string(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                    data: Some(serde_json::json!({
+                        "status": "active",
+                        "tags": ["rust"],
+                        "priority": 5,
+                        "obsolete": "should stay in dry run"
+                    })),
+                    memory: None,
+                }],
+                memory: None,
+            },
+        );
+
+        let result = store.migrate("projects", true, true).unwrap();
+        assert_eq!(result.modified, 1, "dry run should report modifications");
+        assert!(
+            result.changes[0]
+                .fields_pruned
+                .contains(&"obsolete".to_string()),
+            "should report obsolete as pruned"
+        );
+
+        // Verify no actual mutation
+        if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
+            let data = entries[0].data.as_ref().unwrap();
+            assert_eq!(
+                data["obsolete"],
+                serde_json::json!("should stay in dry run"),
+                "dry run should not prune"
+            );
+        } else {
+            panic!("expected history");
+        }
+    }
+
+    #[test]
+    fn migrate_dry_run_data_none_no_mutation() {
+        let (mut store, _dir) = setup_store(migrate_schema());
+        store.data.entries.insert(
+            "projects".to_string(),
+            DataValue::History {
+                entries: vec![HistoryEntry {
+                    index: 1,
+                    id: "abc1".to_string(),
+                    value: "proj-a".to_string(),
+                    ts: "2026-01-01T00:00:00Z".to_string(),
+                    data: None,
+                    memory: None,
+                }],
+                memory: None,
+            },
+        );
+
+        let result = store.migrate("projects", false, true).unwrap();
+        assert_eq!(result.modified, 1, "dry run should report modifications");
+        assert!(!result.changes[0].fields_added.is_empty());
+
+        // Verify data slot is still None
+        if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
+            assert!(
+                entries[0].data.is_none(),
+                "dry run should not create data blob"
+            );
+        } else {
+            panic!("expected history");
+        }
     }
 }

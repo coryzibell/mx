@@ -847,9 +847,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             dry_run,
         } => match store.migrate(&key, prune, dry_run) {
             Ok(result) => {
+                let verb = if dry_run { "would modify" } else { "modified" };
                 println!(
-                    "Examined {} entries, modified {}",
-                    result.examined, result.modified
+                    "Examined {} entries, {} {}",
+                    result.examined, verb, result.modified
                 );
 
                 for change in &result.changes {
