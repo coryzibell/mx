@@ -545,7 +545,10 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 /// Parse a raw default-value string into a typed `serde_json::Value`.
 ///
 /// Used by `migrate` to fill missing required fields from schema defaults.
-pub fn parse_default_value(raw: &str, field_type: DataFieldType) -> Result<serde_json::Value, KvError> {
+pub fn parse_default_value(
+    raw: &str,
+    field_type: DataFieldType,
+) -> Result<serde_json::Value, KvError> {
     match field_type {
         DataFieldType::String => Ok(serde_json::Value::String(raw.to_string())),
         DataFieldType::Number => {
@@ -556,14 +559,18 @@ pub fn parse_default_value(raw: &str, field_type: DataFieldType) -> Result<serde
         }
         DataFieldType::Boolean => {
             let b: bool = raw.parse().map_err(|_| KvError::DataValidation {
-                message: format!("cannot parse default '{}' as boolean (expected \"true\" or \"false\")", raw),
+                message: format!(
+                    "cannot parse default '{}' as boolean (expected \"true\" or \"false\")",
+                    raw
+                ),
             })?;
             Ok(serde_json::Value::Bool(b))
         }
         DataFieldType::Array | DataFieldType::Object => {
-            let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| KvError::DataValidation {
-                message: format!("cannot parse default '{}' as {}: {}", raw, field_type, e),
-            })?;
+            let v: serde_json::Value =
+                serde_json::from_str(raw).map_err(|e| KvError::DataValidation {
+                    message: format!("cannot parse default '{}' as {}: {}", raw, field_type, e),
+                })?;
             Ok(v)
         }
     }
@@ -1261,7 +1268,12 @@ impl KvStore {
     /// 4. Create data blobs from defaults for entries with `data: None`
     ///
     /// When `dry_run` is true, reports what would change without mutating data.
-    pub fn migrate(&mut self, key: &str, prune: bool, dry_run: bool) -> Result<MigrateResult, KvError> {
+    pub fn migrate(
+        &mut self,
+        key: &str,
+        prune: bool,
+        dry_run: bool,
+    ) -> Result<MigrateResult, KvError> {
         let def = self.key_def(key)?.clone();
 
         // Reject non-entry types
@@ -6926,8 +6938,16 @@ type = "counter"
         assert_eq!(result.examined, 1);
         assert_eq!(result.modified, 1);
         assert_eq!(result.changes.len(), 1);
-        assert!(result.changes[0].fields_added.contains(&"status".to_string()));
-        assert!(result.changes[0].fields_added.contains(&"priority".to_string()));
+        assert!(
+            result.changes[0]
+                .fields_added
+                .contains(&"status".to_string())
+        );
+        assert!(
+            result.changes[0]
+                .fields_added
+                .contains(&"priority".to_string())
+        );
 
         // Verify the entry was actually mutated
         if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
@@ -6950,7 +6970,9 @@ type = "counter"
                     id: "abc1".to_string(),
                     value: "proj-a".to_string(),
                     ts: "2026-01-01T00:00:00Z".to_string(),
-                    data: Some(serde_json::json!({"status": "active", "tags": ["rust"], "priority": 5})),
+                    data: Some(
+                        serde_json::json!({"status": "active", "tags": ["rust"], "priority": 5}),
+                    ),
                     memory: None,
                 }],
                 memory: None,
@@ -6989,7 +7011,11 @@ type = "counter"
         let result = store.migrate("projects", true, false).unwrap();
         assert_eq!(result.examined, 1);
         assert_eq!(result.modified, 1);
-        assert!(result.changes[0].fields_pruned.contains(&"obsolete_field".to_string()));
+        assert!(
+            result.changes[0]
+                .fields_pruned
+                .contains(&"obsolete_field".to_string())
+        );
 
         // Verify it was removed
         if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
@@ -7058,16 +7084,30 @@ type = "counter"
 
         let result = store.migrate("projects", false, false).unwrap();
         // Should have warnings about type mismatches
-        let type_warnings: Vec<&String> = result.warnings.iter()
+        let type_warnings: Vec<&String> = result
+            .warnings
+            .iter()
             .filter(|w| w.contains("type") || w.contains("expects"))
             .collect();
-        assert!(type_warnings.len() >= 2, "expected warnings for status and priority type mismatches, got: {:?}", result.warnings);
+        assert!(
+            type_warnings.len() >= 2,
+            "expected warnings for status and priority type mismatches, got: {:?}",
+            result.warnings
+        );
 
         // The mismatched fields should not be modified
         if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
             let data = entries[0].data.as_ref().unwrap();
-            assert_eq!(data["status"], serde_json::json!(42), "status should not be coerced");
-            assert_eq!(data["priority"], serde_json::json!("not-a-number"), "priority should not be coerced");
+            assert_eq!(
+                data["status"],
+                serde_json::json!(42),
+                "status should not be coerced"
+            );
+            assert_eq!(
+                data["priority"],
+                serde_json::json!("not-a-number"),
+                "priority should not be coerced"
+            );
         } else {
             panic!("expected history");
         }
@@ -7093,10 +7133,15 @@ type = "counter"
         );
 
         let result = store.migrate("tasks", false, false).unwrap();
-        let has_warning = result.warnings.iter().any(|w| {
-            w.contains("title") && w.contains("required") && w.contains("no default")
-        });
-        assert!(has_warning, "should warn about missing required field without default: {:?}", result.warnings);
+        let has_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.contains("title") && w.contains("required") && w.contains("no default"));
+        assert!(
+            has_warning,
+            "should warn about missing required field without default: {:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -7120,8 +7165,16 @@ type = "counter"
 
         let result = store.migrate("projects", false, false).unwrap();
         assert_eq!(result.modified, 1);
-        assert!(result.changes[0].fields_added.contains(&"status".to_string()));
-        assert!(result.changes[0].fields_added.contains(&"priority".to_string()));
+        assert!(
+            result.changes[0]
+                .fields_added
+                .contains(&"status".to_string())
+        );
+        assert!(
+            result.changes[0]
+                .fields_added
+                .contains(&"priority".to_string())
+        );
 
         // Verify data blob was created
         if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
@@ -7158,8 +7211,14 @@ type = "counter"
         // Verify no actual mutation
         if let DataValue::History { entries, .. } = &store.data.entries["projects"] {
             let data = entries[0].data.as_ref().unwrap();
-            assert!(data.get("status").is_none(), "dry run should not insert status");
-            assert!(data.get("priority").is_none(), "dry run should not insert priority");
+            assert!(
+                data.get("status").is_none(),
+                "dry run should not insert status"
+            );
+            assert!(
+                data.get("priority").is_none(),
+                "dry run should not insert priority"
+            );
         } else {
             panic!("expected history");
         }
@@ -7187,22 +7246,36 @@ type = "counter"
         let result = store.migrate("notes", false, false).unwrap();
         assert_eq!(result.examined, 0);
         assert_eq!(result.modified, 0);
-        assert!(result.warnings.iter().any(|w| w.contains("nothing to migrate")),
-            "should report nothing to migrate: {:?}", result.warnings);
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("nothing to migrate")),
+            "should report nothing to migrate: {:?}",
+            result.warnings
+        );
     }
 
     #[test]
     fn migrate_rejects_non_entry_type() {
         let (mut store, _dir) = setup_store(migrate_schema());
-        store.data.entries.insert(
-            "visits".to_string(),
-            DataValue::Counter { value: 5 },
-        );
+        store
+            .data
+            .entries
+            .insert("visits".to_string(), DataValue::Counter { value: 5 });
 
         let err = store.migrate("visits", false, false).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("counter"), "error should mention the type: {}", msg);
-        assert!(msg.contains("migrate only works on"), "error should explain constraint: {}", msg);
+        assert!(
+            msg.contains("counter"),
+            "error should mention the type: {}",
+            msg
+        );
+        assert!(
+            msg.contains("migrate only works on"),
+            "error should explain constraint: {}",
+            msg
+        );
     }
 
     // -- parse_default_value tests --
@@ -7236,6 +7309,10 @@ type = "counter"
         let err = parse_default_value("abc", DataFieldType::Number);
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();
-        assert!(msg.contains("cannot parse default"), "error should explain: {}", msg);
+        assert!(
+            msg.contains("cannot parse default"),
+            "error should explain: {}",
+            msg
+        );
     }
 }

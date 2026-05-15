@@ -847,7 +847,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             dry_run,
         } => match store.migrate(&key, prune, dry_run) {
             Ok(result) => {
-                println!("Examined {} entries, modified {}", result.examined, result.modified);
+                println!(
+                    "Examined {} entries, modified {}",
+                    result.examined, result.modified
+                );
 
                 for change in &result.changes {
                     let mut parts = Vec::new();
@@ -857,7 +860,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     if !change.fields_pruned.is_empty() {
                         parts.push(format!("pruned: {}", change.fields_pruned.join(", ")));
                     }
-                    println!("  kv-{} ({}): {}", change.id, change.index, parts.join("; "));
+                    println!(
+                        "  kv-{} ({}): {}",
+                        change.id,
+                        change.index,
+                        parts.join("; ")
+                    );
                 }
 
                 for warning in &result.warnings {
