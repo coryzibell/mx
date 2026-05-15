@@ -594,7 +594,7 @@ impl KeyDef {
         let missing: Vec<&str> = field_defs
             .iter()
             .filter(|(_, d)| d.required)
-            .filter(|(name, _)| !obj.get(name.as_str()).is_some_and(|v| !v.is_null()))
+            .filter(|(name, _)| obj.get(name.as_str()).is_none_or(|v| v.is_null()))
             .map(|(name, _)| name.as_str())
             .collect();
         if !missing.is_empty() {
