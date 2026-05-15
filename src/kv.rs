@@ -594,7 +594,7 @@ impl KeyDef {
         let missing: Vec<&str> = field_defs
             .iter()
             .filter(|(_, d)| d.required)
-            .filter(|(name, _)| !obj.get(name.as_str()).map_or(false, |v| !v.is_null()))
+            .filter(|(name, _)| !obj.get(name.as_str()).is_some_and(|v| !v.is_null()))
             .map(|(name, _)| name.as_str())
             .collect();
         if !missing.is_empty() {
@@ -6347,7 +6347,7 @@ opt = { type = "string" }
 
         let data = Some(serde_json::json!({
             "s": "hello",
-            "n": 3.14,
+            "n": 42.5,
             "b": true,
             "a": [1, 2, 3],
             "o": {"nested": true}
