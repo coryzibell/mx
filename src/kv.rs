@@ -534,14 +534,18 @@ pub fn validate_data(
         }
     };
 
-    // 1. Reject undeclared fields
-    let declared: Vec<&str> = field_defs.keys().map(|s| s.as_str()).collect();
+    // Null values are treated as absent — they don't trigger undeclared-field
+    // errors, don't satisfy required-field checks, and skip type checking.
+
+    // 1. Reject undeclared fields (ignoring nulls)
     let extra: Vec<&str> = obj
-        .keys()
-        .filter(|k| !field_defs.contains_key(k.as_str()))
-        .map(|k| k.as_str())
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .filter(|(k, _)| !field_defs.contains_key(k.as_str()))
+        .map(|(k, _)| k.as_str())
         .collect();
     if !extra.is_empty() {
+        let declared: Vec<&str> = field_defs.keys().map(|s| s.as_str()).collect();
         return Err(KvError::DataValidation {
             message: format!(
                 "key '{}': undeclared data fields: {}; declared fields: {}",
@@ -552,11 +556,11 @@ pub fn validate_data(
         });
     }
 
-    // 2. Required fields present
+    // 2. Required fields present (null counts as absent)
     let missing: Vec<&str> = field_defs
         .iter()
         .filter(|(_, d)| d.required)
-        .filter(|(name, _)| !obj.contains_key(name.as_str()))
+        .filter(|(name, _)| !obj.get(name.as_str()).map_or(false, |v| !v.is_null()))
         .map(|(name, _)| name.as_str())
         .collect();
     if !missing.is_empty() {
@@ -569,8 +573,11 @@ pub fn validate_data(
         });
     }
 
-    // 3. Type checking
+    // 3. Type checking (nulls skipped)
     for (name, value) in obj {
+        if value.is_null() {
+            continue;
+        }
         if let Some(def) = field_defs.get(name.as_str()) {
             let ok = match def.field_type {
                 DataFieldType::String => value.is_string(),
@@ -6375,5 +6382,57 @@ count = { type = "number" }
             }
             _ => panic!("expected History"),
         }
+    }
+
+    // -- Null handling --
+
+    #[test]
+    fn validate_data_null_optional_field_treated_as_absent() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": "active",
+            "tags": null
+        });
+        assert!(
+            validate_data("test", &data, &defs).is_ok(),
+            "null on optional field should be treated as absent"
+        );
+    }
+
+    #[test]
+    fn validate_data_null_required_field_is_missing() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": null
+        });
+        let err = validate_data("test", &data, &defs).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing required"), "null on required field = missing: {}", msg);
+        assert!(msg.contains("status"), "{}", msg);
+    }
+
+    #[test]
+    fn validate_data_null_undeclared_field_ignored() {
+        let defs = sample_field_defs();
+        let data = serde_json::json!({
+            "status": "active",
+            "ghost": null
+        });
+        assert!(
+            validate_data("test", &data, &defs).is_ok(),
+            "null undeclared field should be ignored (treated as absent)"
+        );
+    }
+
+    #[test]
+    fn validate_data_rejects_non_object() {
+        let defs = sample_field_defs();
+        let array = serde_json::json!(["not", "an", "object"]);
+        let err = validate_data("test", &array, &defs).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
+
+        let string = serde_json::json!("just a string");
+        let err = validate_data("test", &string, &defs).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
     }
 }
