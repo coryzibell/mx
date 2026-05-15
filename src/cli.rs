@@ -1939,6 +1939,20 @@ pub enum KvCommands {
         time_range: TimeRangeArgs,
     },
 
+    /// Migrate existing entries to match current schema data definitions
+    Migrate {
+        /// Key name
+        key: String,
+
+        /// Remove fields not declared in the current schema
+        #[arg(long)]
+        prune: bool,
+
+        /// Show what would change without modifying data
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// List all defined keys with their types
     Keys,
 }

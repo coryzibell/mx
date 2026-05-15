@@ -841,6 +841,51 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
+        KvCommands::Migrate {
+            key,
+            prune,
+            dry_run,
+        } => match store.migrate(&key, prune, dry_run) {
+            Ok(result) => {
+                let verb = if dry_run { "would modify" } else { "modified" };
+                println!(
+                    "Examined {} entries, {} {}",
+                    result.examined, verb, result.modified
+                );
+
+                for change in &result.changes {
+                    let mut parts = Vec::new();
+                    if !change.fields_added.is_empty() {
+                        parts.push(format!("added: {}", change.fields_added.join(", ")));
+                    }
+                    if !change.fields_pruned.is_empty() {
+                        parts.push(format!("pruned: {}", change.fields_pruned.join(", ")));
+                    }
+                    println!(
+                        "  kv-{} ({}): {}",
+                        change.id,
+                        change.index,
+                        parts.join("; ")
+                    );
+                }
+
+                for warning in &result.warnings {
+                    eprintln!("warning: {}", warning);
+                }
+
+                if dry_run && result.modified > 0 {
+                    eprintln!("(dry run -- no changes written)");
+                }
+
+                if !dry_run && result.modified > 0 {
+                    store.save()?;
+                }
+
+                Ok(kv::EXIT_OK)
+            }
+            Err(e) => handle_kv_err(e),
+        },
+
         KvCommands::Keys => {
             let keys = store.keys();
             for (name, vtype) in &keys {
