@@ -9,7 +9,11 @@ use super::ImageInfo;
 
 /// Return a sanitised preview of a line for terminal-safe warning output.
 fn preview_line(line: &str) -> String {
-    line.chars().take(50).collect::<String>().escape_default().to_string()
+    line.chars()
+        .take(50)
+        .collect::<String>()
+        .escape_default()
+        .to_string()
 }
 
 /// Count images in JSONL without extracting them (for dry-run)
