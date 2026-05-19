@@ -1,7 +1,7 @@
-/// Adversarial tests for `mx kv update` / `KvStore::update_entry`.
-///
-/// These run via `cargo test` as integration-style tests against the binary.
-/// They test paths the 15 unit tests in kv.rs do not cover.
+//! Adversarial tests for `mx kv update` / `KvStore::update_entry`.
+//!
+//! These run via `cargo test` as integration-style tests against the binary.
+//! They test paths the 15 unit tests in kv.rs do not cover.
 
 use std::fs;
 use std::process::Command;
@@ -53,23 +53,18 @@ fn push_with_data(dir: &TempDir, key: &str, value: &str, data: &str) -> String {
 /// Extract the numeric index from "kv-<id> (<index>)" push output.
 fn index_from_push(push_out: &str) -> String {
     // Format: "kv-<hash> (<index>)"
-    let inner = push_out
+    push_out
         .trim_end_matches(')')
         .rsplit('(')
         .next()
         .unwrap()
         .trim()
-        .to_string();
-    inner
+        .to_string()
 }
 
 /// Extract the kv-<hash> prefix from push output for use in --id.
 fn id_from_push(push_out: &str) -> String {
-    push_out
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_string()
+    push_out.split_whitespace().next().unwrap().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +142,12 @@ fn patch_all_nulls_on_entry_without_data_yields_none() {
     let out = mx(
         &dir,
         &[
-            "kv", "update", "log", "--id", &idx, "--data",
+            "kv",
+            "update",
+            "log",
+            "--id",
+            &idx,
+            "--data",
             r#"{"foo": null, "bar": null}"#,
         ],
     );
@@ -217,10 +217,7 @@ fn update_nonexistent_key_returns_key_not_found_exit_code() {
         &dir,
         &["kv", "update", "does_not_exist", "--id", "0", "newval"],
     );
-    assert!(
-        !out.status.success(),
-        "update on nonexistent key must fail"
-    );
+    assert!(!out.status.success(), "update on nonexistent key must fail");
     // EXIT_KEY_NOT_FOUND = 1
     assert_eq!(
         out.status.code(),
@@ -345,10 +342,7 @@ fn multiple_sequential_updates_preserve_ts_and_id() {
 fn update_counter_key_returns_type_mismatch_exit_code() {
     let dir = setup(BASIC_SCHEMA);
 
-    let out = mx(
-        &dir,
-        &["kv", "update", "counter", "--id", "0", "99"],
-    );
+    let out = mx(&dir, &["kv", "update", "counter", "--id", "0", "99"]);
     assert!(!out.status.success(), "update on counter must fail");
 
     // EXIT_TYPE_MISMATCH = 2
@@ -394,11 +388,7 @@ fn data_as_array_is_rejected() {
         &["kv", "update", "log", "--id", &idx, "--data", "[1,2,3]"],
     );
     assert!(!out.status.success(), "array --data must be rejected");
-    assert_eq!(
-        out.status.code(),
-        Some(4),
-        "expected exit 4 for array data"
-    );
+    assert_eq!(out.status.code(), Some(4), "expected exit 4 for array data");
 }
 
 #[test]
@@ -412,11 +402,7 @@ fn data_as_null_is_rejected() {
         &["kv", "update", "log", "--id", &idx, "--data", "null"],
     );
     assert!(!out.status.success(), "null --data must be rejected");
-    assert_eq!(
-        out.status.code(),
-        Some(4),
-        "expected exit 4 for null data"
-    );
+    assert_eq!(out.status.code(), Some(4), "expected exit 4 for null data");
 }
 
 // ---------------------------------------------------------------------------
@@ -433,10 +419,7 @@ fn data_empty_object_bypasses_noop_guard() {
     let idx = index_from_push(&pushed);
 
     // No positional value, --data '{}' — must now be rejected
-    let out = mx(
-        &dir,
-        &["kv", "update", "log", "--id", &idx, "--data", "{}"],
-    );
+    let out = mx(&dir, &["kv", "update", "log", "--id", &idx, "--data", "{}"]);
     assert!(
         !out.status.success(),
         "empty --data {{}} with no value must be rejected"
@@ -464,7 +447,15 @@ fn null_as_delete_removes_field_from_json_output() {
 
     let out = mx(
         &dir,
-        &["kv", "update", "log", "--id", &idx, "--data", r#"{"b": null}"#],
+        &[
+            "kv",
+            "update",
+            "log",
+            "--id",
+            &idx,
+            "--data",
+            r#"{"b": null}"#,
+        ],
     );
     assert!(
         out.status.success(),
@@ -504,7 +495,12 @@ fn null_delete_required_field_fails_validation() {
     let out = mx(
         &dir,
         &[
-            "kv", "update", "tasks", "--id", &idx, "--data",
+            "kv",
+            "update",
+            "tasks",
+            "--id",
+            &idx,
+            "--data",
             r#"{"status": null}"#,
         ],
     );
@@ -642,14 +638,24 @@ fn update_list_entry_by_index_works() {
 #[test]
 fn patch_wrong_type_for_validated_field_fails_entry_unchanged() {
     let dir = setup(VALIDATED_SCHEMA);
-    let pushed = push_with_data(&dir, "tasks", "work", r#"{"status": "open", "priority": 3}"#);
+    let pushed = push_with_data(
+        &dir,
+        "tasks",
+        "work",
+        r#"{"status": "open", "priority": 3}"#,
+    );
     let idx = index_from_push(&pushed);
 
     // priority must be a number; patch with a string
     let out = mx(
         &dir,
         &[
-            "kv", "update", "tasks", "--id", &idx, "--data",
+            "kv",
+            "update",
+            "tasks",
+            "--id",
+            &idx,
+            "--data",
             r#"{"priority": "high"}"#,
         ],
     );
@@ -685,7 +691,15 @@ fn merge_resulting_in_empty_object_stored_as_none() {
     // Delete the only field via null-patch
     let out = mx(
         &dir,
-        &["kv", "update", "log", "--id", &idx, "--data", r#"{"x": null}"#],
+        &[
+            "kv",
+            "update",
+            "log",
+            "--id",
+            &idx,
+            "--data",
+            r#"{"x": null}"#,
+        ],
     );
     assert!(
         out.status.success(),
@@ -717,7 +731,12 @@ fn invalid_json_for_data_returns_error() {
     let out = mx(
         &dir,
         &[
-            "kv", "update", "log", "--id", &idx, "--data",
+            "kv",
+            "update",
+            "log",
+            "--id",
+            &idx,
+            "--data",
             "{not valid json",
         ],
     );
