@@ -725,6 +725,67 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
+        KvCommands::Update {
+            key,
+            value,
+            id,
+            data,
+        } => {
+            // 1. Reject the no-op case (both fields missing).
+            if value.is_none() && data.is_none() {
+                eprintln!("Error: provide a value argument and/or --data to update");
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // 2. Parse the ID into IdRef (numeric or kv-HASH).
+            let id_ref = match parse_single_id(&id) {
+                Ok(r) => r,
+                Err(msg) => {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            };
+
+            // 3. Parse --data as JSON object (mirror push's checks).
+            let parsed_data = match data {
+                Some(ref json_str) => {
+                    let val: serde_json::Value = match serde_json::from_str(json_str) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("Error: invalid JSON for --data: {}", e);
+                            return Ok(kv::EXIT_INVALID_INPUT);
+                        }
+                    };
+                    if !val.is_object() {
+                        eprintln!(
+                            "Error: --data must be a JSON object, got {}",
+                            match val {
+                                serde_json::Value::Array(_) => "array",
+                                serde_json::Value::String(_) => "string",
+                                serde_json::Value::Number(_) => "number",
+                                serde_json::Value::Bool(_) => "boolean",
+                                serde_json::Value::Null => "null",
+                                serde_json::Value::Object(_) => unreachable!(),
+                            }
+                        );
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                    Some(val)
+                }
+                None => None,
+            };
+
+            // 4. Dispatch to engine.
+            match store.update_entry(&key, &id_ref, value.as_deref(), parsed_data) {
+                Ok(result) => {
+                    store.save()?;
+                    println!("Updated entry {} (kv-{})", result.index, result.id);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
         KvCommands::Search {
             key,
             query,
