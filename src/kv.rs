@@ -7917,53 +7917,20 @@ count = { type = "number" }
 
     #[test]
     fn update_ambiguous_id_prefix() {
-        let (mut store, _dir) = setup_store(test_schema());
-        let r1 = store.push("flavor_history", "a1", None, None).unwrap();
-        let r2 = store.push("flavor_history", "a2", None, None).unwrap();
-
-        // Find a prefix that matches both IDs
-        let id1 = &r1.id;
-        let id2 = &r2.id;
-        let prefix_len = id1
-            .chars()
-            .zip(id2.chars())
-            .take_while(|(c1, c2)| c1 == c2)
-            .count();
-
-        // If no shared prefix, use a single character that appears in both (worst case: use one char)
-        let shared_prefix = if prefix_len > 0 {
-            id1[..prefix_len].to_string()
-        } else {
-            // IDs differ from first char — use an artificial common prefix by
-            // testing with both id substrings that we know exist
-            // Instead, just use an empty-ish prefix that matches any 2-char start
-            id1.chars().next().unwrap().to_string()
-        };
-
-        // Only test ambiguous if the prefix actually matches both
-        let matches_both = id1.starts_with(&shared_prefix) && id2.starts_with(&shared_prefix);
-        if !matches_both {
-            // Different first chars — construct the test differently:
-            // Push two entries with known IDs by checking if id1[0] == id2[0]
-            // Since we can't control IDs, skip the prefix ambiguity and just verify
-            // ambiguous detection works with a known-matching prefix scenario.
-            // This is a test environment limitation — note and skip gracefully.
-            return;
+        let (mut store, _tmp) = setup_store(test_schema());
+        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "beta", None, None).unwrap();
+        // Empty prefix matches every entry — always ambiguous when there are 2+.
+        let err = store.update_entry(
+            "tags",
+            &IdRef::Id("".to_string()),
+            Some("beta-updated"),
+            None,
+        ).unwrap_err();
+        match err {
+            KvError::AmbiguousId { count, .. } => assert_eq!(count, 2),
+            other => panic!("expected AmbiguousId, got {:?}", other),
         }
-
-        let err = store
-            .update_entry(
-                "flavor_history",
-                &IdRef::Id(shared_prefix),
-                Some("new"),
-                None,
-            )
-            .unwrap_err();
-        assert!(
-            matches!(err, KvError::AmbiguousId { count: 2, .. }),
-            "expected AmbiguousId with count 2, got {:?}",
-            err
-        );
     }
 
     #[test]
