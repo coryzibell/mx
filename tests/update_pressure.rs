@@ -23,6 +23,7 @@ fn setup(schema_toml: &str) -> TempDir {
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
     Command::new(MX)
         .args(args)
+        .env("MX_CURRENT_AGENT", "test")
         .env("MX_KV_SCHEMA", dir.path().join("schema.toml"))
         .env("MX_KV_DATA", dir.path().join("data.json"))
         .output()

@@ -2273,52 +2273,61 @@ impl KvStore {
 
         // Compute merged data on a clone so we can validate before mutating.
         // This closure captures what we need from the entry without a mutable borrow.
-        let compute_merged = |entry_data: &Option<serde_json::Value>| -> Result<Option<serde_json::Value>, KvError> {
-            match (entry_data, &new_data) {
-                (_, None) => Ok(entry_data.clone()),
-                (None, Some(patch)) => {
-                    if !patch.is_object() {
-                        return Err(KvError::DataValidation {
-                            message: format!("key '{}': --data must be a JSON object", key),
-                        });
-                    }
-                    let mut obj = serde_json::Map::new();
-                    for (k, v) in patch.as_object().unwrap() {
-                        if !v.is_null() {
-                            obj.insert(k.clone(), v.clone());
-                        }
-                    }
-                    Ok(if obj.is_empty() { None } else { Some(serde_json::Value::Object(obj)) })
-                }
-                (Some(existing), Some(patch)) => {
-                    let mut merged_obj = match existing.as_object() {
-                        Some(o) => o.clone(),
-                        None => {
-                            return Err(KvError::Other(anyhow::anyhow!(
-                                "Data corruption: key '{}' entry has non-object data",
-                                key
-                            )));
-                        }
-                    };
-                    let patch_obj = match patch.as_object() {
-                        Some(p) => p,
-                        None => {
+        let compute_merged =
+            |entry_data: &Option<serde_json::Value>| -> Result<Option<serde_json::Value>, KvError> {
+                match (entry_data, &new_data) {
+                    (_, None) => Ok(entry_data.clone()),
+                    (None, Some(patch)) => {
+                        if !patch.is_object() {
                             return Err(KvError::DataValidation {
                                 message: format!("key '{}': --data must be a JSON object", key),
                             });
                         }
-                    };
-                    for (k, v) in patch_obj {
-                        if v.is_null() {
-                            merged_obj.remove(k);
-                        } else {
-                            merged_obj.insert(k.clone(), v.clone());
+                        let mut obj = serde_json::Map::new();
+                        for (k, v) in patch.as_object().unwrap() {
+                            if !v.is_null() {
+                                obj.insert(k.clone(), v.clone());
+                            }
                         }
+                        Ok(if obj.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Object(obj))
+                        })
                     }
-                    Ok(if merged_obj.is_empty() { None } else { Some(serde_json::Value::Object(merged_obj)) })
+                    (Some(existing), Some(patch)) => {
+                        let mut merged_obj = match existing.as_object() {
+                            Some(o) => o.clone(),
+                            None => {
+                                return Err(KvError::Other(anyhow::anyhow!(
+                                    "Data corruption: key '{}' entry has non-object data",
+                                    key
+                                )));
+                            }
+                        };
+                        let patch_obj = match patch.as_object() {
+                            Some(p) => p,
+                            None => {
+                                return Err(KvError::DataValidation {
+                                    message: format!("key '{}': --data must be a JSON object", key),
+                                });
+                            }
+                        };
+                        for (k, v) in patch_obj {
+                            if v.is_null() {
+                                merged_obj.remove(k);
+                            } else {
+                                merged_obj.insert(k.clone(), v.clone());
+                            }
+                        }
+                        Ok(if merged_obj.is_empty() {
+                            None
+                        } else {
+                            Some(serde_json::Value::Object(merged_obj))
+                        })
+                    }
                 }
-            }
-        };
+            };
 
         match self.data.entries.get_mut(key) {
             Some(DataValue::History { entries, .. }) => {
@@ -2366,7 +2375,10 @@ impl KvStore {
                     entry.value = v.to_string();
                 }
                 entry.data = merged_data;
-                Ok(UpdateResult { index: entry.index, id: entry.id.clone() })
+                Ok(UpdateResult {
+                    index: entry.index,
+                    id: entry.id.clone(),
+                })
             }
             Some(DataValue::List { items, .. }) => {
                 // First pass: read-only to compute merged_data and validate.
@@ -2413,7 +2425,10 @@ impl KvStore {
                     entry.value = v.to_string();
                 }
                 entry.data = merged_data;
-                Ok(UpdateResult { index: entry.index, id: entry.id.clone() })
+                Ok(UpdateResult {
+                    index: entry.index,
+                    id: entry.id.clone(),
+                })
             }
             _ => Err(KvError::EntryNotFound {
                 key: key.to_string(),
@@ -7646,9 +7661,7 @@ count = { type = "number" }
     #[test]
     fn update_value_only_preserves_ts_and_id_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store
-            .push("flavor_history", "mint", None, None)
-            .unwrap();
+        let push = store.push("flavor_history", "mint", None, None).unwrap();
         let before = get_history_entry(&store, "flavor_history", push.index);
 
         let result = store
@@ -7793,9 +7806,7 @@ count = { type = "number" }
     #[test]
     fn update_data_on_entry_with_no_data() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store
-            .push("flavor_history", "oolong", None, None)
-            .unwrap();
+        let push = store.push("flavor_history", "oolong", None, None).unwrap();
 
         let patch = serde_json::json!({"a": 1});
         store
@@ -7832,7 +7843,10 @@ count = { type = "number" }
             err
         );
         let after = get_history_entry(&store, "items", push.index);
-        assert_eq!(after.data, before.data, "entry must be unchanged on failure");
+        assert_eq!(
+            after.data, before.data,
+            "entry must be unchanged on failure"
+        );
     }
 
     #[test]
@@ -7856,7 +7870,10 @@ count = { type = "number" }
             err
         );
         let after = get_history_entry(&store, "items", push.index);
-        assert_eq!(after.data, before.data, "entry must be unchanged on failure");
+        assert_eq!(
+            after.data, before.data,
+            "entry must be unchanged on failure"
+        );
     }
 
     #[test]
@@ -7876,14 +7893,20 @@ count = { type = "number" }
         let after = get_history_entry(&store, "items", push.index);
 
         let data = after.data.as_ref().unwrap();
-        assert_eq!(data["status"], serde_json::json!("open"), "required field preserved in merge");
+        assert_eq!(
+            data["status"],
+            serde_json::json!("open"),
+            "required field preserved in merge"
+        );
         assert_eq!(data["count"], serde_json::json!(2), "count updated");
     }
 
     #[test]
     fn update_entry_not_found_by_index() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "darjeeling", None, None).unwrap();
+        store
+            .push("flavor_history", "darjeeling", None, None)
+            .unwrap();
 
         let err = store
             .update_entry("flavor_history", &IdRef::Index(999), Some("new"), None)
@@ -7921,12 +7944,14 @@ count = { type = "number" }
         store.push("tags", "alpha", None, None).unwrap();
         store.push("tags", "beta", None, None).unwrap();
         // Empty prefix matches every entry — always ambiguous when there are 2+.
-        let err = store.update_entry(
-            "tags",
-            &IdRef::Id("".to_string()),
-            Some("beta-updated"),
-            None,
-        ).unwrap_err();
+        let err = store
+            .update_entry(
+                "tags",
+                &IdRef::Id("".to_string()),
+                Some("beta-updated"),
+                None,
+            )
+            .unwrap_err();
         match err {
             KvError::AmbiguousId { count, .. } => assert_eq!(count, 2),
             other => panic!("expected AmbiguousId, got {:?}", other),
@@ -7949,9 +7974,7 @@ count = { type = "number" }
     #[test]
     fn update_id_lookup_by_prefix_unique() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store
-            .push("flavor_history", "gyokuro", None, None)
-            .unwrap();
+        let push = store.push("flavor_history", "gyokuro", None, None).unwrap();
 
         // Take first 4 chars of id as prefix
         let prefix = push.id[..4.min(push.id.len())].to_string();
