@@ -11,13 +11,13 @@ use super::ImageInfo;
 /// that failed JSON parsing. `parsed` counts non-empty lines that
 /// succeeded.
 #[derive(Debug, Default, Clone, Copy)]
-pub(crate) struct JsonlParseStats {
+pub(super) struct JsonlParseStats {
     pub parsed: usize,
     pub skipped: usize,
 }
 
 impl JsonlParseStats {
-    pub fn total(&self) -> usize {
+    pub(super) fn total(&self) -> usize {
         self.parsed + self.skipped
     }
 }
@@ -25,6 +25,14 @@ impl JsonlParseStats {
 fn preview_for_warning(line: &str) -> String {
     let prefix: String = line.chars().take(50).collect();
     prefix.escape_default().to_string()
+}
+
+fn format_skip_warning(line_num: usize, line: &str) -> String {
+    format!(
+        "warning: skipping invalid JSONL line {}: {}",
+        line_num,
+        preview_for_warning(line),
+    )
 }
 
 /// Count images in JSONL without extracting them (for dry-run)
@@ -44,11 +52,7 @@ pub(super) fn count_images_in_jsonl(content: &str) -> Result<(usize, JsonlParseS
             }
             Err(_) => {
                 stats.skipped += 1;
-                eprintln!(
-                    "warning: skipping invalid JSONL line {}: {}",
-                    idx + 1,
-                    preview_for_warning(line),
-                );
+                eprintln!("{}", format_skip_warning(idx + 1, line));
             }
         }
     }
@@ -107,12 +111,10 @@ pub(super) fn extract_images_from_jsonl(
             }
             Err(_) => {
                 stats.skipped += 1;
-                eprintln!(
-                    "warning: skipping invalid JSONL line {}: {}",
-                    idx + 1,
-                    preview_for_warning(line),
-                );
-                continue; // drop the bad line from output
+                eprintln!("{}", format_skip_warning(idx + 1, line));
+                // Drop the bad line from output — don't propagate corruption into the
+                // archive. The eprintln warning above carries the forensics.
+                continue;
             }
         };
 
@@ -365,5 +367,22 @@ mod tests {
         assert_eq!(stats.skipped, 0);
         assert_eq!(output, "\n");
         assert!(images.is_empty());
+    }
+
+    #[test]
+    fn warning_includes_one_indexed_line_number() {
+        // Bad line at position 27 in a 50-line file
+        let mut lines: Vec<String> = (0..50).map(|i| valid_line(i as u32)).collect();
+        lines[26] = "NOT JSON".to_string(); // position 27 is index 26
+        let content = lines.join("\n");
+
+        // Verify the helper produces the expected text directly
+        let warning = format_skip_warning(27, "NOT JSON");
+        assert_eq!(warning, "warning: skipping invalid JSONL line 27: NOT JSON");
+
+        // And verify the full path produces the right stats
+        let (_count, stats) = count_images_in_jsonl(&content).unwrap();
+        assert_eq!(stats.parsed, 49);
+        assert_eq!(stats.skipped, 1);
     }
 }

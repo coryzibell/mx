@@ -349,16 +349,28 @@ pub(crate) fn archive_session(
         if !agents.is_empty() {
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
-                if let Ok(agent_content) = fs::read_to_string(&source_path)
-                    && let Ok((_modified_agent_content, agent_images, agent_stats)) =
-                        extract_images_from_jsonl(&agent_content, &images_dir)
-                {
-                    total_stats.parsed += agent_stats.parsed;
-                    total_stats.skipped += agent_stats.skipped;
-                    for img in agent_images {
-                        if !all_images.iter().any(|existing| existing.hash == img.hash) {
-                            all_images.push(img);
+                let agent_content = match fs::read_to_string(&source_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("warning: failed to read agent file {:?}: {}", source_path, e);
+                        continue;
+                    }
+                };
+                match extract_images_from_jsonl(&agent_content, &images_dir) {
+                    Ok((_modified_agent_content, agent_images, agent_stats)) => {
+                        total_stats.parsed += agent_stats.parsed;
+                        total_stats.skipped += agent_stats.skipped;
+                        for img in agent_images {
+                            if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                                all_images.push(img);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to extract images from agent file {:?}: {}",
+                            source_path, e
+                        );
                     }
                 }
             }
@@ -438,8 +450,7 @@ pub(crate) fn archive_session(
         println!("Archived session (clean) to: {}", archive_dir.display());
         if total_stats.skipped > 0 {
             println!(
-                "  Messages: {} ({}/{} parsed, {} skipped)",
-                total_stats.parsed,
+                "  Messages: {}/{} parsed, {} skipped",
                 total_stats.parsed,
                 total_stats.total(),
                 total_stats.skipped,
@@ -548,8 +559,7 @@ pub(crate) fn archive_session(
     println!("Archived session to: {}", archive_dir.display());
     if total_stats.skipped > 0 {
         println!(
-            "  Messages: {} ({}/{} parsed, {} skipped)",
-            total_stats.parsed,
+            "  Messages: {}/{} parsed, {} skipped",
             total_stats.parsed,
             total_stats.total(),
             total_stats.skipped,
