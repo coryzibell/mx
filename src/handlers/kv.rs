@@ -770,12 +770,6 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         );
                         return Ok(kv::EXIT_INVALID_INPUT);
                     }
-                    if val.as_object().is_some_and(|o| o.is_empty()) && value.is_none() {
-                        eprintln!(
-                            "Error: --data is an empty object and no value was given — nothing to update"
-                        );
-                        return Ok(kv::EXIT_INVALID_INPUT);
-                    }
                     Some(val)
                 }
                 None => None,

@@ -535,6 +535,178 @@ pub enum IdRef {
 }
 
 // ---------------------------------------------------------------------------
+// Entry-lookup helpers shared by History and List arms
+// ---------------------------------------------------------------------------
+
+/// `HistoryEntry` and `ListEntry` are structurally identical — same fields,
+/// same role in `update_entry`. They exist as separate types because the
+/// outer `DataValue` variant distinguishes append-only history semantics from
+/// mutable list semantics, but at the entry level there's no difference.
+/// This trait acknowledges that and lets the update path be written once.
+///
+/// Shared interface for `HistoryEntry` and `ListEntry` so generic helpers
+/// can operate over both types without duplicating the logic.
+trait EntryFields {
+    fn entry_index(&self) -> u64;
+    fn entry_id(&self) -> &str;
+    fn entry_data(&self) -> &Option<serde_json::Value>;
+    fn entry_id_str(&self) -> String;
+    fn set_value(&mut self, v: &str);
+    fn set_data(&mut self, d: Option<serde_json::Value>);
+}
+
+impl EntryFields for HistoryEntry {
+    fn entry_index(&self) -> u64 { self.index }
+    fn entry_id(&self) -> &str { &self.id }
+    fn entry_data(&self) -> &Option<serde_json::Value> { &self.data }
+    fn entry_id_str(&self) -> String { self.id.clone() }
+    fn set_value(&mut self, v: &str) { self.value = v.to_string(); }
+    fn set_data(&mut self, d: Option<serde_json::Value>) { self.data = d; }
+}
+
+impl EntryFields for ListEntry {
+    fn entry_index(&self) -> u64 { self.index }
+    fn entry_id(&self) -> &str { &self.id }
+    fn entry_data(&self) -> &Option<serde_json::Value> { &self.data }
+    fn entry_id_str(&self) -> String { self.id.clone() }
+    fn set_value(&mut self, v: &str) { self.value = v.to_string(); }
+    fn set_data(&mut self, d: Option<serde_json::Value>) { self.data = d; }
+}
+
+/// Return the Vec position of the entry identified by `id`, or an error.
+///
+/// Uses `position()` so the caller can index the slice directly (`&mut v[pos]`)
+/// — no second search pass and no `.unwrap()`.
+fn find_entry_idx<E: EntryFields>(
+    entries: &[E],
+    id: &IdRef,
+    key: &str,
+) -> Result<usize, KvError> {
+    match id {
+        IdRef::Index(n) => entries
+            .iter()
+            .position(|e| e.entry_index() == *n)
+            .ok_or_else(|| KvError::EntryNotFound {
+                key: key.to_string(),
+                id: format!("{:?}", id),
+            }),
+        IdRef::Id(h) => {
+            let positions: Vec<usize> = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.entry_id().starts_with(h.as_str()))
+                .map(|(i, _)| i)
+                .collect();
+            match positions.len() {
+                0 => Err(KvError::EntryNotFound {
+                    key: key.to_string(),
+                    id: format!("{:?}", id),
+                }),
+                1 => Ok(positions[0]),
+                n => Err(KvError::AmbiguousId {
+                    prefix: h.clone(),
+                    count: n,
+                }),
+            }
+        }
+    }
+}
+
+/// Perform the validated update on `entries[idx]` and return an `UpdateResult`.
+///
+/// Extracted so the `History` and `List` arms of `update_entry` share a single
+/// code path instead of duplicating ~30 lines each.
+fn apply_entry_update<E: EntryFields>(
+    entries: &mut Vec<E>,
+    id: &IdRef,
+    key: &str,
+    def: &KeyDef,
+    new_value: Option<&str>,
+    new_data: Option<&serde_json::Value>,
+) -> Result<UpdateResult, KvError> {
+    let idx = find_entry_idx(entries, id, key)?;
+
+    // Compute merged data from the read-only borrow first.
+    let merged_data = {
+        let entry_data = entries[idx].entry_data();
+        let merged = merge_entry_data(entry_data, new_data, key)?;
+        def.validate_data(key, &merged)?;
+        merged
+    };
+
+    // Commit — safe to index directly because `idx` was verified above.
+    let entry = &mut entries[idx];
+    if let Some(v) = new_value {
+        entry.set_value(v);
+    }
+    entry.set_data(merged_data);
+    Ok(UpdateResult {
+        index: entry.entry_index(),
+        id: entry.entry_id_str(),
+    })
+}
+
+/// Merge `new_data` (a JSON-object patch) into `existing`.
+///
+/// - `None` patch → return existing unchanged.
+/// - Non-null patch fields overwrite / insert; null patch fields delete.
+/// - Empty result → `None`.
+fn merge_entry_data(
+    existing: &Option<serde_json::Value>,
+    patch: Option<&serde_json::Value>,
+    key: &str,
+) -> Result<Option<serde_json::Value>, KvError> {
+    let patch = match patch {
+        None => return Ok(existing.clone()),
+        Some(p) => p,
+    };
+
+    match existing {
+        None => {
+            let patch_obj = patch.as_object().ok_or_else(|| KvError::DataValidation {
+                message: format!("key '{}': --data must be a JSON object", key),
+            })?;
+            let obj: serde_json::Map<_, _> = patch_obj
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            Ok(if obj.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(obj))
+            })
+        }
+        Some(existing_val) => {
+            let mut merged_obj = existing_val
+                .as_object()
+                .ok_or_else(|| {
+                    KvError::Other(anyhow::anyhow!(
+                        "Data corruption: key '{}' entry has non-object data",
+                        key
+                    ))
+                })?
+                .clone();
+            let patch_obj = patch.as_object().ok_or_else(|| KvError::DataValidation {
+                message: format!("key '{}': --data must be a JSON object", key),
+            })?;
+            for (k, v) in patch_obj {
+                if v.is_null() {
+                    merged_obj.remove(k);
+                } else {
+                    merged_obj.insert(k.clone(), v.clone());
+                }
+            }
+            Ok(if merged_obj.is_empty() {
+                None
+            } else {
+                Some(serde_json::Value::Object(merged_obj))
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Data field validation
 // ---------------------------------------------------------------------------
 
@@ -2259,181 +2431,66 @@ impl KvStore {
         new_value: Option<&str>,
         new_data: Option<serde_json::Value>,
     ) -> Result<UpdateResult, KvError> {
+        // Item 4: reject empty-object data with no value — nothing to update.
+        // Engine-level guard so library consumers get it, not just CLI callers.
+        if new_value.is_none()
+            && new_data.as_ref().is_some_and(|d| d.as_object().is_some_and(|o| o.is_empty()))
+        {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key '{}': --data is an empty object and no value was given — nothing to update",
+                    key
+                ),
+            });
+        }
+
         let def = self.key_def(key)?.clone();
+
+        // Guard: key must be a History or List — anything else is a type error.
         match def.value_type {
             ValueType::History | ValueType::List => {}
-            _ => {
+            ValueType::Counter | ValueType::String => {
                 return Err(KvError::TypeMismatch {
                     key: key.to_string(),
-                    expected: "history or list".to_string(),
+                    expected: "update not supported for this entry type".to_string(),
                     got: def.value_type.to_string(),
+                });
+            }
+            ValueType::State => {
+                return Err(KvError::TypeMismatch {
+                    key: key.to_string(),
+                    expected: "history or list (state fields are set with 'mx kv set')".to_string(),
+                    got: "state".to_string(),
                 });
             }
         }
 
-        // Compute merged data on a clone so we can validate before mutating.
-        // This closure captures what we need from the entry without a mutable borrow.
-        let compute_merged =
-            |entry_data: &Option<serde_json::Value>| -> Result<Option<serde_json::Value>, KvError> {
-                match (entry_data, &new_data) {
-                    (_, None) => Ok(entry_data.clone()),
-                    (None, Some(patch)) => {
-                        if !patch.is_object() {
-                            return Err(KvError::DataValidation {
-                                message: format!("key '{}': --data must be a JSON object", key),
-                            });
-                        }
-                        let mut obj = serde_json::Map::new();
-                        for (k, v) in patch.as_object().unwrap() {
-                            if !v.is_null() {
-                                obj.insert(k.clone(), v.clone());
-                            }
-                        }
-                        Ok(if obj.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::Object(obj))
-                        })
-                    }
-                    (Some(existing), Some(patch)) => {
-                        let mut merged_obj = match existing.as_object() {
-                            Some(o) => o.clone(),
-                            None => {
-                                return Err(KvError::Other(anyhow::anyhow!(
-                                    "Data corruption: key '{}' entry has non-object data",
-                                    key
-                                )));
-                            }
-                        };
-                        let patch_obj = match patch.as_object() {
-                            Some(p) => p,
-                            None => {
-                                return Err(KvError::DataValidation {
-                                    message: format!("key '{}': --data must be a JSON object", key),
-                                });
-                            }
-                        };
-                        for (k, v) in patch_obj {
-                            if v.is_null() {
-                                merged_obj.remove(k);
-                            } else {
-                                merged_obj.insert(k.clone(), v.clone());
-                            }
-                        }
-                        Ok(if merged_obj.is_empty() {
-                            None
-                        } else {
-                            Some(serde_json::Value::Object(merged_obj))
-                        })
-                    }
-                }
-            };
+        let patch = new_data.as_ref();
 
         match self.data.entries.get_mut(key) {
             Some(DataValue::History { entries, .. }) => {
-                // First pass: read-only to compute merged_data and validate.
-                let merged_data = {
-                    let entry = match id {
-                        IdRef::Index(n) => entries.iter().find(|e| e.index == *n),
-                        IdRef::Id(h) => {
-                            let matches: Vec<_> = entries
-                                .iter()
-                                .filter(|e| e.id.starts_with(h.as_str()))
-                                .collect();
-                            match matches.len() {
-                                0 => None,
-                                1 => entries.iter().find(|e| e.id.starts_with(h.as_str())),
-                                n => {
-                                    return Err(KvError::AmbiguousId {
-                                        prefix: h.clone(),
-                                        count: n,
-                                    });
-                                }
-                            }
-                        }
-                    };
-                    let entry = match entry {
-                        Some(e) => e,
-                        None => {
-                            return Err(KvError::EntryNotFound {
-                                key: key.to_string(),
-                                id: format!("{:?}", id),
-                            });
-                        }
-                    };
-                    let merged = compute_merged(&entry.data)?;
-                    def.validate_data(key, &merged)?;
-                    merged
-                };
-                // Second pass: mutable to commit the write.
-                let entry = match id {
-                    IdRef::Index(n) => entries.iter_mut().find(|e| e.index == *n),
-                    IdRef::Id(h) => entries.iter_mut().find(|e| e.id.starts_with(h.as_str())),
-                };
-                let entry = entry.unwrap(); // safe: existence confirmed above
-                if let Some(v) = new_value {
-                    entry.value = v.to_string();
-                }
-                entry.data = merged_data;
-                Ok(UpdateResult {
-                    index: entry.index,
-                    id: entry.id.clone(),
-                })
+                apply_entry_update(entries, id, key, &def, new_value, patch)
             }
             Some(DataValue::List { items, .. }) => {
-                // First pass: read-only to compute merged_data and validate.
-                let merged_data = {
-                    let entry = match id {
-                        IdRef::Index(n) => items.iter().find(|e| e.index == *n),
-                        IdRef::Id(h) => {
-                            let matches: Vec<_> = items
-                                .iter()
-                                .filter(|e| e.id.starts_with(h.as_str()))
-                                .collect();
-                            match matches.len() {
-                                0 => None,
-                                1 => items.iter().find(|e| e.id.starts_with(h.as_str())),
-                                n => {
-                                    return Err(KvError::AmbiguousId {
-                                        prefix: h.clone(),
-                                        count: n,
-                                    });
-                                }
-                            }
-                        }
-                    };
-                    let entry = match entry {
-                        Some(e) => e,
-                        None => {
-                            return Err(KvError::EntryNotFound {
-                                key: key.to_string(),
-                                id: format!("{:?}", id),
-                            });
-                        }
-                    };
-                    let merged = compute_merged(&entry.data)?;
-                    def.validate_data(key, &merged)?;
-                    merged
-                };
-                // Second pass: mutable to commit the write.
-                let entry = match id {
-                    IdRef::Index(n) => items.iter_mut().find(|e| e.index == *n),
-                    IdRef::Id(h) => items.iter_mut().find(|e| e.id.starts_with(h.as_str())),
-                };
-                let entry = entry.unwrap(); // safe: existence confirmed above
-                if let Some(v) = new_value {
-                    entry.value = v.to_string();
-                }
-                entry.data = merged_data;
-                Ok(UpdateResult {
-                    index: entry.index,
-                    id: entry.id.clone(),
-                })
+                apply_entry_update(items, id, key, &def, new_value, patch)
             }
-            _ => Err(KvError::EntryNotFound {
+            None => Err(KvError::EntryNotFound {
                 key: key.to_string(),
-                id: format!("{:?}", id),
+                id: "no entries found".to_string(),
             }),
+            // Schema says history/list (filtered by the type guard above) but the
+            // data file disagrees — this is data corruption, not a user error.
+            // Return `Other` rather than panicking so the engine never aborts.
+            Some(DataValue::Counter { .. }) | Some(DataValue::String { .. }) => {
+                Err(KvError::Other(anyhow::anyhow!(
+                    "data corruption: key '{}' schema is history/list but stored value is a scalar",
+                    key
+                )))
+            }
+            Some(DataValue::State { .. }) => Err(KvError::Other(anyhow::anyhow!(
+                "data corruption: key '{}' schema is history/list but stored value is a state map",
+                key
+            ))),
         }
     }
 
