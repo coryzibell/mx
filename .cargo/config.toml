@@ -1,0 +1,8 @@
+# Increase the default stack size on Windows.
+#
+# Debug builds produce large stack frames due to unoptimised local variables.
+# The integration tests spawn `mx.exe` as a subprocess; with the default 1 MB
+# Windows stack the binary overflows on the deep `handle_kv` match dispatch.
+# 8 MB matches the stack size used by the Rust test harness on all platforms.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/STACK:8388608"]
