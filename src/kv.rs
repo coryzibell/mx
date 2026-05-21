@@ -538,50 +538,62 @@ pub enum IdRef {
 // Entry-lookup helpers shared by History and List arms
 // ---------------------------------------------------------------------------
 
-/// `HistoryEntry` and `ListEntry` are structurally identical — same fields,
-/// same role in `update_entry`. They exist as separate types because the
-/// outer `DataValue` variant distinguishes append-only history semantics from
-/// mutable list semantics, but at the entry level there's no difference.
-/// This trait acknowledges that and lets the update path be written once.
+/// Shared access to the field set used by `update_entry`.
 ///
-/// Shared interface for `HistoryEntry` and `ListEntry` so generic helpers
-/// can operate over both types without duplicating the logic.
+/// `HistoryEntry` and `ListEntry` are structurally identical — same fields,
+/// same role here. They exist as separate types because the outer `DataValue`
+/// variant distinguishes append-only history semantics from mutable list
+/// semantics, but at the entry level there's no difference. This trait
+/// acknowledges that and lets the update path be written once.
 trait EntryFields {
     fn entry_index(&self) -> u64;
     fn entry_id(&self) -> &str;
     fn entry_data(&self) -> &Option<serde_json::Value>;
-    fn entry_id_str(&self) -> String;
     fn set_value(&mut self, v: &str);
     fn set_data(&mut self, d: Option<serde_json::Value>);
 }
 
 impl EntryFields for HistoryEntry {
-    fn entry_index(&self) -> u64 { self.index }
-    fn entry_id(&self) -> &str { &self.id }
-    fn entry_data(&self) -> &Option<serde_json::Value> { &self.data }
-    fn entry_id_str(&self) -> String { self.id.clone() }
-    fn set_value(&mut self, v: &str) { self.value = v.to_string(); }
-    fn set_data(&mut self, d: Option<serde_json::Value>) { self.data = d; }
+    fn entry_index(&self) -> u64 {
+        self.index
+    }
+    fn entry_id(&self) -> &str {
+        &self.id
+    }
+    fn entry_data(&self) -> &Option<serde_json::Value> {
+        &self.data
+    }
+    fn set_value(&mut self, v: &str) {
+        self.value = v.to_string();
+    }
+    fn set_data(&mut self, d: Option<serde_json::Value>) {
+        self.data = d;
+    }
 }
 
 impl EntryFields for ListEntry {
-    fn entry_index(&self) -> u64 { self.index }
-    fn entry_id(&self) -> &str { &self.id }
-    fn entry_data(&self) -> &Option<serde_json::Value> { &self.data }
-    fn entry_id_str(&self) -> String { self.id.clone() }
-    fn set_value(&mut self, v: &str) { self.value = v.to_string(); }
-    fn set_data(&mut self, d: Option<serde_json::Value>) { self.data = d; }
+    fn entry_index(&self) -> u64 {
+        self.index
+    }
+    fn entry_id(&self) -> &str {
+        &self.id
+    }
+    fn entry_data(&self) -> &Option<serde_json::Value> {
+        &self.data
+    }
+    fn set_value(&mut self, v: &str) {
+        self.value = v.to_string();
+    }
+    fn set_data(&mut self, d: Option<serde_json::Value>) {
+        self.data = d;
+    }
 }
 
 /// Return the Vec position of the entry identified by `id`, or an error.
 ///
 /// Uses `position()` so the caller can index the slice directly (`&mut v[pos]`)
 /// — no second search pass and no `.unwrap()`.
-fn find_entry_idx<E: EntryFields>(
-    entries: &[E],
-    id: &IdRef,
-    key: &str,
-) -> Result<usize, KvError> {
+fn find_entry_idx<E: EntryFields>(entries: &[E], id: &IdRef, key: &str) -> Result<usize, KvError> {
     match id {
         IdRef::Index(n) => entries
             .iter()
@@ -617,7 +629,7 @@ fn find_entry_idx<E: EntryFields>(
 /// Extracted so the `History` and `List` arms of `update_entry` share a single
 /// code path instead of duplicating ~30 lines each.
 fn apply_entry_update<E: EntryFields>(
-    entries: &mut Vec<E>,
+    entries: &mut [E],
     id: &IdRef,
     key: &str,
     def: &KeyDef,
@@ -642,7 +654,7 @@ fn apply_entry_update<E: EntryFields>(
     entry.set_data(merged_data);
     Ok(UpdateResult {
         index: entry.entry_index(),
-        id: entry.entry_id_str(),
+        id: entry.entry_id().to_string(),
     })
 }
 
@@ -682,7 +694,7 @@ fn merge_entry_data(
                 .as_object()
                 .ok_or_else(|| {
                     KvError::Other(anyhow::anyhow!(
-                        "Data corruption: key '{}' entry has non-object data",
+                        "data corruption: key '{}' entry has non-object data",
                         key
                     ))
                 })?
@@ -2431,19 +2443,6 @@ impl KvStore {
         new_value: Option<&str>,
         new_data: Option<serde_json::Value>,
     ) -> Result<UpdateResult, KvError> {
-        // Item 4: reject empty-object data with no value — nothing to update.
-        // Engine-level guard so library consumers get it, not just CLI callers.
-        if new_value.is_none()
-            && new_data.as_ref().is_some_and(|d| d.as_object().is_some_and(|o| o.is_empty()))
-        {
-            return Err(KvError::DataValidation {
-                message: format!(
-                    "key '{}': --data is an empty object and no value was given — nothing to update",
-                    key
-                ),
-            });
-        }
-
         let def = self.key_def(key)?.clone();
 
         // Guard: key must be a History or List — anything else is a type error.
@@ -2452,7 +2451,7 @@ impl KvStore {
             ValueType::Counter | ValueType::String => {
                 return Err(KvError::TypeMismatch {
                     key: key.to_string(),
-                    expected: "update not supported for this entry type".to_string(),
+                    expected: "history or list".to_string(),
                     got: def.value_type.to_string(),
                 });
             }
@@ -2463,6 +2462,22 @@ impl KvStore {
                     got: "state".to_string(),
                 });
             }
+        }
+
+        // Item 4: reject empty-object data with no value — nothing to update.
+        // Engine-level guard so library consumers get it, not just CLI callers.
+        // Runs after key_def and type guard so schema errors take precedence.
+        if new_value.is_none()
+            && new_data
+                .as_ref()
+                .is_some_and(|d| d.as_object().is_some_and(|o| o.is_empty()))
+        {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key '{}': --data is an empty object and no value was given — nothing to update",
+                    key
+                ),
+            });
         }
 
         let patch = new_data.as_ref();
@@ -2476,7 +2491,7 @@ impl KvStore {
             }
             None => Err(KvError::EntryNotFound {
                 key: key.to_string(),
-                id: "no entries found".to_string(),
+                id: "(no entries pushed)".to_string(),
             }),
             // Schema says history/list (filtered by the type guard above) but the
             // data file disagrees — this is data corruption, not a user error.
