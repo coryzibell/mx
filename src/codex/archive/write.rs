@@ -341,20 +341,39 @@ pub(crate) fn archive_session(
         let images_dir = archive_dir.join("images");
         fs::create_dir_all(&images_dir)?;
 
-        let (_stripped_content, mut all_images) = extract_images_from_jsonl(&content, &images_dir)?;
+        let (_stripped_content, mut all_images, session_stats) =
+            extract_images_from_jsonl(&content, &images_dir)?;
+        let mut total_stats = session_stats;
 
         // Extract images from agent files too (no file copy in clean mode)
         if !agents.is_empty() {
             for agent in &agents {
                 let source_path = PathBuf::from(&agent.id);
-                if let Ok(agent_content) = fs::read_to_string(&source_path)
-                    && let Ok((_modified_agent_content, agent_images)) =
-                        extract_images_from_jsonl(&agent_content, &images_dir)
-                {
-                    for img in agent_images {
-                        if !all_images.iter().any(|existing| existing.hash == img.hash) {
-                            all_images.push(img);
+                let agent_content = match fs::read_to_string(&source_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to read agent file {:?}: {}",
+                            source_path, e
+                        );
+                        continue;
+                    }
+                };
+                match extract_images_from_jsonl(&agent_content, &images_dir) {
+                    Ok((_modified_agent_content, agent_images, agent_stats)) => {
+                        total_stats.parsed += agent_stats.parsed;
+                        total_stats.skipped += agent_stats.skipped;
+                        for img in agent_images {
+                            if !all_images.iter().any(|existing| existing.hash == img.hash) {
+                                all_images.push(img);
+                            }
                         }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to extract images from agent file {:?}: {}",
+                            source_path, e
+                        );
                     }
                 }
             }
@@ -432,7 +451,16 @@ pub(crate) fn archive_session(
         fs::write(archive_dir.join("manifest.json"), manifest_json)?;
 
         println!("Archived session (clean) to: {}", archive_dir.display());
-        println!("  Messages: {}", message_count);
+        if total_stats.skipped > 0 {
+            println!(
+                "  Messages: {}/{} parsed, {} skipped",
+                total_stats.parsed,
+                total_stats.total(),
+                total_stats.skipped,
+            );
+        } else {
+            println!("  Messages: {}", message_count);
+        }
         println!("  Images: {}", image_count);
         println!("  Size: {} KB", archive_size_bytes / 1024);
         println!("  conversation.md written");
@@ -447,8 +475,9 @@ pub(crate) fn archive_session(
 
     // Extract images from session file and save modified content
     let session_content = fs::read_to_string(session_path)?;
-    let (modified_session_content, mut all_images) =
+    let (modified_session_content, mut all_images, session_stats) =
         extract_images_from_jsonl(&session_content, &images_dir)?;
+    let mut total_stats = session_stats;
 
     let dest_session = archive_dir.join("session.jsonl");
     fs::write(&dest_session, modified_session_content)?;
@@ -467,8 +496,10 @@ pub(crate) fn archive_session(
 
             // Extract images from agent file
             let agent_content = fs::read_to_string(&source_path)?;
-            let (modified_agent_content, agent_images) =
+            let (modified_agent_content, agent_images, agent_stats) =
                 extract_images_from_jsonl(&agent_content, &images_dir)?;
+            total_stats.parsed += agent_stats.parsed;
+            total_stats.skipped += agent_stats.skipped;
 
             // Merge agent images with all_images (deduplication handled by hash check)
             for img in agent_images {
@@ -529,7 +560,16 @@ pub(crate) fn archive_session(
     fs::write(archive_dir.join("manifest.json"), manifest_json)?;
 
     println!("Archived session to: {}", archive_dir.display());
-    println!("  Messages: {}", message_count);
+    if total_stats.skipped > 0 {
+        println!(
+            "  Messages: {}/{} parsed, {} skipped",
+            total_stats.parsed,
+            total_stats.total(),
+            total_stats.skipped,
+        );
+    } else {
+        println!("  Messages: {}", message_count);
+    }
     println!("  Agents: {}", agents.len());
     println!("  Images: {}", image_count);
     println!("  Size: {} KB", size_bytes / 1024);

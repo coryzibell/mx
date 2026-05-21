@@ -113,7 +113,7 @@ pub(crate) fn migrate_archives(
 
             // Extract images from session.jsonl
             let session_content = fs::read_to_string(&session_file)?;
-            let (modified_session_content, mut all_images) =
+            let (modified_session_content, mut all_images, _stats) =
                 extract_images_from_jsonl(&session_content, &images_dir)?;
 
             // Write back modified session.jsonl
@@ -140,7 +140,7 @@ pub(crate) fn migrate_archives(
 
                         // Extract images from agent file
                         let agent_content = fs::read_to_string(&path)?;
-                        let (modified_agent_content, agent_images) =
+                        let (modified_agent_content, agent_images, _stats) =
                             extract_images_from_jsonl(&agent_content, &images_dir)?;
 
                         // Merge agent images (deduplicate)
@@ -185,7 +185,7 @@ pub(crate) fn migrate_archives(
         } else {
             // Dry run - just count what would be migrated
             let session_content = fs::read_to_string(&session_file)?;
-            let image_count = count_images_in_jsonl(&session_content)?;
+            let (image_count, _stats) = count_images_in_jsonl(&session_content)?;
 
             // Count images in agent files too
             let agents_dir = archive_dir.join("agents");
@@ -197,7 +197,8 @@ pub(crate) fn migrate_archives(
                     let path = entry.path();
                     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
                         let agent_content = fs::read_to_string(&path)?;
-                        total_archive_images += count_images_in_jsonl(&agent_content)?;
+                        let (agent_image_count, _stats) = count_images_in_jsonl(&agent_content)?;
+                        total_archive_images += agent_image_count;
                     }
                 }
             }
