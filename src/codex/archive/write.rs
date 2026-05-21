@@ -352,7 +352,10 @@ pub(crate) fn archive_session(
                 let agent_content = match fs::read_to_string(&source_path) {
                     Ok(c) => c,
                     Err(e) => {
-                        eprintln!("warning: failed to read agent file {:?}: {}", source_path, e);
+                        eprintln!(
+                            "warning: failed to read agent file {:?}: {}",
+                            source_path, e
+                        );
                         continue;
                     }
                 };

@@ -328,8 +328,7 @@ mod tests {
     fn extract_skips_invalid_line_and_drops_from_output() {
         let dir = TempDir::new().unwrap();
         let content = format!("{}\nNOT JSON\n{}\n", valid_line(1), valid_line(2));
-        let (output, _images, stats) =
-            extract_images_from_jsonl(&content, dir.path()).unwrap();
+        let (output, _images, stats) = extract_images_from_jsonl(&content, dir.path()).unwrap();
         assert_eq!(stats.parsed, 2);
         assert_eq!(stats.skipped, 1);
         assert!(!output.contains("NOT JSON"));
@@ -343,8 +342,7 @@ mod tests {
         // Exactly the bug from issue #178
         let null_line = "\u{0}".repeat(100);
         let content = format!("{}\n{}\n{}\n", valid_line(1), null_line, valid_line(2));
-        let (output, _images, stats) =
-            extract_images_from_jsonl(&content, dir.path()).unwrap();
+        let (output, _images, stats) = extract_images_from_jsonl(&content, dir.path()).unwrap();
         assert_eq!(stats.parsed, 2);
         assert_eq!(stats.skipped, 1);
         assert!(!output.contains('\u{0}'));
@@ -361,8 +359,7 @@ mod tests {
     #[test]
     fn extract_empty_content_is_ok() {
         let dir = TempDir::new().unwrap();
-        let (output, images, stats) =
-            extract_images_from_jsonl("", dir.path()).unwrap();
+        let (output, images, stats) = extract_images_from_jsonl("", dir.path()).unwrap();
         assert_eq!(stats.parsed, 0);
         assert_eq!(stats.skipped, 0);
         assert_eq!(output, "\n");
