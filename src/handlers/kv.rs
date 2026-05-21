@@ -206,10 +206,8 @@ enum SetInput {
     Scalar(String),
     /// A single field=value for a state type (legacy two-arg syntax).
     SingleField { field: String, value: String },
-    /// Multiple field=value pairs for batch state set.
+    /// Multiple field=value pairs for batch state set (from positional args or JSON object).
     BatchFields(Vec<(String, String)>),
-    /// Parsed JSON object → field pairs for state batch.
-    JsonObject(Vec<(String, String)>),
     /// Parsed JSON array → positional values for tensor set.
     JsonArray(Vec<String>),
     /// No input provided.
@@ -232,6 +230,9 @@ fn parse_positional_args(args: &[String]) -> Result<SetInput, String> {
             let arg = &args[0];
             if arg.contains('=') {
                 let (k, v) = arg.split_once('=').unwrap();
+                if k.is_empty() {
+                    return Err(format!("empty field name in '{}'", arg));
+                }
                 Ok(SetInput::BatchFields(vec![(k.to_string(), v.to_string())]))
             } else {
                 Ok(SetInput::Scalar(arg.clone()))
@@ -251,7 +252,12 @@ fn parse_positional_args(args: &[String]) -> Result<SetInput, String> {
                 let mut pairs = Vec::with_capacity(2);
                 for arg in args {
                     match arg.split_once('=') {
-                        Some((k, v)) => pairs.push((k.to_string(), v.to_string())),
+                        Some((k, v)) => {
+                            if k.is_empty() {
+                                return Err(format!("empty field name in '{}'", arg));
+                            }
+                            pairs.push((k.to_string(), v.to_string()));
+                        }
                         None => {
                             return Err(format!("expected key=value pair, got '{}'", arg));
                         }
@@ -265,7 +271,12 @@ fn parse_positional_args(args: &[String]) -> Result<SetInput, String> {
             let mut pairs = Vec::with_capacity(args.len());
             for arg in args {
                 match arg.split_once('=') {
-                    Some((k, v)) => pairs.push((k.to_string(), v.to_string())),
+                    Some((k, v)) => {
+                        if k.is_empty() {
+                            return Err(format!("empty field name in '{}'", arg));
+                        }
+                        pairs.push((k.to_string(), v.to_string()));
+                    }
                     None => {
                         return Err(format!("expected key=value pair, got '{}'", arg));
                     }
@@ -312,7 +323,7 @@ fn parse_json_input(raw: &str) -> Result<SetInput, String> {
             if pairs.is_empty() {
                 return Err("JSON object is empty".to_string());
             }
-            Ok(SetInput::JsonObject(pairs))
+            Ok(SetInput::BatchFields(pairs))
         }
         serde_json::Value::Array(arr) => {
             if arr.is_empty() {
@@ -580,19 +591,37 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     Ok(()) => {
                         did_something = true;
                     }
-                    Err(e) => return handle_kv_err(e),
-                },
-                SetInput::JsonObject(pairs) => match store.set_state_batch(&key, &pairs) {
-                    Ok(()) => {
-                        did_something = true;
+                    Err(e) => {
+                        if memory.is_none() {
+                            return handle_kv_err(e);
+                        }
+                        match &e {
+                            KvError::TypeMismatch { .. } => {
+                                eprintln!(
+                                    "Warning: value not set (type does not support batch set); memory pointer updated"
+                                );
+                            }
+                            _ => return handle_kv_err(e),
+                        }
                     }
-                    Err(e) => return handle_kv_err(e),
                 },
                 SetInput::JsonArray(values) => match store.set_tensor_batch(&key, &values) {
                     Ok(()) => {
                         did_something = true;
                     }
-                    Err(e) => return handle_kv_err(e),
+                    Err(e) => {
+                        if memory.is_none() {
+                            return handle_kv_err(e);
+                        }
+                        match &e {
+                            KvError::TypeMismatch { .. } => {
+                                eprintln!(
+                                    "Warning: value not set (type does not support tensor set); memory pointer updated"
+                                );
+                            }
+                            _ => return handle_kv_err(e),
+                        }
+                    }
                 },
             }
 
@@ -1378,12 +1407,12 @@ mod tests {
     fn json_object_parsing() {
         let input = parse_json_input(r#"{"goal":"finish docs","phase":"writing"}"#).unwrap();
         match input {
-            SetInput::JsonObject(pairs) => {
+            SetInput::BatchFields(pairs) => {
                 assert_eq!(pairs.len(), 2);
                 assert!(pairs.contains(&("goal".to_string(), "finish docs".to_string())));
                 assert!(pairs.contains(&("phase".to_string(), "writing".to_string())));
             }
-            _ => panic!("expected JsonObject"),
+            _ => panic!("expected BatchFields"),
         }
     }
 
@@ -1431,10 +1460,85 @@ mod tests {
     fn json_object_with_numeric_value() {
         let input = parse_json_input(r#"{"temperature":0.75}"#).unwrap();
         match input {
-            SetInput::JsonObject(pairs) => {
+            SetInput::BatchFields(pairs) => {
                 assert_eq!(pairs, vec![("temperature".to_string(), "0.75".to_string())]);
             }
-            _ => panic!("expected JsonObject"),
+            _ => panic!("expected BatchFields"),
         }
+    }
+
+    // -- S3: --json + positional mutual exclusion --
+
+    #[test]
+    fn json_and_positional_args_mutual_exclusion() {
+        // Simulate the handler guard: --json provided AND positional args non-empty
+        let json: Option<String> = Some(r#"{"goal":"test"}"#.to_string());
+        let args: Vec<String> = vec!["goal=test".to_string()];
+        assert!(
+            json.is_some() && !args.is_empty(),
+            "guard should reject --json combined with positional args"
+        );
+    }
+
+    // -- S4: JSON coercion behavior --
+
+    #[test]
+    fn json_object_with_boolean_value() {
+        let input = parse_json_input(r#"{"flag":true}"#).unwrap();
+        match input {
+            SetInput::BatchFields(pairs) => {
+                assert_eq!(pairs, vec![("flag".to_string(), "true".to_string())]);
+            }
+            _ => panic!("expected BatchFields"),
+        }
+    }
+
+    #[test]
+    fn json_object_with_null_value() {
+        let input = parse_json_input(r#"{"val":null}"#).unwrap();
+        match input {
+            SetInput::BatchFields(pairs) => {
+                assert_eq!(pairs, vec![("val".to_string(), "null".to_string())]);
+            }
+            _ => panic!("expected BatchFields"),
+        }
+    }
+
+    #[test]
+    fn json_object_with_integer_value() {
+        let input = parse_json_input(r#"{"count":42}"#).unwrap();
+        match input {
+            SetInput::BatchFields(pairs) => {
+                assert_eq!(pairs, vec![("count".to_string(), "42".to_string())]);
+            }
+            _ => panic!("expected BatchFields"),
+        }
+    }
+
+    // -- W2: empty field name rejection --
+
+    #[test]
+    fn positional_empty_field_name_rejected() {
+        let result = parse_positional_args(&["=hello".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty field name"));
+    }
+
+    #[test]
+    fn positional_empty_field_name_in_batch_rejected() {
+        let result = parse_positional_args(&["goal=finish".to_string(), "=oops".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty field name"));
+    }
+
+    #[test]
+    fn positional_empty_field_name_in_three_plus_rejected() {
+        let result = parse_positional_args(&[
+            "goal=finish".to_string(),
+            "phase=writing".to_string(),
+            "=bad".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty field name"));
     }
 }

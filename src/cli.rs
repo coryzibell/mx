@@ -1724,7 +1724,6 @@ pub enum KvCommands {
     },
 
     /// Set a value (string/counter), or set a field on a state type
-    #[command(trailing_var_arg = true)]
     Set {
         /// Key name
         key: String,

@@ -1122,7 +1122,8 @@ impl KvStore {
         Ok(())
     }
 
-    /// Set multiple fields on a state-type entry in a single atomic operation.
+    /// Set multiple fields on a state-type entry in a single validate-all-then-write-all operation.
+    /// Persistence is atomic (tmp + fsync + rename).
     ///
     /// - Validates the key is `ValueType::State`
     /// - Validates ALL field names against the schema before any writes
@@ -1218,14 +1219,6 @@ impl KvStore {
     /// Delegates to `set_state_batch` after building the field pairs.
     pub fn set_tensor_batch(&mut self, key: &str, values: &[String]) -> Result<(), KvError> {
         let def = self.key_def(key)?.clone();
-
-        if def.value_type != ValueType::State {
-            return Err(KvError::TypeMismatch {
-                key: key.to_string(),
-                expected: "state".to_string(),
-                got: def.value_type.to_string(),
-            });
-        }
 
         let schema_fields = match def.fields {
             Some(ref f) => f,
@@ -3110,7 +3103,8 @@ type = "state"
         let result = store.set_tensor_batch("warmth", &["0.5".to_string()]);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Type mismatch"), "got: {}", msg);
+        // Counter type has no fields, so tensor set fails at the fields-exist check
+        assert!(msg.contains("no fields defined"), "got: {}", msg);
     }
 
     // -- History operations --
