@@ -195,6 +195,152 @@ fn parse_where_clauses(clauses: &[String]) -> Result<Vec<(String, String)>, Stri
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Set input parsing
+// ---------------------------------------------------------------------------
+
+/// Parsed input for the `kv set` subcommand.
+#[derive(Debug, PartialEq)]
+enum SetInput {
+    /// A single scalar value (string or counter).
+    Scalar(String),
+    /// A single field=value for a state type (legacy two-arg syntax).
+    SingleField { field: String, value: String },
+    /// Multiple field=value pairs for batch state set.
+    BatchFields(Vec<(String, String)>),
+    /// Parsed JSON object → field pairs for state batch.
+    JsonObject(Vec<(String, String)>),
+    /// Parsed JSON array → positional values for tensor set.
+    JsonArray(Vec<String>),
+    /// No input provided.
+    None,
+}
+
+/// Parse positional args into a `SetInput`.
+///
+/// Rules:
+/// - 0 args → None
+/// - 1 arg without `=` → Scalar
+/// - 1 arg with `=` → BatchFields (of 1)
+/// - 2 args, neither has `=` → SingleField (legacy backward compat)
+/// - 2 args, any has `=` → BatchFields
+/// - 3+ args → BatchFields (all must have `=`)
+fn parse_positional_args(args: &[String]) -> Result<SetInput, String> {
+    match args.len() {
+        0 => Ok(SetInput::None),
+        1 => {
+            let arg = &args[0];
+            if arg.contains('=') {
+                let (k, v) = arg.split_once('=').unwrap();
+                Ok(SetInput::BatchFields(vec![(k.to_string(), v.to_string())]))
+            } else {
+                Ok(SetInput::Scalar(arg.clone()))
+            }
+        }
+        2 => {
+            let has_eq_0 = args[0].contains('=');
+            let has_eq_1 = args[1].contains('=');
+            if !has_eq_0 && !has_eq_1 {
+                // Legacy: mx kv set <key> <field> <value>
+                Ok(SetInput::SingleField {
+                    field: args[0].clone(),
+                    value: args[1].clone(),
+                })
+            } else {
+                // Both should be key=value pairs
+                let mut pairs = Vec::with_capacity(2);
+                for arg in args {
+                    match arg.split_once('=') {
+                        Some((k, v)) => pairs.push((k.to_string(), v.to_string())),
+                        None => {
+                            return Err(format!("expected key=value pair, got '{}'", arg));
+                        }
+                    }
+                }
+                Ok(SetInput::BatchFields(pairs))
+            }
+        }
+        _ => {
+            // 3+ args: all must be key=value
+            let mut pairs = Vec::with_capacity(args.len());
+            for arg in args {
+                match arg.split_once('=') {
+                    Some((k, v)) => pairs.push((k.to_string(), v.to_string())),
+                    None => {
+                        return Err(format!("expected key=value pair, got '{}'", arg));
+                    }
+                }
+            }
+            Ok(SetInput::BatchFields(pairs))
+        }
+    }
+}
+
+/// Parse `--json` input into a `SetInput`.
+///
+/// - If the string is "-", reads from stdin.
+/// - Object → extract pairs, route to JsonObject
+/// - Array of numbers/strings → extract as strings, route to JsonArray
+/// - Other → error
+fn parse_json_input(raw: &str) -> Result<SetInput, String> {
+    let json_str = if raw == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read JSON from stdin: {}", e))?;
+        buf
+    } else {
+        raw.to_string()
+    };
+
+    let value: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| format!("invalid JSON: {}", e))?;
+
+    match value {
+        serde_json::Value::Object(map) => {
+            let pairs: Vec<(String, String)> = map
+                .into_iter()
+                .map(|(k, v)| {
+                    let v_str = match v {
+                        serde_json::Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (k, v_str)
+                })
+                .collect();
+            if pairs.is_empty() {
+                return Err("JSON object is empty".to_string());
+            }
+            Ok(SetInput::JsonObject(pairs))
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Err("JSON array is empty".to_string());
+            }
+            let values: Vec<String> = arr
+                .into_iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
+                })
+                .collect();
+            Ok(SetInput::JsonArray(values))
+        }
+        _ => Err(format!(
+            "--json value must be an object or array, got {}",
+            match value {
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Bool(_) => "boolean",
+                serde_json::Value::Null => "null",
+                _ => "unknown",
+            }
+        )),
+    }
+}
+
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
 pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
     let mut store = match KvStore::from_env() {
@@ -334,8 +480,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
         KvCommands::Set {
             key,
-            value,
-            field_value,
+            args,
+            json,
             memory,
             id,
         } => {
@@ -358,42 +504,96 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 }
             }
 
+            // Reject --json + positional args together
+            if json.is_some() && !args.is_empty() {
+                eprintln!("Error: --json and positional arguments cannot be combined");
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // Parse input into a SetInput
+            let input = if let Some(json_str) = json {
+                match parse_json_input(&json_str) {
+                    Ok(i) => i,
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                }
+            } else {
+                match parse_positional_args(&args) {
+                    Ok(i) => i,
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                }
+            };
+
             let mut did_something = false;
 
-            // Handle the value set (if a value was provided)
-            if let Some(ref val) = value {
-                // For state types: mx kv set <key> <field> <value>
-                // value = field name, field_value = actual value
-                // For string/counter: mx kv set <key> <value>
-                let result = if let Some(fv) = &field_value {
-                    store.set(&key, fv, Some(val))
-                } else {
-                    store.set(&key, val, None)
-                };
-
-                match result {
-                    Ok(()) => {
-                        did_something = true;
-                    }
-                    Err(e) => {
-                        // If --memory was also provided, still try the memory set
-                        // only if the type mismatch is because it's a history/list
-                        // (set doesn't normally work on those). Otherwise, propagate error.
-                        if memory.is_none() {
-                            return handle_kv_err(e);
+            // Dispatch based on parsed input
+            match input {
+                SetInput::None => {}
+                SetInput::Scalar(val) => {
+                    let result = store.set(&key, &val, None);
+                    match result {
+                        Ok(()) => {
+                            did_something = true;
                         }
-                        // Type mismatch on history/list is expected when only --memory is provided
-                        match &e {
-                            KvError::TypeMismatch { .. } => {
-                                // Allow falling through to memory-only set
-                                eprintln!(
-                                    "Warning: value not set (type does not support set); memory pointer updated"
-                                );
+                        Err(e) => {
+                            if memory.is_none() {
+                                return handle_kv_err(e);
                             }
-                            _ => return handle_kv_err(e),
+                            match &e {
+                                KvError::TypeMismatch { .. } => {
+                                    eprintln!(
+                                        "Warning: value not set (type does not support set); memory pointer updated"
+                                    );
+                                }
+                                _ => return handle_kv_err(e),
+                            }
                         }
                     }
                 }
+                SetInput::SingleField { field, value } => {
+                    let result = store.set(&key, &value, Some(&field));
+                    match result {
+                        Ok(()) => {
+                            did_something = true;
+                        }
+                        Err(e) => {
+                            if memory.is_none() {
+                                return handle_kv_err(e);
+                            }
+                            match &e {
+                                KvError::TypeMismatch { .. } => {
+                                    eprintln!(
+                                        "Warning: value not set (type does not support set); memory pointer updated"
+                                    );
+                                }
+                                _ => return handle_kv_err(e),
+                            }
+                        }
+                    }
+                }
+                SetInput::BatchFields(pairs) => match store.set_state_batch(&key, &pairs) {
+                    Ok(()) => {
+                        did_something = true;
+                    }
+                    Err(e) => return handle_kv_err(e),
+                },
+                SetInput::JsonObject(pairs) => match store.set_state_batch(&key, &pairs) {
+                    Ok(()) => {
+                        did_something = true;
+                    }
+                    Err(e) => return handle_kv_err(e),
+                },
+                SetInput::JsonArray(values) => match store.set_tensor_batch(&key, &values) {
+                    Ok(()) => {
+                        did_something = true;
+                    }
+                    Err(e) => return handle_kv_err(e),
+                },
             }
 
             // Handle the memory pointer (if --memory was provided)
@@ -1081,5 +1281,160 @@ mod tests {
         let err = parse_where_clauses(&clauses).unwrap_err();
         assert!(err.contains("noequalssign"));
         assert!(err.contains("expected format key=value"));
+    }
+
+    // -- parse_positional_args --
+
+    #[test]
+    fn positional_empty_args() {
+        assert_eq!(parse_positional_args(&[]).unwrap(), SetInput::None,);
+    }
+
+    #[test]
+    fn positional_single_scalar() {
+        assert_eq!(
+            parse_positional_args(&["hello".to_string()]).unwrap(),
+            SetInput::Scalar("hello".to_string()),
+        );
+    }
+
+    #[test]
+    fn positional_single_key_value() {
+        assert_eq!(
+            parse_positional_args(&["goal=finish docs".to_string()]).unwrap(),
+            SetInput::BatchFields(vec![("goal".to_string(), "finish docs".to_string())]),
+        );
+    }
+
+    #[test]
+    fn positional_legacy_two_bare_args() {
+        assert_eq!(
+            parse_positional_args(&["phase".to_string(), "writing".to_string()]).unwrap(),
+            SetInput::SingleField {
+                field: "phase".to_string(),
+                value: "writing".to_string(),
+            },
+        );
+    }
+
+    #[test]
+    fn positional_two_key_value_args() {
+        assert_eq!(
+            parse_positional_args(&["goal=finish docs".to_string(), "phase=writing".to_string(),])
+                .unwrap(),
+            SetInput::BatchFields(vec![
+                ("goal".to_string(), "finish docs".to_string()),
+                ("phase".to_string(), "writing".to_string()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn positional_three_plus_key_value_args() {
+        assert_eq!(
+            parse_positional_args(&[
+                "goal=finish docs".to_string(),
+                "phase=writing".to_string(),
+                "blocker=none".to_string(),
+            ])
+            .unwrap(),
+            SetInput::BatchFields(vec![
+                ("goal".to_string(), "finish docs".to_string()),
+                ("phase".to_string(), "writing".to_string()),
+                ("blocker".to_string(), "none".to_string()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn positional_value_containing_equals_splits_first_only() {
+        assert_eq!(
+            parse_positional_args(&["query=key=value".to_string()]).unwrap(),
+            SetInput::BatchFields(vec![("query".to_string(), "key=value".to_string())]),
+        );
+    }
+
+    #[test]
+    fn positional_mixed_two_args_one_has_eq() {
+        let result = parse_positional_args(&["goal=finish".to_string(), "writing".to_string()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected key=value pair"));
+    }
+
+    #[test]
+    fn positional_three_args_one_missing_eq() {
+        let result = parse_positional_args(&[
+            "goal=finish".to_string(),
+            "writing".to_string(),
+            "blocker=none".to_string(),
+        ]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expected key=value pair"));
+    }
+
+    // -- parse_json_input --
+
+    #[test]
+    fn json_object_parsing() {
+        let input = parse_json_input(r#"{"goal":"finish docs","phase":"writing"}"#).unwrap();
+        match input {
+            SetInput::JsonObject(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert!(pairs.contains(&("goal".to_string(), "finish docs".to_string())));
+                assert!(pairs.contains(&("phase".to_string(), "writing".to_string())));
+            }
+            _ => panic!("expected JsonObject"),
+        }
+    }
+
+    #[test]
+    fn json_array_parsing() {
+        assert_eq!(
+            parse_json_input("[0.4, 0.6, 0.5]").unwrap(),
+            SetInput::JsonArray(vec![
+                "0.4".to_string(),
+                "0.6".to_string(),
+                "0.5".to_string(),
+            ]),
+        );
+    }
+
+    #[test]
+    fn json_invalid_input() {
+        let result = parse_json_input("not json at all");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn json_string_rejected() {
+        let result = parse_json_input(r#""just a string""#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be an object or array"));
+    }
+
+    #[test]
+    fn json_empty_object_rejected() {
+        let result = parse_json_input("{}");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn json_empty_array_rejected() {
+        let result = parse_json_input("[]");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn json_object_with_numeric_value() {
+        let input = parse_json_input(r#"{"temperature":0.75}"#).unwrap();
+        match input {
+            SetInput::JsonObject(pairs) => {
+                assert_eq!(pairs, vec![("temperature".to_string(), "0.75".to_string())]);
+            }
+            _ => panic!("expected JsonObject"),
+        }
     }
 }

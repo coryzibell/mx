@@ -1724,15 +1724,20 @@ pub enum KvCommands {
     },
 
     /// Set a value (string/counter), or set a field on a state type
+    #[command(trailing_var_arg = true)]
     Set {
         /// Key name
         key: String,
 
-        /// Value to set (for string/counter), or field name (for state type)
-        value: Option<String>,
+        /// Positional arguments: value (string/counter), field value (state),
+        /// or key=value pairs (batch state set)
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
 
-        /// Field value (only for state type: mx kv set <key> <field> <value>)
-        field_value: Option<String>,
+        /// JSON value: object for state batch, array for tensor positional set.
+        /// Use "-" to read from stdin.
+        #[arg(long)]
+        json: Option<String>,
 
         /// Link a memory entry (kn- ID) to this key, or "" to clear
         #[arg(long)]
