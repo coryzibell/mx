@@ -1870,6 +1870,25 @@ pub enum KvCommands {
         all: bool,
     },
 
+    /// Update an existing entry's value and/or structured data in-place.
+    /// Preserves the entry's ID, position, and timestamp.
+    Update {
+        /// Key name
+        key: String,
+
+        /// New value text (omit to update only --data)
+        value: Option<String>,
+
+        /// Target entry by ID (numeric index or kv-HASH prefix). Required.
+        #[arg(long)]
+        id: String,
+
+        /// JSON object to merge into the entry's structured data.
+        /// Null field values delete that field from the merged result.
+        #[arg(long)]
+        data: Option<String>,
+    },
+
     /// Search entries in a list/history by substring and/or structured data filters
     Search {
         /// Key name
