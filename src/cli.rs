@@ -1723,7 +1723,7 @@ pub enum KvCommands {
         json: bool,
     },
 
-    /// Set a value (string/counter), or set a field on a state type
+    /// Set a value (string/counter), set field(s) on a state type, or batch set via --json
     Set {
         /// Key name
         key: String,

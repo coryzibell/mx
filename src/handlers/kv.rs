@@ -290,7 +290,7 @@ fn parse_positional_args(args: &[String]) -> Result<SetInput, String> {
 /// Parse `--json` input into a `SetInput`.
 ///
 /// - If the string is "-", reads from stdin.
-/// - Object → extract pairs, route to JsonObject
+/// - Object → extract pairs, route to BatchFields
 /// - Array of numbers/strings → extract as strings, route to JsonArray
 /// - Other → error
 fn parse_json_input(raw: &str) -> Result<SetInput, String> {

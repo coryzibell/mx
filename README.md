@@ -125,6 +125,12 @@ mx kv inc builds
 mx kv push decisions "chose Typst for docs"    # prints: kv-A3fB (1)
 mx kv last decisions --count 5
 
+# Batch set multiple state fields at once
+mx kv set context goal="done" phase="writing"
+mx kv set context --json '{"goal":"done","phase":"writing"}'
+mx kv set mytensor --json '[0.4, 0.6, 0.5]'
+echo '{"goal":"done"}' | mx kv set context --json -
+
 # Auto-create a key in the schema and push in one step
 mx kv push puns "the joke" --create history
 mx kv push ideas "wild thought" --create list --max-entries 500
