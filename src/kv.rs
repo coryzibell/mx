@@ -2982,7 +2982,7 @@ max_entries = 5
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unknown field 'bogus'"), "got: {}", msg);
         // Verify nothing was written (entire batch rejected)
-        assert!(store.data.entries.get("tensor").is_none());
+        assert!(!store.data.entries.contains_key("tensor"));
     }
 
     #[test]
