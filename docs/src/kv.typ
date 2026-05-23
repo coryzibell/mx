@@ -262,9 +262,9 @@ can be used anywhere an ID is accepted. See #link(<entry-ids>)[Entry IDs] for
 details.
 
 Both types support `push`, `last`, `search`, `count`, `random`, `remove`,
-`update`, and entry lookup by ID via `get --id`. Both support structured data
-on entries (`--data` on push, `--data` on update) and structured data filtering
-(`--where` on queries). Only lists support `pop`. Only history supports `since`
+`update`, `migrate`, and entry lookup by ID via `get --id`. Both support
+structured data on entries (`--data` on push/update) and structured data
+filtering (`--where` on queries). Only lists support `pop`. Only history supports `since`
 (time-based queries).
 
 === push <push>
@@ -569,6 +569,8 @@ on entries (`--data` on push, `--data` on update) and structured data filtering
   Preserves the entry's ID, position, and timestamp.
 
   Requires `--id` to target a specific entry by numeric index or entry ID.
+  ID matching is prefix-based -- if the prefix is ambiguous (matches
+  multiple entries), an error is returned asking for more characters.
   The value argument is optional -- you can update only `--data`, only the
   value, or both.
 

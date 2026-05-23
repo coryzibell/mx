@@ -194,7 +194,7 @@ mx kv count shipped --json | jq '.count'
 
 Every entry gets a stable entry ID (e.g. `kv-A3fB`) alongside its numeric index. Push prints both: `kv-A3fB (42)`. Anywhere a numeric index works, an entry ID also works -- `--id kv-A3fB`, mixed comma lists, remove. Ranges remain numeric only. Old data files are back-filled on first load.
 
-Entries can carry structured JSON data via `--data` on push. Query entries by data fields with `--where key=value` (available on `search`, `last`, `random`, `count`). Multiple `--where` flags are ANDed. Supports exact string match, array-contains, and numeric/boolean comparison on top-level fields.
+Entries can carry structured JSON data via `--data` on push or update. Query entries by data fields with `--where key=value` (available on `search`, `last`, `random`, `count`). Multiple `--where` flags are ANDed. Supports exact string match, array-contains, and numeric/boolean comparison on top-level fields.
 
 Individual entries can link to the memory graph via `--memory kn-xxx` on `push` (at creation) or `set --id --memory` (on existing entries). Per-entry memory wins over key-level fallback. Pass `--memory` on read commands (`get`, `last`, `since`, `search`, `random`, `dump`) to resolve linked knowledge entries.
 
