@@ -330,7 +330,9 @@ pub(crate) fn auto_anchor(
         .collect();
 
     // Update the entry with new anchors, filtering out stale ones
-    let mut updated_anchors: Vec<String> = entry.anchors.clone()
+    let mut updated_anchors: Vec<String> = entry
+        .anchors
+        .clone()
         .into_iter()
         .filter(|a| !stale_anchors.contains(a))
         .collect();

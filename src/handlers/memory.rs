@@ -1479,7 +1479,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Restore { id, list, no_auto_anchor, json } => {
+        MemoryCommands::Restore {
+            id,
+            list,
+            no_auto_anchor,
+            json,
+        } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let id = normalize_id(&id);
 
@@ -1845,7 +1850,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     let new_anchor_ids: Vec<String> =
                         top_matches.iter().map(|(id, _, _)| id.clone()).collect();
 
-                    let mut updated_anchors: Vec<String> = entry.anchors.clone()
+                    let mut updated_anchors: Vec<String> = entry
+                        .anchors
+                        .clone()
                         .into_iter()
                         .filter(|a| !stale_anchors.contains(a))
                         .collect();
@@ -1861,7 +1868,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     // Save to database
                     db.upsert_knowledge(&updated_entry)?;
 
-                    println!("Added {} anchors, pruned {} stale", top_matches.len(), stale_anchors.len());
+                    println!(
+                        "Added {} anchors, pruned {} stale",
+                        top_matches.len(),
+                        stale_anchors.len()
+                    );
                     total_added += top_matches.len();
                 }
             }
