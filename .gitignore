@@ -64,8 +64,8 @@ $RECYCLE.BIN/
 *.iml
 *.ipr
 *.iws
-# out/ -- disabled; conflicts with docs/out/ negation.
-# IntelliJ output dirs are already covered by .idea/
+# out/ -- disabled; a bare out/ rule here would shadow the docs/out/
+# negation above (gitignore is order-dependent, last matching rule wins).
 .idea_modules/
 
 # Vim
