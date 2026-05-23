@@ -9,6 +9,5 @@ const DOCS_COMPRESSED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mx-docs
 pub fn docs_markdown() -> String {
     let bytes = base_d::decompress(DOCS_COMPRESSED, base_d::CompressionAlgorithm::Zstd)
         .expect("embedded docs blob is corrupt — the binary is broken");
-    String::from_utf8(bytes)
-        .expect("embedded docs blob is not valid UTF-8 — the binary is broken")
+    String::from_utf8(bytes).expect("embedded docs blob is not valid UTF-8 — the binary is broken")
 }
