@@ -6,7 +6,7 @@ use base_d::{CompressionAlgorithm, compress};
 
 /// Zstd compression level for embedded docs. Level 3 is the zstd default —
 /// a good balance of speed and ratio for build-time asset compression.
-const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+const ZSTD_COMPRESSION_LEVEL: u32 = 3;
 
 fn main() {
     let src = Path::new("docs/out/llm/mx-docs.md");
