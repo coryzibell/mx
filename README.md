@@ -172,6 +172,15 @@ mx kv random shipped --count 5
 mx kv random ideas --count 1
 mx kv random shipped --count 3 --since 30d
 
+# Update an entry's value or structured data in-place
+mx kv update projects "palmtop DSI fix (v2)" --id kv-A3fB
+mx kv update projects --id 42 --data '{"status":"done"}'
+mx kv update projects --id 42 --data '{"obsolete_field":null}'
+
+# Migrate entries to match current schema data definitions
+mx kv migrate projects --dry-run
+mx kv migrate projects --prune
+
 # Per-entry memory links (bridge KV entries to the knowledge graph)
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123

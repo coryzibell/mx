@@ -162,6 +162,14 @@ mx kv push projects "palmtop DSI fix" \
 mx kv search projects --where status=active
 mx kv search projects "DSI" --where tags=palmtop
 
+# Update an existing entry's value or data in-place
+mx kv update projects "palmtop DSI fix (v2)" --id kv-A3fB
+mx kv update projects --id 42 --data '{"status":"done"}'
+
+# Migrate entries to match current schema data definitions
+mx kv migrate projects --dry-run
+mx kv migrate projects --prune
+
 # JSON output for scripting and jq piping
 mx kv last projects --count 5 --json | jq '.[].data.status'
 mx kv count shipped --json | jq '.count'

@@ -261,10 +261,11 @@ stable entry ID (a base58 string prefixed with `kv-`, e.g. `kv-A3fB`). Both
 can be used anywhere an ID is accepted. See #link(<entry-ids>)[Entry IDs] for
 details.
 
-Both types support `push`, `last`, `search`, `count`, `random`, `remove`, and
-entry lookup by ID via `get --id`. Both support structured data on entries
-(`--data` on push) and structured data filtering (`--where` on queries).
-Only lists support `pop`. Only history supports `since` (time-based queries).
+Both types support `push`, `last`, `search`, `count`, `random`, `remove`,
+`update`, and entry lookup by ID via `get --id`. Both support structured data
+on entries (`--data` on push, `--data` on update) and structured data filtering
+(`--where` on queries). Only lists support `pop`. Only history supports `since`
+(time-based queries).
 
 === push <push>
 
@@ -557,6 +558,83 @@ Only lists support `pop`. Only history supports `since` (time-based queries).
     "mx kv remove todos --id 7",
     "mx kv remove todos --id kv-A3fB",
     "mx kv remove decisions \"typo\" --all",
+  ),
+)
+
+=== update
+
+#command(
+  "mx kv update <key> [value] --id <spec>",
+  [Update an existing entry's value and/or structured data in-place.
+  Preserves the entry's ID, position, and timestamp.
+
+  Requires `--id` to target a specific entry by numeric index or entry ID.
+  The value argument is optional -- you can update only `--data`, only the
+  value, or both.
+
+  When `--data` is provided, the JSON object is shallow-merged into the
+  entry's existing structured data. Fields in the patch overwrite existing
+  fields. Null values in the patch _delete_ that field from the merged
+  result (they do not set it to null). If the key has a `[data]` schema
+  section, validation runs on the merged result before the write commits.
+
+  At least one of a value argument or `--data` must be provided -- calling
+  update with neither is rejected.
+
+  On success, prints the updated entry's identifiers:
+
+  ```
+  Updated entry 42 (kv-A3fB)
+  ```
+
+  Works on both history and list types.],
+  flags: (
+    ([`--id <spec>`], [string], [Target entry by numeric index (`42`) or entry ID (`kv-A3fB`). Required.]),
+    ([`--data <json>`], [string], [JSON object to merge into the entry's structured data. Null field values delete that field from the merged result.]),
+  ),
+  examples: (
+    "mx kv update projects \"palmtop DSI fix (v2)\" --id kv-A3fB",
+    "mx kv update projects --id 42 --data '{\"status\":\"done\"}'",
+    "mx kv update projects \"renamed\" --id kv-A3fB --data '{\"status\":\"closed\"}'",
+    "mx kv update projects --id 42 --data '{\"obsolete_field\":null}'",
+  ),
+)
+
+=== migrate
+
+#command(
+  "mx kv migrate <key>",
+  [Migrate existing entries to match current schema data definitions.
+  Operates on all entries in a key.
+
+  Compares each entry's structured data against the `[data]` section in
+  the key's schema. Missing fields that have a default value in the schema
+  are added. Required fields without defaults produce a warning. Type
+  mismatches between existing data and schema declarations are reported as
+  warnings.
+
+  Entries without any structured data get a new data object populated from
+  schema defaults.
+
+  With `--prune`, fields present in entries but not declared in the schema
+  are removed. Without `--prune`, undeclared fields are left untouched.
+
+  With `--dry-run`, reports what would change without modifying any data.
+  The output lists each affected entry with its added and pruned fields.
+
+  If the key has no `[data]` section in the schema, nothing is migrated
+  and a warning is printed.
+
+  Works on both history and list types.],
+  flags: (
+    ([`--prune`], [flag], [Remove fields not declared in the current schema]),
+    ([`--dry-run`], [flag], [Show what would change without modifying data]),
+  ),
+  examples: (
+    "mx kv migrate projects",
+    "mx kv migrate projects --dry-run",
+    "mx kv migrate projects --prune",
+    "mx kv migrate projects --prune --dry-run",
   ),
 )
 
