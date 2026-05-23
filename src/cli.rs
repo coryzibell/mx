@@ -1980,7 +1980,7 @@ pub enum KvCommands {
         dry_run: bool,
     },
 
-    /// List all defined keys with their types
+    /// List all defined keys with their types and descriptions
     Keys,
 }
 

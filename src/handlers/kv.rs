@@ -90,7 +90,7 @@ fn print_resolved_memory(kn_id: &str, verbose: bool) {
 
 /// Resolve memory pointers for all keys in a dump.
 fn resolve_dump_memories(store: &KvStore, verbose: bool) {
-    for (key, _vtype) in store.keys() {
+    for (key, _vtype, _desc) in store.keys() {
         if let Ok(Some(mem)) = store.get_memory(key) {
             println!();
             println!("--- {} ---", key);
@@ -1184,8 +1184,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
         KvCommands::Keys => {
             let keys = store.keys();
-            for (name, vtype) in &keys {
-                println!("{:30} {}", name, vtype);
+            for (name, vtype, desc) in &keys {
+                match desc {
+                    Some(d) => println!("{:30} {:10} {}", name, vtype, d),
+                    None => println!("{:30} {:10}", name, vtype),
+                }
             }
             Ok(kv::EXIT_OK)
         }

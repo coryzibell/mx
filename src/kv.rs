@@ -202,6 +202,9 @@ pub struct KeyDef {
     pub max_entries: Option<usize>,
 
     #[serde(default)]
+    pub description: Option<String>,
+
+    #[serde(default)]
     pub fields: Option<Vec<String>>,
 
     /// Optional typed field definitions for `--data` validation.
@@ -2359,12 +2362,12 @@ impl KvStore {
         })
     }
 
-    /// List all keys with their types.
-    pub fn keys(&self) -> Vec<(&str, ValueType)> {
+    /// List all keys with their types and optional descriptions.
+    pub fn keys(&self) -> Vec<(&str, ValueType, Option<&str>)> {
         self.schema
             .keys
             .iter()
-            .map(|(k, v)| (k.as_str(), v.value_type))
+            .map(|(k, v)| (k.as_str(), v.value_type, v.description.as_deref()))
             .collect()
     }
 
@@ -3517,6 +3520,28 @@ type = "state"
         let (store, _dir) = setup_store(test_schema());
         let keys = store.keys();
         assert_eq!(keys.len(), 6);
+        // All test_schema keys lack descriptions
+        for (_name, _vtype, desc) in &keys {
+            assert!(desc.is_none());
+        }
+    }
+
+    #[test]
+    fn key_description_round_trips() {
+        let schema = r#"
+[keys.mood]
+type = "string"
+description = "Current emotional state"
+
+[keys.score]
+type = "counter"
+"#;
+        let (store, _dir) = setup_store(schema);
+        let keys = store.keys();
+        let mood = keys.iter().find(|(k, _, _)| *k == "mood").unwrap();
+        assert_eq!(mood.2, Some("Current emotional state"));
+        let score = keys.iter().find(|(k, _, _)| *k == "score").unwrap();
+        assert_eq!(score.2, None);
     }
 
     // -- Atomic write --
@@ -7018,6 +7043,7 @@ opt = { type = "string" }
             max: None,
             default: None,
             max_entries: None,
+            description: None,
             fields: None,
             data: Some(data),
         }
@@ -7030,6 +7056,7 @@ opt = { type = "string" }
             max: None,
             default: None,
             max_entries: None,
+            description: None,
             fields: None,
             data: Some(data),
         }
@@ -7435,6 +7462,7 @@ count = { type = "number" }
             max: None,
             default: None,
             max_entries: None,
+            description: None,
             fields: None,
             data: None,
         };
