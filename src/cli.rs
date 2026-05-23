@@ -605,6 +605,10 @@ pub enum MemoryCommands {
         /// Thread ID for thread_closed operations (requires --type=thread_closed)
         #[arg(long, requires = "type")]
         thread_id: Option<String>,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
     },
 
     /// Update an existing entry in the database
@@ -740,6 +744,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         force: bool,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -766,6 +774,10 @@ pub enum MemoryCommands {
         #[arg(long, conflicts_with = "replace_all")]
         nth: Option<usize>,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -788,6 +800,10 @@ pub enum MemoryCommands {
             conflicts_with = "content"
         )]
         file: Option<String>,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -812,6 +828,10 @@ pub enum MemoryCommands {
         )]
         file: Option<String>,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -825,6 +845,10 @@ pub enum MemoryCommands {
         /// List available backups instead of restoring
         #[arg(long)]
         list: bool,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
 
         /// Output as JSON
         #[arg(long)]

@@ -265,6 +265,7 @@ pub(crate) fn auto_anchor(
     let threshold = 0.75;
     let max_anchors = 5;
     let mut similarities: Vec<(String, f32)> = Vec::new();
+    let mut stale_anchors: Vec<String> = Vec::new();
 
     for candidate in &candidates {
         // Skip self
@@ -272,9 +273,14 @@ pub(crate) fn auto_anchor(
             continue;
         }
 
-        // Skip if already an anchor
+        // Re-evaluate existing anchors for staleness
         if entry.anchors.contains(&candidate.id) {
-            continue;
+            let candidate_embedding = candidate.embedding.as_ref().unwrap();
+            let similarity = cosine_similarity(entry_embedding, candidate_embedding);
+            if similarity < threshold || similarity > 0.95 {
+                stale_anchors.push(candidate.id.clone());
+            }
+            continue; // don't consider existing anchors as new candidates
         }
 
         // Skip anchors that the user explicitly removed via --anchors replacement.
@@ -310,8 +316,8 @@ pub(crate) fn auto_anchor(
         }
     }
 
-    // No similar entries found
-    if similarities.is_empty() {
+    // No similar entries found and no stale anchors to prune
+    if stale_anchors.is_empty() && similarities.is_empty() {
         return Ok(());
     }
 
@@ -323,8 +329,16 @@ pub(crate) fn auto_anchor(
         .map(|(id, _)| id)
         .collect();
 
-    // Update the entry with new anchors
-    let mut updated_anchors = entry.anchors.clone();
+    // Update the entry with new anchors, filtering out stale ones
+    let mut updated_anchors: Vec<String> = entry.anchors.clone()
+        .into_iter()
+        .filter(|a| !stale_anchors.contains(a))
+        .collect();
+
+    if let Some(removed) = explicitly_removed {
+        updated_anchors.retain(|a| !removed.contains(a));
+    }
+
     updated_anchors.extend(top_matches);
     updated_anchors.sort();
     updated_anchors.dedup();
