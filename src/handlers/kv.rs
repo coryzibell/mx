@@ -1187,7 +1187,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             for (name, vtype, desc) in &keys {
                 match desc {
                     Some(d) => println!("{:30} {:10} {}", name, vtype, d),
-                    None => println!("{:30} {}", name, vtype),
+                    None => println!("{:30} {:10}", name, vtype),
                 }
             }
             Ok(kv::EXIT_OK)
