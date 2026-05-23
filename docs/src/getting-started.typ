@@ -145,6 +145,12 @@ mx kv get decisions --id kv-A3fB              # look up by entry ID
 mx kv push puns "the joke" --create history
 mx kv push ideas "wild thought" --create list --max-entries 500
 
+# Batch set multiple state fields at once
+mx kv set context goal="done" phase="writing"
+mx kv set context --json '{"goal":"done","phase":"writing"}'
+mx kv set mytensor --json '[0.4, 0.6, 0.5]'
+echo '{"goal":"done"}' | mx kv set context --json -
+
 # Link entries to the memory graph
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123

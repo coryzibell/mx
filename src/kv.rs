@@ -1301,6 +1301,137 @@ impl KvStore {
         Ok(())
     }
 
+    /// Set multiple fields on a state-type entry in a single validate-all-then-write-all operation.
+    /// Persistence is atomic (tmp + fsync + rename).
+    ///
+    /// - Validates the key is `ValueType::State`
+    /// - Validates ALL field names against the schema before any writes
+    /// - Rejects empty `fields` vec
+    /// - Rejects duplicate field names in the batch
+    /// - Reports all validation errors, not just the first
+    /// - Preserves existing fields not mentioned in the batch (partial update)
+    pub fn set_state_batch(
+        &mut self,
+        key: &str,
+        fields: &[(String, String)],
+    ) -> Result<(), KvError> {
+        if fields.is_empty() {
+            return Err(KvError::DataValidation {
+                message: "batch set requires at least one field".to_string(),
+            });
+        }
+
+        let def = self.key_def(key)?.clone();
+
+        if def.value_type != ValueType::State {
+            return Err(KvError::TypeMismatch {
+                key: key.to_string(),
+                expected: "state".to_string(),
+                got: def.value_type.to_string(),
+            });
+        }
+
+        // Check for duplicate field names in the batch
+        let mut seen = HashSet::new();
+        let dupes: Vec<&str> = fields
+            .iter()
+            .filter(|(name, _)| !seen.insert(name.as_str()))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !dupes.is_empty() {
+            return Err(KvError::DataValidation {
+                message: format!("duplicate field names in batch: {}", dupes.join(", ")),
+            });
+        }
+
+        // Validate all field names against schema (batch all errors)
+        if let Some(ref schema_fields) = def.fields {
+            let errors: Vec<String> = fields
+                .iter()
+                .filter(|(name, _)| !schema_fields.contains(name))
+                .map(|(name, _)| {
+                    format!(
+                        "unknown field '{}' (valid: {})",
+                        name,
+                        schema_fields.join(", ")
+                    )
+                })
+                .collect();
+            if !errors.is_empty() {
+                return Err(KvError::DataValidation {
+                    message: errors.join("; "),
+                });
+            }
+        }
+
+        // All validation passed -- apply the batch
+        let entry = self
+            .data
+            .entries
+            .entry(key.to_string())
+            .or_insert_with(|| Self::default_value(&def));
+
+        match entry {
+            DataValue::State {
+                fields: state_fields,
+                ..
+            } => {
+                for (name, value) in fields {
+                    state_fields.insert(name.clone(), value.clone());
+                }
+            }
+            _ => {
+                return Err(KvError::Other(anyhow::anyhow!(
+                    "Data corruption: key '{}' has wrong runtime type",
+                    key
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Set a state-type entry's fields from positional values (tensor-style).
+    ///
+    /// Maps each value to the corresponding schema field by position.
+    /// The number of values must match the number of schema fields exactly.
+    /// Delegates to `set_state_batch` after building the field pairs.
+    pub fn set_tensor_batch(&mut self, key: &str, values: &[String]) -> Result<(), KvError> {
+        let def = self.key_def(key)?.clone();
+
+        let schema_fields = match def.fields {
+            Some(ref f) => f,
+            None => {
+                return Err(KvError::DataValidation {
+                    message: format!(
+                        "key '{}' is state type but has no fields defined; \
+                         positional set requires a fields schema",
+                        key
+                    ),
+                });
+            }
+        };
+
+        if values.len() != schema_fields.len() {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "expected {} values ({}), got {}",
+                    schema_fields.len(),
+                    schema_fields.join(", "),
+                    values.len()
+                ),
+            });
+        }
+
+        let pairs: Vec<(String, String)> = schema_fields
+            .iter()
+            .zip(values.iter())
+            .map(|(f, v)| (f.clone(), v.clone()))
+            .collect();
+
+        self.set_state_batch(key, &pairs)
+    }
+
     /// Increment a counter. Clamps to min/max, never errors on bounds.
     pub fn inc(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
@@ -3025,6 +3156,195 @@ max_entries = 5
         let result = store.set("tensor", "0.5", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("field name"));
+    }
+
+    // -- Batch state operations --
+
+    #[test]
+    fn batch_set_multiple_fields() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .set_state_batch(
+                "tensor",
+                &[
+                    ("temperature".to_string(), "0.8".to_string()),
+                    ("entropy".to_string(), "0.3".to_string()),
+                    ("agency".to_string(), "0.9".to_string()),
+                ],
+            )
+            .unwrap();
+        match store.get("tensor").unwrap() {
+            DataValue::State { fields, .. } => {
+                assert_eq!(fields["temperature"], "0.8");
+                assert_eq!(fields["entropy"], "0.3");
+                assert_eq!(fields["agency"], "0.9");
+            }
+            _ => panic!("Expected state"),
+        }
+    }
+
+    #[test]
+    fn batch_preserves_existing_fields() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // Set one field first
+        store.set("tensor", "0.5", Some("temperature")).unwrap();
+        // Batch update only entropy
+        store
+            .set_state_batch("tensor", &[("entropy".to_string(), "0.7".to_string())])
+            .unwrap();
+        match store.get("tensor").unwrap() {
+            DataValue::State { fields, .. } => {
+                assert_eq!(fields["temperature"], "0.5"); // preserved
+                assert_eq!(fields["entropy"], "0.7"); // updated
+            }
+            _ => panic!("Expected state"),
+        }
+    }
+
+    #[test]
+    fn batch_rejects_unknown_field() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_state_batch(
+            "tensor",
+            &[
+                ("temperature".to_string(), "0.5".to_string()),
+                ("bogus".to_string(), "0.1".to_string()),
+            ],
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown field 'bogus'"), "got: {}", msg);
+        // Verify nothing was written (entire batch rejected)
+        assert!(!store.data.entries.contains_key("tensor"));
+    }
+
+    #[test]
+    fn batch_rejects_empty_fields() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_state_batch("tensor", &[]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("at least one field"), "got: {}", msg);
+    }
+
+    #[test]
+    fn batch_rejects_duplicate_field_names() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_state_batch(
+            "tensor",
+            &[
+                ("temperature".to_string(), "0.5".to_string()),
+                ("temperature".to_string(), "0.9".to_string()),
+            ],
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("duplicate"), "got: {}", msg);
+    }
+
+    #[test]
+    fn batch_on_wrong_type_returns_type_mismatch() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result =
+            store.set_state_batch("warmth", &[("temperature".to_string(), "0.5".to_string())]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("Type mismatch"), "got: {}", msg);
+    }
+
+    #[test]
+    fn batch_overwrites_existing_field_value() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("tensor", "0.5", Some("temperature")).unwrap();
+        store
+            .set_state_batch("tensor", &[("temperature".to_string(), "0.9".to_string())])
+            .unwrap();
+        match store.get("tensor").unwrap() {
+            DataValue::State { fields, .. } => {
+                assert_eq!(fields["temperature"], "0.9");
+            }
+            _ => panic!("Expected state"),
+        }
+    }
+
+    #[test]
+    fn batch_reports_all_unknown_fields() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_state_batch(
+            "tensor",
+            &[
+                ("gol".to_string(), "value".to_string()),
+                ("statis".to_string(), "value".to_string()),
+            ],
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("gol"), "got: {}", msg);
+        assert!(msg.contains("statis"), "got: {}", msg);
+    }
+
+    // -- Tensor positional set --
+
+    #[test]
+    fn tensor_positional_set() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .set_tensor_batch(
+                "tensor",
+                &["0.4".to_string(), "0.6".to_string(), "0.5".to_string()],
+            )
+            .unwrap();
+        match store.get("tensor").unwrap() {
+            DataValue::State { fields, .. } => {
+                assert_eq!(fields["temperature"], "0.4");
+                assert_eq!(fields["entropy"], "0.6");
+                assert_eq!(fields["agency"], "0.5");
+            }
+            _ => panic!("Expected state"),
+        }
+    }
+
+    #[test]
+    fn tensor_wrong_count() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_tensor_batch(
+            "tensor",
+            &[
+                "0.1".to_string(),
+                "0.2".to_string(),
+                "0.3".to_string(),
+                "0.4".to_string(),
+                "0.5".to_string(),
+            ],
+        );
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expected 3 values"), "got: {}", msg);
+        assert!(msg.contains("got 5"), "got: {}", msg);
+    }
+
+    #[test]
+    fn tensor_on_key_without_fields() {
+        // Create a state key without fields defined
+        let schema = r#"
+[keys.bare_state]
+type = "state"
+"#;
+        let (mut store, _dir) = setup_store(schema);
+        let result = store.set_tensor_batch("bare_state", &["0.1".to_string()]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("no fields defined"), "got: {}", msg);
+    }
+
+    #[test]
+    fn tensor_on_wrong_type() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let result = store.set_tensor_batch("warmth", &["0.5".to_string()]);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        // Counter type has no fields, so tensor set fails at the fields-exist check
+        assert!(msg.contains("no fields defined"), "got: {}", msg);
     }
 
     // -- History operations --

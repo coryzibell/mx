@@ -156,17 +156,32 @@ KV commands use structured exit codes for scripting:
 )
 
 #command(
-  "mx kv set <key> <value> [field_value]",
+  "mx kv set <key> [args...] [--json <value>]",
   [Set a value for a string, counter, or state key, or link a specific
-  entry to a memory node.
+  entry to a memory node. Supports four input modes for state keys:
+  single-field, inline batch, JSON object, and JSON array (tensor).
 
   For *string* keys: `mx kv set <key> <value>` sets the value directly.
 
   For *counter* keys: `mx kv set <key> <value>` parses the value as an integer
   and clamps to min/max.
 
-  For *state* keys: `mx kv set <key> <field> <value>` sets a single field.
-  The field name must be declared in the schema.
+  For *state* keys, four input modes are available:
+
+  / Single field (legacy): `mx kv set <key> <field> <value>` -- sets one field. Backward compatible with pre-batch syntax.
+  / Inline batch: `mx kv set <key> field1=value1 field2=value2 ...` -- sets multiple fields atomically. All field names are validated against the schema before any writes. Unmentioned fields are preserved (partial update).
+  / JSON object: `mx kv set <key> --json '{"field1":"value1","field2":"value2"}'` -- sets multiple fields from a JSON object. Non-string values (numbers, booleans, null) are coerced to strings. Same atomic validation as inline batch.
+  / JSON array (tensor): `mx kv set <key> --json '[0.4, 0.6, 0.5]'` -- sets all fields by position. The number of array elements must exactly match the number of fields declared in the schema. Values are mapped to schema fields in declaration order.
+
+  The `--json` flag accepts `"-"` to read JSON from stdin:
+  `echo '{"goal":"done"}' | mx kv set context --json -`
+
+  The `--json` flag and positional arguments cannot be combined -- use one
+  or the other.
+
+  Batch operations (inline and JSON) are all-or-nothing: if any field name
+  is invalid, no fields are written. Duplicate field names in a single batch
+  are rejected. All validation errors are reported, not just the first.
 
   With `--id` and `--memory`, links an existing history or list entry to a
   memory knowledge node. The `--id` flag accepts a numeric index (`17`) or an
@@ -175,6 +190,7 @@ KV commands use structured exit codes for scripting:
   `--memory`; it cannot be used alone. Pass an empty string
   (`--memory ""`) to clear a per-entry link.],
   flags: (
+    ([`--json <value>`], [string], [JSON input: object for state batch set, array for tensor positional set. Use `"-"` to read from stdin.]),
     ([`--memory <kn-id>`], [string], [Link a memory entry (kn- ID) to this key or entry, or `""` to clear]),
     ([`--id <spec>`], [string], [Target a specific entry by numeric index or entry ID (requires `--memory`)]),
   ),
@@ -183,6 +199,11 @@ KV commands use structured exit codes for scripting:
     "mx kv set builds 0",
     "mx kv set context goal \"finish KV docs\"",
     "mx kv set context phase \"writing\"",
+    "mx kv set context goal=\"done\" phase=\"writing\"",
+    "mx kv set context goal=\"done\" phase=\"writing\" blocker=\"none\"",
+    "mx kv set context --json '{\"goal\":\"done\",\"phase\":\"writing\"}'",
+    "mx kv set mytensor --json '[0.4, 0.6, 0.5]'",
+    "echo '{\"goal\":\"done\"}' | mx kv set context --json -",
     "mx kv set decisions --memory kn-abc123",
     "mx kv set decisions --memory \"\"",
     "mx kv set decisions --id 17 --memory kn-abc123",

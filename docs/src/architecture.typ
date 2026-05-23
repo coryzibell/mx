@@ -589,7 +589,7 @@ Supported types:
   [`string`], [Simple string value. Supports `set`, `get`],
   [`history`], [Timestamped append-only log with optional `max_entries` cap. Supports `push`, `last`, `since`, `search`, `count`, `random`. Each entry gets a numeric index and a stable base58 entry ID (`kv-` prefix). Entries can carry optional structured JSON data (`--data` on push, `--where` on queries). The `last`, `search`, `count`, and `random` commands accept time-range flags (`--day`, `--month`, `--week`, `--since`, `--from`/`--to`) for date filtering.],
   [`list`], [Ordered list with timestamps. Supports `push`, `pop`, `remove`, `search`, `count`, `random`. Each entry gets a numeric index and a stable base58 entry ID. Entries can carry optional structured JSON data. The `last`, `search`, `count`, and `random` commands accept the same time-range flags as history.],
-  [`state`], [Named fields (like a struct). Supports `set <key> <field> <value>`, `get`],
+  [`state`], [Named fields (like a struct). Supports single-field set (`set <key> <field> <value>`), batch set (`set <key> field=value ...` or `set <key> --json '{...}'`), tensor positional set (`set <key> --json '[...]'`), and `get`. Batch operations validate all fields against the schema before writing.],
 )
 
 === Data (JSON)
