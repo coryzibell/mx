@@ -1753,6 +1753,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 .collect();
 
             let mut total_added = 0;
+            let mut total_pruned = 0;
             let entries_count = entries.len();
 
             for entry in entries {
@@ -1772,7 +1773,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     if entry.anchors.contains(&candidate.id) {
                         let candidate_embedding = candidate.embedding.as_ref().unwrap();
                         let similarity = cosine_similarity(entry_embedding, candidate_embedding);
-                        if similarity < threshold || similarity > 0.95 {
+                        if similarity < threshold || similarity > NEAR_DUPLICATE_CEILING {
                             stale_anchors.push(candidate.id.clone());
                         }
                         continue; // don't consider existing anchors as new candidates
@@ -1797,7 +1798,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     let similarity = cosine_similarity(entry_embedding, candidate_embedding);
 
                     // Filter by threshold, skip near-duplicates
-                    if similarity >= threshold && similarity <= 0.95 {
+                    if similarity >= threshold && similarity <= NEAR_DUPLICATE_CEILING {
                         similarities.push((
                             candidate.id.clone(),
                             candidate.title.clone(),
@@ -1832,9 +1833,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 for (match_id, match_title, score) in &top_matches {
                     if verbose {
-                        println!("  + {} \"{}\" ({:.2})", match_id, match_title, score);
+                        println!("  → {} \"{}\" ({:.2})", match_id, match_title, score);
                     } else {
-                        println!("  + {} \"{}\"", match_id, match_title);
+                        println!("  → {} \"{}\"", match_id, match_title);
                     }
                 }
 
@@ -1874,6 +1875,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         stale_anchors.len()
                     );
                     total_added += top_matches.len();
+                    total_pruned += stale_anchors.len();
                 }
             }
 
@@ -1881,8 +1883,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("\n[DRY RUN] Complete. No changes written.");
             } else {
                 println!(
-                    "\n✓ Added {} total anchors across {} entries",
-                    total_added, entries_count
+                    "\n✓ Added {} total anchors, pruned {} stale across {} entries",
+                    total_added, total_pruned, entries_count
                 );
             }
         }

@@ -168,6 +168,14 @@ pub(crate) fn resolve_agent_context(mine: bool, include_private: bool) -> store:
     }
 }
 
+/// Similarity threshold above which two entries are considered near-duplicates
+/// and should NOT be anchored together. Used in both the batch `AutoAnchor`
+/// handler and the per-entry `auto_anchor` helper.
+pub(crate) const NEAR_DUPLICATE_CEILING: f32 = 0.95;
+
+/// Default minimum similarity for two entries to be considered anchor-worthy.
+pub(crate) const DEFAULT_ANCHOR_THRESHOLD: f32 = 0.75;
+
 /// Calculate cosine similarity between two vectors
 ///
 /// Returns a value between -1.0 and 1.0 (typically 0.0 to 1.0 for normalized embeddings)
@@ -262,7 +270,7 @@ pub(crate) fn auto_anchor(
         .collect();
 
     // Calculate similarities
-    let threshold = 0.75;
+    let threshold = DEFAULT_ANCHOR_THRESHOLD;
     let max_anchors = 5;
     let mut similarities: Vec<(String, f32)> = Vec::new();
     let mut stale_anchors: Vec<String> = Vec::new();
@@ -277,7 +285,7 @@ pub(crate) fn auto_anchor(
         if entry.anchors.contains(&candidate.id) {
             let candidate_embedding = candidate.embedding.as_ref().unwrap();
             let similarity = cosine_similarity(entry_embedding, candidate_embedding);
-            if similarity < threshold || similarity > 0.95 {
+            if similarity < threshold || similarity > NEAR_DUPLICATE_CEILING {
                 stale_anchors.push(candidate.id.clone());
             }
             continue; // don't consider existing anchors as new candidates
@@ -286,6 +294,11 @@ pub(crate) fn auto_anchor(
         // Skip anchors that the user explicitly removed via --anchors replacement.
         // auto_anchor is a safety net for missed connections, not an override of
         // explicit user intent.
+        //
+        // Defensive: current callers (Add, Update) already strip explicitly-removed
+        // anchors before reaching this loop, but future call sites might not. This
+        // guard ensures auto_anchor never re-adds an anchor the user chose to remove,
+        // regardless of how the caller is wired.
         if let Some(removed) = explicitly_removed
             && removed.contains(&candidate.id)
         {
@@ -311,7 +324,7 @@ pub(crate) fn auto_anchor(
         let similarity = cosine_similarity(entry_embedding, candidate_embedding);
 
         // Filter by threshold, skip near-duplicates
-        if similarity >= threshold && similarity <= 0.95 {
+        if similarity >= threshold && similarity <= NEAR_DUPLICATE_CEILING {
             similarities.push((candidate.id.clone(), similarity));
         }
     }
