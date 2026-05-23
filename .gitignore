@@ -3,8 +3,11 @@
 **/*.rs.bk
 *.pdb
 
-# Docs build output
-docs/out/
+# Docs build output (keep LLM markdown for build.rs embedding)
+docs/out/*
+!docs/out/llm/
+docs/out/llm/*
+!docs/out/llm/mx-docs.md
 
 # macOS
 .DS_Store
@@ -61,7 +64,8 @@ $RECYCLE.BIN/
 *.iml
 *.ipr
 *.iws
-out/
+# out/ -- disabled; a bare out/ rule here would shadow the docs/out/
+# negation above (gitignore is order-dependent, last matching rule wins).
 .idea_modules/
 
 # Vim
