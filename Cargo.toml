@@ -65,6 +65,9 @@ colored = "2"
 # Embeddings
 fastembed = { version = "5.6", default-features = false, features = ["hf-hub-rustls-tls", "image-models", "ort-download-binaries-rustls-tls"] }
 
+[build-dependencies]
+base-d = "3"
+
 [dev-dependencies.cargo-husky]
 version = "1"
 default-features = false

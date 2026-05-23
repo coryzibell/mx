@@ -6,6 +6,7 @@ mod commit;
 mod content_ops;
 mod convert;
 mod display;
+mod embedded;
 mod embeddings;
 mod engage;
 mod github;
@@ -86,6 +87,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Commands::Worktree { command } => handle_worktree(command),
+        Commands::Docs => {
+            print!("{}", embedded::docs_markdown());
+            Ok(())
+        }
     }
 }
 

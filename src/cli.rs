@@ -12,6 +12,7 @@ fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
 #[command(name = "mx")]
 #[command(about = "Tsunderground CLI - memory, workflow, and identity tooling")]
 #[command(version)]
+#[command(after_help = "Run `mx docs` for full documentation as Markdown")]
 pub struct Cli {
     /// Enable verbose output (show connection logs)
     #[arg(short = 'v', long, global = true)]
@@ -140,6 +141,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: WorktreeCommands,
     },
+
+    /// Print the full mx documentation as Markdown
+    Docs,
 }
 
 #[derive(Subcommand)]
