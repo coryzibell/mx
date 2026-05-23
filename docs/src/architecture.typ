@@ -574,6 +574,7 @@ default = ""
 
 [keys.focus_areas]
 type = "list"
+description = "Areas of active focus"
 
 [keys.session_state]
 type = "state"

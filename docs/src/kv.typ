@@ -71,6 +71,7 @@ type = "list"
 [keys.todos]
 type = "list"
 max_entries = 20
+description = "Pending work items"
 
 [keys.context]
 type = "state"
@@ -84,6 +85,7 @@ Schema fields:
 / `min`: Optional. Minimum value for counters (clamped, never errors).
 / `max`: Optional. Maximum value for counters (clamped, never errors).
 / `max_entries`: Optional. Maximum entries for history and list types. Oldest entries are dropped when exceeded. Omit to allow unbounded growth.
+/ `description`: Optional. Human-readable description of the key's purpose. Displayed as a third column by `mx kv keys`.
 / `fields`: Optional. List of valid field names for state types. Writes to unlisted fields are rejected.
 
 === Auto-creating keys
@@ -215,7 +217,8 @@ KV commands use structured exit codes for scripting:
 #command(
   "mx kv keys",
   [List all keys defined in the schema with their types. Output is
-  two columns: key name (left-aligned, 30 chars) and type.],
+  two columns: key name (left-aligned, 30 chars) and type. When a key
+  has a `description` in the schema, it is shown as a third column.],
   examples: (
     "mx kv keys",
   ),
