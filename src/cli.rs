@@ -866,7 +866,11 @@ pub enum MemoryCommands {
         all: bool,
     },
 
-    /// Automatically add anchors based on embedding similarity
+    /// Automatically add anchors based on embedding similarity.
+    ///
+    /// Also re-evaluates existing anchors: any anchor whose similarity has
+    /// fallen below the threshold or risen above the near-duplicate ceiling
+    /// (0.95) is pruned. This keeps the anchor graph self-cleaning.
     AutoAnchor {
         /// Entry ID to process (omit to process all entries with embeddings)
         id: Option<String>,
