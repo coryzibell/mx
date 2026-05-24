@@ -15,6 +15,9 @@ jobs:
       needs-openssl: false
       # x86_64-unknown-linux-musl, FreeBSD: no prebuilt ONNX Runtime binaries
       # x86_64-apple-darwin: ort dropped Intel Mac support upstream (ort 2.0+)
-      exclude-targets: x86_64-unknown-linux-musl,x86_64-unknown-freebsd,x86_64-apple-darwin
+      # musl targets: ort has no prebuilt ONNX Runtime binaries for musl
+      # FreeBSD: no prebuilt ONNX Runtime binaries
+      # x86_64-apple-darwin: ort dropped Intel Mac support upstream (ort 2.0+)
+      exclude-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-unknown-freebsd,x86_64-apple-darwin
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
