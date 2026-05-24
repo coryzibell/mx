@@ -14,8 +14,7 @@ jobs:
     with:
       needs-openssl: false
       # ONNX Runtime doesn't provide prebuilt binaries for musl or FreeBSD targets
-      # aarch64-unknown-linux-gnu: ort-sys static linking fails in cross-compilation (see issue)
       # x86_64-apple-darwin: ort dropped Intel Mac support upstream (ort 2.0+)
-      exclude-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-unknown-freebsd,aarch64-unknown-linux-gnu,x86_64-apple-darwin
+      exclude-targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-unknown-freebsd,x86_64-apple-darwin
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
