@@ -124,9 +124,7 @@ impl EmbeddingProvider for TractProvider {
             .context("Failed to convert output to f32 array")?;
 
         // CLS pooling: extract the [CLS] token embedding (position 0)
-        let mut cls_pooled = output_tensor
-            .slice(tract_ndarray::s![0, 0, ..])
-            .to_vec();
+        let mut cls_pooled = output_tensor.slice(tract_ndarray::s![0, 0, ..]).to_vec();
 
         // L2 normalize
         let l2: f32 = cls_pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
