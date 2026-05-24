@@ -424,19 +424,19 @@ Anchors are connections between entries discovered via embedding similarity.
     ([`--threshold`],   [`float`], [Minimum cosine similarity (0.0--1.0). Default: `0.75`.]),
     ([`--max-anchors`], [`int`],   [Maximum anchors to add per entry. Default: `5`.]),
     ([`--dry-run`],     [`flag`],  [Preview changes without writing.]),
-    ([`--verbose`],     [`flag`],  [Show similarity scores in output.]),
+    ([`--detailed`],    [`flag`],  [Show similarity scores in output.]),
     ([`--fill`],        [`flag`],  [Only process entries with zero existing anchors. Fills gaps in the graph without touching already-anchored entries.]),
   ),
   examples: (
     "mx memory auto-anchor",
     "mx memory auto-anchor kn-abc123 --threshold 0.8 --max-anchors 3",
-    "mx memory auto-anchor --dry-run --verbose",
+    "mx memory auto-anchor --dry-run --detailed",
     "mx memory auto-anchor --fill",
   ),
 )
 
 #tip[A typical workflow: run `mx memory embed --all` to generate embeddings,
-then `mx memory auto-anchor --dry-run --verbose` to preview anchor
+then `mx memory auto-anchor --dry-run --detailed` to preview anchor
 candidates, then `mx memory auto-anchor` to write them.]
 
 #note[Anchors are also maintained automatically on every write operation

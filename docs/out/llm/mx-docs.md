@@ -1138,6 +1138,7 @@ the category and generates a title from content).
   `--type`                `string`   Fact type for ephemeral knowledge: `decision`, `insight`, `person`, `quote`, `thread_opened`, `commitment`, `thread_closed`. Auto-routes category and sets `resonance_type=ephemeral`.
   `--session`             `string`   Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.
   `--thread-id`           `string`   Thread ID for `thread_closed` operations. Requires `--type`.
+  `--no-auto-anchor`      `flag`     Skip automatic anchor generation.
   `--json`                `flag`     Output as JSON.
 
 ### Examples
@@ -1345,6 +1346,7 @@ field. Content mutation modes are mutually exclusive.
   `--owner`                `string`   Update owner (only valid when visibility is private).
   `--session-id`           `string`   Update session ID (for retrofitting entries with wrong or missing session linkage).
   `--force`                `flag`     Force dangerous visibility changes (e.g., making blooms public).
+  `--no-auto-anchor`       `flag`     Skip automatic anchor generation.
   `--json`                 `flag`     Output as JSON.
 
 ### Examples
@@ -1377,13 +1379,14 @@ interface.
 
 ### Flags
 
-  **Flag**          **Type**   **Description**
-  ----------------- ---------- ---------------------------------------------------------------
-  `--find`          `string`   Text to find in content. Also accepts `--old`.
-  `--replace`       `string`   Replacement text. Also accepts `--new`.
-  `--replace-all`   `flag`     Replace all occurrences (default: error if multiple matches).
-  `--nth`           `int`      Replace only the Nth occurrence (1-indexed).
-  `--json`          `flag`     Output as JSON.
+  **Flag**             **Type**   **Description**
+  -------------------- ---------- ---------------------------------------------------------------
+  `--find`             `string`   Text to find in content. Also accepts `--old`.
+  `--replace`          `string`   Replacement text. Also accepts `--new`.
+  `--replace-all`      `flag`     Replace all occurrences (default: error if multiple matches).
+  `--nth`              `int`      Replace only the Nth occurrence (1-indexed).
+  `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--json`             `flag`     Output as JSON.
 
 ### Examples
 
@@ -1402,11 +1405,12 @@ Append content to the end of an entry's body. Shortcut for
 
 ### Flags
 
-  **Flag**       **Type**   **Description**
-  -------------- ---------- --------------------------------------------------------
-  `--content`    `string`   Content to append (omit to read from stdin).
-  `-f, --file`   `path`     Read content from file. Also accepts `--content-file`.
-  `--json`       `flag`     Output as JSON.
+  **Flag**             **Type**   **Description**
+  -------------------- ---------- --------------------------------------------------------
+  `--content`          `string`   Content to append (omit to read from stdin).
+  `-f, --file`         `path`     Read content from file. Also accepts `--content-file`.
+  `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--json`             `flag`     Output as JSON.
 
 ### Examples
 
@@ -1425,11 +1429,12 @@ Prepend content to the start of an entry's body. Shortcut for
 
 ### Flags
 
-  **Flag**       **Type**   **Description**
-  -------------- ---------- --------------------------------------------------------
-  `--content`    `string`   Content to prepend (omit to read from stdin).
-  `-f, --file`   `path`     Read content from file. Also accepts `--content-file`.
-  `--json`       `flag`     Output as JSON.
+  **Flag**             **Type**   **Description**
+  -------------------- ---------- --------------------------------------------------------
+  `--content`          `string`   Content to prepend (omit to read from stdin).
+  `-f, --file`         `path`     Read content from file. Also accepts `--content-file`.
+  `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--json`             `flag`     Output as JSON.
 
 ### Examples
 
@@ -1444,10 +1449,11 @@ backups before restoring.
 
 ### Flags
 
-  **Flag**   **Type**   **Description**
-  ---------- ---------- ----------------------------------------------
-  `--list`   `flag`     List available backups instead of restoring.
-  `--json`   `flag`     Output as JSON.
+  **Flag**             **Type**   **Description**
+  -------------------- ---------- ----------------------------------------------
+  `--list`             `flag`     List available backups instead of restoring.
+  `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--json`             `flag`     Output as JSON.
 
 ### Examples
 
@@ -1621,14 +1627,21 @@ mx memory embed --all
 Automatically add anchors between entries based on embedding similarity.
 Processes a single entry or all entries that have embeddings.
 
+Also re-evaluates existing anchors: any anchor whose cosine similarity
+has fallen below the threshold (default 0.75) or risen above the
+near-duplicate ceiling (0.95) is pruned. This keeps the anchor graph
+self-cleaning -- anchors that made sense once but no longer do are
+removed automatically.
+
 ### Flags
 
   **Flag**          **Type**   **Description**
-  ----------------- ---------- --------------------------------------------------------
+  ----------------- ---------- ---------------------------------------------------------------------------------------------------------------------
   `--threshold`     `float`    Minimum cosine similarity (0.0--1.0). Default: `0.75`.
   `--max-anchors`   `int`      Maximum anchors to add per entry. Default: `5`.
   `--dry-run`       `flag`     Preview changes without writing.
-  `--verbose`       `flag`     Show similarity scores in output.
+  `--detailed`      `flag`     Show similarity scores in output.
+  `--fill`          `flag`     Only process entries with zero existing anchors. Fills gaps in the graph without touching already-anchored entries.
 
 ### Examples
 
@@ -1641,13 +1654,26 @@ mx memory auto-anchor kn-abc123 --threshold 0.8 --max-anchors 3
 ```
 
 ``` bash
-mx memory auto-anchor --dry-run --verbose
+mx memory auto-anchor --dry-run --detailed
+```
+
+``` bash
+mx memory auto-anchor --fill
 ```
 
 ::: {.admonition .tip}
 **TIP:** A typical workflow: run `mx memory embed --all` to generate
-embeddings, then `mx memory auto-anchor --dry-run --verbose` to preview
+embeddings, then `mx memory auto-anchor --dry-run --detailed` to preview
 anchor candidates, then `mx memory auto-anchor` to write them.
+:::
+
+::: {.admonition .note}
+**NOTE:** Anchors are also maintained automatically on every write
+operation (`add`, `update`, `edit`, `append`, `prepend`, `restore`).
+After each write, mx re-evaluates anchors and prunes stale ones using
+the same similarity thresholds. Pass `--no-auto-anchor` on any of these
+commands to skip this step -- useful for bulk operations or cleanup
+scripts where the overhead is unwanted.
 :::
 
 ## Relationships
@@ -2562,7 +2588,7 @@ before clean mode existed.
   **Flag**             **Type**   **Description**
   -------------------- ---------- -----------------------------------------------------------------------------------
   `--dry-run`          flag       Show what would be migrated without making changes.
-  `--verbose`          flag       Show detailed progress for each archive.
+  `--detailed`         flag       Show detailed progress for each archive.
   `--clean`            flag       Generate `conversation.md` for archives missing a clean transcript.
   `--include-agents`   flag       Include sub-agent transcripts in generated clean transcripts. Requires `--clean`.
 
@@ -2573,7 +2599,7 @@ mx codex migrate --dry-run
 ```
 
 ``` bash
-mx codex migrate --verbose
+mx codex migrate --detailed
 ```
 
 ``` bash
@@ -2581,7 +2607,7 @@ mx codex migrate --clean
 ```
 
 ``` bash
-mx codex migrate --clean --include-agents --verbose
+mx codex migrate --clean --include-agents --detailed
 ```
 
 ## Deprecated alias
@@ -2694,6 +2720,7 @@ type = "list"
 [keys.todos]
 type = "list"
 max_entries = 20
+description = "Pending work items"
 
 [keys.context]
 type = "state"
@@ -2722,6 +2749,11 @@ Schema fields:
 
 :   Optional. Maximum entries for history and list types. Oldest entries
     are dropped when exceeded. Omit to allow unbounded growth.
+
+`description`
+
+:   Optional. Human-readable description of the key's purpose. Displayed
+    as a third column by `mx kv keys`.
 
 `fields`
 
@@ -2989,7 +3021,8 @@ mx kv set decisions --id 17 --memory ""
 ## `mx kv keys`
 
 List all keys defined in the schema with their types. Output is two
-columns: key name (left-aligned, 30 chars) and type.
+columns: key name (left-aligned, 30 chars) and type. When a key has a
+`description` in the schema, it is shown as a third column.
 
 ### Examples
 
@@ -7157,6 +7190,7 @@ default = ""
 
 [keys.focus_areas]
 type = "list"
+description = "Areas of active focus"
 
 [keys.session_state]
 type = "state"
