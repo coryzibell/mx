@@ -13,8 +13,7 @@ jobs:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@v1
     with:
       needs-openssl: false
-      # All previous exclusions were due to ort/ONNX Runtime C++ linking issues.
-      # With tract-onnx (pure Rust), all targets should build natively.
-      exclude-targets: ""
+      # aarch64-pc-windows-msvc: tract-linalg ARM64 SIMD assembly fails with MSVC linker
+      exclude-targets: aarch64-pc-windows-msvc
     secrets:
       GH_PAT: ${{ secrets.GH_PAT }}
