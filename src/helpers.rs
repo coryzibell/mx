@@ -168,6 +168,14 @@ pub(crate) fn resolve_agent_context(mine: bool, include_private: bool) -> store:
     }
 }
 
+/// Similarity threshold above which two entries are considered near-duplicates
+/// and should NOT be anchored together. Used in both the batch `AutoAnchor`
+/// handler and the per-entry `auto_anchor` helper.
+pub(crate) const NEAR_DUPLICATE_CEILING: f32 = 0.95;
+
+/// Default minimum similarity for two entries to be considered anchor-worthy.
+pub(crate) const DEFAULT_ANCHOR_THRESHOLD: f32 = 0.75;
+
 /// Calculate cosine similarity between two vectors
 ///
 /// Returns a value between -1.0 and 1.0 (typically 0.0 to 1.0 for normalized embeddings)
@@ -262,9 +270,10 @@ pub(crate) fn auto_anchor(
         .collect();
 
     // Calculate similarities
-    let threshold = 0.75;
+    let threshold = DEFAULT_ANCHOR_THRESHOLD;
     let max_anchors = 5;
     let mut similarities: Vec<(String, f32)> = Vec::new();
+    let mut stale_anchors: Vec<String> = Vec::new();
 
     for candidate in &candidates {
         // Skip self
@@ -272,14 +281,24 @@ pub(crate) fn auto_anchor(
             continue;
         }
 
-        // Skip if already an anchor
+        // Re-evaluate existing anchors for staleness
         if entry.anchors.contains(&candidate.id) {
-            continue;
+            let candidate_embedding = candidate.embedding.as_ref().unwrap();
+            let similarity = cosine_similarity(entry_embedding, candidate_embedding);
+            if similarity < threshold || similarity > NEAR_DUPLICATE_CEILING {
+                stale_anchors.push(candidate.id.clone());
+            }
+            continue; // don't consider existing anchors as new candidates
         }
 
         // Skip anchors that the user explicitly removed via --anchors replacement.
         // auto_anchor is a safety net for missed connections, not an override of
         // explicit user intent.
+        //
+        // Defensive: current callers (Add, Update) already strip explicitly-removed
+        // anchors before reaching this loop, but future call sites might not. This
+        // guard ensures auto_anchor never re-adds an anchor the user chose to remove,
+        // regardless of how the caller is wired.
         if let Some(removed) = explicitly_removed
             && removed.contains(&candidate.id)
         {
@@ -305,13 +324,13 @@ pub(crate) fn auto_anchor(
         let similarity = cosine_similarity(entry_embedding, candidate_embedding);
 
         // Filter by threshold, skip near-duplicates
-        if similarity >= threshold && similarity <= 0.95 {
+        if similarity >= threshold && similarity <= NEAR_DUPLICATE_CEILING {
             similarities.push((candidate.id.clone(), similarity));
         }
     }
 
-    // No similar entries found
-    if similarities.is_empty() {
+    // No similar entries found and no stale anchors to prune
+    if stale_anchors.is_empty() && similarities.is_empty() {
         return Ok(());
     }
 
@@ -323,8 +342,18 @@ pub(crate) fn auto_anchor(
         .map(|(id, _)| id)
         .collect();
 
-    // Update the entry with new anchors
-    let mut updated_anchors = entry.anchors.clone();
+    // Update the entry with new anchors, filtering out stale ones
+    let mut updated_anchors: Vec<String> = entry
+        .anchors
+        .clone()
+        .into_iter()
+        .filter(|a| !stale_anchors.contains(a))
+        .collect();
+
+    if let Some(removed) = explicitly_removed {
+        updated_anchors.retain(|a| !removed.contains(a));
+    }
+
     updated_anchors.extend(top_matches);
     updated_anchors.sort();
     updated_anchors.dedup();

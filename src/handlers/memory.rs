@@ -369,6 +369,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             r#type,
             session,
             thread_id,
+            no_auto_anchor,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -728,7 +729,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref(), None)?;
+            if !no_auto_anchor {
+                auto_anchor(&id, db.as_ref(), None)?;
+            } else {
+                eprintln!("  (auto-anchor skipped)");
+            }
 
             if json {
                 println!(
@@ -811,6 +816,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             owner,
             session_id,
             force,
+            no_auto_anchor,
             json,
         } => {
             use anyhow::Context;
@@ -1245,7 +1251,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             } else {
                 Some(explicitly_removed_anchors.as_slice())
             };
-            auto_anchor(&id, db.as_ref(), removed)?;
+            if !no_auto_anchor {
+                auto_anchor(&id, db.as_ref(), removed)?;
+            } else {
+                eprintln!("  (auto-anchor skipped)");
+            }
 
             if json {
                 println!(
@@ -1273,6 +1283,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             replace,
             replace_all,
             nth,
+            no_auto_anchor,
             json,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -1300,7 +1311,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref(), None)?;
+            if !no_auto_anchor {
+                auto_anchor(&id, db.as_ref(), None)?;
+            } else {
+                eprintln!("  (auto-anchor skipped)");
+            }
 
             if json {
                 println!(
@@ -1324,6 +1339,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             id,
             content,
             file,
+            no_auto_anchor,
             json,
         } => {
             use std::io::{self, Read};
@@ -1371,7 +1387,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref(), None)?;
+            if !no_auto_anchor {
+                auto_anchor(&id, db.as_ref(), None)?;
+            } else {
+                eprintln!("  (auto-anchor skipped)");
+            }
 
             if json {
                 println!(
@@ -1391,6 +1411,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             id,
             content,
             file,
+            no_auto_anchor,
             json,
         } => {
             use std::io::{self, Read};
@@ -1438,7 +1459,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             auto_embed(&id, db.as_ref())?;
 
             // Auto-generate anchors if in network SurrealDB mode
-            auto_anchor(&id, db.as_ref(), None)?;
+            if !no_auto_anchor {
+                auto_anchor(&id, db.as_ref(), None)?;
+            } else {
+                eprintln!("  (auto-anchor skipped)");
+            }
 
             if json {
                 println!(
@@ -1454,7 +1479,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Restore { id, list, json } => {
+        MemoryCommands::Restore {
+            id,
+            list,
+            no_auto_anchor,
+            json,
+        } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let id = normalize_id(&id);
 
@@ -1538,7 +1568,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 // #3: update embeddings and anchors like all other mutation paths
                 auto_embed(&id, db.as_ref())?;
-                auto_anchor(&id, db.as_ref(), None)?;
+                if !no_auto_anchor {
+                    auto_anchor(&id, db.as_ref(), None)?;
+                } else {
+                    eprintln!("  (auto-anchor skipped)");
+                }
 
                 if json {
                     println!(
@@ -1670,6 +1704,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             max_anchors,
             dry_run,
             verbose,
+            fill,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -1709,6 +1744,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 return Ok(());
             }
 
+            if fill {
+                println!("Fill mode: only processing entries with no existing anchors");
+            }
             println!("Processing {} entries...", entries.len());
 
             // Get ALL entries with embeddings for similarity comparison
@@ -1719,13 +1757,32 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 .collect();
 
             let mut total_added = 0;
+            let mut total_pruned = 0;
+            let mut total_skipped = 0;
             let entries_count = entries.len();
 
             for entry in entries {
+                // In fill mode, skip entries that already have anchors
+                if fill && !entry.anchors.is_empty() {
+                    total_skipped += 1;
+                    if verbose {
+                        println!(
+                            "  {} \"{}\" - Skipped (has {} anchors)",
+                            entry.id,
+                            entry.title,
+                            entry.anchors.len()
+                        );
+                    } else {
+                        eprintln!("Entry {} already has anchors, skipping (--fill)", entry.id);
+                    }
+                    continue;
+                }
+
                 let entry_embedding = entry.embedding.as_ref().unwrap();
 
                 // Calculate similarities
                 let mut similarities: Vec<(String, String, f32)> = Vec::new();
+                let mut stale_anchors: Vec<String> = Vec::new();
 
                 for candidate in &candidates {
                     // Skip self
@@ -1733,9 +1790,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         continue;
                     }
 
-                    // Skip if already an anchor
+                    // Re-evaluate existing anchors for staleness
                     if entry.anchors.contains(&candidate.id) {
-                        continue;
+                        let candidate_embedding = candidate.embedding.as_ref().unwrap();
+                        let similarity = cosine_similarity(entry_embedding, candidate_embedding);
+                        if similarity < threshold || similarity > NEAR_DUPLICATE_CEILING {
+                            stale_anchors.push(candidate.id.clone());
+                        }
+                        continue; // don't consider existing anchors as new candidates
                     }
 
                     // Privacy check
@@ -1757,7 +1819,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     let similarity = cosine_similarity(entry_embedding, candidate_embedding);
 
                     // Filter by threshold, skip near-duplicates
-                    if similarity >= threshold && similarity <= 0.95 {
+                    if similarity >= threshold && similarity <= NEAR_DUPLICATE_CEILING {
                         similarities.push((
                             candidate.id.clone(),
                             candidate.title.clone(),
@@ -1771,7 +1833,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
                 let top_matches: Vec<_> = similarities.into_iter().take(max_anchors).collect();
 
-                if top_matches.is_empty() {
+                if top_matches.is_empty() && stale_anchors.is_empty() {
                     if verbose {
                         println!(
                             "  {} \"{}\" - No similar entries found",
@@ -1783,6 +1845,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 println!("Processing {} \"{}\"...", entry.id, entry.title);
 
+                if !stale_anchors.is_empty() {
+                    println!("  Pruning {} stale anchor(s)", stale_anchors.len());
+                    for stale_id in &stale_anchors {
+                        println!("  x {}", stale_id);
+                    }
+                }
+
                 for (match_id, match_title, score) in &top_matches {
                     if verbose {
                         println!("  → {} \"{}\" ({:.2})", match_id, match_title, score);
@@ -1793,17 +1862,22 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 if dry_run {
                     println!(
-                        "[DRY RUN] Would add {} anchors to {}",
+                        "[DRY RUN] Would add {} anchors and prune {} stale anchors on {}",
                         top_matches.len(),
+                        stale_anchors.len(),
                         entry.id
                     );
                 } else {
-                    // Update the entry with new anchors
+                    // Update the entry with new anchors, filtering out stale ones
                     let new_anchor_ids: Vec<String> =
                         top_matches.iter().map(|(id, _, _)| id.clone()).collect();
 
-                    // Merge with existing anchors
-                    let mut updated_anchors = entry.anchors.clone();
+                    let mut updated_anchors: Vec<String> = entry
+                        .anchors
+                        .clone()
+                        .into_iter()
+                        .filter(|a| !stale_anchors.contains(a))
+                        .collect();
                     updated_anchors.extend(new_anchor_ids);
                     updated_anchors.sort();
                     updated_anchors.dedup();
@@ -1816,8 +1890,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     // Save to database
                     db.upsert_knowledge(&updated_entry)?;
 
-                    println!("Added {} anchors", top_matches.len());
+                    println!(
+                        "Added {} anchors, pruned {} stale",
+                        top_matches.len(),
+                        stale_anchors.len()
+                    );
                     total_added += top_matches.len();
+                    total_pruned += stale_anchors.len();
                 }
             }
 
@@ -1825,8 +1904,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("\n[DRY RUN] Complete. No changes written.");
             } else {
                 println!(
-                    "\n✓ Added {} total anchors across {} entries",
-                    total_added, entries_count
+                    "\n✓ Added {} total anchors, pruned {} stale across {} entries",
+                    total_added, total_pruned, entries_count
+                );
+            }
+            if fill && total_skipped > 0 {
+                println!(
+                    "  Skipped {} entries that already had anchors (--fill)",
+                    total_skipped
                 );
             }
         }

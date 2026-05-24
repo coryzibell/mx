@@ -69,6 +69,7 @@ similarity, and surfaced through keyword or semantic search.
     ([`--type`],       [`string`], [Fact type for ephemeral knowledge: `decision`, `insight`, `person`, `quote`, `thread_opened`, `commitment`, `thread_closed`. Auto-routes category and sets `resonance_type=ephemeral`.]),
     ([`--session`],    [`string`], [Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.]),
     ([`--thread-id`],  [`string`], [Thread ID for `thread_closed` operations. Requires `--type`.]),
+    ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--json`],       [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -223,6 +224,7 @@ to have embeddings generated via `mx memory embed`.]
     ([`--owner`],         [`string`], [Update owner (only valid when visibility is private).]),
     ([`--session-id`],    [`string`], [Update session ID (for retrofitting entries with wrong or missing session linkage).]),
     ([`--force`],         [`flag`],   [Force dangerous visibility changes (e.g., making blooms public).]),
+    ([`--no-auto-anchor`], [`flag`],  [Skip automatic anchor generation.]),
     ([`--json`],          [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -243,6 +245,7 @@ to have embeddings generated via `mx memory embed`.]
     ([`--replace`],     [`string`], [Replacement text. Also accepts `--new`.]),
     ([`--replace-all`], [`flag`],   [Replace all occurrences (default: error if multiple matches).]),
     ([`--nth`],         [`int`],    [Replace only the Nth occurrence (1-indexed).]),
+    ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--json`],        [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -258,6 +261,7 @@ to have embeddings generated via `mx memory embed`.]
   flags: (
     ([`--content`], [`string`], [Content to append (omit to read from stdin).]),
     ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
+    ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -273,6 +277,7 @@ to have embeddings generated via `mx memory embed`.]
   flags: (
     ([`--content`], [`string`], [Content to prepend (omit to read from stdin).]),
     ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
+    ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -286,6 +291,7 @@ to have embeddings generated via `mx memory embed`.]
   before restoring.],
   flags: (
     ([`--list`], [`flag`], [List available backups instead of restoring.]),
+    ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
@@ -408,23 +414,37 @@ Anchors are connections between entries discovered via embedding similarity.
 #command(
   "mx memory auto-anchor",
   [Automatically add anchors between entries based on embedding similarity.
-  Processes a single entry or all entries that have embeddings.],
+  Processes a single entry or all entries that have embeddings.
+
+  Also re-evaluates existing anchors: any anchor whose cosine similarity has
+  fallen below the threshold (default 0.75) or risen above the near-duplicate
+  ceiling (0.95) is pruned. This keeps the anchor graph self-cleaning --
+  anchors that made sense once but no longer do are removed automatically.],
   flags: (
     ([`--threshold`],   [`float`], [Minimum cosine similarity (0.0--1.0). Default: `0.75`.]),
     ([`--max-anchors`], [`int`],   [Maximum anchors to add per entry. Default: `5`.]),
     ([`--dry-run`],     [`flag`],  [Preview changes without writing.]),
     ([`--verbose`],     [`flag`],  [Show similarity scores in output.]),
+    ([`--fill`],        [`flag`],  [Only process entries with zero existing anchors. Fills gaps in the graph without touching already-anchored entries.]),
   ),
   examples: (
     "mx memory auto-anchor",
     "mx memory auto-anchor kn-abc123 --threshold 0.8 --max-anchors 3",
     "mx memory auto-anchor --dry-run --verbose",
+    "mx memory auto-anchor --fill",
   ),
 )
 
 #tip[A typical workflow: run `mx memory embed --all` to generate embeddings,
 then `mx memory auto-anchor --dry-run --verbose` to preview anchor
 candidates, then `mx memory auto-anchor` to write them.]
+
+#note[Anchors are also maintained automatically on every write operation
+(`add`, `update`, `edit`, `append`, `prepend`, `restore`). After each write,
+mx re-evaluates anchors and prunes stale ones using the same similarity
+thresholds. Pass `--no-auto-anchor` on any of these commands to skip this
+step -- useful for bulk operations or cleanup scripts where the overhead is
+unwanted.]
 
 
 // ═══════════════════════════════════════════════════════════════════════

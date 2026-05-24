@@ -605,6 +605,10 @@ pub enum MemoryCommands {
         /// Thread ID for thread_closed operations (requires --type=thread_closed)
         #[arg(long, requires = "type")]
         thread_id: Option<String>,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
     },
 
     /// Update an existing entry in the database
@@ -740,6 +744,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         force: bool,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -766,6 +774,10 @@ pub enum MemoryCommands {
         #[arg(long, conflicts_with = "replace_all")]
         nth: Option<usize>,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -788,6 +800,10 @@ pub enum MemoryCommands {
             conflicts_with = "content"
         )]
         file: Option<String>,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -812,6 +828,10 @@ pub enum MemoryCommands {
         )]
         file: Option<String>,
 
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -825,6 +845,10 @@ pub enum MemoryCommands {
         /// List available backups instead of restoring
         #[arg(long)]
         list: bool,
+
+        /// Skip automatic anchor generation
+        #[arg(long)]
+        no_auto_anchor: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -842,7 +866,14 @@ pub enum MemoryCommands {
         all: bool,
     },
 
-    /// Automatically add anchors based on embedding similarity
+    /// Automatically add anchors based on embedding similarity.
+    ///
+    /// Also re-evaluates existing anchors: any anchor whose similarity has
+    /// fallen below the threshold or risen above the near-duplicate ceiling
+    /// (0.95) is pruned. This keeps the anchor graph self-cleaning.
+    ///
+    /// Use --fill to only process entries that have zero existing anchors,
+    /// filling the gaps without touching already-anchored entries.
     AutoAnchor {
         /// Entry ID to process (omit to process all entries with embeddings)
         id: Option<String>,
@@ -862,6 +893,10 @@ pub enum MemoryCommands {
         /// Show similarity scores in output
         #[arg(long)]
         verbose: bool,
+
+        /// Only process entries with no existing anchors
+        #[arg(long)]
+        fill: bool,
     },
 
     /// Manage agents registry
