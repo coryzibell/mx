@@ -1704,6 +1704,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             max_anchors,
             dry_run,
             verbose,
+            fill,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -1743,6 +1744,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 return Ok(());
             }
 
+            if fill {
+                println!("Fill mode: only processing entries with no existing anchors");
+            }
             println!("Processing {} entries...", entries.len());
 
             // Get ALL entries with embeddings for similarity comparison
@@ -1754,9 +1758,24 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             let mut total_added = 0;
             let mut total_pruned = 0;
+            let mut total_skipped = 0;
             let entries_count = entries.len();
 
             for entry in entries {
+                // In fill mode, skip entries that already have anchors
+                if fill && !entry.anchors.is_empty() {
+                    total_skipped += 1;
+                    if verbose {
+                        println!(
+                            "  {} \"{}\" - Skipped (has {} anchors)",
+                            entry.id,
+                            entry.title,
+                            entry.anchors.len()
+                        );
+                    }
+                    continue;
+                }
+
                 let entry_embedding = entry.embedding.as_ref().unwrap();
 
                 // Calculate similarities
@@ -1886,6 +1905,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "\n✓ Added {} total anchors, pruned {} stale across {} entries",
                     total_added, total_pruned, entries_count
                 );
+                if fill && total_skipped > 0 {
+                    println!(
+                        "  Skipped {} entries that already had anchors (--fill)",
+                        total_skipped
+                    );
+                }
             }
         }
         MemoryCommands::Agents { command } => handle_agents(command, &config)?,

@@ -871,6 +871,9 @@ pub enum MemoryCommands {
     /// Also re-evaluates existing anchors: any anchor whose similarity has
     /// fallen below the threshold or risen above the near-duplicate ceiling
     /// (0.95) is pruned. This keeps the anchor graph self-cleaning.
+    ///
+    /// Use --fill to only process entries that have zero existing anchors,
+    /// filling the gaps without touching already-anchored entries.
     AutoAnchor {
         /// Entry ID to process (omit to process all entries with embeddings)
         id: Option<String>,
@@ -890,6 +893,10 @@ pub enum MemoryCommands {
         /// Show similarity scores in output
         #[arg(long)]
         verbose: bool,
+
+        /// Only process entries with no existing anchors
+        #[arg(long)]
+        fill: bool,
     },
 
     /// Manage agents registry
