@@ -6627,7 +6627,7 @@ Key dependencies:
 |                       |                       | SurrealDB             |
 |                       |                       | (multi-thread)        |
 +-----------------------+-----------------------+-----------------------+
-| `tract-onnx`          | 0.21                  | Local vector          |
+| `tract-onnx`          | 0.22                  | Local vector          |
 |                       |                       | embeddings via ONNX   |
 |                       |                       | inference             |
 |                       |                       | (BGE-Base-EN-v1.5,    |

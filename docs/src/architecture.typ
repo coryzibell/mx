@@ -48,7 +48,7 @@ Key dependencies:
   [`surrealdb`], [2], [Embedded + WebSocket knowledge store],
   [`base-d`], [3], [Dictionary-based hash/compress encoding],
   [`tokio`], [1], [Async runtime for SurrealDB (multi-thread)],
-  [`tract-onnx`], [0.21], [Local vector embeddings via ONNX inference (BGE-Base-EN-v1.5, 768-dim)],
+  [`tract-onnx`], [0.22], [Local vector embeddings via ONNX inference (BGE-Base-EN-v1.5, 768-dim)],
   [`serde` / `serde_json` / `toml` / `serde_yaml`], [1 / 1 / 0.8 / 0.9], [Serialization across JSON, TOML, YAML],
   [`chrono`], [0.4], [Timestamps with serde support],
   [`anyhow` / `thiserror`], [1 / 2], [Error handling (anyhow for handlers, thiserror for typed errors)],
