@@ -35,6 +35,9 @@ impl TractProvider {
             .build()
             .context("Failed to initialize HF Hub API")?;
 
+        // Xenova/bge-base-en-v1.5 is the ONNX-converted variant on HF Hub;
+        // the canonical model identifier is BAAI/bge-base-en-v1.5 (reported
+        // by model_id() for embedding metadata).
         let repo = api.model("Xenova/bge-base-en-v1.5".to_string());
 
         // Fetch model and tokenizer files (downloads on first use, cached thereafter)
@@ -86,6 +89,7 @@ impl EmbeddingProvider for TractProvider {
         let input_fact =
             InferenceFact::dt_shape(i64::datum_type(), tvec![batch.to_dim(), seq_len.to_dim()]);
 
+        // Set input shapes for all 3 model inputs: input_ids, attention_mask, token_type_ids
         for i in 0..3 {
             model
                 .set_input_fact(i, input_fact.clone())
@@ -119,13 +123,10 @@ impl EmbeddingProvider for TractProvider {
             .to_array_view::<f32>()
             .context("Failed to convert output to f32 array")?;
 
-        let hidden_size = output_tensor.shape()[2];
-
-        // CLS pooling: take position 0 (the [CLS] token)
-        let mut cls_pooled = vec![0.0f32; hidden_size];
-        for hidden_idx in 0..hidden_size {
-            cls_pooled[hidden_idx] = output_tensor[[0, 0, hidden_idx]];
-        }
+        // CLS pooling: extract the [CLS] token embedding (position 0)
+        let mut cls_pooled = output_tensor
+            .slice(tract_ndarray::s![0, 0, ..])
+            .to_vec();
 
         // L2 normalize
         let l2: f32 = cls_pooled.iter().map(|x| x * x).sum::<f32>().sqrt();

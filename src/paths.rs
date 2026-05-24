@@ -589,11 +589,11 @@ mod tests {
     }
 
     #[test]
-    fn model_cache_new_env_takes_precedence_over_legacy() {
+    fn model_cache_empty_new_env_falls_through_to_legacy() {
         let home = mx_home().clone();
         let xdg = PathBuf::from("/xdg/cache");
-        // New env var (empty = not isolated) should take precedence over legacy (set = isolated)
-        // Since we check new first and it's empty, we fall through to legacy
+        // Empty new env var is treated as "not set", so it falls through to the
+        // legacy MX_ISOLATE_FASTEMBED which IS set, resulting in isolation.
         let r = model_cache_dir_with(Some(""), Some("1"), || Some(xdg.clone()), &home);
         assert_eq!(r, home.join("memory").join("embed"));
     }

@@ -34,7 +34,7 @@ Overrides are layered. From most specific to least specific:
 + *Per-file* -- e.g. `MX_KV_SCHEMA`, `MX_KV_DATA`. These point at exact files
   (and may include a `{agent}` placeholder).
 + *Per-subsystem* -- e.g. `MX_SURREAL_ROOT`, `MX_CODEX_PATH`,
-  `MX_ISOLATE_FASTEMBED`. These move one subsystem's root.
+  `MX_ISOLATE_MODELS`. These move one subsystem's root.
 + *Base* -- `MX_HOME`. Moves the entire tree at once.
 + *Default* -- `~/.mx/`.
 
@@ -62,7 +62,7 @@ Everything else asks `paths.rs` for its location.
 │   └── schemas/{id}.yaml       # default ID: "tensor"; CLI --schema flag
 ├── memory/
 │   ├── surreal/                # override MX_SURREAL_ROOT
-│   ├── embed/                  # only when MX_ISOLATE_FASTEMBED is set
+│   ├── embed/                  # only when MX_ISOLATE_MODELS is set
 │   └── seed/
 │       ├── agents/             # *.md (frontmatter)
 │       └── knowledge/          # *.jsonl (markdown ingest tracked in #257)
@@ -124,10 +124,11 @@ The knowledge graph backend and its inputs.
   directory with #link(<env-paths>)[`MX_SURREAL_ROOT`]. For network-mode
   SurrealDB, the directory is unused -- see the
   #link(<env-surreal>)[SurrealDB connection vars].
-- `memory/embed/` -- only created when #link(<env-paths>)[`MX_ISOLATE_FASTEMBED`]
-  is set. Holds FastEmbed model weights that would otherwise live in the shared
-  XDG cache (`$XDG_CACHE_HOME/fastembed/`). Use this when you want mx's model
-  cache isolated from other tools that also use FastEmbed.
+- `memory/embed/` -- only created when #link(<env-paths>)[`MX_ISOLATE_MODELS`]
+  (or legacy `MX_ISOLATE_FASTEMBED`) is set. Holds downloaded ONNX model and
+  tokenizer files that would otherwise live in the shared XDG cache
+  (`$XDG_CACHE_HOME/huggingface/`). Use this when you want mx's model cache
+  isolated from other tools.
 - `memory/seed/agents/` -- markdown files with YAML frontmatter, one per agent.
   Loaded by `mx memory seed agents`.
 - `memory/seed/knowledge/` -- one or more `*.jsonl` files. Loaded by
@@ -175,12 +176,12 @@ anything you want to keep.
   [`MX_CODEX_PATH`], [path], [`$MX_HOME/codex/`], [Codex archive directory],
   [`MX_KV_SCHEMA`], [path template], [`$MX_HOME/kv/schema/{agent}.toml`], [KV schema file; `{agent}` placeholder substituted],
   [`MX_KV_DATA`], [path template], [`$MX_HOME/kv/data/{agent}.json`], [KV data file; `{agent}` placeholder substituted],
-  [`MX_ISOLATE_FASTEMBED`], [boolean flag], [unset], [When non-empty, redirects FastEmbed cache from XDG to `$MX_HOME/memory/embed/`],
+  [`MX_ISOLATE_MODELS`], [boolean flag], [unset], [When non-empty, redirects the model cache from XDG to `$MX_HOME/memory/embed/`. Legacy `MX_ISOLATE_FASTEMBED` is also honored],
 )
 
 Empty-string values for the path overrides in this table (`MX_HOME`,
 `MX_SURREAL_ROOT`, `MX_CODEX_PATH`, `MX_KV_SCHEMA`, `MX_KV_DATA`,
-`MX_ISOLATE_FASTEMBED`) are treated as unset and fall back to the default.
+`MX_ISOLATE_MODELS`) are treated as unset and fall back to the default.
 
 The same is *not* uniformly true of other `MX_*` env vars. In particular,
 the #link(<env-surreal>)[SurrealDB connection vars] below do not all filter
@@ -189,7 +190,7 @@ default `root`. Among the connection vars only `MX_SURREAL_PASS` /
 `MX_SURREAL_PASS_FILE` are empty-filtered. To restore a default, *leave the
 variable unset entirely* rather than setting it to an empty string.
 
-The boolean flag (`MX_ISOLATE_FASTEMBED`) is "on" for any non-empty value
+The boolean flag (`MX_ISOLATE_MODELS`) is "on" for any non-empty value
 (`1`, `true`, `yes` -- it doesn't parse, it just checks for non-emptiness).
 
 === SurrealDB connection <env-surreal>
@@ -339,10 +340,10 @@ export MX_KV_SCHEMA='/etc/mx/schemas/{agent}.toml'
 export MX_KV_DATA='/var/lib/mx/{agent}.json'
 ```
 
-Isolate the FastEmbed model cache so it doesn't share with other tools:
+Isolate the model cache so it doesn't share with other tools:
 
 ```bash
-export MX_ISOLATE_FASTEMBED=1
+export MX_ISOLATE_MODELS=1
 # Models will now download into $MX_HOME/memory/embed/
 ```
 
