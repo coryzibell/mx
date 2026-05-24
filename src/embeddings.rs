@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use tract_onnx::prelude::*;
 use tokenizers::Tokenizer;
+use tract_onnx::prelude::*;
 
 /// Trait for embedding providers
 pub trait EmbeddingProvider: Send + Sync {
@@ -72,19 +72,19 @@ impl EmbeddingProvider for TractProvider {
             .map_err(|e| anyhow::anyhow!("Failed to tokenize: {}", e))?;
 
         let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
-        let attention_mask: Vec<i64> =
-            encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
-        let token_type_ids: Vec<i64> =
-            encoding.get_type_ids().iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        let token_type_ids: Vec<i64> = encoding.get_type_ids().iter().map(|&x| x as i64).collect();
         let seq_len = input_ids.len();
         let batch = 1_usize;
 
         // Clone model and set input facts for this sequence length
         let mut model = self.model.clone();
-        let input_fact = InferenceFact::dt_shape(
-            i64::datum_type(),
-            tvec![batch.to_dim(), seq_len.to_dim()],
-        );
+        let input_fact =
+            InferenceFact::dt_shape(i64::datum_type(), tvec![batch.to_dim(), seq_len.to_dim()]);
 
         for i in 0..3 {
             model
@@ -92,9 +92,7 @@ impl EmbeddingProvider for TractProvider {
                 .with_context(|| format!("Failed to set input fact for input {}", i))?;
         }
 
-        let model = model
-            .into_optimized()
-            .context("Failed to optimize model")?;
+        let model = model.into_optimized().context("Failed to optimize model")?;
         let model = model
             .into_runnable()
             .context("Failed to make model runnable")?;
