@@ -1772,6 +1772,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             entry.title,
                             entry.anchors.len()
                         );
+                    } else {
+                        eprintln!("Entry {} already has anchors, skipping (--fill)", entry.id);
                     }
                     continue;
                 }
@@ -1905,12 +1907,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     "\n✓ Added {} total anchors, pruned {} stale across {} entries",
                     total_added, total_pruned, entries_count
                 );
-                if fill && total_skipped > 0 {
-                    println!(
-                        "  Skipped {} entries that already had anchors (--fill)",
-                        total_skipped
-                    );
-                }
+            }
+            if fill && total_skipped > 0 {
+                println!(
+                    "  Skipped {} entries that already had anchors (--fill)",
+                    total_skipped
+                );
             }
         }
         MemoryCommands::Agents { command } => handle_agents(command, &config)?,
