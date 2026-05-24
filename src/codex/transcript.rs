@@ -253,7 +253,7 @@ pub(super) fn migrate_clean_transcripts(
     codex_dir: &Path,
     archives: Vec<ArchiveEntry>,
     dry_run: bool,
-    verbose: bool,
+    detailed: bool,
     include_agents: bool,
 ) -> Result<()> {
     let mut needs_transcript = Vec::new();
@@ -265,7 +265,7 @@ pub(super) fn migrate_clean_transcripts(
 
         if transcript_file.exists() {
             // Already has a clean transcript — skip
-            if verbose {
+            if detailed {
                 println!(
                     "  Skipping {} (already has conversation.md)",
                     archive.short_id
@@ -276,7 +276,7 @@ pub(super) fn migrate_clean_transcripts(
 
         if !session_file.exists() {
             // Clean-only archive or missing JSONL — can't generate
-            if verbose {
+            if detailed {
                 println!(
                     "  Skipping {} (no session.jsonl to generate from)",
                     archive.short_id
@@ -359,7 +359,7 @@ pub(super) fn migrate_clean_transcripts(
             }
         }
 
-        if verbose {
+        if detailed {
             println!("  Generated conversation.md for {}", archive.short_id);
         }
 
