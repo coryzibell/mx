@@ -28,7 +28,7 @@ use super::archive::{collect_archives, get_codex_dir};
 /// `None` counts.
 pub(crate) fn migrate_archives(
     dry_run: bool,
-    verbose: bool,
+    detailed: bool,
     clean: bool,
     include_agents: bool,
 ) -> Result<()> {
@@ -48,7 +48,7 @@ pub(crate) fn migrate_archives(
 
     // --clean mode: generate conversation.md for archives that have session.jsonl but no transcript
     if clean {
-        return migrate_clean_transcripts(&codex_dir, archives, dry_run, verbose, include_agents);
+        return migrate_clean_transcripts(&codex_dir, archives, dry_run, detailed, include_agents);
     }
 
     // Split archives into two buckets:
@@ -98,7 +98,7 @@ pub(crate) fn migrate_archives(
             continue;
         }
 
-        if verbose {
+        if detailed {
             println!("Migrating archive: {}", archive.short_id);
         }
 
@@ -127,7 +127,7 @@ pub(crate) fn migrate_archives(
                     let path = entry.path();
 
                     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                        if verbose {
+                        if detailed {
                             println!(
                                 "  Processing agent file: {}",
                                 path.file_name().unwrap().to_string_lossy()
@@ -174,7 +174,7 @@ pub(crate) fn migrate_archives(
             let image_count = all_images.len();
             total_images += image_count;
 
-            if verbose || image_count > 0 {
+            if detailed || image_count > 0 {
                 println!(
                     "  ✓ Migrated {}: {} images extracted, {} KB saved",
                     archive.short_id,
@@ -205,7 +205,7 @@ pub(crate) fn migrate_archives(
 
             total_images += total_archive_images;
 
-            if verbose || total_archive_images > 0 {
+            if detailed || total_archive_images > 0 {
                 println!(
                     "  Would migrate {}: {} images found",
                     archive.short_id, total_archive_images
@@ -223,7 +223,7 @@ pub(crate) fn migrate_archives(
     let mut metadata_bumped = 0;
     for archive in metadata_only_bumps {
         let archive_dir = codex_dir.join(&archive.dir_name);
-        if verbose {
+        if detailed {
             println!(
                 "Metadata bump: {} (v{} -> v{})",
                 archive.short_id, archive.manifest.version, MANIFEST_WRITE_VERSION

@@ -1703,7 +1703,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             threshold,
             max_anchors,
             dry_run,
-            verbose,
+            detailed,
             fill,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -1765,7 +1765,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // In fill mode, skip entries that already have anchors
                 if fill && !entry.anchors.is_empty() {
                     total_skipped += 1;
-                    if verbose {
+                    if detailed {
                         println!(
                             "  {} \"{}\" - Skipped (has {} anchors)",
                             entry.id,
@@ -1834,7 +1834,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let top_matches: Vec<_> = similarities.into_iter().take(max_anchors).collect();
 
                 if top_matches.is_empty() && stale_anchors.is_empty() {
-                    if verbose {
+                    if detailed {
                         println!(
                             "  {} \"{}\" - No similar entries found",
                             entry.id, entry.title
@@ -1853,7 +1853,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
 
                 for (match_id, match_title, score) in &top_matches {
-                    if verbose {
+                    if detailed {
                         println!("  → {} \"{}\" ({:.2})", match_id, match_title, score);
                     } else {
                         println!("  → {} \"{}\"", match_id, match_title);

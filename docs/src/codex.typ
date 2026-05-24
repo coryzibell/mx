@@ -285,15 +285,15 @@ The remaining tokens (`subagents`, `mcp`, `tool-output`, `history`, `all`,
   existed.],
   flags: (
     ([`--dry-run`], [flag], [Show what would be migrated without making changes.]),
-    ([`--verbose`], [flag], [Show detailed progress for each archive.]),
+    ([`--detailed`], [flag], [Show detailed progress for each archive.]),
     ([`--clean`], [flag], [Generate `conversation.md` for archives missing a clean transcript.]),
     ([`--include-agents`], [flag], [Include sub-agent transcripts in generated clean transcripts. Requires `--clean`.]),
   ),
   examples: (
     "mx codex migrate --dry-run",
-    "mx codex migrate --verbose",
+    "mx codex migrate --detailed",
     "mx codex migrate --clean",
-    "mx codex migrate --clean --include-agents --verbose",
+    "mx codex migrate --clean --include-agents --detailed",
   ),
 )
 

@@ -892,7 +892,7 @@ pub enum MemoryCommands {
 
         /// Show similarity scores in output
         #[arg(long)]
-        verbose: bool,
+        detailed: bool,
 
         /// Only process entries with no existing anchors
         #[arg(long)]
@@ -1419,7 +1419,7 @@ pub enum CodexCommands {
 
         /// Show detailed progress
         #[arg(long)]
-        verbose: bool,
+        detailed: bool,
 
         /// Generate conversation.md for archives that have session.jsonl but no clean transcript
         #[arg(long)]

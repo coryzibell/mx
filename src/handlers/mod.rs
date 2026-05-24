@@ -153,11 +153,11 @@ pub(crate) fn handle_codex(cmd: CodexCommands) -> Result<()> {
         }
         CodexCommands::Migrate {
             dry_run,
-            verbose,
+            detailed,
             clean,
             include_agents,
         } => {
-            codex::migrate_archives(dry_run, verbose, clean, include_agents)?;
+            codex::migrate_archives(dry_run, detailed, clean, include_agents)?;
             Ok(())
         }
     }
