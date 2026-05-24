@@ -425,11 +425,13 @@ Anchors are connections between entries discovered via embedding similarity.
     ([`--max-anchors`], [`int`],   [Maximum anchors to add per entry. Default: `5`.]),
     ([`--dry-run`],     [`flag`],  [Preview changes without writing.]),
     ([`--verbose`],     [`flag`],  [Show similarity scores in output.]),
+    ([`--fill`],        [`flag`],  [Only process entries with zero existing anchors. Fills gaps in the graph without touching already-anchored entries.]),
   ),
   examples: (
     "mx memory auto-anchor",
     "mx memory auto-anchor kn-abc123 --threshold 0.8 --max-anchors 3",
     "mx memory auto-anchor --dry-run --verbose",
+    "mx memory auto-anchor --fill",
   ),
 )
 
