@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use tract_onnx::prelude::*;
+use tokenizers::Tokenizer;
 
 /// Trait for embedding providers
 pub trait EmbeddingProvider: Send + Sync {
@@ -16,51 +17,133 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_id(&self) -> &str;
 }
 
-/// FastEmbed provider using BGE-Base-EN-v1.5
-pub struct FastEmbedProvider {
-    model: TextEmbedding,
+/// Tract-ONNX provider using BGE-Base-EN-v1.5 (pure Rust, no C++ ONNX Runtime)
+pub struct TractProvider {
+    model: InferenceModel,
+    tokenizer: Tokenizer,
     model_id: String,
     dimensions: usize,
 }
 
-impl FastEmbedProvider {
+impl TractProvider {
     pub fn new() -> Result<Self> {
-        // Default: $XDG_CACHE_HOME/fastembed (shared with other tools).
-        // If MX_ISOLATE_FASTEMBED is set: $MX_HOME/memory/embed.
-        let cache_dir = crate::paths::fastembed_cache_dir();
+        let cache_dir = crate::paths::model_cache_dir();
 
-        let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGEBaseENV15)
-                .with_cache_dir(cache_dir)
-                .with_show_download_progress(true),
-        )
-        .context("Failed to initialize FastEmbed model")?;
+        // Configure hf-hub to use mx's model cache directory
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_cache_dir(cache_dir)
+            .build()
+            .context("Failed to initialize HF Hub API")?;
+
+        let repo = api.model("Xenova/bge-base-en-v1.5".to_string());
+
+        // Fetch model and tokenizer files (downloads on first use, cached thereafter)
+        let model_path = repo
+            .get("onnx/model.onnx")
+            .context("Failed to fetch ONNX model from HF Hub")?;
+        let tokenizer_path = repo
+            .get("tokenizer.json")
+            .context("Failed to fetch tokenizer from HF Hub")?;
+
+        // Load ONNX model (unoptimized -- optimized per-input in embed())
+        let model = tract_onnx::onnx()
+            .model_for_path(&model_path)
+            .context("Failed to load ONNX model with tract")?;
+
+        // Load tokenizer
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
         Ok(Self {
             model,
+            tokenizer,
             model_id: "BAAI/bge-base-en-v1.5".to_string(),
             dimensions: 768,
         })
     }
 }
 
-impl EmbeddingProvider for FastEmbedProvider {
+impl EmbeddingProvider for TractProvider {
     fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
-        let embeddings = self
-            .model
-            .embed(vec![text.to_string()], None)
-            .context("Failed to generate embedding")?;
+        // Tokenize
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("Failed to tokenize: {}", e))?;
 
-        embeddings
-            .into_iter()
-            .next()
-            .context("No embedding returned")
+        let input_ids: Vec<i64> = encoding.get_ids().iter().map(|&x| x as i64).collect();
+        let attention_mask: Vec<i64> =
+            encoding.get_attention_mask().iter().map(|&x| x as i64).collect();
+        let token_type_ids: Vec<i64> =
+            encoding.get_type_ids().iter().map(|&x| x as i64).collect();
+        let seq_len = input_ids.len();
+        let batch = 1_usize;
+
+        // Clone model and set input facts for this sequence length
+        let mut model = self.model.clone();
+        let input_fact = InferenceFact::dt_shape(
+            i64::datum_type(),
+            tvec![batch.to_dim(), seq_len.to_dim()],
+        );
+
+        for i in 0..3 {
+            model
+                .set_input_fact(i, input_fact.clone())
+                .with_context(|| format!("Failed to set input fact for input {}", i))?;
+        }
+
+        let model = model
+            .into_optimized()
+            .context("Failed to optimize model")?;
+        let model = model
+            .into_runnable()
+            .context("Failed to make model runnable")?;
+
+        // Build input tensors
+        let input_ids_tensor =
+            tract_ndarray::Array2::from_shape_vec((batch, seq_len), input_ids)?.into_tensor();
+        let attention_mask_tensor =
+            tract_ndarray::Array2::from_shape_vec((batch, seq_len), attention_mask)?.into_tensor();
+        let token_type_ids_tensor =
+            tract_ndarray::Array2::from_shape_vec((batch, seq_len), token_type_ids)?.into_tensor();
+
+        let inputs = tvec![
+            input_ids_tensor.into(),
+            attention_mask_tensor.into(),
+            token_type_ids_tensor.into(),
+        ];
+
+        // Run inference
+        let outputs = model.run(inputs).context("Failed to run inference")?;
+
+        // Output shape: [batch, seq_len, hidden_size]
+        let output_tensor = outputs[0]
+            .to_array_view::<f32>()
+            .context("Failed to convert output to f32 array")?;
+
+        let hidden_size = output_tensor.shape()[2];
+
+        // CLS pooling: take position 0 (the [CLS] token)
+        let mut cls_pooled = vec![0.0f32; hidden_size];
+        for hidden_idx in 0..hidden_size {
+            cls_pooled[hidden_idx] = output_tensor[[0, 0, hidden_idx]];
+        }
+
+        // L2 normalize
+        let l2: f32 = cls_pooled.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if l2 > 0.0 {
+            for v in cls_pooled.iter_mut() {
+                *v /= l2;
+            }
+        }
+
+        Ok(cls_pooled)
     }
 
     fn embed_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.model
-            .embed(texts, None)
-            .context("Failed to generate batch embeddings")
+        // Simple loop: each text gets compiled at its actual sequence length.
+        // This is correct and avoids padding complexity.
+        texts.iter().map(|t| self.embed(t)).collect()
     }
 
     fn dimensions(&self) -> usize {
@@ -80,7 +163,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_embed_single() -> Result<()> {
-        let mut provider = FastEmbedProvider::new()?;
+        let mut provider = TractProvider::new()?;
         let embedding = provider.embed("Hello, world!")?;
         assert_eq!(embedding.len(), 768);
         Ok(())
@@ -89,7 +172,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_embed_batch() -> Result<()> {
-        let mut provider = FastEmbedProvider::new()?;
+        let mut provider = TractProvider::new()?;
         let texts = vec!["First text".to_string(), "Second text".to_string()];
         let embeddings = provider.embed_batch(&texts)?;
         assert_eq!(embeddings.len(), 2);
@@ -101,7 +184,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_dimensions() -> Result<()> {
-        let provider = FastEmbedProvider::new()?;
+        let provider = TractProvider::new()?;
         assert_eq!(provider.dimensions(), 768);
         Ok(())
     }

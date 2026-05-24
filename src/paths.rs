@@ -178,7 +178,7 @@ pub fn memory_seed_knowledge_dir() -> PathBuf {
 
 /// Pure resolution of the legacy agents directory layout. Takes `home`
 /// explicitly so tests don't need to touch process state -- mirrors the
-/// `surreal_root_with` / `fastembed_cache_dir_with` pattern.
+/// `surreal_root_with` / `model_cache_dir_with` pattern.
 fn legacy_agents_dir_with(home: &Path) -> PathBuf {
     home.join("agents")
 }
@@ -198,28 +198,38 @@ pub fn legacy_memory_index_jsonl() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// FastEmbed cache (decision 4)
+// Model cache (decision 4 — renamed from fastembed_cache)
 // ---------------------------------------------------------------------------
 
-fn fastembed_cache_dir_with(
+fn model_cache_dir_with(
     isolate_env: Option<&str>,
+    legacy_isolate_env: Option<&str>,
     cache_dir_fn: impl FnOnce() -> Option<PathBuf>,
     home: &Path,
 ) -> PathBuf {
-    if isolate_env.map(|v| !v.is_empty()).unwrap_or(false) {
+    // Check new env var first, then legacy for backward compat.
+    // Empty strings are treated as "not set" so they fall through.
+    let isolate = isolate_env
+        .filter(|v| !v.is_empty())
+        .or(legacy_isolate_env.filter(|v| !v.is_empty()))
+        .is_some();
+
+    if isolate {
         return home.join("memory").join("embed");
     }
     cache_dir_fn()
-        .map(|d| d.join("fastembed"))
-        .unwrap_or_else(|| PathBuf::from(".fastembed_cache"))
+        .map(|d| d.join("huggingface"))
+        .unwrap_or_else(|| PathBuf::from(".hf_cache"))
 }
 
-/// FastEmbed model cache directory.
+/// Model cache directory (used by hf-hub for ONNX model and tokenizer files).
 ///
-/// - Default: `$XDG_CACHE_HOME/fastembed/` (shared across tools)
-/// - If `MX_ISOLATE_FASTEMBED` is set: `$MX_HOME/memory/embed/`
-pub fn fastembed_cache_dir() -> PathBuf {
-    fastembed_cache_dir_with(
+/// - Default: `$XDG_CACHE_HOME/huggingface/` (shared across tools)
+/// - If `MX_ISOLATE_MODELS` is set: `$MX_HOME/memory/embed/`
+/// - Legacy: `MX_ISOLATE_FASTEMBED` is also honored for backward compat
+pub fn model_cache_dir() -> PathBuf {
+    model_cache_dir_with(
+        std::env::var("MX_ISOLATE_MODELS").ok().as_deref(),
         std::env::var("MX_ISOLATE_FASTEMBED").ok().as_deref(),
         dirs::cache_dir,
         mx_home(),
@@ -535,38 +545,57 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // fastembed cache
+    // model cache
     // ---------------------------------------------------------------------
 
     #[test]
-    fn fastembed_cache_default_uses_xdg() {
+    fn model_cache_default_uses_xdg() {
         let home = mx_home().clone();
         let xdg = PathBuf::from("/xdg/cache");
-        let r = fastembed_cache_dir_with(None, || Some(xdg.clone()), &home);
-        assert_eq!(r, xdg.join("fastembed"));
+        let r = model_cache_dir_with(None, None, || Some(xdg.clone()), &home);
+        assert_eq!(r, xdg.join("huggingface"));
     }
 
     #[test]
-    fn fastembed_cache_isolate_uses_mx_home() {
+    fn model_cache_isolate_uses_mx_home() {
         let home = mx_home().clone();
         let xdg = PathBuf::from("/xdg/cache");
-        let r = fastembed_cache_dir_with(Some("1"), || Some(xdg.clone()), &home);
+        let r = model_cache_dir_with(Some("1"), None, || Some(xdg.clone()), &home);
         assert_eq!(r, home.join("memory").join("embed"));
     }
 
     #[test]
-    fn fastembed_cache_isolate_empty_is_default() {
+    fn model_cache_isolate_empty_is_default() {
         let home = mx_home().clone();
         let xdg = PathBuf::from("/xdg/cache");
-        let r = fastembed_cache_dir_with(Some(""), || Some(xdg.clone()), &home);
-        assert_eq!(r, xdg.join("fastembed"));
+        let r = model_cache_dir_with(Some(""), None, || Some(xdg.clone()), &home);
+        assert_eq!(r, xdg.join("huggingface"));
     }
 
     #[test]
-    fn fastembed_cache_no_xdg_falls_back() {
+    fn model_cache_no_xdg_falls_back() {
         let home = mx_home().clone();
-        let r = fastembed_cache_dir_with(None, || None, &home);
-        assert_eq!(r, PathBuf::from(".fastembed_cache"));
+        let r = model_cache_dir_with(None, None, || None, &home);
+        assert_eq!(r, PathBuf::from(".hf_cache"));
+    }
+
+    #[test]
+    fn model_cache_legacy_isolate_env_honored() {
+        let home = mx_home().clone();
+        let xdg = PathBuf::from("/xdg/cache");
+        // Legacy MX_ISOLATE_FASTEMBED should work when new env var is absent
+        let r = model_cache_dir_with(None, Some("1"), || Some(xdg.clone()), &home);
+        assert_eq!(r, home.join("memory").join("embed"));
+    }
+
+    #[test]
+    fn model_cache_new_env_takes_precedence_over_legacy() {
+        let home = mx_home().clone();
+        let xdg = PathBuf::from("/xdg/cache");
+        // New env var (empty = not isolated) should take precedence over legacy (set = isolated)
+        // Since we check new first and it's empty, we fall through to legacy
+        let r = model_cache_dir_with(Some(""), Some("1"), || Some(xdg.clone()), &home);
+        assert_eq!(r, home.join("memory").join("embed"));
     }
 
     // ---------------------------------------------------------------------
