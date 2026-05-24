@@ -199,7 +199,7 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 ///
 /// This silently generates and updates the embedding for a single entry.
 pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
-    use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+    use crate::embeddings::{EmbeddingProvider, TractProvider};
 
     // Get agent context for fetching the entry
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
@@ -214,7 +214,7 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     };
 
     // Initialize embedding provider
-    let mut provider = FastEmbedProvider::new()?;
+    let mut provider = TractProvider::new()?;
 
     // Use the entry's embedding_text method (DRY - shared with other embedding paths)
     let embedding_text = entry.embedding_text();

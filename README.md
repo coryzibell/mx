@@ -253,7 +253,7 @@ Everything mx writes lives under a single base directory: `$MX_HOME`, default
 `~/.mx/`. Each subsystem owns a subdirectory (`kv/`, `state/`, `memory/`,
 `codex/`, ...). Move the whole tree by setting `MX_HOME`, or override one
 subsystem at a time with vars like `MX_SURREAL_ROOT`, `MX_CODEX_PATH`,
-`MX_KV_SCHEMA`, `MX_KV_DATA`, `MX_ISOLATE_FASTEMBED`.
+`MX_KV_SCHEMA`, `MX_KV_DATA`, `MX_ISOLATE_MODELS`.
 
 Two env vars were removed in the path-alignment refactor (#259):
 

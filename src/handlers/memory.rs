@@ -55,10 +55,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Get results from database with resonance filtering
             let entries = if semantic {
-                use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+                use crate::embeddings::{EmbeddingProvider, TractProvider};
 
                 eprintln!("Initializing semantic search...");
-                let mut provider = FastEmbedProvider::new()?;
+                let mut provider = TractProvider::new()?;
                 let query_embedding = provider.embed(&query)?;
 
                 // When --tags is present the in-memory filter will thin the DB results,
@@ -1598,7 +1598,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::Embed { id, all } => {
-            use crate::embeddings::{EmbeddingProvider, FastEmbedProvider};
+            use crate::embeddings::{EmbeddingProvider, TractProvider};
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -1609,8 +1609,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // Initialize embedding provider once
-            println!("Initializing FastEmbed model...");
-            let mut provider = FastEmbedProvider::new()?;
+            println!("Initializing embedding model...");
+            let mut provider = TractProvider::new()?;
 
             if all {
                 // Embed ALL entries

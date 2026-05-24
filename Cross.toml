@@ -1,7 +1,8 @@
 # Cross-compilation configuration for targets that need OpenSSL
-# ort-sys v2.0.0-rc.10 build-dependency uses ureq with native-tls (openssl)
-# openssl-sys is a BUILD dependency, so it needs HOST OpenSSL, not TARGET
-# The cross container (x86_64) needs libssl-dev for the host architecture
+# hf-hub (used by the tract-onnx embedding backend to fetch model files)
+# depends on ureq with native-tls, which requires openssl-sys at build time.
+# openssl-sys is a BUILD dependency, so it needs HOST OpenSSL, not TARGET.
+# The cross container (x86_64) needs libssl-dev for the host architecture.
 
 [target.x86_64-unknown-linux-musl]
 pre-build = [
