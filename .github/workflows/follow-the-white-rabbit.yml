@@ -13,7 +13,7 @@ jobs:
     uses: coryzibell/nebuchadnezzar/.github/workflows/follow-the-white-rabbit.yml@v1
     with:
       needs-openssl: false
-      # x86_64-unknown-linux-musl/FreeBSD: no prebuilt ONNX Runtime binaries
+      # x86_64-unknown-linux-musl, FreeBSD: no prebuilt ONNX Runtime binaries
       # x86_64-apple-darwin: ort dropped Intel Mac support upstream (ort 2.0+)
       exclude-targets: x86_64-unknown-linux-musl,x86_64-unknown-freebsd,x86_64-apple-darwin
     secrets:
