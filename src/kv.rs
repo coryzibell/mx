@@ -1271,9 +1271,7 @@ impl KvStore {
             // Rollback in-memory mutations so the KvStore stays clean.
             let key_def = self.schema.keys.remove(new_key).expect("just inserted");
             self.schema.keys.insert(old_key.to_string(), key_def);
-            if had_data
-                && let Some(data_value) = self.data.entries.remove(new_key)
-            {
+            if had_data && let Some(data_value) = self.data.entries.remove(new_key) {
                 self.data.entries.insert(old_key.to_string(), data_value);
             }
             return Err(KvError::Other(e));
