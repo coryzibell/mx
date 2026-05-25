@@ -8492,17 +8492,11 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
 
         // Push some data into flavor_history so there is something to rename
-        let push1 = store
-            .push("flavor_history", "matcha", None, None)
-            .unwrap();
-        let push2 = store
-            .push("flavor_history", "hojicha", None, None)
-            .unwrap();
+        let push1 = store.push("flavor_history", "matcha", None, None).unwrap();
+        let push2 = store.push("flavor_history", "hojicha", None, None).unwrap();
         store.save().unwrap();
 
-        store
-            .rename_key("flavor_history", "tea_history")
-            .unwrap();
+        store.rename_key("flavor_history", "tea_history").unwrap();
 
         // Old key gone from schema and data
         assert!(!store.schema.keys.contains_key("flavor_history"));
@@ -8528,9 +8522,7 @@ count = { type = "number" }
     fn rename_key_old_key_not_found() {
         let (mut store, _dir) = setup_store(test_schema());
 
-        let err = store
-            .rename_key("nonexistent", "something")
-            .unwrap_err();
+        let err = store.rename_key("nonexistent", "something").unwrap_err();
         assert!(
             matches!(err, KvError::KeyNotFound(ref k) if k == "nonexistent"),
             "Expected KeyNotFound, got: {err}"
@@ -8541,9 +8533,7 @@ count = { type = "number" }
     fn rename_key_new_key_already_exists() {
         let (mut store, _dir) = setup_store(test_schema());
 
-        let err = store
-            .rename_key("warmth", "capped")
-            .unwrap_err();
+        let err = store.rename_key("warmth", "capped").unwrap_err();
         assert!(
             matches!(err, KvError::DataValidation { .. }),
             "Expected DataValidation, got: {err}"
@@ -8556,9 +8546,7 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
 
         // Dots are rejected
-        let err = store
-            .rename_key("warmth", "bad.name")
-            .unwrap_err();
+        let err = store.rename_key("warmth", "bad.name").unwrap_err();
         assert!(
             matches!(err, KvError::DataValidation { .. }),
             "Expected DataValidation, got: {err}"
@@ -8572,9 +8560,7 @@ count = { type = "number" }
         );
 
         // Special chars rejected
-        let err = store
-            .rename_key("warmth", "no spaces!")
-            .unwrap_err();
+        let err = store.rename_key("warmth", "no spaces!").unwrap_err();
         assert!(
             matches!(err, KvError::DataValidation { .. }),
             "Expected DataValidation, got: {err}"
@@ -8615,21 +8601,17 @@ count = { type = "number" }
         store.save().unwrap();
 
         // Serialize before rename
-        let before = serde_json::to_string(
-            store.data.entries.get("flavor_history").unwrap(),
-        )
-        .unwrap();
+        let before =
+            serde_json::to_string(store.data.entries.get("flavor_history").unwrap()).unwrap();
 
-        store
-            .rename_key("flavor_history", "tea_log")
-            .unwrap();
+        store.rename_key("flavor_history", "tea_log").unwrap();
 
         // Serialize after rename -- should be identical
-        let after = serde_json::to_string(
-            store.data.entries.get("tea_log").unwrap(),
-        )
-        .unwrap();
+        let after = serde_json::to_string(store.data.entries.get("tea_log").unwrap()).unwrap();
 
-        assert_eq!(before, after, "Serialized data should be identical after rename");
+        assert_eq!(
+            before, after,
+            "Serialized data should be identical after rename"
+        );
     }
 }
