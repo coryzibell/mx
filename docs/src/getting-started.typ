@@ -170,6 +170,9 @@ mx kv update projects --id 42 --data '{"status":"done"}'
 mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
+# Rename a key (preserves all entries and data)
+mx kv rename old_decisions archived_decisions
+
 # JSON output for scripting and jq piping
 mx kv last projects --count 5 --json | jq '.[].data.status'
 mx kv count shipped --json | jq '.count'

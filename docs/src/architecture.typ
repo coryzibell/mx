@@ -626,6 +626,15 @@ exposed through `push --create <type>` at the CLI layer, where the handler
 calls `add_key_to_schema` before the normal push path. If the key already
 exists, the method is a no-op.
 
+The `rename_key()` method moves a key from one name to another in both the
+schema and data files. It validates the new name, checks that the old key
+exists and the new key does not, then atomically swaps the in-memory
+entries before persisting. Data is written first (higher-value file), then
+schema. If the data write fails, in-memory mutations are rolled back. Entry
+IDs are stable across renames -- they were hashed from the original key
+name at creation time and are never regenerated. This is exposed through
+`mx kv rename <old> <new>` at the CLI layer.
+
 === Per-agent keying
 
 The active agent is determined by the `MX_CURRENT_AGENT` environment variable.

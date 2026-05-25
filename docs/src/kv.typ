@@ -935,6 +935,27 @@ manual action is needed.
   ),
 )
 
+#command(
+  "mx kv rename <old-key> <new-key>",
+  [Rename a key, preserving all entries and data. The old key is removed
+  from both the schema (TOML) and data (JSON) files, and all its content
+  -- type definition, constraints, entries, timestamps, structured data,
+  memory links -- is moved to the new key name. Entry IDs are stable and
+  do not change.
+
+  The new key name is validated with the same rules as `push --create`:
+  alphanumeric characters, underscores, and hyphens only, maximum 128
+  characters, no dots.
+
+  Persistence order: the data file is written first (higher-value file),
+  then the schema file. If the data write fails, in-memory state is
+  rolled back and no files are modified.],
+  examples: (
+    "mx kv rename session_goal current_goal",
+    "mx kv rename old_decisions archived_decisions",
+  ),
+)
+
 == Memory linking
 
 History, list, and state keys can be linked to a memory graph entry via the
