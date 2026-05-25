@@ -1187,8 +1187,8 @@ impl KvStore {
     /// formatting -- this matches the existing pattern established by
     /// `add_key_to_schema` which re-parses after appending.
     fn save_schema(&self) -> Result<()> {
-        let toml_str = toml::to_string_pretty(&self.schema)
-            .context("Failed to serialize schema to TOML")?;
+        let toml_str =
+            toml::to_string_pretty(&self.schema).context("Failed to serialize schema to TOML")?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.schema_path.parent() {
