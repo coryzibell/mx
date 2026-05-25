@@ -271,6 +271,10 @@ worked examples, see the **[filesystem layout](https://coryzibell.github.io/mx/p
 
 For the complete command reference, configuration guide, and architecture docs, see the [full documentation](https://coryzibell.github.io/mx/).
 
+## Build Notes
+
+`tract-linalg` is patched via `[patch.crates-io]` in `Cargo.toml` to fix ARM64 NEON assembly compilation on `aarch64-pc-windows-msvc`, where MSVC's `cl.exe` silently ignores GAS-syntax `.S` files. The patch lives in [coryzibell/tract](https://github.com/coryzibell/tract/tree/fix/aarch64-msvc-asm); an upstream fix is pending.
+
 ## Status
 
 Published on [crates.io](https://crates.io/crates/mx). The API surface is evolving.
