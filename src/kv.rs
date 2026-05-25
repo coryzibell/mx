@@ -178,13 +178,13 @@ impl From<anyhow::Error> for KvError {
 // ---------------------------------------------------------------------------
 
 /// Top-level schema definition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Schema {
     pub keys: BTreeMap<String, KeyDef>,
 }
 
 /// Definition of a single key in the schema.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KeyDef {
     #[serde(rename = "type")]
     pub value_type: ValueType,
@@ -215,7 +215,7 @@ pub struct KeyDef {
 }
 
 /// The type of a data field in a schema's `[keys.X.data]` section.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DataFieldType {
     String,
@@ -238,7 +238,7 @@ impl std::fmt::Display for DataFieldType {
 }
 
 /// Definition of a single data field within a key's `[keys.X.data]` section.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DataFieldDef {
     #[serde(rename = "type")]
     pub field_type: DataFieldType,
@@ -251,7 +251,7 @@ pub struct DataFieldDef {
     pub default: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueType {
     Counter,
@@ -1176,6 +1176,90 @@ impl KvStore {
             ))
         })?;
         self.schema = schema;
+
+        Ok(())
+    }
+
+    /// Atomic write of the schema file: serialize to TOML, write to tmp, fsync, rename.
+    ///
+    /// This is the schema counterpart of `save()` (which persists only the data
+    /// file). Schema serialization via `toml = "0.8"` drops comments and custom
+    /// formatting -- this matches the existing pattern established by
+    /// `add_key_to_schema` which re-parses after appending.
+    fn save_schema(&self) -> Result<()> {
+        let toml_str = toml::to_string_pretty(&self.schema)
+            .context("Failed to serialize schema to TOML")?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = self.schema_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+
+        let tmp_path = self
+            .schema_path
+            .with_extension(format!("tmp.{}", std::process::id()));
+
+        {
+            let mut f = fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            f.write_all(toml_str.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        fs::rename(&tmp_path, &self.schema_path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                self.schema_path.display()
+            )
+        })?;
+
+        Ok(())
+    }
+
+    /// Rename a key in both schema and data, preserving all entries.
+    ///
+    /// Atomic: mutates in-memory state fully before writing either file, so
+    /// if either write fails the on-disk state is unchanged (the old data is
+    /// still there).
+    ///
+    /// Entry IDs are stable -- they were hashed from the original key name at
+    /// creation time and are never regenerated.
+    pub fn rename_key(&mut self, old_key: &str, new_key: &str) -> Result<(), KvError> {
+        // Validate new key name (convert Other errors to DataValidation for
+        // proper exit code mapping -- validate_key_name uses Other internally)
+        Self::validate_key_name(new_key).map_err(|e| match e {
+            KvError::Other(inner) => KvError::DataValidation {
+                message: inner.to_string(),
+            },
+            other => other,
+        })?;
+
+        // old_key must exist in schema
+        if !self.schema.keys.contains_key(old_key) {
+            return Err(KvError::KeyNotFound(old_key.to_string()));
+        }
+
+        // new_key must not already exist
+        if self.schema.keys.contains_key(new_key) {
+            return Err(KvError::DataValidation {
+                message: format!("Key already exists: {}", new_key),
+            });
+        }
+
+        // Move schema entry: remove old, insert new
+        let key_def = self.schema.keys.remove(old_key).expect("checked above");
+        self.schema.keys.insert(new_key.to_string(), key_def);
+
+        // Move data entry (if it exists -- key might have no data yet)
+        if let Some(data_value) = self.data.entries.remove(old_key) {
+            self.data.entries.insert(new_key.to_string(), data_value);
+        }
+
+        // Persist both files. Schema first, then data.
+        self.save_schema().map_err(KvError::Other)?;
+        self.save().map_err(KvError::Other)?;
 
         Ok(())
     }
