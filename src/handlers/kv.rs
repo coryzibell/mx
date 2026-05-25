@@ -1184,7 +1184,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
         KvCommands::Rename { old_key, new_key } => match store.rename_key(&old_key, &new_key) {
             Ok(()) => {
-                println!("Key renamed: {} \u{2192} {}", old_key, new_key);
+                println!("Renamed {} to {}", old_key, new_key);
                 Ok(kv::EXIT_OK)
             }
             Err(e) => handle_kv_err(e),

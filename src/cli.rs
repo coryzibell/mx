@@ -2015,7 +2015,7 @@ pub enum KvCommands {
         dry_run: bool,
     },
 
-    /// Rename a key (schema + data migration)
+    /// Rename a key, preserving all entries and data
     Rename {
         /// Current key name
         old_key: String,
