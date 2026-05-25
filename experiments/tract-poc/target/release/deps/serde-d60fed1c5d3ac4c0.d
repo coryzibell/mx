@@ -1,0 +1,14 @@
+/home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/deps/serde-d60fed1c5d3ac4c0.d: /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/build/serde-210cff9733845105/out/private.rs
+
+/home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/deps/libserde-d60fed1c5d3ac4c0.rlib: /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/build/serde-210cff9733845105/out/private.rs
+
+/home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/deps/libserde-d60fed1c5d3ac4c0.rmeta: /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/build/serde-210cff9733845105/out/private.rs
+
+/home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/charlie/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/build/serde-210cff9733845105/out/private.rs:
+
+# env-dep:OUT_DIR=/home/charlie/recipes/coryzibell/mx/experiments/tract-poc/target/release/build/serde-210cff9733845105/out
