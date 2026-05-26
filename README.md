@@ -181,6 +181,9 @@ mx kv update projects --id 42 --data '{"obsolete_field":null}'
 mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
+# Rename a key (preserves all entries, IDs, and data)
+mx kv rename old_decisions archived_decisions
+
 # Per-entry memory links (bridge KV entries to the knowledge graph)
 mx kv push decisions "adopted memory links" --memory kn-abc123
 mx kv set decisions --id 17 --memory kn-abc123

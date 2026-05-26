@@ -1182,6 +1182,14 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
+        KvCommands::Rename { old_key, new_key } => match store.rename_key(&old_key, &new_key) {
+            Ok(()) => {
+                println!("Renamed {} to {}", old_key, new_key);
+                Ok(kv::EXIT_OK)
+            }
+            Err(e) => handle_kv_err(e),
+        },
+
         KvCommands::Keys => {
             let keys = store.keys();
             for (name, vtype, desc) in &keys {

@@ -2015,6 +2015,14 @@ pub enum KvCommands {
         dry_run: bool,
     },
 
+    /// Rename a key, preserving all entries and data
+    Rename {
+        /// Current key name
+        old_key: String,
+        /// New key name
+        new_key: String,
+    },
+
     /// List all defined keys with their types and descriptions
     Keys,
 }

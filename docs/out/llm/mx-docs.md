@@ -299,6 +299,9 @@ mx kv update projects --id 42 --data '{"status":"done"}'
 mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
+# Rename a key (preserves all entries and data)
+mx kv rename old_decisions archived_decisions
+
 # JSON output for scripting and jq piping
 mx kv last projects --count 5 --json | jq '.[].data.status'
 mx kv count shipped --json | jq '.count'
@@ -4025,6 +4028,32 @@ mx kv reset decisions
 mx kv reset context
 ```
 
+## `mx kv rename <old-key> <new-key>`
+
+Rename a key, preserving all entries and data. The old key is removed
+from both the schema (TOML) and data (JSON) files, and all its content
+-- type definition, constraints, entries, timestamps, structured data,
+memory links -- is moved to the new key name. Entry IDs are stable and
+do not change.
+
+The new key name is validated with the same rules as `push --create`:
+alphanumeric characters, underscores, and hyphens only, maximum 128
+characters, no dots.
+
+Persistence order: the data file is written first (higher-value file),
+then the schema file. If the data write fails, in-memory state is rolled
+back and no files are modified.
+
+### Examples
+
+``` bash
+mx kv rename session_goal current_goal
+```
+
+``` bash
+mx kv rename old_decisions archived_decisions
+```
+
 ## Memory linking
 
 History, list, and state keys can be linked to a memory graph entry via
@@ -7286,6 +7315,15 @@ content, and re-parses the file to update the in-memory `Schema`. This
 is exposed through `push --create <type>` at the CLI layer, where the
 handler calls `add_key_to_schema` before the normal push path. If the
 key already exists, the method is a no-op.
+
+The `rename_key()` method moves a key from one name to another in both
+the schema and data files. It validates the new name, checks that the
+old key exists and the new key does not, then atomically swaps the
+in-memory entries before persisting. Data is written first (higher-value
+file), then schema. If the data write fails, in-memory mutations are
+rolled back. Entry IDs are stable across renames -- they were hashed
+from the original key name at creation time and are never regenerated.
+This is exposed through `mx kv rename <old> <new>` at the CLI layer.
 
 ### Per-agent keying
 

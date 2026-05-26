@@ -178,13 +178,13 @@ impl From<anyhow::Error> for KvError {
 // ---------------------------------------------------------------------------
 
 /// Top-level schema definition.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Schema {
     pub keys: BTreeMap<String, KeyDef>,
 }
 
 /// Definition of a single key in the schema.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KeyDef {
     #[serde(rename = "type")]
     pub value_type: ValueType,
@@ -215,7 +215,7 @@ pub struct KeyDef {
 }
 
 /// The type of a data field in a schema's `[keys.X.data]` section.
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DataFieldType {
     String,
@@ -238,7 +238,7 @@ impl std::fmt::Display for DataFieldType {
 }
 
 /// Definition of a single data field within a key's `[keys.X.data]` section.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DataFieldDef {
     #[serde(rename = "type")]
     pub field_type: DataFieldType,
@@ -251,7 +251,7 @@ pub struct DataFieldDef {
     pub default: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueType {
     Counter,
@@ -1087,28 +1087,33 @@ impl KvStore {
     /// and names with other special characters.
     fn validate_key_name(key: &str) -> Result<(), KvError> {
         if key.is_empty() {
-            return Err(KvError::Other(anyhow::anyhow!("key name cannot be empty")));
+            return Err(KvError::DataValidation {
+                message: "key name cannot be empty".to_string(),
+            });
         }
         if key.len() > 128 {
-            return Err(KvError::Other(anyhow::anyhow!(
-                "key name too long ({} chars, max 128)",
-                key.len()
-            )));
+            return Err(KvError::DataValidation {
+                message: format!("key name too long ({} chars, max 128)", key.len()),
+            });
         }
         if key.contains('.') {
-            return Err(KvError::Other(anyhow::anyhow!(
-                "key name '{}' cannot contain dots -- they require TOML quoting and create confusion",
-                key
-            )));
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key name '{}' cannot contain dots -- they require TOML quoting and create confusion",
+                    key
+                ),
+            });
         }
         if !key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
-            return Err(KvError::Other(anyhow::anyhow!(
-                "key name '{}' contains invalid characters -- only alphanumeric, underscores, and hyphens are allowed",
-                key
-            )));
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key name '{}' contains invalid characters -- only alphanumeric, underscores, and hyphens are allowed",
+                    key
+                ),
+            });
         }
         Ok(())
     }
@@ -1176,6 +1181,105 @@ impl KvStore {
             ))
         })?;
         self.schema = schema;
+
+        Ok(())
+    }
+
+    /// Atomic write of the schema file: serialize to TOML, write to tmp, fsync, rename.
+    ///
+    /// This is the schema counterpart of `save()` (which persists only the data
+    /// file). Schema serialization via `toml = "0.8"` drops comments and custom
+    /// formatting -- this matches the existing pattern established by
+    /// `add_key_to_schema` which re-parses after appending.
+    ///
+    /// Takes `&self` rather than `&mut self` because it only serializes the
+    /// current schema to disk -- unlike `save()`, it does not update timestamps
+    /// or other mutable bookkeeping.
+    fn save_schema(&self) -> Result<()> {
+        let toml_str =
+            toml::to_string_pretty(&self.schema).context("Failed to serialize schema to TOML")?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = self.schema_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+
+        let tmp_path = self
+            .schema_path
+            .with_extension(format!("tmp.{}", std::process::id()));
+
+        {
+            let mut f = fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temp file: {}", tmp_path.display()))?;
+            f.write_all(toml_str.as_bytes())?;
+            f.sync_all()?;
+        }
+
+        fs::rename(&tmp_path, &self.schema_path).with_context(|| {
+            format!(
+                "Failed to rename {} -> {}",
+                tmp_path.display(),
+                self.schema_path.display()
+            )
+        })?;
+
+        Ok(())
+    }
+
+    /// Rename a key, preserving all entries and data.
+    ///
+    /// Mutates in-memory state fully before writing either file. Data is
+    /// persisted first (higher-value file), then schema. If the data write
+    /// fails, in-memory mutations are rolled back so the `KvStore` stays
+    /// clean. If data succeeds but the schema write fails, the on-disk data
+    /// file already contains the renamed key while the schema still
+    /// references the old name -- a narrow consistency gap that callers
+    /// should be aware of. In practice both writes target the same
+    /// directory, so a failure between them is unlikely.
+    ///
+    /// Entry IDs are stable -- they were hashed from the original key name at
+    /// creation time and are never regenerated.
+    pub fn rename_key(&mut self, old_key: &str, new_key: &str) -> Result<(), KvError> {
+        // Validate new key name
+        Self::validate_key_name(new_key)?;
+
+        // old_key must exist in schema
+        if !self.schema.keys.contains_key(old_key) {
+            return Err(KvError::KeyNotFound(old_key.to_string()));
+        }
+
+        // new_key must not already exist
+        if self.schema.keys.contains_key(new_key) {
+            return Err(KvError::DataValidation {
+                message: format!("Key already exists: {}", new_key),
+            });
+        }
+
+        // Move schema entry: remove old, insert new
+        let key_def = self.schema.keys.remove(old_key).expect("checked above");
+        self.schema.keys.insert(new_key.to_string(), key_def);
+
+        // Move data entry (if it exists -- key might have no data yet)
+        let had_data = self.data.entries.contains_key(old_key);
+        if let Some(data_value) = self.data.entries.remove(old_key) {
+            self.data.entries.insert(new_key.to_string(), data_value);
+        }
+
+        // Persist data first (higher-value file), then schema.
+        if let Err(e) = self.save() {
+            // Rollback in-memory mutations so the KvStore stays clean.
+            let key_def = self.schema.keys.remove(new_key).expect("just inserted");
+            self.schema.keys.insert(old_key.to_string(), key_def);
+            if had_data && let Some(data_value) = self.data.entries.remove(new_key) {
+                self.data.entries.insert(old_key.to_string(), data_value);
+            }
+            return Err(KvError::Other(e));
+        }
+
+        // Schema write -- if this fails, data is already persisted with the
+        // new key name. See doc comment for the consistency trade-off.
+        self.save_schema().map_err(KvError::Other)?;
 
         Ok(())
     }
@@ -8377,5 +8481,135 @@ count = { type = "number" }
         assert_eq!(result.id, push.id);
         let after = get_history_entry(&store, "flavor_history", push.index);
         assert_eq!(after.value, "gyokuro-updated");
+    }
+
+    // -- rename_key --
+
+    #[test]
+    fn rename_key_happy_path() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // Push some data into flavor_history so there is something to rename
+        let push1 = store.push("flavor_history", "matcha", None, None).unwrap();
+        let push2 = store.push("flavor_history", "hojicha", None, None).unwrap();
+        store.save().unwrap();
+
+        store.rename_key("flavor_history", "tea_history").unwrap();
+
+        // Old key gone from schema and data
+        assert!(!store.schema.keys.contains_key("flavor_history"));
+        assert!(!store.data.entries.contains_key("flavor_history"));
+
+        // New key present in schema and data
+        assert!(store.schema.keys.contains_key("tea_history"));
+        assert!(store.data.entries.contains_key("tea_history"));
+
+        // Data preserved: IDs and values intact (newest entry first)
+        let entries = match store.data.entries.get("tea_history").unwrap() {
+            DataValue::History { entries, .. } => entries,
+            _ => panic!("Expected History"),
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].value, "hojicha");
+        assert_eq!(entries[0].id, push2.id);
+        assert_eq!(entries[1].value, "matcha");
+        assert_eq!(entries[1].id, push1.id);
+    }
+
+    #[test]
+    fn rename_key_old_key_not_found() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store.rename_key("nonexistent", "something").unwrap_err();
+        assert!(
+            matches!(err, KvError::KeyNotFound(ref k) if k == "nonexistent"),
+            "Expected KeyNotFound, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rename_key_new_key_already_exists() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store.rename_key("warmth", "capped").unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "Expected DataValidation, got: {err}"
+        );
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn rename_key_invalid_new_key_name() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // Dots are rejected
+        let err = store.rename_key("warmth", "bad.name").unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "Expected DataValidation, got: {err}"
+        );
+
+        // Empty name rejected
+        let err = store.rename_key("warmth", "").unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "Expected DataValidation, got: {err}"
+        );
+
+        // Special chars rejected
+        let err = store.rename_key("warmth", "no spaces!").unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "Expected DataValidation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rename_key_with_no_data_entries() {
+        // Key exists in schema but has no data entries yet
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // warmth is a counter with no data pushed yet -- but counters get a
+        // default. Use a fresh history key via add_key_to_schema instead.
+        store
+            .add_key_to_schema("empty_history", "history", None)
+            .unwrap();
+        assert!(!store.data.entries.contains_key("empty_history"));
+
+        store
+            .rename_key("empty_history", "renamed_history")
+            .unwrap();
+
+        assert!(!store.schema.keys.contains_key("empty_history"));
+        assert!(store.schema.keys.contains_key("renamed_history"));
+        // No crash, no data entry created out of thin air
+        assert!(!store.data.entries.contains_key("empty_history"));
+    }
+
+    #[test]
+    fn rename_key_data_preservation() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        // Push entries with data payloads
+        let data_json = serde_json::json!({"mood": "calm"});
+        store
+            .push("flavor_history", "sencha", Some(data_json.clone()), None)
+            .unwrap();
+        store.save().unwrap();
+
+        // Serialize before rename
+        let before =
+            serde_json::to_string(store.data.entries.get("flavor_history").unwrap()).unwrap();
+
+        store.rename_key("flavor_history", "tea_log").unwrap();
+
+        // Serialize after rename -- should be identical
+        let after = serde_json::to_string(store.data.entries.get("tea_log").unwrap()).unwrap();
+
+        assert_eq!(
+            before, after,
+            "Serialized data should be identical after rename"
+        );
     }
 }
