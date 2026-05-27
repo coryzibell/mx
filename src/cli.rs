@@ -421,9 +421,9 @@ pub enum MemoryCommands {
         #[arg(long)]
         semantic: bool,
 
-        /// Activate returned results (mark as intentionally consumed)
+        /// Activate returned results (mark as intentionally consumed, resets decay clock)
         #[arg(long)]
-        select: bool,
+        activate: bool,
     },
 
     /// List entries by category
@@ -1143,7 +1143,7 @@ pub enum MemoryCommands {
         #[arg(long, default_value = "1")]
         amount: i32,
 
-        /// Maximum resonance cap (default: 10). Entries at resonance 10+ with foundational or transformative resonance_type are immune to decay.
+        /// Maximum resonance cap (default: 10)
         #[arg(long, default_value = "10")]
         cap: i32,
 

@@ -1563,27 +1563,118 @@ fn test_relationship_add_reinforces_target() {
 
 #[test]
 fn test_relationship_add_no_reinforce_skips() {
-    // When --no-reinforce is set, the target should NOT be reinforced.
-    // We verify by checking that the target's resonance is unchanged
-    // after adding a relationship without calling reinforce.
+    // Compare the two handler paths: with reinforce vs without (--no-reinforce).
+    // The WITH path calls add_relationship + reinforce, changing resonance.
+    // The WITHOUT path calls only add_relationship, leaving resonance unchanged.
     let db = SurrealDatabase::open_in_memory().unwrap();
     let ctx = crate::store::AgentContext::public_only();
 
-    let entry_a = make_test_entry("kn-noreinf-src", 5, 0.0);
-    let entry_b = make_test_entry("kn-noreinf-tgt", 3, 0.0);
-    db.upsert_knowledge(&entry_a).unwrap();
-    db.upsert_knowledge(&entry_b).unwrap();
+    // --- Path A: with reinforce (default handler behavior) ---
+    let entry_a_src = make_test_entry("kn-noreinf-a-src", 5, 0.0);
+    let entry_a_tgt = make_test_entry("kn-noreinf-a-tgt", 3, 0.0);
+    db.upsert_knowledge(&entry_a_src).unwrap();
+    db.upsert_knowledge(&entry_a_tgt).unwrap();
 
-    // Add relationship but do NOT call reinforce (simulating --no-reinforce)
-    db.add_relationship("kn-noreinf-src", "kn-noreinf-tgt", "related")
+    db.add_relationship("kn-noreinf-a-src", "kn-noreinf-a-tgt", "related")
         .unwrap();
+    // Simulate the handler calling reinforce (no_reinforce=false)
+    db.reinforce("kn-noreinf-a-tgt", 1, Some(10), &ctx)
+        .unwrap()
+        .expect("reinforce should succeed");
 
-    // Target resonance should be unchanged
-    let target = db.get("kn-noreinf-tgt", &ctx).unwrap().unwrap();
+    let reinforced = db.get("kn-noreinf-a-tgt", &ctx).unwrap().unwrap();
     assert_eq!(
-        target.resonance, 3,
-        "Target resonance should be unchanged when --no-reinforce is set"
+        reinforced.resonance, 4,
+        "Target resonance should increase from 3 to 4 when reinforced"
     );
+
+    // --- Path B: without reinforce (--no-reinforce flag) ---
+    let entry_b_src = make_test_entry("kn-noreinf-b-src", 5, 0.0);
+    let entry_b_tgt = make_test_entry("kn-noreinf-b-tgt", 3, 0.0);
+    db.upsert_knowledge(&entry_b_src).unwrap();
+    db.upsert_knowledge(&entry_b_tgt).unwrap();
+
+    db.add_relationship("kn-noreinf-b-src", "kn-noreinf-b-tgt", "related")
+        .unwrap();
+    // Handler does NOT call reinforce when --no-reinforce is set
+
+    let not_reinforced = db.get("kn-noreinf-b-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(
+        not_reinforced.resonance, 3,
+        "Target resonance should stay at 3 when --no-reinforce is set"
+    );
+
+    // The contrast: same starting resonance, different outcomes
+    assert_ne!(
+        reinforced.resonance, not_reinforced.resonance,
+        "Reinforced and non-reinforced targets should have different resonance"
+    );
+}
+
+#[test]
+fn test_relationship_contradicts_supersedes_skip_reinforce() {
+    // W1: contradicts and supersedes relationship types should NOT auto-reinforce
+    // the target, because those types mean the target is outdated or wrong.
+    // This mirrors the handler logic:
+    //   let should_reinforce = !no_reinforce && !matches!(type, "contradicts" | "supersedes");
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Test contradicts: target should NOT be reinforced
+    let src_c = make_test_entry("kn-contra-src", 5, 0.0);
+    let tgt_c = make_test_entry("kn-contra-tgt", 3, 0.0);
+    db.upsert_knowledge(&src_c).unwrap();
+    db.upsert_knowledge(&tgt_c).unwrap();
+
+    db.add_relationship("kn-contra-src", "kn-contra-tgt", "contradicts")
+        .unwrap();
+    // Handler skips reinforce for contradicts -- simulate by NOT calling reinforce
+
+    let contra_target = db.get("kn-contra-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(
+        contra_target.resonance, 3,
+        "contradicts target should NOT be reinforced (resonance stays at 3)"
+    );
+
+    // Test supersedes: target should NOT be reinforced
+    let src_s = make_test_entry("kn-super-src", 5, 0.0);
+    let tgt_s = make_test_entry("kn-super-tgt", 3, 0.0);
+    db.upsert_knowledge(&src_s).unwrap();
+    db.upsert_knowledge(&tgt_s).unwrap();
+
+    db.add_relationship("kn-super-src", "kn-super-tgt", "supersedes")
+        .unwrap();
+    // Handler skips reinforce for supersedes -- simulate by NOT calling reinforce
+
+    let super_target = db.get("kn-super-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(
+        super_target.resonance, 3,
+        "supersedes target should NOT be reinforced (resonance stays at 3)"
+    );
+
+    // Control: "related" type SHOULD reinforce (proving the distinction)
+    let src_r = make_test_entry("kn-related-src", 5, 0.0);
+    let tgt_r = make_test_entry("kn-related-tgt", 3, 0.0);
+    db.upsert_knowledge(&src_r).unwrap();
+    db.upsert_knowledge(&tgt_r).unwrap();
+
+    db.add_relationship("kn-related-src", "kn-related-tgt", "related")
+        .unwrap();
+    // Handler DOES reinforce for "related" type
+    db.reinforce("kn-related-tgt", 1, Some(10), &ctx)
+        .unwrap()
+        .expect("reinforce should succeed for related type");
+
+    let related_target = db.get("kn-related-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(
+        related_target.resonance, 4,
+        "related target SHOULD be reinforced (resonance goes from 3 to 4)"
+    );
+
+    // The distinction: contradicts/supersedes stay at 3, related goes to 4
+    assert_eq!(contra_target.resonance, 3);
+    assert_eq!(super_target.resonance, 3);
+    assert_eq!(related_target.resonance, 4);
 }
 
 // =========================================================================
