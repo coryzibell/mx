@@ -179,6 +179,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     if content_only {
                         if let Some(body) = &entry.body {
                             print!("{}", body);
+                            // Flush stdout explicitly -- `print!` (no newline)
+                            // uses line-buffered stdout which may not flush when
+                            // output is piped to a file or another process.
+                            use std::io::Write;
+                            std::io::stdout().flush()?;
                         }
                     } else if json {
                         println!("{}", serde_json::to_string_pretty(&entry)?);
@@ -732,7 +737,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if !no_auto_anchor {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                eprintln!("  (auto-anchor skipped)");
+                println!("  (auto-anchor skipped)");
             }
 
             if json {
@@ -1254,7 +1259,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if !no_auto_anchor {
                 auto_anchor(&id, db.as_ref(), removed)?;
             } else {
-                eprintln!("  (auto-anchor skipped)");
+                println!("  (auto-anchor skipped)");
             }
 
             if json {
@@ -1314,7 +1319,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if !no_auto_anchor {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                eprintln!("  (auto-anchor skipped)");
+                println!("  (auto-anchor skipped)");
             }
 
             if json {
@@ -1390,7 +1395,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if !no_auto_anchor {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                eprintln!("  (auto-anchor skipped)");
+                println!("  (auto-anchor skipped)");
             }
 
             if json {
@@ -1462,7 +1467,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if !no_auto_anchor {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                eprintln!("  (auto-anchor skipped)");
+                println!("  (auto-anchor skipped)");
             }
 
             if json {
@@ -1571,7 +1576,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 if !no_auto_anchor {
                     auto_anchor(&id, db.as_ref(), None)?;
                 } else {
-                    eprintln!("  (auto-anchor skipped)");
+                    println!("  (auto-anchor skipped)");
                 }
 
                 if json {
@@ -1773,7 +1778,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             entry.anchors.len()
                         );
                     } else {
-                        eprintln!("Entry {} already has anchors, skipping (--fill)", entry.id);
+                        println!("Entry {} already has anchors, skipping (--fill)", entry.id);
                     }
                     continue;
                 }
