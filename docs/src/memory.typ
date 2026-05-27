@@ -332,9 +332,9 @@ engagement. Use `--activate` when you are intentionally consuming the results
 == Wake system <wake>
 
 The wake system provides identity bootstrap for agents. It retrieves
-high-resonance entries ("blooms") and presents them through a ritual that
-verifies the agent's connection to its knowledge. There are several output
-modes and an interactive engage flow.
+high-resonance entries ("blooms") and presents them through a cascade that
+reconnects the agent to its knowledge. The default output is a plain-text
+cascade; a token-based ritual flow is available for programmatic use.
 
 #command(
   "mx memory wake",
@@ -344,12 +344,7 @@ modes and an interactive engage flow.
     ([`-l, --limit`],   [`int`],    [Number of blooms to return. Default: `20`.]),
     ([`--min-resonance`], [`int`],   [Minimum resonance threshold -- get ALL blooms >= this value (overrides `--limit`).]),
     ([`-d, --days`],    [`int`],    [Include memories activated in last N days. Default: `7`.]),
-    ([`--json`],        [`flag`],   [Output as JSON.]),
-    ([`--ritual`],      [`flag`],   [Output as bash ritual script (sequential reading).]),
-    ([`--index`],       [`flag`],   [Output as compact markdown index (for identity loading).]),
     ([`--no-activate`], [`flag`],   [Do not update activation counts.]),
-    ([`-e, --engage`],  [`flag`],   [Interactive engage mode -- verify wake phrases (requires TTY).]),
-    ([`-s, --set-missing`], [`flag`], [Prompt to set missing wake phrases during engage mode. Requires `--engage`.]),
     ([`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.]),
     ([`--bloom-id`],    [`string`], [Bloom ID for `--respond` or `--skip` operations.]),
     ([`--respond`],     [`string`], [Submit wake phrase response for a bloom.]),
@@ -358,24 +353,17 @@ modes and an interactive engage flow.
   ),
   examples: (
     "# Default wake -- top 20 blooms, text output\nmx memory wake",
-    "# Compact index for agent identity loading\nmx memory wake --index",
     "# All blooms with resonance >= 7\nmx memory wake --min-resonance 7",
-    "# Interactive engage mode with wake phrase verification\nmx memory wake --engage",
     "# Token-based ritual (for non-TTY / programmatic use)\nmx memory wake --begin\nmx memory wake --bloom-id kn-abc --respond \"the phrase\" --session tok-xyz\nmx memory wake --bloom-id kn-def --skip --session tok-xyz",
   ),
 )
 
-#note[`MX_CURRENT_AGENT` must be set for wake to function. The wake ritual
-reads blooms ordered by resonance and wake order, then optionally verifies
-the agent can produce each bloom's wake phrase.]
+#note[`MX_CURRENT_AGENT` must be set for wake to function. The wake system
+reads blooms ordered by resonance and wake order.]
 
 === Wake modes
 
-- *Default* (`mx memory wake`): plain text output, blooms listed with titles and content.
-- *JSON* (`--json`): structured output for programmatic consumption.
-- *Ritual* (`--ritual`): bash script that presents blooms sequentially.
-- *Index* (`--index`): compact markdown suitable for loading into agent context.
-- *Engage* (`--engage`): interactive TTY mode where the agent verifies each bloom's wake phrase. Add `--set-missing` to be prompted for phrases on blooms that lack them.
+- *Default* (`mx memory wake`): plain text cascade output, blooms listed with titles and content.
 - *Token-based* (`--begin`, `--respond`, `--skip`): stateless chained ritual for non-interactive environments. Start with `--begin`, then loop with `--respond` or `--skip` using the returned session token and bloom ID.
 
 #command(
