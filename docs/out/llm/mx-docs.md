@@ -1252,8 +1252,9 @@ default; add `--semantic` to use vector embeddings.
 ### Flags
 
   **Flag**       **Type**   **Description**
-  -------------- ---------- ---------------------------------------------------------
+  -------------- ---------- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `--semantic`   `flag`     Use semantic (vector) search instead of keyword search.
+  `--activate`   `flag`     Activate all returned results: resets `last_activated` (decay clock) and increments `activation_count`. Marks results as intentionally consumed rather than just browsed.
 
 ### Examples
 
@@ -1269,9 +1270,21 @@ mx memory search "how to handle timeouts" --semantic
 mx memory search "agent bootstrap" -c recipe,method --limit 5
 ```
 
+``` bash
+# Search and activate results (mark as consumed)
+mx memory search "retry pattern" --activate
+```
+
 ::: {.admonition .note}
 **NOTE:** `search` accepts all shared filter flags. Semantic search
 requires entries to have embeddings generated via `mx memory embed`.
+:::
+
+::: {.admonition .tip}
+**TIP:** By default, search does not activate results -- browsing is not
+the same as engagement. Use `--activate` when you are intentionally
+consuming the results (e.g., loading context for a task), not just
+exploring.
 :::
 
 ## `mx memory recent`
@@ -1703,15 +1716,21 @@ mx memory relationships list kn-abc123
 
 ## `mx memory relationships add`
 
-Add a typed relationship between two entries.
+Add a typed relationship between two entries. By default, the target
+entry (`--to`) is automatically reinforced by +1 (capped at 10) when the
+relationship is created -- being linked to means the fact proved
+relevant. The `contradicts` and `supersedes` types are excluded from
+auto-reinforcement because boosting an outdated or contradicted entry
+works against intent.
 
 ### Flags
 
-  **Flag**   **Type**   **Description**
-  ---------- ---------- -------------------------------------------------------------------------------------
-  `--from`   `string`   Source entry ID.
-  `--to`     `string`   Target entry ID.
-  `--type`   `string`   Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.
+  **Flag**           **Type**   **Description**
+  ------------------ ---------- -------------------------------------------------------------------------------------
+  `--from`           `string`   Source entry ID.
+  `--to`             `string`   Target entry ID.
+  `--type`           `string`   Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.
+  `--no-reinforce`   `flag`     Skip automatic reinforcement of the target entry.
 
 ### Examples
 
@@ -1721,6 +1740,11 @@ mx memory relationships add --from kn-abc --to kn-def --type extends
 
 ``` bash
 mx memory relationships add --from kn-abc --to kn-ghi --type supersedes
+```
+
+``` bash
+# Add a relationship without auto-reinforcing the target
+mx memory relationships add --from kn-abc --to kn-def --type related --no-reinforce
 ```
 
 ## `mx memory relationships delete`
@@ -1898,6 +1922,23 @@ mx memory export -f md -o /data/export/
 ```
 
 ## Reinforcement
+
+Reinforcement is the mechanism by which the knowledge graph breathes in
+-- entries that are used, referenced, or linked gain resonance,
+counteracting the natural decay of the exhale. There are three
+reinforcement paths:
+
+1.  **Explicit reinforcement** via `mx memory reinforce` -- directly
+    boost an entry's resonance.
+
+2.  **Auto-reinforce on relationship creation** -- when
+    `mx memory relationships add` links to a target entry, the target is
+    reinforced by +1 (capped at 10). The `contradicts` and `supersedes`
+    types are excluded. Use `--no-reinforce` to opt out.
+
+3.  **Search activation** via `mx memory search --activate` -- marks
+    returned results as intentionally consumed, resetting their decay
+    clock and incrementing their activation count.
 
 ## `mx memory reinforce`
 
@@ -6990,7 +7031,8 @@ in `surreal_db/trait_impl.rs`. The trait surface includes:
 - Lookups: categories, agents, projects, sessions, relationships, tags
 
 - Reinforcement: `reinforce` (increment resonance, update activation
-  metadata)
+  metadata), `update_activations` (batch-reset decay clocks for search
+  activation)
 
 - Backups: pre-mutation content snapshots
 

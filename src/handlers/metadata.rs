@@ -688,12 +688,45 @@ pub(crate) fn handle_relationships(cmd: RelationshipsCommands, config: &IndexCon
             }
         }
 
-        RelationshipsCommands::Add { from, to, r#type } => {
+        RelationshipsCommands::Add {
+            from,
+            to,
+            r#type,
+            no_reinforce,
+        } => {
             let id = db.add_relationship(&from, &to, &r#type)?;
             println!("Added relationship: {}", id);
             println!("  From: {}", from);
             println!("  To: {}", to);
             println!("  Type: {}", r#type);
+
+            // Auto-reinforce the target entry: being linked TO means the fact
+            // proved relevant. Reinforce by +1, capped at 10.
+            // Skip reinforcement for contradicts/supersedes -- those types mean
+            // the target is outdated or wrong; boosting its resonance works
+            // against intent.
+            let should_reinforce =
+                !no_reinforce && !matches!(r#type.as_str(), "contradicts" | "supersedes");
+            if should_reinforce {
+                let ctx = match std::env::var("MX_CURRENT_AGENT") {
+                    Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+                    _ => store::AgentContext::public_only(),
+                };
+                match db.reinforce(&to, 1, Some(10), &ctx) {
+                    Ok(Some(_)) => {
+                        eprintln!("  reinforced {} (+1)", to);
+                    }
+                    Ok(None) => {
+                        eprintln!(
+                            "Warning: could not reinforce '{}' (not found or not visible)",
+                            to
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to reinforce '{}': {}", to, e);
+                    }
+                }
+            }
         }
 
         RelationshipsCommands::Delete { id } => {

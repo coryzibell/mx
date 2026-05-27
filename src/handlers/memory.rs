@@ -41,11 +41,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             query,
             filter,
             semantic,
+            activate,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let ctx = resolve_agent_context(filter.mine, filter.include_private);
 
-            // Note: Search doesn't activate facts - discovery != engagement
+            // Note: Search doesn't activate facts by default - discovery != engagement
+            // Use --activate to explicitly mark results as intentionally consumed.
             // Build filter for database query (resonance and category)
             let db_filter = store::KnowledgeFilter {
                 min_resonance: filter.min_resonance,
@@ -87,9 +89,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("No results for '{}'", query);
             } else {
                 println!("Found {} results:\n", entries.len());
-                for entry in entries {
-                    print_entry_summary(&entry);
+                for entry in &entries {
+                    print_entry_summary(entry);
                 }
+            }
+
+            // --activate: activate returned results (mark as intentionally consumed)
+            if activate && !entries.is_empty() {
+                let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
+                if let Err(e) = db.update_activations(&ids) {
+                    eprintln!("Warning: failed to activate results: {}", e);
+                }
+                eprintln!("Activated {} result(s)", ids.len());
             }
         }
 

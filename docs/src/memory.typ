@@ -148,16 +148,22 @@ flags. These are documented once here and referenced below.
   default; add `--semantic` to use vector embeddings.],
   flags: (
     ([`--semantic`], [`flag`], [Use semantic (vector) search instead of keyword search.]),
+    ([`--activate`], [`flag`], [Activate all returned results: resets `last_activated` (decay clock) and increments `activation_count`. Marks results as intentionally consumed rather than just browsed.]),
   ),
   examples: (
     "mx memory search \"retry pattern\"",
     "mx memory search \"how to handle timeouts\" --semantic",
     "mx memory search \"agent bootstrap\" -c recipe,method --limit 5",
+    "# Search and activate results (mark as consumed)\nmx memory search \"retry pattern\" --activate",
   ),
 )
 
 #note[`search` accepts all shared filter flags. Semantic search requires entries
 to have embeddings generated via `mx memory embed`.]
+
+#tip[By default, search does not activate results -- browsing is not the same as
+engagement. Use `--activate` when you are intentionally consuming the results
+(e.g., loading context for a task), not just exploring.]
 
 #command(
   "mx memory recent",
@@ -470,15 +476,21 @@ semantic connections.
 
 #command(
   "mx memory relationships add",
-  [Add a typed relationship between two entries.],
+  [Add a typed relationship between two entries. By default, the target entry
+  (`--to`) is automatically reinforced by +1 (capped at 10) when the
+  relationship is created -- being linked to means the fact proved relevant.
+  The `contradicts` and `supersedes` types are excluded from auto-reinforcement
+  because boosting an outdated or contradicted entry works against intent.],
   flags: (
-    ([`--from`], [`string`], [Source entry ID.]),
-    ([`--to`],   [`string`], [Target entry ID.]),
-    ([`--type`], [`string`], [Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.]),
+    ([`--from`],         [`string`], [Source entry ID.]),
+    ([`--to`],           [`string`], [Target entry ID.]),
+    ([`--type`],         [`string`], [Relationship type: `related`, `supersedes`, `extends`, `implements`, `contradicts`.]),
+    ([`--no-reinforce`], [`flag`],   [Skip automatic reinforcement of the target entry.]),
   ),
   examples: (
     "mx memory relationships add --from kn-abc --to kn-def --type extends",
     "mx memory relationships add --from kn-abc --to kn-ghi --type supersedes",
+    "# Add a relationship without auto-reinforcing the target\nmx memory relationships add --from kn-abc --to kn-def --type related --no-reinforce",
   ),
 )
 
@@ -616,6 +628,20 @@ removed in a future release.]
 // ═══════════════════════════════════════════════════════════════════════
 
 == Reinforcement <reinforcement>
+
+Reinforcement is the mechanism by which the knowledge graph breathes in --
+entries that are used, referenced, or linked gain resonance, counteracting
+the natural decay of the exhale. There are three reinforcement paths:
+
++ *Explicit reinforcement* via `mx memory reinforce` -- directly boost an
+  entry's resonance.
++ *Auto-reinforce on relationship creation* -- when
+  `mx memory relationships add` links to a target entry, the target is
+  reinforced by +1 (capped at 10). The `contradicts` and `supersedes`
+  types are excluded. Use `--no-reinforce` to opt out.
++ *Search activation* via `mx memory search --activate` -- marks returned
+  results as intentionally consumed, resetting their decay clock and
+  incrementing their activation count.
 
 #command(
   "mx memory reinforce",

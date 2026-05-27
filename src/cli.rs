@@ -420,6 +420,10 @@ pub enum MemoryCommands {
         /// Use semantic (vector) search instead of keyword search
         #[arg(long)]
         semantic: bool,
+
+        /// Activate returned results (mark as intentionally consumed, resets decay clock)
+        #[arg(long)]
+        activate: bool,
     },
 
     /// List entries by category
@@ -1674,6 +1678,10 @@ pub enum RelationshipsCommands {
         /// Relationship type (related, supersedes, extends, implements, contradicts)
         #[arg(long)]
         r#type: String,
+
+        /// Skip automatic reinforcement of the target entry
+        #[arg(long)]
+        no_reinforce: bool,
     },
 
     /// Delete a relationship
