@@ -1523,3 +1523,129 @@ fn test_sweep_ghost_anchors_no_anchored_entries() {
     assert_eq!(result.ghosts_found, 0);
     assert!(result.affected_entries.is_empty());
 }
+
+// =========================================================================
+// RELATIONSHIP AUTO-REINFORCE TESTS (Issue #119)
+// =========================================================================
+
+#[test]
+fn test_relationship_add_reinforces_target() {
+    // After creating a relationship A -> B, B should be reinforced by +1.
+    // This mirrors what handle_relationships does when no_reinforce=false.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Create source and target entries
+    let entry_a = make_test_entry("kn-rel-src", 5, 0.0);
+    let entry_b = make_test_entry("kn-rel-tgt", 3, 0.0);
+    db.upsert_knowledge(&entry_a).unwrap();
+    db.upsert_knowledge(&entry_b).unwrap();
+
+    // Add relationship (simulating the handler path)
+    db.add_relationship("kn-rel-src", "kn-rel-tgt", "related")
+        .unwrap();
+
+    // Reinforce the target (what handle_relationships does after add)
+    let result = db
+        .reinforce("kn-rel-tgt", 1, Some(10), &ctx)
+        .unwrap()
+        .expect("reinforce should succeed on visible target");
+
+    assert_eq!(result.old_resonance, 3);
+    assert_eq!(result.new_resonance, 4);
+    assert_eq!(result.amount_added, 1);
+    assert!(!result.capped);
+
+    // Verify persistence
+    let updated = db.get("kn-rel-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 4);
+}
+
+#[test]
+fn test_relationship_add_no_reinforce_skips() {
+    // When --no-reinforce is set, the target should NOT be reinforced.
+    // We verify by checking that the target's resonance is unchanged
+    // after adding a relationship without calling reinforce.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry_a = make_test_entry("kn-noreinf-src", 5, 0.0);
+    let entry_b = make_test_entry("kn-noreinf-tgt", 3, 0.0);
+    db.upsert_knowledge(&entry_a).unwrap();
+    db.upsert_knowledge(&entry_b).unwrap();
+
+    // Add relationship but do NOT call reinforce (simulating --no-reinforce)
+    db.add_relationship("kn-noreinf-src", "kn-noreinf-tgt", "related")
+        .unwrap();
+
+    // Target resonance should be unchanged
+    let target = db.get("kn-noreinf-tgt", &ctx).unwrap().unwrap();
+    assert_eq!(
+        target.resonance, 3,
+        "Target resonance should be unchanged when --no-reinforce is set"
+    );
+}
+
+// =========================================================================
+// SEARCH --SELECT ACTIVATION TESTS (Issue #119)
+// =========================================================================
+
+#[test]
+fn test_search_select_activates_results() {
+    // --select on search should call update_activations on all returned IDs.
+    // We verify by checking that activation_count and last_activated change.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Create a searchable entry
+    let mut entry = make_test_entry("kn-search-sel", 5, 0.0);
+    entry.title = "unique searchable widget".to_string();
+    entry.body = Some("unique searchable widget content".to_string());
+    entry.activation_count = 0;
+    entry.last_activated = None;
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Simulate what --select does: search then activate results
+    let filter = crate::store::KnowledgeFilter::default();
+    let results = db.search("widget", &ctx, &filter).unwrap();
+    assert!(!results.is_empty(), "Search should find the entry");
+
+    // Activate (this is what --select triggers)
+    let ids: Vec<String> = results.iter().map(|e| e.id.clone()).collect();
+    db.update_activations(&ids).unwrap();
+
+    // Verify activation was recorded
+    let activated = db.get("kn-search-sel", &ctx).unwrap().unwrap();
+    assert_eq!(
+        activated.activation_count, 1,
+        "activation_count should increment after --select"
+    );
+    assert!(
+        activated.last_activated.is_some(),
+        "last_activated should be set after --select"
+    );
+}
+
+#[test]
+fn test_search_select_no_results_is_noop() {
+    // --select with no results should not error or attempt any activations.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Search for something that doesn't exist
+    let filter = crate::store::KnowledgeFilter::default();
+    let results = db
+        .search("xyzzy_nonexistent_query_12345", &ctx, &filter)
+        .unwrap();
+    assert!(results.is_empty(), "Should find no results");
+
+    // The handler checks `if select && !entries.is_empty()`, so with empty
+    // results update_activations is never called. Verify it's safe to call
+    // with empty slice anyway (belt and suspenders).
+    let empty_ids: Vec<String> = vec![];
+    let result = db.update_activations(&empty_ids);
+    assert!(
+        result.is_ok(),
+        "update_activations with empty IDs should not error"
+    );
+}

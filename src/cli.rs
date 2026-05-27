@@ -420,6 +420,10 @@ pub enum MemoryCommands {
         /// Use semantic (vector) search instead of keyword search
         #[arg(long)]
         semantic: bool,
+
+        /// Activate returned results (mark as intentionally consumed)
+        #[arg(long)]
+        select: bool,
     },
 
     /// List entries by category
@@ -1139,7 +1143,7 @@ pub enum MemoryCommands {
         #[arg(long, default_value = "1")]
         amount: i32,
 
-        /// Maximum resonance cap (default: 10)
+        /// Maximum resonance cap (default: 10). Entries at resonance 10+ with foundational or transformative resonance_type are immune to decay.
         #[arg(long, default_value = "10")]
         cap: i32,
 
@@ -1674,6 +1678,10 @@ pub enum RelationshipsCommands {
         /// Relationship type (related, supersedes, extends, implements, contradicts)
         #[arg(long)]
         r#type: String,
+
+        /// Skip automatic reinforcement of the target entry
+        #[arg(long)]
+        no_reinforce: bool,
     },
 
     /// Delete a relationship
