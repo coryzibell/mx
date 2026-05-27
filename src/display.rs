@@ -121,4 +121,3 @@ pub(crate) fn print_wake_cascade(cascade: &store::WakeCascade) {
         .count()
     );
 }
-
