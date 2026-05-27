@@ -363,7 +363,8 @@ knowledge storage. `SurrealDatabase` implements this trait in
 - Listing: `list_by_category`, `count_by_category`, `list_all`, `count`
 - Wake cascade: `wake_cascade` (layered identity retrieval)
 - Lookups: categories, agents, projects, sessions, relationships, tags
-- Reinforcement: `reinforce` (increment resonance, update activation metadata)
+- Reinforcement: `reinforce` (increment resonance, update activation metadata),
+  `update_activations` (batch-reset decay clocks for search activation)
 - Backups: pre-mutation content snapshots
 
 The trait exists to decouple handler logic from the storage backend. In
