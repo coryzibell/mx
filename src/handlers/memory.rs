@@ -1641,16 +1641,16 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("Found {} entries to embed", total);
                 for (idx, entry) in entries.iter().enumerate() {
                     // Check token count if --long-only is specified
-                    if let Some(min_tokens) = long_only {
-                        if let Some(ref tok) = tokenizer {
-                            let text = entry.embedding_text();
-                            let encoding = tok
-                                .encode(text.as_str(), false)
-                                .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
-                            if encoding.get_ids().len() <= min_tokens {
-                                skipped += 1;
-                                continue;
-                            }
+                    if let Some(min_tokens) = long_only
+                        && let Some(ref tok) = tokenizer
+                    {
+                        let text = entry.embedding_text();
+                        let encoding = tok
+                            .encode(text.as_str(), false)
+                            .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+                        if encoding.get_ids().len() <= min_tokens {
+                            skipped += 1;
+                            continue;
                         }
                     }
 
