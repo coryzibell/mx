@@ -76,6 +76,8 @@ impl std::fmt::Display for AuthLevel {
 /// - `MX_SURREAL_AUTH_LEVEL`: Auth level for signin: "root" (default), "namespace"/"ns", or "database"/"db"
 /// - `MX_SURREAL_NS`: Namespace (default: memory)
 /// - `MX_SURREAL_DB`: Database name (default: knowledge)
+/// - `MX_SKIP_SCHEMA`: Set to "1" or "true" to skip auto-schema application on connect
+///   (escape hatch for restricted DB permissions; `mx migrate` ignores this)
 #[derive(Debug, Clone)]
 pub struct SurrealConfig {
     /// Connection mode
@@ -213,13 +215,22 @@ impl SurrealDatabase {
     /// the path is ignored and a network connection is established instead.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = SurrealConfig::from_env();
-        Self::runtime().block_on(Self::open_with_config_async(path, &config, false))
+        Self::runtime().block_on(Self::open_with_config_async(path, &config, false, false))
     }
 
     /// Open database with verbose control
     pub fn open_with_verbose<P: AsRef<Path>>(path: P, verbose: bool) -> Result<Self> {
         let config = SurrealConfig::from_env();
-        Self::runtime().block_on(Self::open_with_config_async(path, &config, verbose))
+        Self::runtime().block_on(Self::open_with_config_async(path, &config, verbose, false))
+    }
+
+    /// Open database connection without applying schema.
+    ///
+    /// Used by `mx migrate` to avoid double schema application — it opens
+    /// the connection, then applies schema explicitly via `apply_schema_explicit`.
+    pub fn open_connection_only<P: AsRef<Path>>(path: P, verbose: bool) -> Result<Self> {
+        let config = SurrealConfig::from_env();
+        Self::runtime().block_on(Self::open_with_config_async(path, &config, verbose, true))
     }
 
     /// Connect using explicit configuration
@@ -227,7 +238,7 @@ impl SurrealDatabase {
     /// For embedded mode, `path` specifies the database location.
     /// For network mode, `path` is ignored.
     pub fn connect<P: AsRef<Path>>(path: P, config: &SurrealConfig) -> Result<Self> {
-        Self::runtime().block_on(Self::open_with_config_async(path, config, false))
+        Self::runtime().block_on(Self::open_with_config_async(path, config, false, false))
     }
 
     /// Internal: open with config, branching on mode
@@ -235,10 +246,13 @@ impl SurrealDatabase {
         path: P,
         config: &SurrealConfig,
         verbose: bool,
+        skip_schema: bool,
     ) -> Result<Self> {
         match config.mode {
-            SurrealMode::Embedded => Self::open_embedded_async(path, config, verbose).await,
-            SurrealMode::Network => Self::open_network_async(config, verbose).await,
+            SurrealMode::Embedded => {
+                Self::open_embedded_async(path, config, verbose, skip_schema).await
+            }
+            SurrealMode::Network => Self::open_network_async(config, verbose, skip_schema).await,
         }
     }
 
@@ -247,6 +261,7 @@ impl SurrealDatabase {
         path: P,
         config: &SurrealConfig,
         verbose: bool,
+        skip_schema: bool,
     ) -> Result<Self> {
         let path = path.as_ref();
 
@@ -288,8 +303,9 @@ impl SurrealDatabase {
             conn: SurrealConnection::Embedded(db),
         };
 
-        // Apply schema (idempotent)
-        instance.apply_schema(verbose, false).await?;
+        if !skip_schema {
+            instance.apply_schema(verbose, false).await?;
+        }
 
         if verbose {
             eprintln!("[mx] Embedded connection established successfully");
@@ -317,7 +333,11 @@ impl SurrealDatabase {
     /// Open network connection via WebSocket
     ///
     /// Authenticates with the remote SurrealDB server using credentials from config.
-    async fn open_network_async(config: &SurrealConfig, verbose: bool) -> Result<Self> {
+    async fn open_network_async(
+        config: &SurrealConfig,
+        verbose: bool,
+        skip_schema: bool,
+    ) -> Result<Self> {
         // Diagnostic: Log connection attempt (to stderr, doesn't interfere with stdout)
         if verbose {
             eprintln!(
@@ -448,9 +468,9 @@ impl SurrealDatabase {
             conn: SurrealConnection::Network(db),
         };
 
-        // Apply schema (idempotent) -- all statements use IF NOT EXISTS,
-        // so this is safe to run on every connection including network mode.
-        instance.apply_schema(verbose, false).await?;
+        if !skip_schema {
+            instance.apply_schema(verbose, false).await?;
+        }
 
         if verbose {
             eprintln!("[mx] Network connection established successfully");
@@ -463,7 +483,7 @@ impl SurrealDatabase {
     #[allow(dead_code)]
     async fn open_async<P: AsRef<Path>>(path: P) -> Result<Self> {
         let config = SurrealConfig::from_env();
-        Self::open_with_config_async(path, &config, false).await
+        Self::open_with_config_async(path, &config, false, false).await
     }
 
     /// Test helper - open temporary database

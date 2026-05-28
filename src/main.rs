@@ -90,7 +90,7 @@ fn main() -> Result<()> {
         Commands::Worktree { command } => handle_worktree(command),
         Commands::Migrate => {
             let db_path = paths::surreal_root().with_extension("surreal");
-            let db = surreal_db::SurrealDatabase::open_with_verbose(&db_path, cli.verbose)?;
+            let db = surreal_db::SurrealDatabase::open_connection_only(&db_path, cli.verbose)?;
             db.apply_schema_explicit(cli.verbose)?;
             eprintln!("[mx] Schema applied successfully");
             Ok(())
