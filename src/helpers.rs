@@ -214,7 +214,7 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     };
 
     // Initialize embedding provider
-    let mut provider = TractProvider::new()?;
+    let provider = TractProvider::new()?;
 
     // Use the entry's embedding_text method (DRY - shared with other embedding paths)
     let embedding_text = entry.embedding_text();
