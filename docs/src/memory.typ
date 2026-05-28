@@ -404,10 +404,49 @@ Embeddings enable semantic search and automatic relationship discovery.
 Each entry can have a vector embedding generated from its title and content.
 Anchors are connections between entries discovered via embedding similarity.
 
+=== Chunked embeddings <chunked-embeddings>
+
+Entries longer than 400 tokens are automatically split into overlapping chunks
+before embedding. This ensures semantic search covers the full content of long
+entries, not just the first 400 tokens.
+
+*How it works:*
+
++ The entry's embedding text (title + body/summary + tags) is tokenized using
+  the BGE-Base-EN-v1.5 tokenizer.
++ If the text fits within 400 tokens, a single embedding is generated and
+  stored on the entry --- exactly as before. No chunks are created.
++ If the text exceeds 400 tokens, it is split into overlapping chunks with a
+  sliding window: 400 tokens per chunk, 100-token overlap (stride 300).
++ Each chunk is embedded separately and stored in the `embedding_chunk` table.
++ A normalized mean vector of all chunk embeddings is stored on the entry's
+  `embedding` field for `auto-anchor` compatibility.
++ The entry's `chunk_count` field records how many chunks were created (0 for
+  unchunked entries).
+
+*Semantic search with chunks:*
+
+When `mx memory search --semantic` runs, it queries both unchunked entry
+embeddings and chunk embeddings in parallel. Results are merged by taking the
+maximum similarity score per entry --- if a chunk from entry X scores 0.92 and
+the entry's mean vector scores 0.85, the entry's final score is 0.92. This
+ensures long entries surface when any section is relevant, not just when the
+overall average is relevant.
+
+#tip[Short entries (≤400 tokens) behave exactly as before --- single embedding,
+no chunks, no behavior change. Chunking only activates for entries that exceed
+the 400-token threshold.]
+
+#note[The `embedding_text()` method on entries no longer truncates body content.
+The chunker handles length management, ensuring no content is lost during
+embedding.]
+
 #command(
   "mx memory embed",
   [Generate a vector embedding for one or all entries. Embeddings power
-  semantic search (`--semantic` flag on `search`) and automatic anchoring.],
+  semantic search (`--semantic` flag on `search`) and automatic anchoring.
+  Long entries (>400 tokens) are automatically split into overlapping chunks,
+  with each chunk embedded separately. Short entries get a single embedding.],
   flags: (
     ([`-a, --all`], [`flag`], [Embed all knowledge entries (instead of a single ID).]),
   ),
