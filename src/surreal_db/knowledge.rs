@@ -828,7 +828,8 @@ impl SurrealDatabase {
         );
 
         // Phase 1b: Search chunks (no visibility filter — applied after dedup)
-        let chunk_sql = "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
+        let chunk_sql =
+            "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM embedding_chunk
             ORDER BY score DESC
             LIMIT $chunk_limit";

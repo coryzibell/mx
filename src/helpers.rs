@@ -202,7 +202,7 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// chunk separately, stores chunks in `embedding_chunk` table, and stores a
 /// mean vector on the entry for auto_anchor compatibility.
 pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
-    use crate::chunking::{chunk_text, ChunkConfig};
+    use crate::chunking::{ChunkConfig, chunk_text};
     use crate::embeddings::{EmbeddingProvider, TractProvider};
 
     let ctx = match std::env::var("MX_CURRENT_AGENT") {

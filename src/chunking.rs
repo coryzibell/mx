@@ -122,7 +122,11 @@ mod tests {
         let long_text = "the quick brown fox jumps over the lazy dog ".repeat(250);
         let chunks = chunk_text(&long_text, &tokenizer, &config);
 
-        assert!(chunks.len() > 1, "Expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "Expected multiple chunks, got {}",
+            chunks.len()
+        );
 
         // Verify chunk indices are sequential
         for (i, chunk) in chunks.iter().enumerate() {
