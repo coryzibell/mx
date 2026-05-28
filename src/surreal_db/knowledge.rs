@@ -277,6 +277,53 @@ impl SurrealDatabase {
          END"
     }
 
+    /// Compute effective resonance in Rust, matching the SQL in `effective_resonance_expr()`.
+    ///
+    /// Tiered decay rates (per week):
+    ///   resonance <= 3  -> 10%/week (base 0.90)
+    ///   resonance 4-5   -> 5%/week  (base 0.95)
+    ///   resonance 6+    -> 2.5%/week (base 0.975)
+    /// foundational/transformative entries are exempt from decay (return raw resonance).
+    fn compute_effective_resonance(entry: &KnowledgeEntry) -> f64 {
+        let resonance = entry.resonance as f64;
+
+        // Foundational and transformative entries are exempt from decay
+        if let Some(ref rtype) = entry.resonance_type {
+            if rtype == "foundational" || rtype == "transformative" {
+                return resonance;
+            }
+        }
+
+        // Determine the reference timestamp: last_activated, falling back to created_at
+        let reference_ts = entry
+            .last_activated
+            .as_deref()
+            .or(entry.created_at.as_deref());
+
+        let weeks_elapsed = match reference_ts {
+            Some(ts) => {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    let elapsed = chrono::Utc::now() - dt.to_utc();
+                    elapsed.num_seconds() as f64 / (7.0 * 86400.0)
+                } else {
+                    0.0
+                }
+            }
+            None => 0.0,
+        };
+
+        // Tiered decay base matching the SQL expression
+        let decay_base: f64 = if entry.resonance <= 3 {
+            0.90
+        } else if entry.resonance <= 5 {
+            0.95
+        } else {
+            0.975
+        };
+
+        resonance * decay_base.powf(weeks_elapsed)
+    }
+
     /// Build resonance filter clauses using computed effective_resonance.
     /// Tiered decay rates:
     ///   resonance <= 3  -> 10%/week (base 0.90)
@@ -898,14 +945,15 @@ impl SurrealDatabase {
 
             // Fetch full entry with visibility/category/resonance filtering
             if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
-                // Apply resonance filter manually (get_knowledge doesn't apply it)
+                // Apply decay-adjusted resonance filter (matching the SQL in effective_resonance_expr)
+                let effective = Self::compute_effective_resonance(&entry);
                 if let Some(min) = filter.min_resonance
-                    && entry.resonance < min
+                    && effective < min as f64
                 {
                     continue;
                 }
                 if let Some(max) = filter.max_resonance
-                    && entry.resonance > max
+                    && effective > max as f64
                 {
                     continue;
                 }
@@ -1107,7 +1155,8 @@ impl SurrealDatabase {
         embedding: &[f32],
         model_id: &str,
     ) -> Result<()> {
-        let sql = "CREATE embedding_chunk SET
+        let chunk_id = format!("{}_{}", entry_id, chunk_index);
+        let sql = "UPSERT type::thing('embedding_chunk', $chunk_id) SET
             entry_id = $entry_id,
             chunk_index = $chunk_index,
             chunk_text = $chunk_text,
@@ -1118,6 +1167,7 @@ impl SurrealDatabase {
 
         let mut response = with_db!(self, db, {
             db.query(sql)
+                .bind(("chunk_id", chunk_id))
                 .bind(("entry_id", entry_id.to_string()))
                 .bind(("chunk_index", chunk_index as i64))
                 .bind(("chunk_text", chunk_text.to_string()))

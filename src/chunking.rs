@@ -161,6 +161,16 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_text_single_chunk() {
+        let tokenizer = test_tokenizer();
+        let config = ChunkConfig::default();
+        let chunks = chunk_text("", &tokenizer, &config);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].token_count, 0);
+        assert_eq!(chunks[0].chunk_index, 0);
+    }
+
+    #[test]
     fn test_exact_boundary() {
         let tokenizer = test_tokenizer();
         let config = ChunkConfig {
