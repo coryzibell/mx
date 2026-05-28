@@ -210,6 +210,7 @@ which is the embedded-mode storage location).
   [`MX_SURREAL_NS`], [string], [`memory`], [Namespace],
   [`MX_SURREAL_DB`], [string], [`knowledge`], [Database name],
   [`MX_SURREAL_AUTH_LEVEL`], [enum], [`root`], [One of `root`, `namespace` (or `ns`), `database` (or `db`)],
+  [`MX_SKIP_SCHEMA`], [boolean], [unset], [Set to `1` or `true` to skip automatic schema application on connection. Escape hatch for restricted DB permissions. Ignored by `mx migrate`, which always applies the schema],
 )
 
 === GitHub App auth (sync) <env-github>
@@ -361,13 +362,23 @@ form is what the lookup helper handles; for an absolute or relative file
 path, just pass the path directly (see
 #link(<layout-state>)[`state/schemas/`] for the path-vs-ID heuristic).
 
-Point SurrealDB at a remote network instance:
+Point SurrealDB at a remote network instance (schema is applied automatically
+on connection, just like embedded mode):
 
 ```bash
 export MX_SURREAL_MODE=network
 export MX_SURREAL_URL=ws://surreal.internal:8000
 export MX_SURREAL_USER=mx
 export MX_SURREAL_PASS_FILE=/run/agenix/mx-surreal-pass
+```
+
+Skip auto-apply when the DB user lacks DDL permissions (schema managed
+externally by an admin):
+
+```bash
+export MX_SKIP_SCHEMA=1
+# To explicitly apply schema when needed, use:
+# mx migrate
 ```
 
 

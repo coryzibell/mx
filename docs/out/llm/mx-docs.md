@@ -50,9 +50,10 @@ mx log
 
 ### Knowledge graph
 
-The memory system is a knowledge graph backed by SurrealDB (or embedded
-SurrealKV). Entries have categories, tags, resonance levels, embeddings,
-and relationships.
+The memory system is a knowledge graph backed by SurrealDB (embedded
+SurrealKV or network WebSocket). The schema is applied automatically on
+every connection in both modes. Entries have categories, tags, resonance
+levels, embeddings, and relationships.
 
 ``` bash
 mx memory search "session bootstrap"
@@ -342,6 +343,18 @@ for offline editing and batch operations.
 ``` bash
 mx sync pull owner/repo
 mx sync push owner/repo --dry-run
+```
+
+### Migrate
+
+`mx migrate` explicitly applies the database schema to SurrealDB. The
+schema is normally applied automatically on every connection (both
+embedded and network mode), but `migrate` is useful after upgrading mx,
+or to apply the schema on an instance where `MX_SKIP_SCHEMA=1` is set.
+
+``` bash
+mx migrate            # apply schema (ignores MX_SKIP_SCHEMA)
+mx migrate -v         # verbose: see connection and schema details
 ```
 
 ## What's next
@@ -1074,6 +1087,15 @@ title, body content, optional tags, a resonance level (1--10+), and
 timestamps. Entries can be linked via typed relationships, anchored to
 each other by embedding similarity, and surfaced through keyword or
 semantic search.
+
+::: {.admonition .note}
+**NOTE:** The database schema is applied automatically on every
+connection, in both embedded and network mode. All schema statements are
+idempotent (`IF NOT EXISTS` / `UPSERT`), so no manual setup is required.
+Set `MX_SKIP_SCHEMA=1` to skip auto-apply in environments with
+restricted DB permissions. Run `mx migrate` to explicitly apply the
+schema (it ignores `MX_SKIP_SCHEMA`).
+:::
 
 ## Table of contents
 
@@ -6425,6 +6447,20 @@ talks to, not where files live on disk (with the exception of
 |                         |                 |                       | `ns`), `database` |
 |                         |                 |                       | (or `db`)         |
 +-------------------------+-----------------+-----------------------+-------------------+
+| `MX_SKIP_SCHEMA`        | boolean         | unset                 | Set to `1` or     |
+|                         |                 |                       | `true` to skip    |
+|                         |                 |                       | automatic schema  |
+|                         |                 |                       | application on    |
+|                         |                 |                       | connection.       |
+|                         |                 |                       | Escape hatch for  |
+|                         |                 |                       | restricted DB     |
+|                         |                 |                       | permissions.      |
+|                         |                 |                       | Ignored by        |
+|                         |                 |                       | `mx migrate`,     |
+|                         |                 |                       | which always      |
+|                         |                 |                       | applies the       |
+|                         |                 |                       | schema            |
++-------------------------+-----------------+-----------------------+-------------------+
 
 ### GitHub App auth (sync) {#env-github}
 
@@ -6649,13 +6685,23 @@ form is what the lookup helper handles; for an absolute or relative file
 path, just pass the path directly (see `state/schemas/` for the
 path-vs-ID heuristic).
 
-Point SurrealDB at a remote network instance:
+Point SurrealDB at a remote network instance (schema is applied
+automatically on connection, just like embedded mode):
 
 ``` bash
 export MX_SURREAL_MODE=network
 export MX_SURREAL_URL=ws://surreal.internal:8000
 export MX_SURREAL_USER=mx
 export MX_SURREAL_PASS_FILE=/run/agenix/mx-surreal-pass
+```
+
+Skip auto-apply when the DB user lacks DDL permissions (schema managed
+externally by an admin):
+
+``` bash
+export MX_SKIP_SCHEMA=1
+# To explicitly apply schema when needed, use:
+# mx migrate
 ```
 
 ## Notes for contributors {#contributors}
@@ -7042,6 +7088,37 @@ path is unused. Authentication supports three levels (root, namespace,
 database), configured via `MX_SURREAL_AUTH_LEVEL`. Password can be
 provided directly (`MX_SURREAL_PASS`) or read from a file
 (`MX_SURREAL_PASS_FILE`, useful for agenix-managed secrets on NixOS).
+
+### Schema auto-apply
+
+The embedded schema (`schema/surrealdb-schema.surql`) is applied on
+every database connection, in both embedded and network mode. All
+statements use `DEFINE ... IF NOT EXISTS` and `UPSERT`, so
+re-application is idempotent and safe. This means a fresh network-mode
+database is bootstrapped automatically on first connection -- no manual
+schema setup is required.
+
+The `apply_schema` method on `SurrealDatabase` uses the `with_db!` macro
+so the same code path runs against both the embedded and network
+backends.
+
+#### `MX_SKIP_SCHEMA`
+
+Set `MX_SKIP_SCHEMA=1` (or `true`) to skip schema application at
+connection time. This is an escape hatch for environments where the
+database user lacks DDL permissions (e.g., a read-only replica or a
+locked-down network instance where an admin applies the schema
+separately). When the variable is set, a `--verbose` message confirms
+the skip.
+
+#### `mx migrate`
+
+The `mx migrate` command explicitly applies the schema, ignoring
+`MX_SKIP_SCHEMA`. It connects to the database (respecting
+`MX_SURREAL_MODE` and all connection variables) and runs the full
+schema. Use it after upgrading mx to ensure the remote database has any
+new tables or indexes, or to re-apply the schema on an instance where
+`MX_SKIP_SCHEMA` is normally set.
 
 ### Connection architecture
 
