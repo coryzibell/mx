@@ -356,13 +356,70 @@ UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'd
 UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 
 -- =============================================================================
--- DATA MIGRATION (Issues #72, #73, #122)
+-- BACKFILL (Issues #72, #73, #122, #352)
 -- =============================================================================
+--
+-- WHY THIS SECTION EXISTS
+-- -----------------------
+-- Our tables are SCHEMAFULL. SurrealDB validates the ENTIRE record on ANY
+-- write — both a full UPSERT and a partial `SET`. A `DEFAULT` clause on a
+-- field only fires when a NEW record is created; it does NOT fire when an
+-- existing field is re-DEFINEd. So when we add a new REQUIRED (non-`option<>`)
+-- field to an existing table, every pre-existing row is left with that field
+-- as NONE. Reads survive via projection coalescing (e.g. the
+-- `IF chunk_count THEN chunk_count ELSE 0 END` projection — see
+-- knowledge_select_fields() in src/surreal_db/knowledge.rs), but the next WRITE
+-- that touches such a row throws
+-- `Found NONE for field X ... but expected a <type>`.
+--
+-- This file is replayed on EVERY connection (embedded AND network — see
+-- connection.rs apply_schema) and on every `mx migrate`. The DEFINE statements
+-- above are idempotent via `IF NOT EXISTS`; the statements below must be
+-- idempotent too.
+--
+-- THE RULE (read this before adding a required field)
+-- ---------------------------------------------------
+-- Whenever you add a new REQUIRED field to an existing table, add a PAIRED
+-- backfill statement here. Each statement MUST be a no-op once applied —
+-- always guard with `WHERE <field> IS NONE` so re-running over already-fixed
+-- rows changes nothing. Never make a field `option<>` just to dodge this;
+-- backfill is the correct fix because downstream code assumes presence.
+-- If the backfill COMPUTES a value (not a constant), add a test that exercises
+-- the non-empty case — assert the computed value matches the real count, not
+-- just that the statement runs. Issue #352 is the cautionary tale: a chunk_count
+-- backfill shipped relying on a non-obvious SurrealDB sub-select quirk with only
+-- a throwaway probe; the permanent test (test_backfill_chunk_count_* in
+-- src/surreal_db/tests.rs) now guards it.
 
--- Migrate existing single wake_phrase to wake_phrases array
--- Handle records where wake_phrases is NONE (not yet created)
+-- Issues #72/#73: migrate single wake_phrase to wake_phrases array.
+-- Guard: only rows where wake_phrases was never set.
 UPDATE knowledge SET wake_phrases = IF wake_phrase != NONE THEN [wake_phrase] ELSE [] END
 WHERE wake_phrases IS NONE;
 
--- Issue #122: Backfill format field for existing entries
+-- Issue #122: backfill format field for existing entries.
 UPDATE knowledge SET format = 'markdown' WHERE format IS NONE;
+
+-- Issue #352: backfill chunk_count for entries that predate chunking (Issue #346).
+-- chunk_count is `int DEFAULT 0` (required); 340/368 rows predate it and are
+-- stranded with NONE — broken on next write.
+--
+-- The correct value is the actual number of embedding_chunk rows for the entry.
+-- ID MISMATCH: a knowledge record id is `knowledge:<hex>`, but
+-- `embedding_chunk.entry_id` stores the `kn-<hex>` form (e.g. kn-<hex>) as a
+-- plain string — NOT string-identical. We must translate the prefix when
+-- joining: build the `kn-<hex>` key from meta::id(id) and count matching chunks.
+-- For the pre-chunking rows this correctly yields 0; for genuinely chunked
+-- entries it yields the real count. Guard `WHERE chunk_count IS NONE` keeps it a
+-- no-op once applied.
+--
+-- We use `array::len(SELECT id FROM ...)` rather than a `count() ... GROUP ALL`
+-- sub-select: it returns a plain int (naturally 0 on no matches), so there is no
+-- `[0].count ?? 0` projection-shape dependency to break across SurrealDB
+-- versions. Verified empirically against the live DB (2.6.1): both forms yield
+-- identical per-entry counts (24 chunked entries, 64 chunks total over 368 rows).
+-- Regression coverage: see test_backfill_chunk_count_* in src/surreal_db/tests.rs.
+UPDATE knowledge SET chunk_count = array::len(
+    SELECT id FROM embedding_chunk
+    WHERE entry_id = string::concat('kn-', meta::id($parent.id))
+)
+WHERE chunk_count IS NONE;

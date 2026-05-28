@@ -1230,4 +1230,57 @@ impl SurrealDatabase {
 
         Ok(pairs)
     }
+
+    // ------------------------------------------------------------------
+    // Test-only raw helpers (Issue #352 / W1 regression coverage).
+    //
+    // These exist so the chunk_count backfill test can drive a raw
+    // statement and read the stored value back WITHOUT going through the
+    // read-coalescing projection (which would mask a NONE as 0). They are
+    // compiled only under `cfg(test)` and never ship.
+    // ------------------------------------------------------------------
+
+    /// Execute an arbitrary statement, surfacing any per-statement errors.
+    #[cfg(test)]
+    pub(crate) fn test_exec(&self, sql: &str) -> Result<()> {
+        Self::runtime().block_on(async {
+            let mut response = with_db!(self, db, {
+                db.query(sql).await.context("test_exec query failed")
+            })?;
+            let errors = response.take_errors();
+            if !errors.is_empty() {
+                return Err(anyhow::anyhow!("test_exec statement errors: {:?}", errors));
+            }
+            Ok(())
+        })
+    }
+
+    /// Read the RAW stored `chunk_count` for `kn-<id_part>` without the
+    /// read-coalescing projection. Returns `None` when the field is NONE
+    /// (i.e. the pre-backfill state) and `Some(n)` once it holds an int.
+    #[cfg(test)]
+    pub(crate) fn test_raw_chunk_count(&self, entry_id: &str) -> Result<Option<i64>> {
+        let id_part = entry_id.strip_prefix("kn-").unwrap_or(entry_id).to_string();
+        Self::runtime().block_on(async {
+            let mut response = with_db!(self, db, {
+                db.query("SELECT chunk_count FROM type::thing('knowledge', $id)")
+                    .bind(("id", id_part.clone()))
+                    .await
+                    .context("test_raw_chunk_count query failed")
+            })?;
+            let rows: Vec<serde_json::Value> = response
+                .take(0)
+                .context("test_raw_chunk_count parse failed")?;
+            let row = match rows.first() {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            // NONE serializes to JSON null; an int serializes to a number.
+            match row.get("chunk_count") {
+                Some(v) if v.is_null() => Ok(None),
+                Some(v) => Ok(v.as_i64()),
+                None => Ok(None),
+            }
+        })
+    }
 }

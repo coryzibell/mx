@@ -169,7 +169,11 @@ pub trait KnowledgeStore {
     /// Use for intentional single-entry access (e.g. `show`, `fact-session`).
     fn update_activations(&self, ids: &[String]) -> Result<()>;
 
-    /// Update only the summary field of a knowledge entry (targeted update, bypasses SCHEMAFULL UPSERT)
+    /// Update only the summary field of a knowledge entry (targeted partial `SET`).
+    /// NOTE: a partial `SET` does NOT bypass SCHEMAFULL validation — SurrealDB
+    /// validates the ENTIRE record on any write, so this still requires every
+    /// required field on the row to be present (see Issue #352 / the BACKFILL
+    /// section in schema/surrealdb-schema.surql).
     /// Respects visibility: agents can only update summaries on entries they can see.
     /// Returns Ok(false) for entries that don't exist OR that the agent can't see
     /// (to avoid leaking existence of private entries).

@@ -7093,6 +7093,70 @@ schema. Use it after upgrading mx to ensure the remote database has any
 new tables or indexes, or to re-apply the schema on an instance where
 `MX_SKIP_SCHEMA` is normally set.
 
+### Evolving the schema: the BACKFILL convention {#schema-backfill}
+
+There is no separate migration tool and no ordered migration history.
+The schema file *is* the migration: it is replayed in full on every
+connection and on every `mx migrate`. Schema evolution therefore happens
+by editing `schema/surrealdb-schema.surql` so that re-applying it is
+always idempotent.
+
+This model has one sharp edge that every contributor adding a field must
+know about, because the model is SCHEMAFULL.
+
+#### The SCHEMAFULL-stranding trap
+
+When you add a new **required** field (one whose type is not
+`option<...>`) to an existing table, SurrealDB does *not* retroactively
+populate it. Every pre-existing row keeps that field as `NONE`. Reads
+usually survive, because projections coalesce the missing value (for
+example the `IF chunk_count THEN chunk_count ELSE 0 END` projection in
+`knowledge_select_fields()`). The danger is the next **write**:
+SurrealDB validates the whole record on any write, so the first time
+anything touches a stranded row it throws
+
+    Found NONE for field X ... but expected a <type>
+
+This is how issue #352 stranded 340 of 368 `knowledge` rows:
+`chunk_count` was added as a required `int`, and the pre-chunking rows
+had no value for it.
+
+#### THE RULE
+
+Whenever you add a required field to an existing table, add a paired,
+idempotent backfill `UPDATE` immediately after the `DEFINE`:
+
+``` surql
+DEFINE FIELD chunk_count ON knowledge TYPE int DEFAULT 0;
+-- Backfill: required field added to an existing table strands old rows at NONE.
+UPDATE knowledge SET chunk_count = 0 WHERE chunk_count IS NONE;
+```
+
+Three requirements make a correct backfill:
+
+1.  **Guard with `WHERE <field> IS NONE`.** This makes the statement a
+    no-op once applied, so replaying the schema on every connection
+    costs nothing and never double-counts.
+
+2.  **Backfill, do not dodge.** Do not make the field `option<...>` just
+    to avoid the trap. Downstream code assumes the field is present; the
+    backfill is the correct fix.
+
+3.  **If the backfill computes a value, test the non-empty case.** A
+    constant backfill is self-evidently correct, but a computed one is
+    not. Add a regression test that asserts the computed value matches
+    the real data, not merely that the statement runs. The `chunk_count`
+    backfill computes a count by joining `embedding_chunk`, so
+    `test_backfill_chunk_count_*` in `src/surreal_db/tests.rs` guards
+    it. Those tests use the `cfg(test)`-only `test_exec` /
+    `test_raw_chunk_count` helpers on `SurrealDatabase`, which read the
+    raw stored value *without* the read-coalescing projection so a
+    lingering `NONE` cannot masquerade as `0`.
+
+The backfill block at the bottom of `schema/surrealdb-schema.surql`
+documents this rule inline and collects every historical backfill as a
+worked example.
+
 ### Connection architecture
 
 The connection is represented as an enum:
@@ -7219,7 +7283,8 @@ entry with the following field groups:
 - `chunk_count` (int, default 0) -- number of embedding chunks. Zero
   means the entry is unchunked (single embedding). A positive value
   means the entry was split into overlapping chunks stored in the
-  `embedding_chunk` table.
+  `embedding_chunk` table. This is a required field; rows that predate
+  it are repaired by a backfill -- see the BACKFILL convention.
 
 ### Graph relations
 
