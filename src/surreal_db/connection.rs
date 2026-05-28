@@ -284,28 +284,18 @@ impl SurrealDatabase {
             .await
             .context("Failed to set namespace and database")?;
 
-        // Apply schema (idempotent)
-        if verbose {
-            eprintln!("[mx] Applying database schema");
-        }
-        let mut response = db
-            .query(SCHEMA)
-            .await
-            .context("Failed to apply database schema")?;
+        let instance = Self {
+            conn: SurrealConnection::Embedded(db),
+        };
 
-        // Check for errors - schema application returns multiple results
-        let errors = response.take_errors();
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
-        }
+        // Apply schema (idempotent)
+        instance.apply_schema(verbose, false).await?;
 
         if verbose {
             eprintln!("[mx] Embedded connection established successfully");
         }
 
-        Ok(Self {
-            conn: SurrealConnection::Embedded(db),
-        })
+        Ok(instance)
     }
 
     /// Check if URL is localhost (safe for unencrypted traffic)
@@ -454,17 +444,19 @@ impl SurrealDatabase {
                 )
             })?;
 
+        let instance = Self {
+            conn: SurrealConnection::Network(db),
+        };
+
+        // Apply schema (idempotent) -- all statements use IF NOT EXISTS,
+        // so this is safe to run on every connection including network mode.
+        instance.apply_schema(verbose, false).await?;
+
         if verbose {
             eprintln!("[mx] Network connection established successfully");
         }
 
-        // Note: Schema is NOT applied for network mode
-        // The remote server should already have the schema
-        // (Schema is applied via NixOS module or manual setup)
-
-        Ok(Self {
-            conn: SurrealConnection::Network(db),
-        })
+        Ok(instance)
     }
 
     /// Legacy async open - kept for compatibility
@@ -485,6 +477,52 @@ impl SurrealDatabase {
         let temp_dir = tempdir()?;
         let config = SurrealConfig::default(); // always Embedded
         Self::connect(temp_dir.path(), &config)
+    }
+
+    /// Apply the embedded schema to the connected database.
+    ///
+    /// All statements use `IF NOT EXISTS`, so this is idempotent and safe
+    /// to run on every connection (embedded or network).
+    ///
+    /// When `force` is false, the `MX_SKIP_SCHEMA` environment variable
+    /// is respected: set it to `1` or `true` to skip schema application
+    /// (escape hatch for restricted DB permissions). When `force` is true
+    /// (used by `mx migrate`), the env var is ignored.
+    async fn apply_schema(&self, verbose: bool, force: bool) -> Result<()> {
+        if !force
+            && std::env::var("MX_SKIP_SCHEMA")
+                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
+        {
+            if verbose {
+                eprintln!("[mx] Skipping schema application (MX_SKIP_SCHEMA=1)");
+            }
+            return Ok(());
+        }
+
+        if verbose {
+            eprintln!("[mx] Applying database schema");
+        }
+
+        let mut response = with_db!(self, db, {
+            db.query(SCHEMA)
+                .await
+                .context("Failed to apply database schema")?
+        });
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
+        }
+
+        Ok(())
+    }
+
+    /// Explicitly apply the database schema, ignoring `MX_SKIP_SCHEMA`.
+    ///
+    /// This is the public entry point used by `mx migrate`. It always
+    /// applies the schema regardless of environment variable overrides.
+    pub fn apply_schema_explicit(&self, verbose: bool) -> Result<()> {
+        Self::runtime().block_on(self.apply_schema(verbose, true))
     }
 
     /// Get reference to underlying Surreal instance (embedded only)

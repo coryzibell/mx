@@ -142,6 +142,14 @@ pub enum Commands {
         command: WorktreeCommands,
     },
 
+    /// Apply database schema migrations
+    ///
+    /// Connects to the database (respects MX_SURREAL_MODE) and applies
+    /// the embedded schema. All statements use IF NOT EXISTS, so this is
+    /// idempotent. Ignores MX_SKIP_SCHEMA -- if you run `mx migrate`
+    /// explicitly, you want the schema applied.
+    Migrate,
+
     /// Print the full mx documentation as Markdown
     Docs,
 }
