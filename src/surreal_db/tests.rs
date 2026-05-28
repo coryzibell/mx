@@ -1765,7 +1765,8 @@ fn make_pizza_test_entry() -> String {
         However, the rigidity of this approach led to the development of more flexible \
         methodologies. Agile development, introduced through the Agile Manifesto in 2001, \
         emphasized iterative development, collaboration, and adaptability. \
-        ".repeat(4);
+        "
+    .repeat(4);
 
     // The buried pizza passage (~200 tokens)
     let pizza = "The art of pizza making is a fascinating departure from our main topic. \
@@ -1787,7 +1788,8 @@ fn make_pizza_test_entry() -> String {
         development and operations teams, fostering a culture of shared responsibility. \
         Container technologies like Docker and orchestration platforms like Kubernetes \
         have revolutionized how applications are packaged and deployed. \
-        ".repeat(4);
+        "
+    .repeat(4);
 
     format!("{}\n\n{}\n\n{}", prefix, pizza, suffix)
 }
@@ -1810,9 +1812,10 @@ fn test_chunked_search_finds_buried_content() {
     // which has truncation disabled -- the provider's tokenizer truncates
     // at 512, so it would always report <= 512.
     {
-        let counting_tok = crate::embeddings::load_tokenizer()
-            .expect("load_tokenizer should succeed");
-        let encoding = counting_tok.encode(long_body.as_str(), false)
+        let counting_tok =
+            crate::embeddings::load_tokenizer().expect("load_tokenizer should succeed");
+        let encoding = counting_tok
+            .encode(long_body.as_str(), false)
             .expect("tokenizer.encode should succeed");
         assert!(
             encoding.get_ids().len() > 512,
@@ -1887,12 +1890,16 @@ fn test_chunked_search_finds_buried_content() {
 
     // 4. Embed the pizza query
     let query = "pizza making techniques and oven temperature";
-    let query_embedding = provider.embed(query).expect("query embedding should succeed");
+    let query_embedding = provider
+        .embed(query)
+        .expect("query embedding should succeed");
 
     // 5. Semantic search -- this exercises the two-phase search
     //    (unchunked entries + embedding_chunk table).
     let filter = crate::store::KnowledgeFilter::default();
-    let results = db.semantic_search(&query_embedding, &ctx, &filter, 10).unwrap();
+    let results = db
+        .semantic_search(&query_embedding, &ctx, &filter, 10)
+        .unwrap();
 
     // 6. Assert the long entry appears in results
     let found = results.iter().any(|e| e.id == "kn-pizza-deep");
