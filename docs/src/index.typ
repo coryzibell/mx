@@ -41,8 +41,9 @@ mx log
 === Knowledge graph
 
 The #link("memory.html")[memory] system is a knowledge graph backed by SurrealDB
-(or embedded SurrealKV). Entries have categories, tags, resonance levels,
-embeddings, and relationships.
+(embedded SurrealKV or network WebSocket). The schema is applied automatically
+on every connection in both modes. Entries have categories, tags, resonance
+levels, embeddings, and relationships.
 
 ```bash
 mx memory search "session bootstrap"

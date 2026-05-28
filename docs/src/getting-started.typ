@@ -215,6 +215,18 @@ mx sync pull owner/repo
 mx sync push owner/repo --dry-run
 ```
 
+=== Migrate
+
+`mx migrate` explicitly applies the database schema to SurrealDB. The schema is
+normally applied automatically on every connection (both embedded and network
+mode), but `migrate` is useful after upgrading mx, or to apply the schema on an
+instance where `MX_SKIP_SCHEMA=1` is set.
+
+```bash
+mx migrate            # apply schema (ignores MX_SKIP_SCHEMA)
+mx migrate -v         # verbose: see connection and schema details
+```
+
 == What's next
 
 - Read the #link("commit.html")[commit], #link("log.html")[log], and
