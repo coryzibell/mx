@@ -1639,7 +1639,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut skipped = 0;
 
                 println!("Found {} entries to embed", total);
-                for (idx, entry) in entries.iter().enumerate() {
+                for entry in &entries {
                     // Check token count if --long-only is specified
                     if let Some(min_tokens) = long_only
                         && let Some(ref tok) = tokenizer
@@ -1654,9 +1654,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         }
                     }
 
-                    println!("Embedding {}/{}: {}", idx + 1, total, entry.title);
-                    crate::helpers::auto_embed(&entry.id, db.as_ref())?;
                     embedded += 1;
+                    println!("Embedding {}/{}: {}", embedded, total - skipped, entry.title);
+                    crate::helpers::auto_embed(&entry.id, db.as_ref())?;
                 }
                 if long_only.is_some() {
                     println!(

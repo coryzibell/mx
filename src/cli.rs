@@ -873,7 +873,7 @@ pub enum MemoryCommands {
         /// Entries at or below the threshold are skipped entirely.
         /// Useful for selectively re-embedding long entries that were previously
         /// truncated at a smaller token limit (e.g., 512).
-        #[arg(long)]
+        #[arg(long, requires = "all")]
         long_only: Option<usize>,
     },
 
