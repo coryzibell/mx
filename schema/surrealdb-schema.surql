@@ -145,6 +145,9 @@ DEFINE FIELD IF NOT EXISTS embedding ON knowledge TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON knowledge TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedded_at ON knowledge TYPE option<datetime>;
 
+-- Embedding chunk count (Issue #346)
+DEFINE FIELD IF NOT EXISTS chunk_count ON knowledge TYPE int DEFAULT 0;
+
 -- Issue #122: Stele encoding format
 DEFINE FIELD IF NOT EXISTS format ON knowledge TYPE string DEFAULT 'markdown'
   ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', 'stele:light', 'stele:full'];
@@ -241,6 +244,24 @@ DEFINE FIELD IF NOT EXISTS created_at   ON memory_backup TYPE datetime DEFAULT t
 DEFINE INDEX IF NOT EXISTS backup_entry_id   ON memory_backup FIELDS entry_id;
 DEFINE INDEX IF NOT EXISTS backup_created    ON memory_backup FIELDS created_at;
 DEFINE INDEX IF NOT EXISTS backup_entry_time ON memory_backup FIELDS entry_id, created_at;
+
+-- =============================================================================
+-- EMBEDDING CHUNKS (Issue #346)
+-- =============================================================================
+-- Chunked embeddings for long entries (>400 tokens). Each chunk is embedded
+-- separately so semantic search covers the full content.
+
+DEFINE TABLE IF NOT EXISTS embedding_chunk SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS entry_id ON embedding_chunk TYPE string;
+DEFINE FIELD IF NOT EXISTS chunk_index ON embedding_chunk TYPE int;
+DEFINE FIELD IF NOT EXISTS chunk_text ON embedding_chunk TYPE string;
+DEFINE FIELD IF NOT EXISTS token_offset ON embedding_chunk TYPE int;
+DEFINE FIELD IF NOT EXISTS token_count ON embedding_chunk TYPE int;
+DEFINE FIELD IF NOT EXISTS embedding ON embedding_chunk TYPE array<float>;
+DEFINE FIELD IF NOT EXISTS embedding_model ON embedding_chunk TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON embedding_chunk TYPE datetime DEFAULT time::now();
+DEFINE INDEX IF NOT EXISTS chunk_entry_id ON embedding_chunk FIELDS entry_id;
+DEFINE INDEX IF NOT EXISTS chunk_entry_idx ON embedding_chunk FIELDS entry_id, chunk_index UNIQUE;
 
 -- =============================================================================
 -- METADATA TABLES

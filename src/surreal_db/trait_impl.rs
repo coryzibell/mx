@@ -261,6 +261,39 @@ impl KnowledgeStore for SurrealDatabase {
         self.list_relationship_types()
     }
 
+    fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+        self.delete_embedding_chunks(entry_id)
+    }
+
+    fn insert_embedding_chunk(
+        &self,
+        entry_id: &str,
+        chunk_index: usize,
+        chunk_text: &str,
+        token_offset: usize,
+        token_count: usize,
+        embedding: &[f32],
+        model_id: &str,
+    ) -> Result<()> {
+        self.insert_embedding_chunk(
+            entry_id,
+            chunk_index,
+            chunk_text,
+            token_offset,
+            token_count,
+            embedding,
+            model_id,
+        )
+    }
+
+    fn semantic_search_chunks(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
+        self.semantic_search_chunks(query_embedding, limit)
+    }
+
     fn edit_content(
         &self,
         id: &str,

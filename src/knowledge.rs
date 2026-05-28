@@ -90,6 +90,10 @@ pub struct KnowledgeEntry {
     #[serde(default)]
     pub embedded_at: Option<String>, // RFC3339 timestamp when embedded
 
+    // Embedding chunks (Issue #346)
+    #[serde(default)]
+    pub chunk_count: i32,
+
     // Stele encoding format (Issue #122)
     #[serde(default = "default_format")]
     pub format: String, // markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
@@ -138,8 +142,7 @@ impl KnowledgeEntry {
         if let Some(summary) = &self.summary {
             parts.push(summary.clone());
         } else if let Some(body) = &self.body {
-            // Truncate body to avoid overwhelming the embedding model
-            parts.push(body.chars().take(2000).collect());
+            parts.push(body.clone());
         }
 
         if !self.tags.is_empty() {
@@ -272,6 +275,7 @@ mod tests {
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            chunk_count: 0,
             format: "markdown".to_string(),
             effective_resonance: None,
         };
@@ -317,6 +321,7 @@ mod tests {
             embedding: None,
             embedding_model: None,
             embedded_at: None,
+            chunk_count: 0,
             format: "markdown".to_string(),
             effective_resonance: None,
         };

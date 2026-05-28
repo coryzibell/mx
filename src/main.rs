@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod chunking;
 mod cli;
 mod codex;
 mod commit;

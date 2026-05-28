@@ -1617,16 +1617,69 @@ Each entry can have a vector embedding generated from its title and
 content. Anchors are connections between entries discovered via
 embedding similarity.
 
+### Chunked embeddings
+
+Entries longer than 400 tokens are automatically split into overlapping
+chunks before embedding. This ensures semantic search covers the full
+content of long entries, not just the first 400 tokens.
+
+**How it works:**
+
+1.  The entry's embedding text (title + body/summary + tags) is
+    tokenized using the BGE-Base-EN-v1.5 tokenizer.
+
+2.  If the text fits within 400 tokens, a single embedding is generated
+    and stored on the entry --- exactly as before. No chunks are
+    created.
+
+3.  If the text exceeds 400 tokens, it is split into overlapping chunks
+    with a sliding window: 400 tokens per chunk, 100-token overlap
+    (stride 300).
+
+4.  Each chunk is embedded separately and stored in the
+    `embedding_chunk` table.
+
+5.  A normalized mean vector of all chunk embeddings is stored on the
+    entry's `embedding` field for `auto-anchor` compatibility.
+
+6.  The entry's `chunk_count` field records how many chunks were created
+    (0 for unchunked entries).
+
+**Semantic search with chunks:**
+
+When `mx memory search --semantic` runs, it queries both unchunked entry
+embeddings and chunk embeddings in parallel. Results are merged by
+taking the maximum similarity score per entry --- if a chunk from entry
+X scores 0.92 and the entry's mean vector scores 0.85, the entry's final
+score is 0.92. This ensures long entries surface when any section is
+relevant, not just when the overall average is relevant.
+
+::: {.admonition .tip}
+**TIP:** Short entries (≤400 tokens) behave exactly as before --- single
+embedding, no chunks, no behavior change. Chunking only activates for
+entries that exceed the 400-token threshold.
+:::
+
+::: {.admonition .note}
+**NOTE:** The `embedding_text()` method on entries no longer truncates
+body content. The chunker handles length management, ensuring no content
+is lost during embedding.
+:::
+
 ## `mx memory embed`
 
 Generate a vector embedding for one or all entries. Embeddings power
 semantic search (`--semantic` flag on `search`) and automatic anchoring.
+Long entries (\>400 tokens) are automatically split into overlapping
+chunks, with each chunk embedded separately. Short entries get a single
+embedding.
 
 ### Flags
 
-  **Flag**      **Type**   **Description**
-  ------------- ---------- -------------------------------------------------------
-  `-a, --all`   `flag`     Embed all knowledge entries (instead of a single ID).
+  **Flag**        **Type**   **Description**
+  --------------- ---------- --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `-a, --all`     `flag`     Embed all knowledge entries (instead of a single ID).
+  `--long-only`   `int`      Only re-embed entries whose `embedding_text()` exceeds this many tokens. Entries at or below the threshold are skipped entirely. Use with `--all`. Useful for selectively re-embedding long entries that were previously truncated at a smaller token limit (e.g., 512).
 
 ### Examples
 
@@ -1636,6 +1689,11 @@ mx memory embed kn-abc123
 
 ``` bash
 mx memory embed --all
+```
+
+``` bash
+# Re-embed only entries that exceed 512 tokens
+mx memory embed --all --long-only 512
 ```
 
 ## `mx memory auto-anchor`
@@ -6770,6 +6828,7 @@ All source lives under `src/`. The top-level modules declared in
        read.rs          # list, read, search operations
        migrate.rs       # v1->v2 archive migration
        notices.rs       # vault-present warnings
+     chunking.rs        # token-aware text chunking for embeddings
      embeddings.rs      # EmbeddingProvider trait, TractProvider
      kv.rs              # KV store engine (schema TOML + data JSON)
      types.rs           # shared domain types (Agent, Category, Project, etc.)
@@ -7102,9 +7161,15 @@ entry with the following field groups:
 **Embeddings:**
 
 - `embedding` (optional array\<float\>) -- 768-dim vector
-  (BGE-Base-EN-v1.5)
+  (BGE-Base-EN-v1.5). For chunked entries, this holds a normalized mean
+  vector of all chunk embeddings (used by `auto-anchor`).
 
 - `embedding_model` (optional string), `embedded_at` (optional datetime)
+
+- `chunk_count` (int, default 0) -- number of embedding chunks. Zero
+  means the entry is unchunked (single embedding). A positive value
+  means the entry was split into overlapping chunks stored in the
+  `embedding_chunk` table.
 
 ### Graph relations
 
@@ -7148,6 +7213,67 @@ vectors or 100ms query latency.
 The `EmbeddingProvider` trait in `embeddings.rs` abstracts the embedding
 backend. `TractProvider` is the sole implementation. The model cache
 location is controlled by `paths::model_cache_dir()`.
+
+#### Two-phase semantic search {#two-phase-search}
+
+Semantic search uses a two-phase strategy to cover both unchunked
+entries and chunked entries:
+
+1.  **Phase 1a**: Query unchunked entries (those with `chunk_count <= 0`
+    or absent) by cosine similarity against their `embedding` field.
+    Returns up to `limit` results.
+
+2.  **Phase 1b**: Query the `embedding_chunk` table by cosine
+    similarity. Returns up to `limit * 3` results (over-fetching for
+    deduplication).
+
+Both queries run in a single SurrealDB request (chained statements).
+
+1.  **Phase 2 (merge)**: Chunk results are deduplicated by `entry_id`,
+    keeping the maximum similarity score per entry. For each unique
+    chunk entry, the full `knowledge` record is fetched (with
+    visibility, category, and resonance filters applied). The unchunked
+    and chunk results are merged into a single scored map: if an entry
+    appears in both result sets, the higher score wins. The final list
+    is sorted by score descending and truncated to `limit`.
+
+This design means a long entry surfaces in search results if *any*
+400-token section is semantically relevant, rather than only when the
+mean vector (which averages over all sections) happens to score well.
+
+### Embedding chunks
+
+The `embedding_chunk` table stores per-chunk embeddings for long entries
+(those exceeding 400 tokens). Each row represents one chunk of a chunked
+entry:
+
+- `entry_id` (string) -- the `kn-` prefixed ID of the parent knowledge
+  entry
+
+- `chunk_index` (int) -- zero-based position within the entry's chunk
+  sequence
+
+- `chunk_text` (string) -- the decoded text of this chunk
+
+- `token_offset` (int) -- token offset from the start of the original
+  text
+
+- `token_count` (int) -- number of tokens in this chunk
+
+- `embedding` (array\<float\>) -- 768-dim vector for this chunk
+
+- `embedding_model` (string) -- model ID that generated the embedding
+
+- `created_at` (datetime)
+
+The table is indexed on `entry_id` (for bulk deletion) and uniquely
+indexed on `(entry_id, chunk_index)` (for upsert). Chunks are deleted
+and re-created on every re-embed of the parent entry. When a knowledge
+entry is deleted, its chunks are cleaned up on a best-effort basis.
+
+Chunking parameters: 400 tokens per chunk, 100-token overlap (stride
+300). These are defined in `ChunkConfig::default()` in
+`src/chunking.rs`.
 
 ### Backups
 
