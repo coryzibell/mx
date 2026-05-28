@@ -490,8 +490,7 @@ impl SurrealDatabase {
     /// (used by `mx migrate`), the env var is ignored.
     async fn apply_schema(&self, verbose: bool, force: bool) -> Result<()> {
         if !force
-            && std::env::var("MX_SKIP_SCHEMA")
-                .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
+            && std::env::var("MX_SKIP_SCHEMA").is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
         {
             if verbose {
                 eprintln!("[mx] Skipping schema application (MX_SKIP_SCHEMA=1)");
