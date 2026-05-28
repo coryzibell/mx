@@ -1741,3 +1741,166 @@ fn test_search_select_no_results_is_noop() {
         "update_activations with empty IDs should not error"
     );
 }
+
+// =========================================================================
+// CHUNKED EMBEDDING SEARCH TEST (PR #348)
+// =========================================================================
+
+/// Generate a long test entry with a pizza passage buried deep in unrelated content.
+///
+/// The entry is ~1500+ tokens: ~500 tokens of software engineering filler,
+/// then a distinctive passage about Neapolitan pizza, then ~500 more tokens
+/// of filler. Without chunked embedding the pizza passage sits well beyond
+/// the old 512-token truncation point.
+fn make_pizza_test_entry() -> String {
+    // ~700 tokens of generic content about software (repeated for length)
+    let prefix = "Software engineering is a discipline that encompasses the systematic \
+        design, development, testing, and maintenance of software applications. \
+        The field has evolved significantly since its inception in the 1960s, \
+        when the term was first coined at the NATO Software Engineering Conference. \
+        Early software development was characterized by ad-hoc approaches and a lack \
+        of formal methodologies. The waterfall model emerged as one of the first \
+        structured approaches, dividing the development process into distinct phases: \
+        requirements analysis, design, implementation, testing, and maintenance. \
+        However, the rigidity of this approach led to the development of more flexible \
+        methodologies. Agile development, introduced through the Agile Manifesto in 2001, \
+        emphasized iterative development, collaboration, and adaptability. \
+        ".repeat(4);
+
+    // The buried pizza passage (~200 tokens)
+    let pizza = "The art of pizza making is a fascinating departure from our main topic. \
+        A proper Neapolitan pizza requires a dough made from type 00 flour with 60-65% \
+        hydration, fermented for at least 24 hours. The sauce should be made from San \
+        Marzano tomatoes, crushed by hand, with nothing more than salt and fresh basil. \
+        Mozzarella di bufala, made from water buffalo milk, provides the ideal cheese \
+        topping. The pizza must be baked in a wood-fired oven at 485 degrees Celsius \
+        for exactly 60 to 90 seconds. The cornicione, or outer crust, should be puffy \
+        and leopard-spotted with char marks. A pizzaiolo trains for years to master the \
+        art of stretching dough by hand without tearing, creating a perfectly thin center \
+        with an airy, risen edge. The Associazione Verace Pizza Napoletana certifies \
+        pizzerias worldwide that meet their strict standards for authentic preparation.";
+
+    // ~700 more tokens of generic content
+    let suffix = "Returning to software engineering, modern practices include continuous \
+        integration and continuous deployment, microservices architecture, and cloud-native \
+        development. The rise of DevOps has blurred the traditional boundaries between \
+        development and operations teams, fostering a culture of shared responsibility. \
+        Container technologies like Docker and orchestration platforms like Kubernetes \
+        have revolutionized how applications are packaged and deployed. \
+        ".repeat(4);
+
+    format!("{}\n\n{}\n\n{}", prefix, pizza, suffix)
+}
+
+#[test]
+fn test_chunked_search_finds_buried_content() {
+    use crate::chunking::{ChunkConfig, chunk_text};
+    use crate::embeddings::{EmbeddingProvider, TractProvider};
+    use crate::store::KnowledgeStore;
+
+    // 1. Create provider and test database
+    let provider = TractProvider::new().expect("TractProvider should initialize");
+    let db = SurrealDatabase::open_in_memory().expect("in-memory DB should open");
+
+    // 2. Create a long entry with pizza buried deep inside
+    let long_body = make_pizza_test_entry();
+
+    // Sanity check: the body should be >512 tokens so the old truncation
+    // would have missed the pizza passage entirely. Use load_tokenizer()
+    // which has truncation disabled -- the provider's tokenizer truncates
+    // at 512, so it would always report <= 512.
+    {
+        let counting_tok = crate::embeddings::load_tokenizer()
+            .expect("load_tokenizer should succeed");
+        let encoding = counting_tok.encode(long_body.as_str(), false)
+            .expect("tokenizer.encode should succeed");
+        assert!(
+            encoding.get_ids().len() > 512,
+            "Test body must exceed 512 tokens to validate chunked search (got {})",
+            encoding.get_ids().len()
+        );
+    }
+
+    let mut entry = make_test_entry("kn-pizza-deep", 5, 0.0);
+    entry.title = "Software Engineering History".to_string();
+    entry.body = Some(long_body);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // 3. Embed with chunking (replicate auto_embed logic inline so we
+    //    don't depend on MX_CURRENT_AGENT being set)
+    let ctx = crate::store::AgentContext::public_only();
+    let embedding_text = entry.embedding_text();
+    let config = ChunkConfig::default();
+    let chunks = chunk_text(&embedding_text, provider.tokenizer(), &config);
+
+    assert!(
+        chunks.len() > 1,
+        "Entry should produce multiple chunks (got {})",
+        chunks.len()
+    );
+
+    let mut chunk_embeddings = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        chunk_embeddings.push(provider.embed(&chunk.text).unwrap());
+    }
+
+    // Store chunks
+    db.delete_embedding_chunks("kn-pizza-deep").unwrap();
+    for (chunk, embedding) in chunks.iter().zip(chunk_embeddings.iter()) {
+        db.insert_embedding_chunk(
+            "kn-pizza-deep",
+            chunk.chunk_index,
+            &chunk.text,
+            chunk.token_offset,
+            chunk.token_count,
+            embedding,
+            provider.model_id(),
+        )
+        .unwrap();
+    }
+
+    // Mean vector on entry (for the unchunked search path and auto_anchor)
+    let dims = provider.dimensions();
+    let mut mean_vec = vec![0.0f32; dims];
+    for emb in &chunk_embeddings {
+        for (i, v) in emb.iter().enumerate() {
+            mean_vec[i] += v;
+        }
+    }
+    let n = chunk_embeddings.len() as f32;
+    for v in mean_vec.iter_mut() {
+        *v /= n;
+    }
+    let l2: f32 = mean_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if l2 > 0.0 {
+        for v in mean_vec.iter_mut() {
+            *v /= l2;
+        }
+    }
+
+    entry.embedding = Some(mean_vec);
+    entry.embedding_model = Some(provider.model_id().to_string());
+    entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    entry.chunk_count = chunks.len() as i32;
+    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // 4. Embed the pizza query
+    let query = "pizza making techniques and oven temperature";
+    let query_embedding = provider.embed(query).expect("query embedding should succeed");
+
+    // 5. Semantic search -- this exercises the two-phase search
+    //    (unchunked entries + embedding_chunk table).
+    let filter = crate::store::KnowledgeFilter::default();
+    let results = db.semantic_search(&query_embedding, &ctx, &filter, 10).unwrap();
+
+    // 6. Assert the long entry appears in results
+    let found = results.iter().any(|e| e.id == "kn-pizza-deep");
+    assert!(
+        found,
+        "Chunked semantic search should find the entry with buried pizza content. \
+         Got {} results: {:?}",
+        results.len(),
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+}

@@ -1615,7 +1615,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::Embed { id, all } => {
+        MemoryCommands::Embed { id, all, long_only } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Use current agent context for private entry access
@@ -1627,12 +1627,41 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if all {
                 let entries = db.list_all(&ctx)?;
                 let total = entries.len();
+
+                // If --long-only is specified, load tokenizer for token counting
+                let tokenizer = if long_only.is_some() {
+                    Some(crate::embeddings::load_tokenizer()?)
+                } else {
+                    None
+                };
+
+                let mut embedded = 0;
+                let mut skipped = 0;
+
                 println!("Found {} entries to embed", total);
                 for (idx, entry) in entries.iter().enumerate() {
+                    // Check token count if --long-only is specified
+                    if let Some(min_tokens) = long_only {
+                        if let Some(ref tok) = tokenizer {
+                            let text = entry.embedding_text();
+                            let encoding = tok.encode(text.as_str(), false)
+                                .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
+                            if encoding.get_ids().len() <= min_tokens {
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                    }
+
                     println!("Embedding {}/{}: {}", idx + 1, total, entry.title);
                     crate::helpers::auto_embed(&entry.id, db.as_ref())?;
+                    embedded += 1;
                 }
-                println!("All {} entries embedded!", total);
+                if long_only.is_some() {
+                    println!("Embedded {} entries ({} skipped below threshold)", embedded, skipped);
+                } else {
+                    println!("All {} entries embedded!", total);
+                }
             } else {
                 let entry_id = id.ok_or_else(|| {
                     anyhow::anyhow!("Entry ID required (use --all to embed all entries)")

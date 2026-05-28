@@ -868,6 +868,10 @@ pub enum MemoryCommands {
         /// Embed all knowledge entries
         #[arg(short, long)]
         all: bool,
+
+        /// Only re-embed entries longer than this many tokens (use with --all)
+        #[arg(long)]
+        long_only: Option<usize>,
     },
 
     /// Automatically add anchors based on embedding similarity.

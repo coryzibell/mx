@@ -20,6 +20,26 @@ pub trait EmbeddingProvider: Send + Sync {
     fn model_id(&self) -> &str;
 }
 
+/// Load just the tokenizer (no ONNX model). Used for token counting
+/// without the overhead of model initialization.
+pub fn load_tokenizer() -> Result<Tokenizer> {
+    let cache_dir = crate::paths::model_cache_dir();
+    let api = hf_hub::api::sync::ApiBuilder::new()
+        .with_cache_dir(cache_dir)
+        .build()
+        .context("Failed to initialize HF Hub API")?;
+    let repo = api.model("Xenova/bge-base-en-v1.5".to_string());
+    let tokenizer_path = repo
+        .get("tokenizer.json")
+        .context("Failed to fetch tokenizer from HF Hub")?;
+    let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+    tokenizer
+        .with_truncation(None)
+        .map_err(|e| anyhow::anyhow!("Failed to configure truncation: {}", e))?;
+    Ok(tokenizer)
+}
+
 /// Tract-ONNX provider using BGE-Base-EN-v1.5 (pure Rust, no C++ ONNX Runtime)
 ///
 /// The model is optimized once at construction time with a fixed input shape
