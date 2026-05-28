@@ -288,10 +288,10 @@ impl SurrealDatabase {
         let resonance = entry.resonance as f64;
 
         // Foundational and transformative entries are exempt from decay
-        if let Some(ref rtype) = entry.resonance_type {
-            if rtype == "foundational" || rtype == "transformative" {
-                return resonance;
-            }
+        if let Some(ref rtype) = entry.resonance_type
+            && (rtype == "foundational" || rtype == "transformative")
+        {
+            return resonance;
         }
 
         // Determine the reference timestamp: last_activated, falling back to created_at
