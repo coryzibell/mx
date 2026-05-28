@@ -150,12 +150,12 @@ mod tests {
         // Verify overlap: each subsequent chunk's offset should be
         // previous chunk's offset + stride (300)
         let stride = config.max_tokens - config.overlap_tokens;
-        for i in 1..chunks.len() {
+        for (i, chunk) in chunks.iter().enumerate().skip(1) {
             let expected_offset = i * stride;
             assert_eq!(
-                chunks[i].token_offset, expected_offset,
+                chunk.token_offset, expected_offset,
                 "Chunk {} offset {} != expected {}",
-                i, chunks[i].token_offset, expected_offset
+                i, chunk.token_offset, expected_offset
             );
         }
     }

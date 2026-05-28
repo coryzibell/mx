@@ -221,6 +221,7 @@ pub trait KnowledgeStore {
     fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()>;
 
     /// Insert a single embedding chunk for a knowledge entry
+    #[allow(clippy::too_many_arguments)]
     fn insert_embedding_chunk(
         &self,
         entry_id: &str,

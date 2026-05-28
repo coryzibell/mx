@@ -888,10 +888,10 @@ impl SurrealDatabase {
         for (entry_id, score) in &chunk_scores {
             if scored_entries.contains_key(entry_id) {
                 // Entry already in results from unchunked path — take max score
-                if let Some((existing_score, _)) = scored_entries.get_mut(entry_id) {
-                    if *score > *existing_score {
-                        *existing_score = *score;
-                    }
+                if let Some((existing_score, _)) = scored_entries.get_mut(entry_id)
+                    && *score > *existing_score
+                {
+                    *existing_score = *score;
                 }
                 continue;
             }
@@ -899,21 +899,22 @@ impl SurrealDatabase {
             // Fetch full entry with visibility/category/resonance filtering
             if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
                 // Apply resonance filter manually (get_knowledge doesn't apply it)
-                if let Some(min) = filter.min_resonance {
-                    if entry.resonance < min {
-                        continue;
-                    }
+                if let Some(min) = filter.min_resonance
+                    && entry.resonance < min
+                {
+                    continue;
                 }
-                if let Some(max) = filter.max_resonance {
-                    if entry.resonance > max {
-                        continue;
-                    }
+                if let Some(max) = filter.max_resonance
+                    && entry.resonance > max
+                {
+                    continue;
                 }
                 // Apply category filter
-                if let Some(cats) = &filter.categories {
-                    if !cats.is_empty() && !cats.contains(&entry.category_id) {
-                        continue;
-                    }
+                if let Some(cats) = &filter.categories
+                    && !cats.is_empty()
+                    && !cats.contains(&entry.category_id)
+                {
+                    continue;
                 }
                 scored_entries.insert(entry_id.clone(), (*score, Some(entry)));
             }
@@ -1073,6 +1074,7 @@ impl SurrealDatabase {
     }
 
     /// Insert a single embedding chunk (sync wrapper)
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_embedding_chunk(
         &self,
         entry_id: &str,
@@ -1094,6 +1096,7 @@ impl SurrealDatabase {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn insert_embedding_chunk_async(
         &self,
         entry_id: &str,
