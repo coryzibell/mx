@@ -869,7 +869,10 @@ pub enum MemoryCommands {
         #[arg(short, long)]
         all: bool,
 
-        /// Only re-embed entries longer than this many tokens (use with --all)
+        /// Only re-embed entries whose embedding text exceeds N tokens (use with --all).
+        /// Entries at or below the threshold are skipped entirely.
+        /// Useful for selectively re-embedding long entries that were previously
+        /// truncated at a smaller token limit (e.g., 512).
         #[arg(long)]
         long_only: Option<usize>,
     },

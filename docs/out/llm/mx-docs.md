@@ -1676,9 +1676,10 @@ embedding.
 
 ### Flags
 
-  **Flag**      **Type**   **Description**
-  ------------- ---------- -------------------------------------------------------
-  `-a, --all`   `flag`     Embed all knowledge entries (instead of a single ID).
+  **Flag**        **Type**   **Description**
+  --------------- ---------- --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `-a, --all`     `flag`     Embed all knowledge entries (instead of a single ID).
+  `--long-only`   `int`      Only re-embed entries whose `embedding_text()` exceeds this many tokens. Entries at or below the threshold are skipped entirely. Use with `--all`. Useful for selectively re-embedding long entries that were previously truncated at a smaller token limit (e.g., 512).
 
 ### Examples
 
@@ -1688,6 +1689,11 @@ mx memory embed kn-abc123
 
 ``` bash
 mx memory embed --all
+```
+
+``` bash
+# Re-embed only entries that exceed 512 tokens
+mx memory embed --all --long-only 512
 ```
 
 ## `mx memory auto-anchor`
