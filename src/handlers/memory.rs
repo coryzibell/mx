@@ -1655,7 +1655,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
 
                     embedded += 1;
-                    println!("Embedding {}/{}: {}", embedded, total - skipped, entry.title);
+                    println!(
+                        "Embedding {}/{}: {}",
+                        embedded,
+                        total - skipped,
+                        entry.title
+                    );
                     crate::helpers::auto_embed(&entry.id, db.as_ref())?;
                 }
                 if long_only.is_some() {
