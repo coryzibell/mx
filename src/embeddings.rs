@@ -84,9 +84,7 @@ impl TractProvider {
                 .with_context(|| format!("Failed to set input fact for input {}", i))?;
         }
 
-        let model = model
-            .into_optimized()
-            .context("Failed to optimize model")?;
+        let model = model.into_optimized().context("Failed to optimize model")?;
         let plan = model
             .into_runnable()
             .context("Failed to make model runnable")?;
