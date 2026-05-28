@@ -1555,6 +1555,29 @@ mod tests {
                 unreachable!()
             }
 
+            fn delete_embedding_chunks(&self, _id: &str) -> Result<()> {
+                unreachable!()
+            }
+            fn insert_embedding_chunk(
+                &self,
+                _id: &str,
+                _ci: usize,
+                _ct: &str,
+                _to: usize,
+                _tc: usize,
+                _emb: &[f32],
+                _m: &str,
+            ) -> Result<()> {
+                unreachable!()
+            }
+            fn semantic_search_chunks(
+                &self,
+                _emb: &[f32],
+                _l: usize,
+            ) -> Result<Vec<(String, f32)>> {
+                unreachable!()
+            }
+
             fn sweep_ghost_anchors(
                 &self,
                 _dry_run: bool,

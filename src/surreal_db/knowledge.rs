@@ -139,6 +139,11 @@ pub(super) struct SurrealKnowledgeRecord {
     #[serde(default)]
     pub embedded_at: Option<String>,
 
+    // === Embedding chunks (Issue #346) ===
+    /// Number of embedding chunks (0 = unchunked)
+    #[serde(default)]
+    pub chunk_count: i32,
+
     // === Stele encoding (Issue #122) ===
     /// Content format: markdown (default), json, stele:markdown, stele:ascii, stele:light, stele:full
     #[serde(default = "default_format")]
@@ -193,6 +198,7 @@ impl SurrealKnowledgeRecord {
             embedding: self.embedding,
             embedding_model: self.embedding_model,
             embedded_at: self.embedded_at,
+            chunk_count: self.chunk_count,
             format: self.format,
             effective_resonance: None,
         }
@@ -224,6 +230,7 @@ impl SurrealDatabase {
         IF embedding THEN embedding ELSE null END AS embedding,
         IF embedding_model THEN embedding_model ELSE null END AS embedding_model,
         IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at,
+        IF chunk_count THEN chunk_count ELSE 0 END AS chunk_count,
         IF format THEN format ELSE 'markdown' END AS format"
     }
 
@@ -378,6 +385,7 @@ impl SurrealDatabase {
             wake_phrase = $wake_phrase,
             embedding = $embedding,
             embedding_model = $embedding_model,
+            chunk_count = $chunk_count,
             format = $format"
             .to_string();
 
@@ -452,6 +460,7 @@ impl SurrealDatabase {
                 .bind(("wake_phrase", entry.wake_phrase.clone()))
                 .bind(("embedding", entry.embedding.clone()))
                 .bind(("embedding_model", entry.embedding_model.clone()))
+                .bind(("chunk_count", entry.chunk_count))
                 .bind(("format", entry.format.clone()));
 
             // Bind optional parameters
@@ -716,6 +725,12 @@ impl SurrealDatabase {
             return Err(anyhow::anyhow!("Delete failed: {:?}", errors));
         }
 
+        // Best-effort cleanup of embedding chunks (Issue #346)
+        let full_entry_id = format!("kn-{}", id_part);
+        self.delete_embedding_chunks_async(&full_entry_id)
+            .await
+            .ok();
+
         Ok(true)
     }
 
@@ -799,11 +814,11 @@ impl SurrealDatabase {
         let resonance_clause = Self::build_resonance_filter(filter);
         let category_clause = Self::build_category_filter(filter);
 
-        // Brute force vector similarity search (no HNSW index)
-        let sql = format!(
+        // Phase 1a: Search unchunked entries (chunk_count <= 0 or absent)
+        let unchunked_sql = format!(
             "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM knowledge
-            WHERE embedding IS NOT NONE {} {} {}
+            WHERE embedding IS NOT NONE AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {}
             ORDER BY score DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
@@ -812,12 +827,22 @@ impl SurrealDatabase {
             category_clause
         );
 
+        // Phase 1b: Search chunks (no visibility filter — applied after dedup)
+        let chunk_sql = "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
+            FROM embedding_chunk
+            ORDER BY score DESC
+            LIMIT $chunk_limit";
+
+        let chunk_limit = limit * 3; // over-fetch for dedup
+
         let mut response = with_db!(self, db, {
             let mut query_builder = db
-                .query(&sql)
+                .query(&unchunked_sql)
+                .query(chunk_sql)
                 .bind(("query_vec", query_embedding.to_vec()))
-                .bind(("limit", limit));
-            if let Some(agent) = current_agent {
+                .bind(("limit", limit))
+                .bind(("chunk_limit", chunk_limit));
+            if let Some(agent) = current_agent.clone() {
                 query_builder = query_builder.bind(("current_agent", agent));
             }
             query_builder
@@ -825,16 +850,84 @@ impl SurrealDatabase {
                 .context("Failed to execute semantic search query")
         })?;
 
-        let results: Vec<serde_json::Value> = response
+        // Parse unchunked results (statement 0)
+        let unchunked_results: Vec<serde_json::Value> = response
             .take(0)
-            .context("Failed to parse semantic search results")?;
+            .context("Failed to parse unchunked search results")?;
 
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
+        // Parse chunk results (statement 1)
+        let chunk_results: Vec<serde_json::Value> = response
+            .take(1)
+            .context("Failed to parse chunk search results")?;
+
+        // Phase 2: Merge results
+        // Collect unchunked entries with their scores
+        let mut scored_entries: std::collections::HashMap<String, (f32, Option<KnowledgeEntry>)> =
+            std::collections::HashMap::new();
+
+        for obj in unchunked_results {
+            let entry = self.value_to_knowledge_entry(obj.clone()).await?;
+            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+            scored_entries.insert(entry.id.clone(), (score, Some(entry)));
         }
 
-        Ok(entries)
+        // Deduplicate chunks: keep max score per entry_id
+        let mut chunk_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
+        for obj in &chunk_results {
+            let entry_id = obj["entry_id"].as_str().unwrap_or_default().to_string();
+            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+            let current = chunk_scores.entry(entry_id).or_insert(0.0f32);
+            if score > *current {
+                *current = score;
+            }
+        }
+
+        // For each unique chunk entry_id, fetch the full entry (with visibility/filter check)
+        for (entry_id, score) in &chunk_scores {
+            if scored_entries.contains_key(entry_id) {
+                // Entry already in results from unchunked path — take max score
+                if let Some((existing_score, _)) = scored_entries.get_mut(entry_id) {
+                    if *score > *existing_score {
+                        *existing_score = *score;
+                    }
+                }
+                continue;
+            }
+
+            // Fetch full entry with visibility/category/resonance filtering
+            if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
+                // Apply resonance filter manually (get_knowledge doesn't apply it)
+                if let Some(min) = filter.min_resonance {
+                    if entry.resonance < min {
+                        continue;
+                    }
+                }
+                if let Some(max) = filter.max_resonance {
+                    if entry.resonance > max {
+                        continue;
+                    }
+                }
+                // Apply category filter
+                if let Some(cats) = &filter.categories {
+                    if !cats.is_empty() && !cats.contains(&entry.category_id) {
+                        continue;
+                    }
+                }
+                scored_entries.insert(entry_id.clone(), (*score, Some(entry)));
+            }
+            // If entry not found or not visible, skip silently
+        }
+
+        // Sort by score DESC and take limit
+        let mut sorted: Vec<(f32, KnowledgeEntry)> = scored_entries
+            .into_values()
+            .filter_map(|(score, entry)| entry.map(|e| (score, e)))
+            .collect();
+        sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.truncate(limit);
+
+        Ok(sorted.into_iter().map(|(_, entry)| entry).collect())
     }
 
     /// Helper: Convert SurrealDB query result to KnowledgeEntry
@@ -943,9 +1036,144 @@ impl SurrealDatabase {
             embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
             embedding_model: serde_json::from_value(obj["embedding_model"].clone()).ok(),
             embedded_at: serde_json::from_value(obj["embedded_at"].clone()).ok(),
+            chunk_count: serde_json::from_value(obj["chunk_count"].clone()).unwrap_or(0),
             format: serde_json::from_value(obj["format"].clone())
                 .unwrap_or_else(|_| "markdown".to_string()),
             effective_resonance: obj.get("effective_resonance").and_then(|v| v.as_f64()),
         })
+    }
+
+    // =========================================================================
+    // EMBEDDING CHUNK OPERATIONS (Issue #346)
+    // =========================================================================
+
+    /// Delete all embedding chunks for a knowledge entry (sync wrapper)
+    pub fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+        Self::runtime().block_on(self.delete_embedding_chunks_async(entry_id))
+    }
+
+    async fn delete_embedding_chunks_async(&self, entry_id: &str) -> Result<()> {
+        let mut response = with_db!(self, db, {
+            db.query("DELETE FROM embedding_chunk WHERE entry_id = $entry_id")
+                .bind(("entry_id", entry_id.to_string()))
+                .await
+                .context("Failed to delete embedding chunks")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to delete embedding chunks: {:?}",
+                errors
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Insert a single embedding chunk (sync wrapper)
+    pub fn insert_embedding_chunk(
+        &self,
+        entry_id: &str,
+        chunk_index: usize,
+        chunk_text: &str,
+        token_offset: usize,
+        token_count: usize,
+        embedding: &[f32],
+        model_id: &str,
+    ) -> Result<()> {
+        Self::runtime().block_on(self.insert_embedding_chunk_async(
+            entry_id,
+            chunk_index,
+            chunk_text,
+            token_offset,
+            token_count,
+            embedding,
+            model_id,
+        ))
+    }
+
+    async fn insert_embedding_chunk_async(
+        &self,
+        entry_id: &str,
+        chunk_index: usize,
+        chunk_text: &str,
+        token_offset: usize,
+        token_count: usize,
+        embedding: &[f32],
+        model_id: &str,
+    ) -> Result<()> {
+        let sql = "CREATE embedding_chunk SET
+            entry_id = $entry_id,
+            chunk_index = $chunk_index,
+            chunk_text = $chunk_text,
+            token_offset = $token_offset,
+            token_count = $token_count,
+            embedding = $embedding,
+            embedding_model = $embedding_model";
+
+        let mut response = with_db!(self, db, {
+            db.query(sql)
+                .bind(("entry_id", entry_id.to_string()))
+                .bind(("chunk_index", chunk_index as i64))
+                .bind(("chunk_text", chunk_text.to_string()))
+                .bind(("token_offset", token_offset as i64))
+                .bind(("token_count", token_count as i64))
+                .bind(("embedding", embedding.to_vec()))
+                .bind(("embedding_model", model_id.to_string()))
+                .await
+                .context("Failed to insert embedding chunk")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to insert embedding chunk: {:?}",
+                errors
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Search embedding chunks by vector similarity (sync wrapper)
+    pub fn semantic_search_chunks(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
+        Self::runtime().block_on(self.semantic_search_chunks_async(query_embedding, limit))
+    }
+
+    async fn semantic_search_chunks_async(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
+        let sql = "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
+            FROM embedding_chunk
+            ORDER BY score DESC
+            LIMIT $limit";
+
+        let mut response = with_db!(self, db, {
+            db.query(sql)
+                .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("limit", limit))
+                .await
+                .context("Failed to search embedding chunks")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse chunk search results")?;
+
+        let mut pairs = Vec::new();
+        for obj in results {
+            let entry_id = obj["entry_id"].as_str().unwrap_or_default().to_string();
+            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+            pairs.push((entry_id, score));
+        }
+
+        Ok(pairs)
     }
 }

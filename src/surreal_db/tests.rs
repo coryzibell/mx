@@ -146,6 +146,7 @@ fn make_test_entry(id: &str, resonance: i32, decay_rate: f64) -> crate::knowledg
         embedding: None,
         embedding_model: None,
         embedded_at: None,
+        chunk_count: 0,
         format: "markdown".to_string(),
         effective_resonance: None,
     }

@@ -195,41 +195,89 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot_product / (magnitude_a * magnitude_b)
 }
 
-/// Auto-embed a knowledge entry after add/update
+/// Auto-embed a knowledge entry after add/update.
 ///
-/// This silently generates and updates the embedding for a single entry.
+/// For short entries (<=400 tokens): stores a single embedding on the entry.
+/// For long entries (>400 tokens): splits into overlapping chunks, embeds each
+/// chunk separately, stores chunks in `embedding_chunk` table, and stores a
+/// mean vector on the entry for auto_anchor compatibility.
 pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    use crate::chunking::{chunk_text, ChunkConfig};
     use crate::embeddings::{EmbeddingProvider, TractProvider};
 
-    // Get agent context for fetching the entry
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
         Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
         _ => store::AgentContext::public_only(),
     };
 
-    // Fetch the entry
     let mut entry = match db.get(entry_id, &ctx)? {
         Some(e) => e,
-        None => return Ok(()), // Entry not found, skip silently
+        None => return Ok(()),
     };
 
-    // Initialize embedding provider
     let provider = TractProvider::new()?;
-
-    // Use the entry's embedding_text method (DRY - shared with other embedding paths)
     let embedding_text = entry.embedding_text();
+    let config = ChunkConfig::default();
+    let chunks = chunk_text(&embedding_text, provider.tokenizer(), &config);
 
-    // Generate embedding
-    let embedding = provider.embed(&embedding_text)?;
+    if chunks.len() == 1 {
+        // Short entry: single embedding, no chunks
+        let embedding = provider.embed(&chunks[0].text)?;
+        entry.embedding = Some(embedding);
+        entry.embedding_model = Some(provider.model_id().to_string());
+        entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+        entry.chunk_count = 0;
+        entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        db.upsert_knowledge(&entry)?;
+        db.delete_embedding_chunks(entry_id)?; // clean up any stale chunks
+    } else {
+        // Long entry: chunk, embed each, store chunks + mean vector on entry
+        let mut chunk_embeddings = Vec::with_capacity(chunks.len());
+        for chunk in &chunks {
+            chunk_embeddings.push(provider.embed(&chunk.text)?);
+        }
 
-    // Update entry with embedding
-    entry.embedding = Some(embedding);
-    entry.embedding_model = Some(provider.model_id().to_string());
-    entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
-    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        // Store chunks (delete-then-insert)
+        db.delete_embedding_chunks(entry_id)?;
+        for (chunk, embedding) in chunks.iter().zip(chunk_embeddings.iter()) {
+            db.insert_embedding_chunk(
+                entry_id,
+                chunk.chunk_index,
+                &chunk.text,
+                chunk.token_offset,
+                chunk.token_count,
+                embedding,
+                provider.model_id(),
+            )?;
+        }
 
-    // Save to database
-    db.upsert_knowledge(&entry)?;
+        // Mean vector on entry (for auto_anchor compatibility)
+        let dims = provider.dimensions();
+        let mut mean_vec = vec![0.0f32; dims];
+        for emb in &chunk_embeddings {
+            for (i, v) in emb.iter().enumerate() {
+                mean_vec[i] += v;
+            }
+        }
+        let n = chunk_embeddings.len() as f32;
+        for v in mean_vec.iter_mut() {
+            *v /= n;
+        }
+        // L2 normalize
+        let l2: f32 = mean_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if l2 > 0.0 {
+            for v in mean_vec.iter_mut() {
+                *v /= l2;
+            }
+        }
+
+        entry.embedding = Some(mean_vec);
+        entry.embedding_model = Some(provider.model_id().to_string());
+        entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+        entry.chunk_count = chunks.len() as i32;
+        entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        db.upsert_knowledge(&entry)?;
+    }
 
     Ok(())
 }

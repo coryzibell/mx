@@ -214,6 +214,32 @@ pub trait KnowledgeStore {
     ) -> Result<Option<ReinforcementResult>>;
 
     // =========================================================================
+    // EMBEDDING CHUNK OPERATIONS (Issue #346)
+    // =========================================================================
+
+    /// Delete all embedding chunks for a knowledge entry
+    fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()>;
+
+    /// Insert a single embedding chunk for a knowledge entry
+    fn insert_embedding_chunk(
+        &self,
+        entry_id: &str,
+        chunk_index: usize,
+        chunk_text: &str,
+        token_offset: usize,
+        token_count: usize,
+        embedding: &[f32],
+        model_id: &str,
+    ) -> Result<()>;
+
+    /// Search embedding chunks by vector similarity, returning (entry_id, score) pairs
+    fn semantic_search_chunks(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>>;
+
+    // =========================================================================
     // CONTENT PATCH OPERATIONS
     // =========================================================================
 

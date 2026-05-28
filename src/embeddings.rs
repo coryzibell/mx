@@ -34,6 +34,11 @@ pub struct TractProvider {
 }
 
 impl TractProvider {
+    /// Access the underlying tokenizer (used by the chunker).
+    pub fn tokenizer(&self) -> &Tokenizer {
+        &self.tokenizer
+    }
+
     pub fn new() -> Result<Self> {
         let cache_dir = crate::paths::model_cache_dir();
 

@@ -548,6 +548,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     embedding: None,
                     embedding_model: None,
                     embedded_at: None,
+                    chunk_count: 0,
                     format: "markdown".to_string(),
                     effective_resonance: None,
                 };
@@ -718,6 +719,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 embedding: None,
                 embedding_model: None,
                 embedded_at: None,
+                chunk_count: 0,
                 format: "markdown".to_string(),
                 effective_resonance: None,
             };
@@ -1614,8 +1616,6 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
         }
 
         MemoryCommands::Embed { id, all } => {
-            use crate::embeddings::{EmbeddingProvider, TractProvider};
-
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
             // Use current agent context for private entry access
@@ -1624,93 +1624,25 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            // Initialize embedding provider once
-            println!("Initializing embedding model...");
-            let provider = TractProvider::new()?;
-
             if all {
-                // Embed ALL entries
                 let entries = db.list_all(&ctx)?;
                 let total = entries.len();
-
                 println!("Found {} entries to embed", total);
-
-                for (idx, mut entry) in entries.into_iter().enumerate() {
-                    // Construct embedding text from title + summary/body + tags
-                    let mut parts = vec![entry.title.clone()];
-
-                    if let Some(summary) = &entry.summary {
-                        parts.push(summary.clone());
-                    } else if let Some(body) = &entry.body {
-                        parts.push(body.chars().take(2000).collect());
-                    }
-
-                    if !entry.tags.is_empty() {
-                        parts.push(format!("Tags: {}", entry.tags.join(", ")));
-                    }
-
-                    let embedding_text = parts.join("\n\n");
-
-                    // Generate embedding
-                    println!("Embedded {}/{}: {}", idx + 1, total, entry.title);
-                    let embedding = provider.embed(&embedding_text)?;
-
-                    // Update entry with embedding
-                    entry.embedding = Some(embedding);
-                    entry.embedding_model = Some(provider.model_id().to_string());
-                    entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
-                    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
-
-                    // Save to database
-                    db.upsert_knowledge(&entry)?;
+                for (idx, entry) in entries.iter().enumerate() {
+                    println!("Embedding {}/{}: {}", idx + 1, total, entry.title);
+                    crate::helpers::auto_embed(&entry.id, db.as_ref())?;
                 }
-
-                println!("✓ All {} entries embedded successfully!", total);
-                println!("  Model: {}", provider.model_id());
-                println!("  Dimensions: {}", provider.dimensions());
+                println!("All {} entries embedded!", total);
             } else {
-                // Embed single entry
                 let entry_id = id.ok_or_else(|| {
                     anyhow::anyhow!("Entry ID required (use --all to embed all entries)")
                 })?;
-
-                // Fetch entry
-                let mut entry = db
+                let entry = db
                     .get(&entry_id, &ctx)?
                     .ok_or_else(|| anyhow::anyhow!("Entry not found: {}", entry_id))?;
-
-                // Construct embedding text from title + summary/body + tags
-                let mut parts = vec![entry.title.clone()];
-
-                if let Some(summary) = &entry.summary {
-                    parts.push(summary.clone());
-                } else if let Some(body) = &entry.body {
-                    parts.push(body.chars().take(2000).collect());
-                }
-
-                if !entry.tags.is_empty() {
-                    parts.push(format!("Tags: {}", entry.tags.join(", ")));
-                }
-
-                let embedding_text = parts.join("\n\n");
-
-                // Generate embedding
                 println!("Generating embedding for '{}'...", entry.title);
-                let embedding = provider.embed(&embedding_text)?;
-
-                // Update entry with embedding
-                entry.embedding = Some(embedding);
-                entry.embedding_model = Some(provider.model_id().to_string());
-                entry.embedded_at = Some(chrono::Utc::now().to_rfc3339());
-                entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
-
-                // Save to database
-                db.upsert_knowledge(&entry)?;
-
-                println!("✓ Embedding generated and saved!");
-                println!("  Entry: {}", entry_id);
-                println!("  Model: {}", provider.model_id());
-                println!("  Dimensions: {}", provider.dimensions());
+                crate::helpers::auto_embed(&entry.id, db.as_ref())?;
+                println!("Embedding generated and saved for: {}", entry_id);
             }
         }
 
