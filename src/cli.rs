@@ -1015,32 +1015,12 @@ pub enum MemoryCommands {
         #[arg(short, long, default_value = "7")]
         days: i64,
 
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-
-        /// Output as bash ritual script (sequential reading)
-        #[arg(long)]
-        ritual: bool,
-
-        /// Output as compact markdown index (for identity loading)
-        #[arg(long, conflicts_with_all = &["json", "ritual", "begin", "engage"])]
-        index: bool,
-
         /// Don't update activation counts
         #[arg(long)]
         no_activate: bool,
 
-        /// Interactive engage mode - verify wake phrases (requires TTY)
-        #[arg(short = 'e', long)]
-        engage: bool,
-
-        /// Prompt to set missing wake phrases during engage mode
-        #[arg(short = 's', long, requires = "engage")]
-        set_missing: bool,
-
         /// Start token-based wake ritual (returns first bloom and session token)
-        #[arg(long, conflicts_with_all = &["engage", "json", "ritual"])]
+        #[arg(long, conflicts_with_all = &["skip"])]
         begin: bool,
 
         /// Bloom ID for --respond or --skip operations
@@ -1048,11 +1028,11 @@ pub enum MemoryCommands {
         bloom_id: Option<String>,
 
         /// Submit wake phrase response
-        #[arg(long, conflicts_with_all = &["engage", "json", "ritual", "begin", "skip"])]
+        #[arg(long, conflicts_with_all = &["begin", "skip"])]
         respond: Option<String>,
 
         /// Skip a bloom without wake phrase
-        #[arg(long, conflicts_with_all = &["engage", "json", "ritual", "begin", "respond"])]
+        #[arg(long, conflicts_with_all = &["begin", "respond"])]
         skip: bool,
 
         /// Session token for chained ritual (required with --respond or --skip)

@@ -3,7 +3,6 @@ use anyhow::{Context, Result, bail};
 use crate::cli::*;
 use crate::content_ops;
 use crate::display::*;
-use crate::engage;
 use crate::helpers::*;
 use crate::index::{IndexConfig, export_csv, export_jsonl, export_markdown};
 use crate::knowledge;
@@ -1967,12 +1966,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             limit,
             min_resonance,
             days,
-            json,
-            ritual,
-            index,
             no_activate,
-            engage,
-            set_missing,
             begin,
             bloom_id,
             respond,
@@ -2029,15 +2023,6 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 let output = wake_ritual::skip_ritual(db.as_ref(), &ctx, &id, &session_token)?;
                 println!("{}", output);
-            } else if engage {
-                // Interactive engage mode
-                engage::run_engage_ritual(&cascade, db.as_ref(), set_missing)?;
-            } else if json {
-                println!("{}", serde_json::to_string_pretty(&cascade)?);
-            } else if index {
-                print_wake_index(&cascade);
-            } else if ritual {
-                print_wake_ritual(&cascade, &current_agent);
             } else {
                 print_wake_cascade(&cascade);
             }
