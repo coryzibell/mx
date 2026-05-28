@@ -218,7 +218,11 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     let provider = TractProvider::new()?;
     let embedding_text = entry.embedding_text();
     let config = ChunkConfig::default();
-    let chunks = chunk_text(&embedding_text, provider.tokenizer(), &config);
+    // Use load_tokenizer() (no truncation) for chunking — the provider's
+    // tokenizer truncates at 512 which would hide content beyond that point.
+    // Chunking must see ALL tokens to split them correctly.
+    let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
+    let chunks = chunk_text(&embedding_text, &chunking_tokenizer, &config);
 
     if chunks.len() == 1 {
         // Short entry: single embedding, no chunks

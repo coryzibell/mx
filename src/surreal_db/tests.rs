@@ -1834,7 +1834,11 @@ fn test_chunked_search_finds_buried_content() {
     let ctx = crate::store::AgentContext::public_only();
     let embedding_text = entry.embedding_text();
     let config = ChunkConfig::default();
-    let chunks = chunk_text(&embedding_text, provider.tokenizer(), &config);
+    // Use load_tokenizer() (no truncation) for chunking — provider.tokenizer()
+    // truncates at 512 which would hide the buried pizza content.
+    let chunking_tokenizer =
+        crate::embeddings::load_tokenizer().expect("load_tokenizer should succeed");
+    let chunks = chunk_text(&embedding_text, &chunking_tokenizer, &config);
 
     assert!(
         chunks.len() > 1,
