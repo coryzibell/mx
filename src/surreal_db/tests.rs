@@ -1915,3 +1915,130 @@ fn test_chunked_search_finds_buried_content() {
         results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
     );
 }
+
+// =========================================================================
+// Issue #352 — chunk_count backfill regression coverage (W1).
+//
+// The chunk_count backfill computes a value rather than a constant, so it
+// gets a real test (per "THE RULE" in schema/surrealdb-schema.surql). It
+// covers: the non-empty case (entry with N>0 embedding_chunk rows), the zero
+// case (entry with no chunks), and idempotency (re-running over an
+// already-set value is a no-op). The throwaway probe that once "tested" this
+// was deleted; this is its permanent replacement.
+// =========================================================================
+
+/// The exact chunk_count backfill statement that ships in
+/// schema/surrealdb-schema.surql (Issue #352). Kept in sync with the schema:
+/// this test is the guard that the idiom actually counts chunks correctly.
+const BACKFILL_CHUNK_COUNT_SQL: &str = "UPDATE knowledge SET chunk_count = array::len(\
+    SELECT id FROM embedding_chunk \
+    WHERE entry_id = string::concat('kn-', meta::id($parent.id))) \
+    WHERE chunk_count IS NONE";
+
+/// Strand a knowledge row's `chunk_count` as NONE, faithfully reproducing the
+/// production pre-chunking state: SurrealDB forbids writing NONE to a required
+/// `int` field, so the only way a live row got NONE was the field being DEFINEd
+/// AFTER the row already existed (a re-DEFINE does not backfill existing rows).
+/// We reproduce that exactly: drop the field constraint, set the value to NONE,
+/// then re-DEFINE the field — the row keeps NONE, which the backfill must fix.
+fn strand_chunk_count_none(db: &SurrealDatabase, record: &str) {
+    db.test_exec("REMOVE FIELD IF EXISTS chunk_count ON knowledge")
+        .unwrap();
+    db.test_exec(&format!("UPDATE {} SET chunk_count = NONE", record))
+        .unwrap();
+    db.test_exec("DEFINE FIELD IF NOT EXISTS chunk_count ON knowledge TYPE int DEFAULT 0")
+        .unwrap();
+}
+
+/// Insert `n` embedding_chunk rows for `entry_id` (kn-<hex> form).
+fn insert_n_chunks(db: &SurrealDatabase, entry_id: &str, n: usize) {
+    for i in 0..n {
+        db.insert_embedding_chunk(
+            entry_id,
+            i,
+            &format!("chunk {} text", i),
+            i * 10,
+            10,
+            &[0.1f32, 0.2, 0.3],
+            "test-model",
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn test_backfill_chunk_count_nonempty() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Entry with 3 chunks. The id "kn-w1chunked" maps to record
+    // knowledge:w1chunked, and meta::id(id) yields "w1chunked", so the
+    // chunks must use entry_id "kn-w1chunked" (the backfill rebuilds that
+    // key via string::concat('kn-', meta::id(id))).
+    let entry = make_test_entry("kn-w1chunked", 5, 0.5);
+    db.upsert_knowledge(&entry).unwrap();
+    insert_n_chunks(&db, "kn-w1chunked", 3);
+
+    // Reproduce a pre-chunking row whose chunk_count is genuinely NONE.
+    strand_chunk_count_none(&db, "knowledge:w1chunked");
+    assert_eq!(
+        db.test_raw_chunk_count("kn-w1chunked").unwrap(),
+        None,
+        "precondition: chunk_count should be NONE before backfill"
+    );
+
+    // Run the real backfill.
+    db.test_exec(BACKFILL_CHUNK_COUNT_SQL).unwrap();
+
+    assert_eq!(
+        db.test_raw_chunk_count("kn-w1chunked").unwrap(),
+        Some(3),
+        "backfill must count the 3 embedding_chunk rows"
+    );
+}
+
+#[test]
+fn test_backfill_chunk_count_zero_case() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Entry with NO chunks (a pre-chunking row that was never chunked).
+    let entry = make_test_entry("kn-w1zero", 5, 0.5);
+    db.upsert_knowledge(&entry).unwrap();
+
+    strand_chunk_count_none(&db, "knowledge:w1zero");
+    assert_eq!(db.test_raw_chunk_count("kn-w1zero").unwrap(), None);
+
+    db.test_exec(BACKFILL_CHUNK_COUNT_SQL).unwrap();
+
+    // array::len over an empty SELECT is naturally 0 — no projection-shape
+    // dependency, which is the whole point of the S1 form.
+    assert_eq!(
+        db.test_raw_chunk_count("kn-w1zero").unwrap(),
+        Some(0),
+        "entry with no chunks must backfill to 0"
+    );
+}
+
+#[test]
+fn test_backfill_chunk_count_idempotent() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let entry = make_test_entry("kn-w1idem", 5, 0.5);
+    db.upsert_knowledge(&entry).unwrap();
+    insert_n_chunks(&db, "kn-w1idem", 2);
+
+    strand_chunk_count_none(&db, "knowledge:w1idem");
+    db.test_exec(BACKFILL_CHUNK_COUNT_SQL).unwrap();
+    assert_eq!(db.test_raw_chunk_count("kn-w1idem").unwrap(), Some(2));
+
+    // Add MORE chunks after the value is set. The guard WHERE chunk_count IS
+    // NONE means a second run must NOT touch the already-set value, even
+    // though the underlying chunk count has changed. This proves the no-op
+    // guarantee that keeps the statement safe to replay on every connection.
+    insert_n_chunks(&db, "kn-w1idem", 5); // now 5 chunks total on disk
+    db.test_exec(BACKFILL_CHUNK_COUNT_SQL).unwrap();
+    assert_eq!(
+        db.test_raw_chunk_count("kn-w1idem").unwrap(),
+        Some(2),
+        "re-running backfill must not change an already-set chunk_count"
+    );
+}

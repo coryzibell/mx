@@ -367,8 +367,10 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 -- existing field is re-DEFINEd. So when we add a new REQUIRED (non-`option<>`)
 -- field to an existing table, every pre-existing row is left with that field
 -- as NONE. Reads survive via projection coalescing (e.g. the
--- `IF chunk_count THEN ... ELSE 0 END` projection), but the next WRITE that
--- touches such a row throws `Found NONE for field X ... but expected a <type>`.
+-- `IF chunk_count THEN chunk_count ELSE 0 END` projection — see
+-- knowledge_select_fields() in src/surreal_db/knowledge.rs), but the next WRITE
+-- that touches such a row throws
+-- `Found NONE for field X ... but expected a <type>`.
 --
 -- This file is replayed on EVERY connection (embedded AND network — see
 -- connection.rs apply_schema) and on every `mx migrate`. The DEFINE statements
@@ -382,6 +384,12 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 -- always guard with `WHERE <field> IS NONE` so re-running over already-fixed
 -- rows changes nothing. Never make a field `option<>` just to dodge this;
 -- backfill is the correct fix because downstream code assumes presence.
+-- If the backfill COMPUTES a value (not a constant), add a test that exercises
+-- the non-empty case — assert the computed value matches the real count, not
+-- just that the statement runs. Issue #352 is the cautionary tale: a chunk_count
+-- backfill shipped relying on a non-obvious SurrealDB sub-select quirk with only
+-- a throwaway probe; the permanent test (test_backfill_chunk_count_* in
+-- src/surreal_db/tests.rs) now guards it.
 
 -- Issues #72/#73: migrate single wake_phrase to wake_phrases array.
 -- Guard: only rows where wake_phrases was never set.
@@ -396,16 +404,22 @@ UPDATE knowledge SET format = 'markdown' WHERE format IS NONE;
 -- stranded with NONE — broken on next write.
 --
 -- The correct value is the actual number of embedding_chunk rows for the entry.
--- ID MISMATCH (kn-cb0a1fa2 / kn-747f2f37): a knowledge record id is
--- `knowledge:<hex>`, but `embedding_chunk.entry_id` stores the `kn-<hex>` form
--- as a plain string — NOT string-identical. We must translate the prefix when
+-- ID MISMATCH: a knowledge record id is `knowledge:<hex>`, but
+-- `embedding_chunk.entry_id` stores the `kn-<hex>` form (e.g. kn-<hex>) as a
+-- plain string — NOT string-identical. We must translate the prefix when
 -- joining: build the `kn-<hex>` key from meta::id(id) and count matching chunks.
--- For the 340 pre-chunking rows this correctly yields 0; for genuinely chunked
+-- For the pre-chunking rows this correctly yields 0; for genuinely chunked
 -- entries it yields the real count. Guard `WHERE chunk_count IS NONE` keeps it a
 -- no-op once applied.
-UPDATE knowledge SET chunk_count = (
-    SELECT VALUE count() FROM embedding_chunk
+--
+-- We use `array::len(SELECT id FROM ...)` rather than a `count() ... GROUP ALL`
+-- sub-select: it returns a plain int (naturally 0 on no matches), so there is no
+-- `[0].count ?? 0` projection-shape dependency to break across SurrealDB
+-- versions. Verified empirically against the live DB (2.6.1): both forms yield
+-- identical per-entry counts (24 chunked entries, 64 chunks total over 368 rows).
+-- Regression coverage: see test_backfill_chunk_count_* in src/surreal_db/tests.rs.
+UPDATE knowledge SET chunk_count = array::len(
+    SELECT id FROM embedding_chunk
     WHERE entry_id = string::concat('kn-', meta::id($parent.id))
-    GROUP ALL
-)[0].count ?? 0
+)
 WHERE chunk_count IS NONE;
