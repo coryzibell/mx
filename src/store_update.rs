@@ -26,7 +26,19 @@
 //! Tags are graph edges (`tagged_with`), not a column on `knowledge`, so
 //! `add_tag` is tracked separately in [`UpdateSpec::add_tags`] and applied as a
 //! `RELATE` alongside (not inside) the column `SET`. This keeps the `SET` clause
-//! column-pure: tag adds never leak into the targeted-column safety surface.
+//! column-pure: tag adds never leak into the targeted-column safety surface. The
+//! `RELATE` is itself gated on a visibility-filtered existence subquery, so the
+//! edge write obeys the same agent-visibility filter as the column `UPDATE`
+//! (symmetric TOCTOU safety).
+//!
+//! # Known exception to the single update path
+//!
+//! `update_summary` delegates here, so the builder is the *primary* place
+//! knowledge `UPDATE ... SET` is built. One backend method is a deliberate,
+//! tracked exception: `reinforce` hand-writes its own `UPDATE knowledge SET ...`
+//! because it is read-compute-write (it computes the new resonance and returns a
+//! `ReinforcementResult`), which a simple per-id column spec can't express. It is
+//! left as-is; it is not a drift bug.
 
 use anyhow::Result;
 

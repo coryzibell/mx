@@ -1383,14 +1383,53 @@ fn test_update_builder_field_and_tag_together() {
 }
 
 #[test]
+fn test_update_builder_column_write_bumps_updated_at() {
+    // Deliberate decision (Verdictia finding #3): a column write always bumps
+    // updated_at = time::now(); a tag-only update does NOT (tags are a graph edge,
+    // not a knowledge column, so the row itself is unchanged).
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-updated-at", 5, 0.0);
+    entry.updated_at = Some("2020-01-01T00:00:00Z".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Column write -> updated_at moves forward from the stale 2020 value.
+    as_store(&db)
+        .update("kn-updated-at")
+        .resonance(8)
+        .execute(&ctx)
+        .unwrap();
+    let after_col = db.get("kn-updated-at", &ctx).unwrap().unwrap();
+    let col_ts = after_col.updated_at.clone().unwrap();
+    assert!(
+        col_ts.as_str() > "2020-01-01T00:00:00Z",
+        "column write must bump updated_at, got {col_ts}"
+    );
+
+    // Tag-only write -> updated_at unchanged (no column touched).
+    as_store(&db)
+        .update("kn-updated-at")
+        .add_tag("tag-only")
+        .execute(&ctx)
+        .unwrap();
+    let after_tag = db.get("kn-updated-at", &ctx).unwrap().unwrap();
+    assert_eq!(
+        after_tag.updated_at.unwrap(),
+        col_ts,
+        "tag-only update must NOT bump updated_at"
+    );
+}
+
+#[test]
 fn test_update_builder_respects_visibility() {
     // Cross-agent: agent-b must NOT be able to update agent-a's private entry.
     let db = SurrealDatabase::open_in_memory().unwrap();
 
+    // make_test_entry(..., 5, ...) already sets resonance = 5.
     let mut entry = make_test_entry("kn-builder-private", 5, 0.0);
     entry.visibility = "private".to_string();
     entry.owner = Some("agent-a".to_string());
-    entry.resonance = 5;
     db.upsert_knowledge(&entry).unwrap();
 
     let ctx_b = crate::store::AgentContext::for_agent("agent-b");
@@ -1411,6 +1450,50 @@ fn test_update_builder_respects_visibility() {
         unchanged.resonance, 5,
         "private entry resonance must be unchanged after blocked cross-agent update"
     );
+}
+
+#[test]
+fn test_update_builder_add_tag_respects_visibility() {
+    // Cross-agent (Verdictia finding #5): agent-b must NOT be able to tag
+    // agent-a's private entry. The RELATE is gated on a visibility-filtered
+    // existence subquery, so a blocked agent gets applied=false and NO edge is
+    // created. This test fails before the TOCTOU tag-guard fix and passes after.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-builder-tag-private", 5, 0.0);
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // agent-b cannot see the entry, so the tag update must not apply...
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let outcome = as_store(&db)
+        .update("kn-builder-tag-private")
+        .add_tag("sneaky")
+        .execute(&ctx_b)
+        .unwrap();
+    assert!(
+        !outcome.applied,
+        "agent-b must not be able to tag agent-a's private entry"
+    );
+
+    // ...and no edge may have been grafted on. Check as the owner (who CAN see it).
+    let tags = db.get_tags_for_entry("kn-builder-tag-private").unwrap();
+    assert!(
+        tags.is_empty(),
+        "no tag edge should exist after a blocked cross-agent add_tag, got {tags:?}"
+    );
+
+    // Sanity: the owner CAN still tag it.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let owner_outcome = as_store(&db)
+        .update("kn-builder-tag-private")
+        .add_tag("legit")
+        .execute(&ctx_a)
+        .unwrap();
+    assert!(owner_outcome.applied, "owner must be able to tag own entry");
+    let owner_tags = db.get_tags_for_entry("kn-builder-tag-private").unwrap();
+    assert_eq!(owner_tags, vec!["legit".to_string()]);
 }
 
 #[test]
