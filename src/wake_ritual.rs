@@ -1397,6 +1397,14 @@ mod tests {
             fn update_summary(&self, _id: &str, _s: &str, _ctx: &AgentContext) -> Result<bool> {
                 unreachable!()
             }
+            fn apply_update(
+                &self,
+                _id: &str,
+                _spec: &crate::store_update::UpdateSpec,
+                _ctx: &AgentContext,
+            ) -> Result<crate::store_update::UpdateOutcome> {
+                unreachable!()
+            }
             fn increment_activation_count(&self, _ids: &[String]) -> Result<()> {
                 unreachable!()
             }

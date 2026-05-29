@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use crate::knowledge::KnowledgeEntry;
+use crate::store_update::{UpdateBuilder, UpdateOutcome, UpdateSpec};
 use crate::types::{
     Agent, ApplicabilityType, Category, ContentType, EntryType, Project, Relationship,
     RelationshipType, Session, SessionType, SourceType,
@@ -183,6 +184,20 @@ pub trait KnowledgeStore {
     /// * `summary` - New summary value to set
     /// * `ctx` - Agent context for visibility filtering
     fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool>;
+
+    /// Backend primitive that the [`UpdateBuilder`] delegates to. Builds and runs
+    /// ONE targeted `UPDATE knowledge SET <only the set columns> WHERE ...`,
+    /// binding every value, under the agent visibility filter (TOCTOU-safe).
+    /// Any tag adds in the spec are applied as `tagged_with` `RELATE`s.
+    ///
+    /// Prefer [`update`](Self::update) — this is the low-level seam, public only
+    /// so backends can implement it. Returns whether the entry existed/was visible.
+    fn apply_update(
+        &self,
+        id: &str,
+        spec: &UpdateSpec,
+        ctx: &AgentContext,
+    ) -> Result<UpdateOutcome>;
 
     /// Increment activation_count only — does NOT reset last_activated.
     /// Use for passive bulk surfacing (wake cascade, for-session view) so entries
@@ -476,6 +491,29 @@ pub trait KnowledgeStore {
 
     /// List tables (for migration status)
     fn list_tables(&self) -> Result<Vec<String>>;
+}
+
+impl dyn KnowledgeStore + '_ {
+    /// Composable builder-pattern update entry point (Issue #134).
+    ///
+    /// Returns an [`UpdateBuilder`] for `id`; chain field setters then call
+    /// `.execute(&ctx)`. Only the fields actually set are written — see
+    /// [`crate::store_update`] for the no-full-record-overwrite safety property.
+    ///
+    /// ```rust,ignore
+    /// store.update("kn-abc123")
+    ///     .summary("new summary")
+    ///     .resonance(8)
+    ///     .add_tag("new-tag")
+    ///     .execute(&ctx)?;
+    /// ```
+    ///
+    /// Defined on `dyn KnowledgeStore` (not the trait body) so it is callable on
+    /// the `Box<dyn KnowledgeStore>` / `&dyn KnowledgeStore` that every handler
+    /// holds, with `self` coercing straight into the builder.
+    pub fn update(&self, id: impl Into<String>) -> UpdateBuilder<'_> {
+        UpdateBuilder::new(self, id)
+    }
 }
 
 /// Summary result from a ghost anchor sweep.

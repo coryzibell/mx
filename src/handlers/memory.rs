@@ -450,11 +450,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             );
                         }
                         let new_summary = meta.to_string();
-                        if db.update_summary(
-                            &tid,
-                            &new_summary,
-                            &store::AgentContext::for_agent(&agent_id),
-                        )? {
+                        let outcome = db
+                            .update(tid.as_str())
+                            .summary(new_summary)
+                            .execute(&store::AgentContext::for_agent(&agent_id))?;
+                        if outcome.applied {
                             println!("Closed thread: {}", tid);
                         } else {
                             bail!("Entry '{}' not found", tid);

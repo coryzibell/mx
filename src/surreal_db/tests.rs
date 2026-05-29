@@ -1146,6 +1146,298 @@ fn test_get_summary_state_returns_none_for_no_summary() {
     );
 }
 
+// ============================================================================
+// BUILDER-PATTERN UPDATE API (Issue #134)
+//
+// The store.update(id).<field>(..).execute(&ctx) path. The recurring assertion
+// across these tests is the safety property from PR #131: a field NOT set on the
+// builder must NOT be touched by the resulting UPDATE.
+// ============================================================================
+
+/// Coerce a concrete SurrealDatabase to the trait object so the `update()`
+/// builder entry point (defined on `dyn KnowledgeStore`) is reachable in tests.
+fn as_store(db: &SurrealDatabase) -> &dyn KnowledgeStore {
+    db
+}
+
+#[test]
+fn test_update_builder_single_field_sets_only_that_field() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-single", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.activation_count = 7;
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Set ONLY summary via the builder.
+    let outcome = as_store(&db)
+        .update("kn-builder-single")
+        .summary(r#"{"state":"closed"}"#)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+    assert!(!outcome.no_op);
+
+    let updated = db.get("kn-builder-single", &ctx).unwrap().unwrap();
+    // summary changed...
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    // ...but resonance and activation_count were NOT in the SET clause, so
+    // they are untouched (the no-full-record-overwrite property).
+    assert_eq!(updated.resonance, 5, "resonance must be untouched");
+    assert_eq!(
+        updated.activation_count, 7,
+        "activation_count must be untouched"
+    );
+}
+
+#[test]
+fn test_update_builder_multiple_fields_compose() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-multi", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.activation_count = 1;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-multi")
+        .summary(r#"{"state":"closed"}"#)
+        .resonance(9)
+        .activation_count(42)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-multi", &ctx).unwrap().unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    assert_eq!(updated.resonance, 9);
+    assert_eq!(updated.activation_count, 42);
+}
+
+#[test]
+fn test_update_builder_unset_field_preserved() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-preserve", 6, 0.0);
+    entry.summary = Some(r#"{"keep":"me"}"#.to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Update ONLY resonance; summary must survive verbatim.
+    let outcome = as_store(&db)
+        .update("kn-builder-preserve")
+        .resonance(2)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-preserve", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 2);
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        summary["keep"], "me",
+        "summary must be preserved when only resonance is set"
+    );
+}
+
+#[test]
+fn test_update_builder_increment_activation_count_is_relative() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-incr", 5, 0.0);
+    entry.activation_count = 10;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-incr")
+        .increment_activation_count(3)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-incr", &ctx).unwrap().unwrap();
+    assert_eq!(
+        updated.activation_count, 13,
+        "increment_activation_count(3) should be a relative +=, not a set"
+    );
+}
+
+#[test]
+fn test_update_builder_empty_is_noop() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry = make_test_entry("kn-builder-empty", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // No setters called -> no-op, no query, no error.
+    let outcome = as_store(&db)
+        .update("kn-builder-empty")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.no_op, "empty builder must be a no-op");
+    assert!(!outcome.applied);
+
+    // Entry untouched.
+    let updated = db.get("kn-builder-empty", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 5);
+}
+
+#[test]
+fn test_update_builder_not_found_returns_not_applied() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let outcome = as_store(&db)
+        .update("kn-does-not-exist")
+        .resonance(3)
+        .execute(&ctx)
+        .unwrap();
+    assert!(!outcome.applied, "missing entry => applied=false");
+    assert!(
+        !outcome.no_op,
+        "a real (non-empty) update still ran the check"
+    );
+}
+
+#[test]
+fn test_update_builder_add_tag() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-tag", 5, 0.0);
+    entry.tags = vec!["existing".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-tag")
+        .add_tag("fresh")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let mut tags = db.get_tags_for_entry("kn-builder-tag").unwrap();
+    tags.sort();
+    assert_eq!(tags, vec!["existing".to_string(), "fresh".to_string()]);
+}
+
+#[test]
+fn test_update_builder_add_tag_idempotent() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry = make_test_entry("kn-builder-tag-idem", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Add the same tag twice across two updates: must not duplicate the edge.
+    as_store(&db)
+        .update("kn-builder-tag-idem")
+        .add_tag("dup")
+        .execute(&ctx)
+        .unwrap();
+    as_store(&db)
+        .update("kn-builder-tag-idem")
+        .add_tag("dup")
+        .execute(&ctx)
+        .unwrap();
+
+    let tags = db.get_tags_for_entry("kn-builder-tag-idem").unwrap();
+    assert_eq!(
+        tags,
+        vec!["dup".to_string()],
+        "adding the same tag twice should yield a single edge"
+    );
+}
+
+#[test]
+fn test_update_builder_field_and_tag_together() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-combo", 5, 0.0);
+    entry.activation_count = 2;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-combo")
+        .resonance(8)
+        .add_tag("combo")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-combo", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 8);
+    // activation_count not set -> untouched
+    assert_eq!(updated.activation_count, 2);
+    let tags = db.get_tags_for_entry("kn-builder-combo").unwrap();
+    assert_eq!(tags, vec!["combo".to_string()]);
+}
+
+#[test]
+fn test_update_builder_respects_visibility() {
+    // Cross-agent: agent-b must NOT be able to update agent-a's private entry.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-builder-private", 5, 0.0);
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-a".to_string());
+    entry.resonance = 5;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let outcome = as_store(&db)
+        .update("kn-builder-private")
+        .resonance(1)
+        .execute(&ctx_b)
+        .unwrap();
+    assert!(
+        !outcome.applied,
+        "agent-b must not see/update agent-a's private entry"
+    );
+
+    // Confirm nothing changed, viewed as the owner.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let unchanged = db.get("kn-builder-private", &ctx_a).unwrap().unwrap();
+    assert_eq!(
+        unchanged.resonance, 5,
+        "private entry resonance must be unchanged after blocked cross-agent update"
+    );
+}
+
+#[test]
+fn test_update_summary_still_works_via_builder_delegation() {
+    // Regression: update_summary() now delegates to the builder's apply_update.
+    // Its observable behavior must be unchanged from PR #131.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-summary-delegation", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.resonance = 5;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let applied = db
+        .update_summary("kn-summary-delegation", r#"{"state":"closed"}"#, &ctx)
+        .unwrap();
+    assert!(applied);
+
+    let updated = db.get("kn-summary-delegation", &ctx).unwrap().unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    // And resonance is still untouched through the delegation path.
+    assert_eq!(updated.resonance, 5);
+}
+
 #[test]
 fn test_query_recent_facts_all_types_includes_foundational() {
     // query_recent_facts_all_types should return foundational entries that would
