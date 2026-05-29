@@ -181,6 +181,17 @@ fn handle_trigger_check(
     // Drop already-fired entries (one-shot dedup) using a read-only peek so the
     // cap is computed over GENUINELY new matches. The authoritative mark happens
     // atomically below; this read just lets us cap + count deferred correctly.
+    //
+    // CONCURRENCY: this is a SHARED-lock peek that is released before the
+    // EXCLUSIVE-lock mark in `mark_survivors`. Firing is race-safe — the mark
+    // re-checks the fired set under the exclusive lock, so two concurrent
+    // trigger-checks on the same session can never double-fire a memory. But
+    // `deferred_count` (computed below from this pre-lock peek) is BEST-EFFORT:
+    // if a concurrent check fires some of these matches between this peek and
+    // our mark, those become survivors there and we may OVER-count them as
+    // "deferred" here. That's an accepted, reported-count-only inaccuracy under
+    // concurrent same-session checks; the authoritative fired set is always the
+    // one returned by `mark_survivors`. Not worth a single-lock refactor.
     let fired_store = crate::triggers::FiredStore::open();
     let already_fired = fired_store.read_fired()?;
     let new_matches: Vec<&knowledge::KnowledgeEntry> = matched_entries

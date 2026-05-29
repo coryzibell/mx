@@ -135,6 +135,29 @@ fn dry_run_does_not_create_or_modify_fired_state() {
 }
 
 #[test]
+fn no_match_real_check_does_not_create_fired_state() {
+    let dir = TempDir::new().unwrap();
+    let fired = dir.path().join("fired.json");
+    // A REAL (non-dry-run) trigger-check that matches nothing must do ZERO file
+    // IO on the hot path: no empty fired-state file should be created/flocked.
+    // This is the no-match case that the short-circuit in mark_survivors covers.
+    let out = mx(
+        &dir,
+        &["memory", "trigger-check", "an unremarkable message"],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "no-match must be success (exit 0); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !fired.exists(),
+        "no-match real trigger-check must not create the fired-state file"
+    );
+}
+
+#[test]
 fn trigger_reset_removes_fired_state_file() {
     let dir = TempDir::new().unwrap();
     let fired = dir.path().join("fired.json");

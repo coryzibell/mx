@@ -181,6 +181,17 @@ impl FiredStore {
     /// runs entirely before or entirely after — it can never observe the file
     /// mid-update and double-fire a memory.
     pub fn mark_survivors(&self, matched: &[String]) -> Result<Vec<String>> {
+        // Hot-path short-circuit: a no-match check passes an empty slice, and
+        // most user prompts match nothing. There is nothing to record, so do
+        // ZERO file IO — no open/create, no flock, no empty fired-state file
+        // littered into /tmp on every prompt. Guarding here (rather than only
+        // in the caller) keeps the invariant safe even if a future caller
+        // forgets to skip the call. The in-lock `survivors.is_empty()` early
+        // return in `read_modify_write` remains as defense in depth.
+        if matched.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -267,6 +278,9 @@ impl FiredStore {
         if contents.trim().is_empty() {
             return Ok(HashSet::new());
         }
+        // Deliberate fail-safe (mirrors `read_modify_write`): a corrupt/partial
+        // fired-state file degrades to "empty fired set" rather than hard-failing
+        // the check, so a triggered-memory hook re-fires rather than breaking.
         let state: FiredState = serde_json::from_str(&contents).unwrap_or_default();
         Ok(state.fired.into_iter().collect())
     }
@@ -438,6 +452,20 @@ mod tests {
         // Never written yet.
         store.reset().unwrap();
         assert!(store.read_fired().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mark_survivors_empty_input_does_no_file_io() {
+        // Hot-path invariant: a no-match check (empty `matched`) must NOT create,
+        // open, or lock the fired-state file. Most prompts match nothing, so this
+        // keeps the common case zero-IO and avoids littering an empty file.
+        let (_dir, store) = temp_store();
+        let survivors = store.mark_survivors(&[]).unwrap();
+        assert!(survivors.is_empty());
+        assert!(
+            !store.path.exists(),
+            "empty mark_survivors must not create the fired-state file"
+        );
     }
 
     #[test]
