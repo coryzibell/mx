@@ -11,6 +11,88 @@ use crate::wake_ritual;
 
 use super::metadata::*;
 
+/// Maximum byte length of `mx memory show` stdout before content is diverted
+/// to a temp file instead.
+///
+/// Claude Code's Bash tool persists any command stdout larger than exactly
+/// 30,000 bytes to a temp file and shows the model only a ~2KB preview -- the
+/// model does NOT auto-read the persisted file, so large memories become
+/// effectively invisible. We divert at a safe margin below that hard ceiling
+/// so the pointer message (plus any minor overhead) always stays inline.
+///
+/// This is a pure BYTE count: the Bash ceiling is not affected by token
+/// density, line count, or content type, so we measure `str::len()` (bytes),
+/// never `chars().count()`.
+const BASH_STDOUT_DIVERT_THRESHOLD: usize = 28_000;
+
+/// What to do with a rendered `mx memory show` payload.
+#[derive(Debug, PartialEq, Eq)]
+enum ShowOutput {
+    /// Content fits under the threshold -- print it to stdout as-is.
+    Inline,
+    /// Content exceeds the threshold -- write it to `path` and print `pointer`.
+    Divert {
+        path: std::path::PathBuf,
+        pointer: String,
+    },
+}
+
+/// Decide whether a rendered payload should be printed inline or diverted to a
+/// temp file, and (for the divert case) compute the target path and the short
+/// pointer message that will be printed to stdout instead.
+///
+/// Pure function (no IO) so the threshold logic, byte-length measurement, and
+/// pointer message can be unit-tested directly. `temp_dir` is injected for the
+/// same reason. `id` is the normalized memory id (e.g. `kn-99e08808`).
+fn plan_show_output(content: &str, id: &str, temp_dir: &std::path::Path) -> ShowOutput {
+    // BYTE length -- multibyte UTF-8 makes char count an undercount, and the
+    // Bash ceiling is a hard byte count.
+    let byte_len = content.len();
+    if byte_len <= BASH_STDOUT_DIVERT_THRESHOLD {
+        return ShowOutput::Inline;
+    }
+
+    let line_count = content.lines().count();
+    let path = temp_dir.join(format!("mx-memory-{}.md", id));
+    let pointer = format!(
+        "Memory {id} is {byte_len} bytes ({line_count} lines).\n\
+         Content written to: {path}\n\
+         Read the file to see full content.\n",
+        id = id,
+        byte_len = byte_len,
+        line_count = line_count,
+        path = path.display(),
+    );
+    ShowOutput::Divert { path, pointer }
+}
+
+/// Emit a rendered `mx memory show` payload, diverting to a temp file when it
+/// would exceed the Bash stdout ceiling. `trailing_newline` controls whether a
+/// newline is appended in the inline case (the `--content-only` path historically
+/// uses `print!` with no trailing newline; the JSON and full views already end
+/// in one).
+fn emit_show_output(content: &str, id: &str, trailing_newline: bool) -> Result<()> {
+    use std::io::Write;
+    match plan_show_output(content, id, &std::env::temp_dir()) {
+        ShowOutput::Inline => {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(content.as_bytes())?;
+            if trailing_newline {
+                stdout.write_all(b"\n")?;
+            }
+            // Flush explicitly -- line-buffered stdout may not flush when piped.
+            stdout.flush()?;
+        }
+        ShowOutput::Divert { path, pointer } => {
+            std::fs::write(&path, content)
+                .with_context(|| format!("failed to write memory content to {}", path.display()))?;
+            print!("{}", pointer);
+            std::io::stdout().flush()?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -186,19 +268,21 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         eprintln!("Warning: failed to update activation: {}", e);
                     }
 
+                    // Render the chosen view to a String first, then route it
+                    // through emit_show_output so any view that would blow past
+                    // the Bash stdout ceiling gets diverted to a temp file.
                     if content_only {
                         if let Some(body) = &entry.body {
-                            print!("{}", body);
-                            // Flush stdout explicitly -- `print!` (no newline)
-                            // uses line-buffered stdout which may not flush when
-                            // output is piped to a file or another process.
-                            use std::io::Write;
-                            std::io::stdout().flush()?;
+                            // Preserve historical behavior: no trailing newline.
+                            emit_show_output(body, &entry.id, false)?;
                         }
                     } else if json {
-                        println!("{}", serde_json::to_string_pretty(&entry)?);
+                        let rendered = serde_json::to_string_pretty(&entry)?;
+                        emit_show_output(&rendered, &entry.id, true)?;
                     } else {
-                        print_entry_full(&entry);
+                        let rendered = format_entry_full(&entry);
+                        // format_entry_full already ends in a newline.
+                        emit_show_output(&rendered, &entry.id, false)?;
                     }
                 }
                 None => {
@@ -2482,4 +2566,114 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod show_divert_tests {
+    use super::*;
+    use std::path::Path;
+
+    const ID: &str = "kn-99e08808";
+
+    #[test]
+    fn under_threshold_prints_inline() {
+        let content = "small memory body\n";
+        let plan = plan_show_output(content, ID, Path::new("/tmp"));
+        assert_eq!(plan, ShowOutput::Inline);
+    }
+
+    #[test]
+    fn empty_content_is_inline() {
+        let plan = plan_show_output("", ID, Path::new("/tmp"));
+        assert_eq!(plan, ShowOutput::Inline);
+    }
+
+    #[test]
+    fn over_threshold_writes_file_and_pointer() {
+        // One byte over the threshold must divert.
+        let content = "a".repeat(BASH_STDOUT_DIVERT_THRESHOLD + 1);
+        let temp_dir = Path::new("/tmp");
+        let plan = plan_show_output(&content, ID, temp_dir);
+        // Derive the expected path the same way the code does (`temp_dir.join`)
+        // so the assertion is platform-agnostic -- on Windows the joined
+        // separator is a backslash, so a hardcoded `/tmp/...` literal can never
+        // match. Comparing against the joined path proves the real derived path.
+        let expected_path = temp_dir.join("mx-memory-kn-99e08808.md");
+        match plan {
+            ShowOutput::Divert { path, pointer } => {
+                assert_eq!(path, expected_path);
+                // Pointer reports the true BYTE length.
+                assert!(
+                    pointer.contains(&format!("{} bytes", BASH_STDOUT_DIVERT_THRESHOLD + 1)),
+                    "pointer missing byte count: {pointer}"
+                );
+                // The pointer renders the path via `Path::display()`, so derive
+                // the expected substring the same way rather than assuming a
+                // POSIX separator.
+                let expected_path_str = expected_path.display().to_string();
+                assert!(
+                    pointer.contains(&expected_path_str),
+                    "pointer missing path {expected_path_str}: {pointer}"
+                );
+                assert!(pointer.contains("Read the file to see full content."));
+                // The pointer itself must stay safely under the ceiling.
+                assert!(pointer.len() < BASH_STDOUT_DIVERT_THRESHOLD);
+            }
+            ShowOutput::Inline => panic!("expected divert for oversized content"),
+        }
+    }
+
+    #[test]
+    fn boundary_exactly_at_threshold_is_inline() {
+        // Exactly at the threshold stays inline (the check is `<=`).
+        let content = "a".repeat(BASH_STDOUT_DIVERT_THRESHOLD);
+        assert_eq!(content.len(), BASH_STDOUT_DIVERT_THRESHOLD);
+        let plan = plan_show_output(&content, ID, Path::new("/tmp"));
+        assert_eq!(plan, ShowOutput::Inline);
+    }
+
+    #[test]
+    fn boundary_counts_bytes_not_chars() {
+        // 'é' (U+00E9) is 2 bytes in UTF-8 but 1 char. A string whose CHAR
+        // count is under the threshold but whose BYTE count is over it must
+        // divert -- proving we measure bytes, not chars.
+        let multibyte = "é".repeat(BASH_STDOUT_DIVERT_THRESHOLD - 1);
+        assert!(multibyte.chars().count() < BASH_STDOUT_DIVERT_THRESHOLD);
+        assert!(multibyte.len() > BASH_STDOUT_DIVERT_THRESHOLD);
+        let plan = plan_show_output(&multibyte, ID, Path::new("/tmp"));
+        assert!(
+            matches!(plan, ShowOutput::Divert { .. }),
+            "multibyte content over the byte ceiling must divert"
+        );
+    }
+
+    #[test]
+    fn pointer_line_count_is_accurate() {
+        // 5 lines, each padded so the total exceeds the threshold.
+        let line = "x".repeat(BASH_STDOUT_DIVERT_THRESHOLD);
+        let content = format!("{line}\n{line}\n{line}\n{line}\n{line}\n");
+        match plan_show_output(&content, ID, Path::new("/tmp")) {
+            ShowOutput::Divert { pointer, .. } => {
+                assert!(
+                    pointer.contains("(5 lines)"),
+                    "expected 5 lines in pointer: {pointer}"
+                );
+            }
+            ShowOutput::Inline => panic!("expected divert"),
+        }
+    }
+
+    #[test]
+    fn emit_diverts_oversized_content_to_real_temp_file() {
+        // End-to-end through the IO wrapper: file is written with full content.
+        let id = "kn-emittest1";
+        let content = "z".repeat(BASH_STDOUT_DIVERT_THRESHOLD + 100);
+        emit_show_output(&content, id, false).expect("emit should succeed");
+
+        let expected = std::env::temp_dir().join(format!("mx-memory-{id}.md"));
+        let written = std::fs::read_to_string(&expected).expect("temp file should exist");
+        assert_eq!(written, content, "diverted file must hold the full content");
+
+        let _ = std::fs::remove_file(&expected);
+    }
 }

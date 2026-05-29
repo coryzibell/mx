@@ -29,60 +29,75 @@ pub(crate) fn print_entry_summary(entry: &knowledge::KnowledgeEntry) {
 }
 
 pub(crate) fn print_entry_full(entry: &knowledge::KnowledgeEntry) {
-    println!("ID:       {}", entry.id);
-    println!("Category: {}", entry.category_id);
+    print!("{}", format_entry_full(entry));
+}
+
+/// Render the full detail view of an entry into a String.
+///
+/// Split out from `print_entry_full` so callers (e.g. `mx memory show`) can
+/// measure the rendered byte length before deciding whether to print it to
+/// stdout or divert it to a temp file. The returned string ends with a
+/// trailing newline, matching the previous `println!`-based output exactly.
+pub(crate) fn format_entry_full(entry: &knowledge::KnowledgeEntry) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+
+    let _ = writeln!(out, "ID:       {}", entry.id);
+    let _ = writeln!(out, "Category: {}", entry.category_id);
 
     // Extract state from summary if present
     let state = entry.get_summary_state();
 
     if let Some(state) = state {
-        println!("Title:    {} ({})", entry.title, state);
+        let _ = writeln!(out, "Title:    {} ({})", entry.title, state);
     } else {
-        println!("Title:    {}", entry.title);
+        let _ = writeln!(out, "Title:    {}", entry.title);
     }
 
     if entry.resonance > 0 {
-        println!("Resonance: {}", entry.resonance);
+        let _ = writeln!(out, "Resonance: {}", entry.resonance);
     }
     if let Some(ref rtype) = entry.resonance_type {
-        println!("Resonance Type: {}", rtype);
+        let _ = writeln!(out, "Resonance Type: {}", rtype);
     }
     if let Some(ref phrase) = entry.wake_phrase {
-        println!("Wake Phrase: {}", phrase);
+        let _ = writeln!(out, "Wake Phrase: {}", phrase);
     }
     if !entry.wake_phrases.is_empty() {
-        println!("Wake Phrases: {}", entry.wake_phrases.join(", "));
+        let _ = writeln!(out, "Wake Phrases: {}", entry.wake_phrases.join(", "));
     }
     if let Some(path) = &entry.file_path {
-        println!("File:     {}", path);
+        let _ = writeln!(out, "File:     {}", path);
     }
     if !entry.tags.is_empty() {
-        println!("Tags:     {}", entry.tags.join(", "));
+        let _ = writeln!(out, "Tags:     {}", entry.tags.join(", "));
     }
     if !entry.applicability.is_empty() {
-        println!("Applicability: {}", entry.applicability.join(", "));
+        let _ = writeln!(out, "Applicability: {}", entry.applicability.join(", "));
     }
     if !entry.anchors.is_empty() {
-        println!("Anchors:  {}", entry.anchors.join(", "));
+        let _ = writeln!(out, "Anchors:  {}", entry.anchors.join(", "));
     }
     // Always show visibility for private entries (public is the default)
     if entry.visibility == "private" {
-        println!("Visibility: {}", entry.visibility);
+        let _ = writeln!(out, "Visibility: {}", entry.visibility);
         if let Some(ref o) = entry.owner {
-            println!("Owner:    {}", o);
+            let _ = writeln!(out, "Owner:    {}", o);
         }
     }
     if let Some(created) = &entry.created_at {
-        println!("Created:  {}", created);
+        let _ = writeln!(out, "Created:  {}", created);
     }
     if let Some(updated) = &entry.updated_at {
-        println!("Updated:  {}", updated);
+        let _ = writeln!(out, "Updated:  {}", updated);
     }
-    println!("Format:   {}", entry.format);
-    println!();
+    let _ = writeln!(out, "Format:   {}", entry.format);
+    let _ = writeln!(out);
     if let Some(body) = &entry.body {
-        println!("{}", body);
+        let _ = writeln!(out, "{}", body);
     }
+
+    out
 }
 
 pub(crate) fn print_wake_cascade(cascade: &store::WakeCascade) {
