@@ -131,6 +131,25 @@ DEFINE FIELD IF NOT EXISTS wake_phrases ON knowledge TYPE array<string> DEFAULT 
 DEFINE FIELD IF NOT EXISTS wake_order ON knowledge TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
 
+-- Issue #246: Trigger keywords for reactive memory injection.
+-- Mirrors the wake_phrases field exactly: `array<string> DEFAULT []`.
+--
+-- NO BACKFILL IS NEEDED HERE (and a future reader should NOT add one).
+-- The stranding bug documented in the BACKFILL section below only afflicts
+-- REQUIRED SCALAR fields (e.g. `int DEFAULT 0`): when such a field is added to
+-- a SCHEMAFULL table, pre-existing rows hold NONE and the next write throws
+-- "Found NONE for field X". `array<string> DEFAULT []` is the safe pattern and
+-- is immune for two reasons working together:
+--   1. READ PATH coalesce: knowledge_select_fields() projects
+--      `IF triggers THEN triggers ELSE [] END`, so any pre-existing row whose
+--      `triggers` is NONE reads back as `[]` -- never observed as NONE.
+--   2. WRITE PATH always binds: upsert_knowledge_async always sets
+--      `triggers = $triggers` (bound, never NONE), so the moment any row is
+--      written it gets a concrete array. No row is ever left stranded with NONE.
+-- Because both halves hold, there is no window in which a row needs a backfill.
+DEFINE FIELD IF NOT EXISTS triggers ON knowledge TYPE array<string> DEFAULT [];
+DEFINE INDEX IF NOT EXISTS knowledge_triggers ON knowledge FIELDS triggers;
+
 -- DEPRECATED: Kept for backward compatibility during migration
 DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
 

@@ -141,6 +141,7 @@ fn make_test_entry(id: &str, resonance: i32, decay_rate: f64) -> crate::knowledg
         decay_rate,
         anchors: vec![],
         wake_phrases: vec![],
+        triggers: vec![],
         wake_order: None,
         wake_phrase: None,
         embedding: None,
@@ -2494,5 +2495,69 @@ fn test_backfill_chunk_count_idempotent() {
         db.test_raw_chunk_count("kn-w1idem").unwrap(),
         Some(2),
         "re-running backfill must not change an already-set chunk_count"
+    );
+}
+
+// =========================================================================
+// TRIGGERS (Issue #246, PR 1/4 -- data layer)
+// =========================================================================
+
+#[test]
+fn test_triggers_round_trip_normalized_and_deduped() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-trig1", 5, 0.0);
+    // Mix of cases needing normalization: uppercase, leading/trailing space,
+    // collapsible internal whitespace, an exact duplicate (post-normalization),
+    // and an empty string that must be dropped.
+    entry.triggers = vec![
+        "Brad".to_string(),
+        "  blood   sugar ".to_string(),
+        "BLOOD SUGAR".to_string(), // dup of "blood sugar" after normalization
+        "Glucose".to_string(),
+        "".to_string(),    // empty -> dropped
+        "   ".to_string(), // whitespace-only -> dropped
+    ];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let got = db
+        .get("kn-trig1", &ctx)
+        .unwrap()
+        .expect("entry should exist");
+
+    // Normalized: lowercased, whitespace-collapsed, empties dropped, deduped,
+    // first-seen order preserved.
+    assert_eq!(
+        got.triggers,
+        vec![
+            "brad".to_string(),
+            "blood sugar".to_string(),
+            "glucose".to_string(),
+        ],
+        "triggers must be normalized, deduped, and empty-dropped on write"
+    );
+}
+
+#[test]
+fn test_triggers_default_empty_when_absent() {
+    // No-backfill safety: an entry created WITHOUT triggers must read back as
+    // `[]` (never NONE), via the `IF triggers THEN triggers ELSE [] END`
+    // read-path coalesce plus the always-bound write path.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let entry = make_test_entry("kn-trig2", 5, 0.0); // make_test_entry sets triggers: vec![]
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let got = db
+        .get("kn-trig2", &ctx)
+        .unwrap()
+        .expect("entry should exist");
+
+    assert_eq!(
+        got.triggers,
+        Vec::<String>::new(),
+        "an entry with no triggers must read back as an empty array"
     );
 }

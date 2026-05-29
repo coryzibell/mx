@@ -74,6 +74,10 @@ pub struct KnowledgeEntry {
     #[serde(default)]
     pub wake_phrases: Vec<String>, // Multiple phrases for ritual variety
 
+    // Issue #246: Trigger keywords for reactive memory injection
+    #[serde(default)]
+    pub triggers: Vec<String>, // Keywords/phrases that reactively inject this memory
+
     // Issue #73: Custom wake order
     #[serde(default)]
     pub wake_order: Option<i32>, // Custom wake sequence (lower = earlier)
@@ -103,6 +107,44 @@ pub struct KnowledgeEntry {
     // raw `resonance` does not account for age.
     #[serde(default)]
     pub effective_resonance: Option<f64>,
+}
+
+/// Normalize a single trigger keyword/phrase for storage and matching (Issue #246).
+///
+/// Lowercases, trims, and collapses internal whitespace runs to a single space.
+/// Returns `None` when the input is empty after trimming, so callers can drop
+/// blank entries.
+///
+/// This is the single source of truth for trigger normalization, shared by the
+/// store write path (PR1), the CLI flag parsing (PR2), and the trigger matcher
+/// (PR3): all three MUST normalize identically so author-time and match-time
+/// values line up.
+pub fn normalize_trigger(raw: &str) -> Option<String> {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed.to_lowercase())
+    }
+}
+
+/// Normalize a collection of triggers: apply `normalize_trigger` to each, drop
+/// empties, and dedupe while preserving first-seen order (Issue #246).
+pub fn normalize_triggers<I, S>(raw: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in raw {
+        if let Some(norm) = normalize_trigger(item.as_ref())
+            && seen.insert(norm.clone())
+        {
+            out.push(norm);
+        }
+    }
+    out
 }
 
 fn default_format() -> String {
@@ -241,6 +283,41 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_trigger() {
+        // Lowercase + trim + collapse internal whitespace
+        assert_eq!(
+            normalize_trigger("  Blood   Sugar "),
+            Some("blood sugar".to_string())
+        );
+        assert_eq!(normalize_trigger("Brad"), Some("brad".to_string()));
+        // Empty / whitespace-only -> None
+        assert_eq!(normalize_trigger(""), None);
+        assert_eq!(normalize_trigger("   "), None);
+        assert_eq!(normalize_trigger("\t\n"), None);
+    }
+
+    #[test]
+    fn test_normalize_triggers_dedupe_and_order() {
+        let out = normalize_triggers(vec![
+            "Brad",
+            "  blood   sugar ",
+            "BLOOD SUGAR", // dup after normalization
+            "Glucose",
+            "",     // dropped
+            "   ",  // dropped
+            "brad", // dup
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                "brad".to_string(),
+                "blood sugar".to_string(),
+                "glucose".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn test_embedding_text() {
         let entry = KnowledgeEntry {
             id: "kn-test".to_string(),
@@ -270,6 +347,7 @@ mod tests {
             decay_rate: 0.0,
             anchors: vec![],
             wake_phrases: vec![],
+            triggers: vec![],
             wake_order: None,
             wake_phrase: None,
             embedding: None,
@@ -316,6 +394,7 @@ mod tests {
             decay_rate: 0.0,
             anchors: vec![],
             wake_phrases: vec![],
+            triggers: vec![],
             wake_order: None,
             wake_phrase: None,
             embedding: None,

@@ -118,6 +118,10 @@ pub(super) struct SurrealKnowledgeRecord {
     #[serde(default)]
     pub wake_phrases: Vec<String>,
 
+    // Issue #246: Trigger keywords for reactive memory injection
+    #[serde(default)]
+    pub triggers: Vec<String>,
+
     // Issue #73: Custom wake order
     #[serde(default)]
     pub wake_order: Option<i32>,
@@ -193,6 +197,7 @@ impl SurrealKnowledgeRecord {
             decay_rate: self.decay_rate,
             anchors: self.anchors,
             wake_phrases: self.wake_phrases,
+            triggers: self.triggers,
             wake_order: self.wake_order,
             wake_phrase: self.wake_phrase,
             embedding: self.embedding,
@@ -225,6 +230,7 @@ impl SurrealDatabase {
         IF decay_rate THEN decay_rate ELSE 0.0 END AS decay_rate,
         IF anchors THEN anchors ELSE [] END AS anchors,
         IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
+        IF triggers THEN triggers ELSE [] END AS triggers,
         IF wake_order THEN wake_order ELSE null END AS wake_order,
         IF wake_phrase THEN wake_phrase ELSE null END AS wake_phrase,
         IF embedding THEN embedding ELSE null END AS embedding,
@@ -428,6 +434,7 @@ impl SurrealDatabase {
             decay_rate = $decay_rate,
             anchors = $anchors,
             wake_phrases = $wake_phrases,
+            triggers = $triggers,
             wake_order = $wake_order,
             wake_phrase = $wake_phrase,
             embedding = $embedding,
@@ -503,6 +510,13 @@ impl SurrealDatabase {
                 .bind(("decay_rate", entry.decay_rate))
                 .bind(("anchors", entry.anchors.clone()))
                 .bind(("wake_phrases", entry.wake_phrases.clone()))
+                // Issue #246: normalize triggers on write (lowercase + collapse
+                // whitespace, drop empties, dedupe) so author-time values line up
+                // with match-time lookups in PR3. Bound param, never interpolated.
+                .bind((
+                    "triggers",
+                    crate::knowledge::normalize_triggers(entry.triggers.iter()),
+                ))
                 .bind(("wake_order", entry.wake_order))
                 .bind(("wake_phrase", entry.wake_phrase.clone()))
                 .bind(("embedding", entry.embedding.clone()))
@@ -1081,6 +1095,7 @@ impl SurrealDatabase {
             decay_rate: serde_json::from_value(obj["decay_rate"].clone()).unwrap_or(0.0),
             anchors: serde_json::from_value(obj["anchors"].clone()).unwrap_or_default(),
             wake_phrases: serde_json::from_value(obj["wake_phrases"].clone()).unwrap_or_default(),
+            triggers: serde_json::from_value(obj["triggers"].clone()).unwrap_or_default(),
             wake_order: serde_json::from_value(obj["wake_order"].clone()).ok(),
             wake_phrase: serde_json::from_value(obj["wake_phrase"].clone()).ok(),
             embedding: serde_json::from_value(obj["embedding"].clone()).ok(),
