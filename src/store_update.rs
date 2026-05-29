@@ -31,14 +31,22 @@
 //! edge write obeys the same agent-visibility filter as the column `UPDATE`
 //! (symmetric TOCTOU safety).
 //!
-//! # Known exception to the single update path
+//! # Known exceptions to the single update path
 //!
 //! `update_summary` delegates here, so the builder is the *primary* place
-//! knowledge `UPDATE ... SET` is built. One backend method is a deliberate,
-//! tracked exception: `reinforce` hand-writes its own `UPDATE knowledge SET ...`
-//! because it is read-compute-write (it computes the new resonance and returns a
-//! `ReinforcementResult`), which a simple per-id column spec can't express. It is
-//! left as-is; it is not a drift bug.
+//! per-id knowledge `UPDATE ... SET` is built. THREE backend methods are
+//! deliberate, tracked exceptions that hand-write their own
+//! `UPDATE knowledge SET ...` because their shapes can't be expressed by a
+//! per-id column spec:
+//!
+//! - `update_activations` — bulk multi-id write (`WHERE id IN $ids`).
+//! - `increment_activation_count` — bulk multi-id write (`WHERE id IN $ids`).
+//! - `reinforce` — read-compute-write: it reads, computes the new resonance,
+//!   and returns a `ReinforcementResult`.
+//!
+//! The builder is per-id, so the two bulk activation writers can't ride it;
+//! `reinforce`'s read-compute-write loop likewise doesn't fit a column spec.
+//! All three are left as-is by design; they are not drift bugs.
 
 use anyhow::Result;
 
