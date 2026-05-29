@@ -485,13 +485,64 @@ impl SurrealDatabase {
         summary: &str,
         ctx: &crate::store::AgentContext,
     ) -> Result<bool> {
-        let id_part = id.strip_prefix("kn-").unwrap_or(id);
+        // Delegate to the builder's targeted-update path (Issue #134). This is the
+        // primary place per-id knowledge `UPDATE ... SET` statements are built.
+        // Three tracked exceptions hand-write their own `UPDATE knowledge SET ...`
+        // because their shapes can't ride a per-id builder spec: the bulk multi-id
+        // activation writers `update_activations_async` and
+        // `increment_activation_count_async` (`WHERE id IN $ids`), and
+        // `reinforce_async` (read-compute-write returning a ReinforcementResult).
+        let spec = crate::store_update::UpdateSpec {
+            fields: vec![crate::store_update::FieldUpdate {
+                assignment: "summary = $set_summary".to_string(),
+                param: "set_summary".to_string(),
+                value: crate::store_update::UpdateValue::Str(summary.to_string()),
+            }],
+            add_tags: Vec::new(),
+        };
+        Ok(self.apply_update_async(id, &spec, ctx).await?.applied)
+    }
 
+    /// Builder-pattern targeted update (Issue #134).
+    ///
+    /// Runs ONE `UPDATE knowledge SET <only the columns in `spec`> WHERE ...`,
+    /// binding every value (no string interpolation of caller data), under the
+    /// agent visibility filter. The `SET` body is assembled solely from
+    /// `spec.fields` (see [`crate::store_update::UpdateSpec::set_clause_columns`]),
+    /// so a column the caller never set cannot appear in the statement — this is
+    /// the no-full-record-overwrite safety property from PR #131, made structural.
+    ///
+    /// Any `add_tags` are applied as `tagged_with` `RELATE` edges after the
+    /// column update (tags are a graph relation, not a `knowledge` column).
+    pub fn apply_update(
+        &self,
+        id: &str,
+        spec: &crate::store_update::UpdateSpec,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<crate::store_update::UpdateOutcome> {
+        Self::runtime().block_on(self.apply_update_async(id, spec, ctx))
+    }
+
+    pub(super) async fn apply_update_async(
+        &self,
+        id: &str,
+        spec: &crate::store_update::UpdateSpec,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<crate::store_update::UpdateOutcome> {
+        use crate::store_update::{UpdateOutcome, UpdateValue};
+
+        // Empty spec => no-op (no query). The builder guards this too, but a
+        // backend caller could hand us an empty spec directly.
+        if spec.is_empty() {
+            return Ok(UpdateOutcome::no_op());
+        }
+
+        let id_part = id.strip_prefix("kn-").unwrap_or(id);
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
-        // Check if the record exists AND is visible to the current agent.
-        // If the entry exists but isn't visible, we return false (same as "not found")
-        // to avoid leaking the existence of private entries.
+        // Existence + visibility check. If the entry exists but isn't visible we
+        // return applied=false (same as "not found") to avoid leaking the
+        // existence of private entries.
         let check_sql = format!(
             "SELECT count() AS c FROM knowledge WHERE meta::id(id) = $id {} GROUP ALL",
             visibility_clause
@@ -504,7 +555,7 @@ impl SurrealDatabase {
             }
             query
                 .await
-                .context("Failed to check knowledge record existence for summary update")
+                .context("Failed to check knowledge record existence for update")
         })?;
 
         let count_results: Vec<serde_json::Value> = check_response.take(0)?;
@@ -515,34 +566,128 @@ impl SurrealDatabase {
             > 0;
 
         if !exists {
-            return Ok(false);
+            return Ok(UpdateOutcome::ran(false));
         }
 
-        // Update with the same visibility filter to prevent TOCTOU race conditions.
-        // Even though we checked above, re-applying the filter on the UPDATE ensures
-        // no bypass is possible between check and update.
-        let update_sql = format!(
-            "UPDATE knowledge SET summary = $summary WHERE meta::id(id) = $id {}",
-            visibility_clause
-        );
+        // Targeted column update. The SET body is built ONLY from spec.fields, so
+        // unset columns are structurally absent. Re-apply the visibility filter on
+        // the UPDATE itself to close the TOCTOU window between check and update.
+        //
+        // We always bump `updated_at = time::now()` on a column write (server-side
+        // expr, binds nothing — consistent with `reinforce` and how
+        // `last_activated` is handled). A record whose summary/resonance changed
+        // but whose `updated_at` is stale would be misleading. A tag-only update
+        // does NOT bump `updated_at`: tags are a graph edge, not a `knowledge`
+        // column, so the row itself is unchanged and `updated_at` should reflect
+        // column mutations only (matching `reinforce`, which only touches it on
+        // its own column write).
+        if spec.has_column_updates() {
+            let set_body = spec.set_clause_columns();
+            let update_sql = format!(
+                "UPDATE knowledge SET {}, updated_at = time::now() WHERE meta::id(id) = $id {}",
+                set_body, visibility_clause
+            );
 
-        let mut response = with_db!(self, db, {
+            let mut response = with_db!(self, db, {
+                let mut query = db.query(&update_sql).bind(("id", id_part.to_string()));
+                if let Some(ref agent) = current_agent {
+                    query = query.bind(("current_agent", agent.clone()));
+                }
+                // Bind each set field's value by its param name. Fields with an
+                // empty param (server-side expressions like time::now()) bind
+                // nothing.
+                for field in &spec.fields {
+                    if field.param.is_empty() {
+                        continue;
+                    }
+                    query = match &field.value {
+                        UpdateValue::Str(s) => query.bind((field.param.clone(), s.clone())),
+                        UpdateValue::Int(i) => query.bind((field.param.clone(), *i)),
+                        UpdateValue::None => query,
+                    };
+                }
+                query.await.context("Failed to apply targeted update")
+            })?;
+
+            let errors = response.take_errors();
+            if !errors.is_empty() {
+                return Err(anyhow::anyhow!("Failed to apply update: {:?}", errors));
+            }
+        }
+
+        // Apply tag adds as tagged_with edges (graph relation, not a SET column).
+        // The RELATE itself is gated on a visibility-filtered existence subquery
+        // (same filter as the column UPDATE), so the edge write is subject to the
+        // same TOCTOU-safe visibility check as the column path — see below.
+        for tag_name in &spec.add_tags {
+            self.add_tag_edge_async(id_part, tag_name, &visibility_clause, &current_agent)
+                .await?;
+        }
+
+        Ok(UpdateOutcome::ran(true))
+    }
+
+    /// Ensure a tag exists and relate the knowledge entry to it (idempotent edge).
+    /// Shared tag-edge logic for the builder's `add_tag`.
+    ///
+    /// The RELATE is folded behind a visibility-filtered existence subquery so the
+    /// edge write obeys the *same* visibility filter the column UPDATE re-applies
+    /// (see `apply_update_async`). This closes the TOCTOU window between the
+    /// existence check and the edge write: if the entry stopped being visible to
+    /// the agent in between, the subquery returns empty and the RELATE never runs,
+    /// mirroring the column path's `WHERE ... <visibility_clause>` guard.
+    async fn add_tag_edge_async(
+        &self,
+        id_part: &str,
+        tag_name: &str,
+        visibility_clause: &str,
+        current_agent: &Option<String>,
+    ) -> Result<()> {
+        let knowledge = Thing::from(("knowledge", id_part));
+        let tag = Thing::from(("tag", tag_name));
+
+        // Ensure the tag node exists (matches upsert_knowledge's tag handling).
+        let mut tag_response = with_db!(self, db, {
+            db.query("UPSERT type::thing('tag', $tag_id) SET name = $tag_name")
+                .bind(("tag_id", tag_name.to_string()))
+                .bind(("tag_name", tag_name.to_string()))
+                .await
+                .context("Failed to create tag for update")
+        })?;
+        let tag_errors = tag_response.take_errors();
+        if !tag_errors.is_empty() {
+            return Err(anyhow::anyhow!("Failed to create tag: {:?}", tag_errors));
+        }
+
+        // Gate the RELATE on a visibility-filtered existence subquery (TOCTOU-safe,
+        // symmetric with the column UPDATE) AND on the absence of an existing edge
+        // (idempotent — calling add_tag twice doesn't create duplicate edges).
+        // All values bound; the visibility clause references $current_agent.
+        let edge_sql = format!(
+            "IF (SELECT VALUE id FROM knowledge WHERE meta::id(id) = $id {visibility_clause}) != [] \
+             AND (SELECT VALUE id FROM tagged_with WHERE in = $knowledge AND out = $tag) = [] \
+             THEN (RELATE $knowledge->tagged_with->$tag) END"
+        );
+        let mut edge_response = with_db!(self, db, {
             let mut query = db
-                .query(&update_sql)
+                .query(&edge_sql)
                 .bind(("id", id_part.to_string()))
-                .bind(("summary", summary.to_string()));
-            if let Some(ref agent) = current_agent {
+                .bind(("knowledge", knowledge.clone()))
+                .bind(("tag", tag.clone()));
+            if let Some(agent) = current_agent {
                 query = query.bind(("current_agent", agent.clone()));
             }
-            query.await.context("Failed to update summary")
+            query.await.context("Failed to create tag edge for update")
         })?;
-
-        let errors = response.take_errors();
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!("Failed to update summary: {:?}", errors));
+        let edge_errors = edge_response.take_errors();
+        if !edge_errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Failed to create tag edge: {:?}",
+                edge_errors
+            ));
         }
 
-        Ok(true)
+        Ok(())
     }
 
     /// Increment activation_count only — does NOT reset last_activated.

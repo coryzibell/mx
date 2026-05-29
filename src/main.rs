@@ -19,6 +19,7 @@ mod kv;
 pub mod paths;
 mod session;
 mod store;
+mod store_update;
 mod surreal_db;
 mod sync;
 mod tensor;

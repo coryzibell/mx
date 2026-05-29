@@ -95,6 +95,15 @@ impl KnowledgeStore for SurrealDatabase {
         self.update_summary(id, summary, ctx)
     }
 
+    fn apply_update(
+        &self,
+        id: &str,
+        spec: &crate::store_update::UpdateSpec,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<crate::store_update::UpdateOutcome> {
+        self.apply_update(id, spec, ctx)
+    }
+
     fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
         self.increment_activation_count(ids)
     }

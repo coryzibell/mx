@@ -1146,6 +1146,460 @@ fn test_get_summary_state_returns_none_for_no_summary() {
     );
 }
 
+// ============================================================================
+// BUILDER-PATTERN UPDATE API (Issue #134)
+//
+// The store.update(id).<field>(..).execute(&ctx) path. The recurring assertion
+// across these tests is the safety property from PR #131: a field NOT set on the
+// builder must NOT be touched by the resulting UPDATE.
+// ============================================================================
+
+/// Coerce a concrete SurrealDatabase to the trait object so the `update()`
+/// builder entry point (defined on `dyn KnowledgeStore`) is reachable in tests.
+fn as_store(db: &SurrealDatabase) -> &dyn KnowledgeStore {
+    db
+}
+
+#[test]
+fn test_update_builder_single_field_sets_only_that_field() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-single", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.activation_count = 7;
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Set ONLY summary via the builder.
+    let outcome = as_store(&db)
+        .update("kn-builder-single")
+        .summary(r#"{"state":"closed"}"#)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+    assert!(!outcome.no_op);
+
+    let updated = db.get("kn-builder-single", &ctx).unwrap().unwrap();
+    // summary changed...
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    // ...but resonance and activation_count were NOT in the SET clause, so
+    // they are untouched (the no-full-record-overwrite property).
+    assert_eq!(updated.resonance, 5, "resonance must be untouched");
+    assert_eq!(
+        updated.activation_count, 7,
+        "activation_count must be untouched"
+    );
+}
+
+#[test]
+fn test_update_builder_multiple_fields_compose() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-multi", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.activation_count = 1;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-multi")
+        .summary(r#"{"state":"closed"}"#)
+        .resonance(9)
+        .activation_count(42)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-multi", &ctx).unwrap().unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    assert_eq!(updated.resonance, 9);
+    assert_eq!(updated.activation_count, 42);
+}
+
+#[test]
+fn test_update_builder_unset_field_preserved() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-preserve", 6, 0.0);
+    entry.summary = Some(r#"{"keep":"me"}"#.to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Update ONLY resonance; summary must survive verbatim.
+    let outcome = as_store(&db)
+        .update("kn-builder-preserve")
+        .resonance(2)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-preserve", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 2);
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        summary["keep"], "me",
+        "summary must be preserved when only resonance is set"
+    );
+}
+
+#[test]
+fn test_update_builder_increment_activation_count_is_relative() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-incr", 5, 0.0);
+    entry.activation_count = 10;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-incr")
+        .increment_activation_count(3)
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-incr", &ctx).unwrap().unwrap();
+    assert_eq!(
+        updated.activation_count, 13,
+        "increment_activation_count(3) should be a relative +=, not a set"
+    );
+}
+
+#[test]
+fn test_update_builder_empty_is_noop() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry = make_test_entry("kn-builder-empty", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // No setters called -> no-op, no query, no error.
+    let outcome = as_store(&db)
+        .update("kn-builder-empty")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.no_op, "empty builder must be a no-op");
+    assert!(!outcome.applied);
+
+    // Entry untouched.
+    let updated = db.get("kn-builder-empty", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 5);
+}
+
+#[test]
+fn test_update_builder_not_found_returns_not_applied() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let outcome = as_store(&db)
+        .update("kn-does-not-exist")
+        .resonance(3)
+        .execute(&ctx)
+        .unwrap();
+    assert!(!outcome.applied, "missing entry => applied=false");
+    assert!(
+        !outcome.no_op,
+        "a real (non-empty) update still ran the check"
+    );
+}
+
+#[test]
+fn test_update_builder_add_tag() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-tag", 5, 0.0);
+    entry.tags = vec!["existing".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-tag")
+        .add_tag("fresh")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let mut tags = db.get_tags_for_entry("kn-builder-tag").unwrap();
+    tags.sort();
+    assert_eq!(tags, vec!["existing".to_string(), "fresh".to_string()]);
+}
+
+#[test]
+fn test_update_builder_add_tag_idempotent() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry = make_test_entry("kn-builder-tag-idem", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Add the same tag twice across two updates: must not duplicate the edge.
+    as_store(&db)
+        .update("kn-builder-tag-idem")
+        .add_tag("dup")
+        .execute(&ctx)
+        .unwrap();
+    as_store(&db)
+        .update("kn-builder-tag-idem")
+        .add_tag("dup")
+        .execute(&ctx)
+        .unwrap();
+
+    let tags = db.get_tags_for_entry("kn-builder-tag-idem").unwrap();
+    assert_eq!(
+        tags,
+        vec!["dup".to_string()],
+        "adding the same tag twice should yield a single edge"
+    );
+}
+
+#[test]
+fn test_update_builder_field_and_tag_together() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-builder-combo", 5, 0.0);
+    entry.activation_count = 2;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let outcome = as_store(&db)
+        .update("kn-builder-combo")
+        .resonance(8)
+        .add_tag("combo")
+        .execute(&ctx)
+        .unwrap();
+    assert!(outcome.applied);
+
+    let updated = db.get("kn-builder-combo", &ctx).unwrap().unwrap();
+    assert_eq!(updated.resonance, 8);
+    // activation_count not set -> untouched
+    assert_eq!(updated.activation_count, 2);
+    let tags = db.get_tags_for_entry("kn-builder-combo").unwrap();
+    assert_eq!(tags, vec!["combo".to_string()]);
+}
+
+#[test]
+fn test_update_builder_column_write_bumps_updated_at() {
+    // Deliberate decision (Verdictia finding #3): a column write always bumps
+    // updated_at = time::now(); a tag-only update does NOT (tags are a graph edge,
+    // not a knowledge column, so the row itself is unchanged).
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-updated-at", 5, 0.0);
+    entry.updated_at = Some("2020-01-01T00:00:00Z".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Column write -> updated_at moves forward from the stale 2020 value.
+    as_store(&db)
+        .update("kn-updated-at")
+        .resonance(8)
+        .execute(&ctx)
+        .unwrap();
+    let after_col = db.get("kn-updated-at", &ctx).unwrap().unwrap();
+    let col_ts = after_col.updated_at.clone().unwrap();
+    assert!(
+        col_ts.as_str() > "2020-01-01T00:00:00Z",
+        "column write must bump updated_at, got {col_ts}"
+    );
+
+    // Tag-only write -> updated_at unchanged (no column touched).
+    as_store(&db)
+        .update("kn-updated-at")
+        .add_tag("tag-only")
+        .execute(&ctx)
+        .unwrap();
+    let after_tag = db.get("kn-updated-at", &ctx).unwrap().unwrap();
+    assert_eq!(
+        after_tag.updated_at.unwrap(),
+        col_ts,
+        "tag-only update must NOT bump updated_at"
+    );
+}
+
+#[test]
+fn test_update_builder_respects_visibility() {
+    // Cross-agent: agent-b must NOT be able to update agent-a's private entry.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // make_test_entry(..., 5, ...) already sets resonance = 5.
+    let mut entry = make_test_entry("kn-builder-private", 5, 0.0);
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let outcome = as_store(&db)
+        .update("kn-builder-private")
+        .resonance(1)
+        .execute(&ctx_b)
+        .unwrap();
+    assert!(
+        !outcome.applied,
+        "agent-b must not see/update agent-a's private entry"
+    );
+
+    // Confirm nothing changed, viewed as the owner.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let unchanged = db.get("kn-builder-private", &ctx_a).unwrap().unwrap();
+    assert_eq!(
+        unchanged.resonance, 5,
+        "private entry resonance must be unchanged after blocked cross-agent update"
+    );
+}
+
+#[test]
+fn test_update_builder_add_tag_respects_visibility() {
+    // Cross-agent (Verdictia finding #5): agent-b must NOT be able to tag
+    // agent-a's private entry. The RELATE is gated on a visibility-filtered
+    // existence subquery, so a blocked agent gets applied=false and NO edge is
+    // created. This test fails before the TOCTOU tag-guard fix and passes after.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-builder-tag-private", 5, 0.0);
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // agent-b cannot see the entry, so the tag update must not apply...
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let outcome = as_store(&db)
+        .update("kn-builder-tag-private")
+        .add_tag("sneaky")
+        .execute(&ctx_b)
+        .unwrap();
+    assert!(
+        !outcome.applied,
+        "agent-b must not be able to tag agent-a's private entry"
+    );
+
+    // ...and no edge may have been grafted on. Check as the owner (who CAN see it).
+    let tags = db.get_tags_for_entry("kn-builder-tag-private").unwrap();
+    assert!(
+        tags.is_empty(),
+        "no tag edge should exist after a blocked cross-agent add_tag, got {tags:?}"
+    );
+
+    // Sanity: the owner CAN still tag it.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let owner_outcome = as_store(&db)
+        .update("kn-builder-tag-private")
+        .add_tag("legit")
+        .execute(&ctx_a)
+        .unwrap();
+    assert!(owner_outcome.applied, "owner must be able to tag own entry");
+    let owner_tags = db.get_tags_for_entry("kn-builder-tag-private").unwrap();
+    assert_eq!(owner_tags, vec!["legit".to_string()]);
+}
+
+#[test]
+fn test_update_builder_column_plus_tag_respects_visibility() {
+    // Companion to test_update_builder_add_tag_respects_visibility.
+    //
+    // That test uses a TAG-ONLY spec, where has_column_updates() is false, so the
+    // column-UPDATE block in apply_update_async is skipped entirely. Here the spec
+    // carries a column field ALONGSIDE the tag, so has_column_updates() is TRUE and
+    // the combined path runs: targeted column UPDATE first, then the RELATE. This
+    // covers the "column + tag in one execute()" shape the tag-only test can't.
+    //
+    // Isolation note: even with a column field, a non-owner is rejected at the
+    // upstream existence/visibility check (apply_update_async ~:568) before either
+    // the column UPDATE or the RELATE runs, so this case still exercises the
+    // upstream guard rather than the RELATE's own visibility subquery in
+    // add_tag_edge_async (~:667). Isolating that subquery would require forcing the
+    // post-check TOCTOU window (visibility flips between the existence check and the
+    // RELATE) single-threaded, which the in-memory harness can't cleanly do without
+    // injecting a hook between the two statements. The RELATE subquery guard is
+    // correct by inspection (it re-applies the same visibility_clause); this test
+    // asserts the observable contract: blocked => no column change AND no edge.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-builder-col-tag-private", 5, 0.0);
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-a".to_string());
+    entry.summary = Some("original".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    // agent-b cannot see the entry: a column+tag spec must not apply, and must
+    // mutate NEITHER the column NOR create the edge.
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let outcome = as_store(&db)
+        .update("kn-builder-col-tag-private")
+        .summary("hijacked")
+        .add_tag("sneaky")
+        .execute(&ctx_b)
+        .unwrap();
+    assert!(
+        !outcome.applied,
+        "agent-b must not be able to update+tag agent-a's private entry"
+    );
+
+    // Verify as the owner that nothing changed: summary intact, no tag edge.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let after_block = db
+        .get("kn-builder-col-tag-private", &ctx_a)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_block.summary.as_deref(),
+        Some("original"),
+        "blocked cross-agent update must not change the column"
+    );
+    let tags = db.get_tags_for_entry("kn-builder-col-tag-private").unwrap();
+    assert!(
+        tags.is_empty(),
+        "blocked cross-agent update must not create a tag edge, got {tags:?}"
+    );
+
+    // Owner CAN apply the combined column+tag update: both effects land.
+    let owner_outcome = as_store(&db)
+        .update("kn-builder-col-tag-private")
+        .summary("owner-set")
+        .add_tag("legit")
+        .execute(&ctx_a)
+        .unwrap();
+    assert!(
+        owner_outcome.applied,
+        "owner must be able to update+tag own entry"
+    );
+    let after_owner = db
+        .get("kn-builder-col-tag-private", &ctx_a)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_owner.summary.as_deref(), Some("owner-set"));
+    let owner_tags = db.get_tags_for_entry("kn-builder-col-tag-private").unwrap();
+    assert_eq!(owner_tags, vec!["legit".to_string()]);
+}
+
+#[test]
+fn test_update_summary_still_works_via_builder_delegation() {
+    // Regression: update_summary() now delegates to the builder's apply_update.
+    // Its observable behavior must be unchanged from PR #131.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut entry = make_test_entry("kn-summary-delegation", 5, 0.0);
+    entry.summary = Some(r#"{"state":"open"}"#.to_string());
+    entry.resonance = 5;
+    db.upsert_knowledge(&entry).unwrap();
+
+    let applied = db
+        .update_summary("kn-summary-delegation", r#"{"state":"closed"}"#, &ctx)
+        .unwrap();
+    assert!(applied);
+
+    let updated = db.get("kn-summary-delegation", &ctx).unwrap().unwrap();
+    let summary: serde_json::Value =
+        serde_json::from_str(updated.summary.as_deref().unwrap()).unwrap();
+    assert_eq!(summary["state"], "closed");
+    // And resonance is still untouched through the delegation path.
+    assert_eq!(updated.resonance, 5);
+}
+
 #[test]
 fn test_query_recent_facts_all_types_includes_foundational() {
     // query_recent_facts_all_types should return foundational entries that would
