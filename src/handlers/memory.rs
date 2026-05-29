@@ -626,6 +626,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     decay_rate: 0.0,
                     anchors: vec![],
                     wake_phrases: vec![],
+                    // Issue #246: triggers wired through the CLI in PR2; default empty for now.
+                    triggers: vec![],
                     wake_order: None,
                     wake_phrase: None,
                     embedding: None,
@@ -797,6 +799,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 decay_rate: 0.0,
                 anchors: anchor_list,
                 wake_phrases: wake_phrase_list,
+                // Issue #246: triggers wired through the CLI in PR2; default empty for now.
+                triggers: vec![],
                 wake_order,
                 wake_phrase,
                 embedding: None,
