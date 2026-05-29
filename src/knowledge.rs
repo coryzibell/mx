@@ -111,16 +111,27 @@ pub struct KnowledgeEntry {
 
 /// Normalize a single trigger keyword/phrase for storage and matching (Issue #246).
 ///
-/// Lowercases, trims, and collapses internal whitespace runs to a single space.
-/// Returns `None` when the input is empty after trimming, so callers can drop
-/// blank entries.
+/// Pipeline: Unicode NFC canonicalization, lowercase, trim, and collapse
+/// internal whitespace runs to a single space. Returns `None` when the input is
+/// empty after trimming, so callers can drop blank entries.
 ///
 /// This is the single source of truth for trigger normalization, shared by the
 /// store write path (PR1), the CLI flag parsing (PR2), and the trigger matcher
 /// (PR3): all three MUST normalize identically so author-time and match-time
 /// values line up.
+///
+/// NFC matters because precomposed "café" (U+00E9) and decomposed "café"
+/// (e + U+0301 combining acute) are visually identical but byte-distinct. Author
+/// time and match time can each arrive in either form (different keyboards,
+/// editors, OSes), so we canonicalize BOTH sides to NFC here — the one shared
+/// helper — guaranteeing they compare equal (Verdictia PR1 review, #246).
 pub fn normalize_trigger(raw: &str) -> Option<String> {
-    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    use unicode_normalization::UnicodeNormalization;
+    // NFC first so combining sequences fold into precomposed code points before
+    // we lowercase/compare. `to_lowercase` is locale-independent (Unicode default
+    // case folding) and stable across the NFC-canonicalized input.
+    let canonical: String = raw.nfc().collect();
+    let collapsed = canonical.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         None
     } else {
@@ -294,6 +305,24 @@ mod tests {
         assert_eq!(normalize_trigger(""), None);
         assert_eq!(normalize_trigger("   "), None);
         assert_eq!(normalize_trigger("\t\n"), None);
+    }
+
+    #[test]
+    fn test_normalize_trigger_nfc_canonicalization() {
+        // Precomposed "café": ...caf + é (U+00E9).
+        let precomposed = "caf\u{00e9}";
+        // Decomposed "café": ...caf + e + combining acute (U+0301).
+        let decomposed = "cafe\u{0301}";
+        // Byte-distinct inputs...
+        assert_ne!(precomposed, decomposed);
+        // ...must normalize to the SAME canonical form (NFC). Without NFC in the
+        // shared helper, a precomposed stored trigger would never fire on a
+        // decomposed message token (or vice versa). #246 / Verdictia review.
+        assert_eq!(
+            normalize_trigger(precomposed),
+            normalize_trigger(decomposed)
+        );
+        assert_eq!(normalize_trigger(decomposed), Some("café".to_string()));
     }
 
     #[test]

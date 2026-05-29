@@ -93,6 +93,176 @@ fn emit_show_output(content: &str, id: &str, trailing_newline: bool) -> Result<(
     Ok(())
 }
 
+/// Maximum number of memories to fire on a single `trigger-check`. If more than
+/// this many match, the top `TRIGGER_FIRE_CAP` by resonance fire and the rest
+/// stay UNFIRED (eligible to fire on a later turn). Keeps a single message from
+/// flooding context. (Issue #246, Savorist decision.)
+const TRIGGER_FIRE_CAP: usize = 5;
+
+/// Resolve the message for `trigger-check`: use the positional arg if present
+/// and non-empty (after trim), otherwise read stdin to EOF. Returns `None` when
+/// there is no usable message (empty arg AND empty/whitespace stdin) — the
+/// caller maps that to exit code 4.
+fn resolve_trigger_message(arg: Option<String>) -> Result<Option<String>> {
+    if let Some(m) = arg
+        && !m.trim().is_empty()
+    {
+        return Ok(Some(m));
+    }
+    // Stdin fallback.
+    use std::io::Read;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("failed to read message from stdin")?;
+    if buf.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(buf))
+    }
+}
+
+/// `mx memory trigger-check` handler (Issue #246, PR3).
+///
+/// Pipeline: resolve message (arg or stdin) → load trigger-bearing entries
+/// VISIBLE to the current agent → run the matcher → drop already-fired → sort by
+/// resonance desc → cap at `TRIGGER_FIRE_CAP` → mark survivors fired (unless
+/// `--dry-run`) → emit. Firing nothing is success (exit 0). Empty message exits 4.
+fn handle_trigger_check(
+    config: &IndexConfig,
+    verbose: bool,
+    message: Option<String>,
+    json: bool,
+    _format: TriggerFormat,
+    dry_run: bool,
+) -> Result<()> {
+    use std::io::Write;
+
+    let Some(message) = resolve_trigger_message(message)? else {
+        // Invalid input: empty message even after stdin fallback.
+        eprintln!("[mx] trigger-check: empty message (provide an argument or pipe via stdin)");
+        std::process::exit(4);
+    };
+
+    let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+    // Visibility: the SAME filter used by every other read path. A private
+    // triggered memory only fires for its owner. (See store::list_with_triggers.)
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+        _ => store::AgentContext::public_only(),
+    };
+
+    let entries = db.list_with_triggers(&ctx)?;
+
+    // Run the matcher over (id, triggers) pairs. `match_entries` tokenizes the
+    // message once and checks every entry against the shared stem stream.
+    let pairs: Vec<(&str, &[String])> = entries
+        .iter()
+        .map(|e| (e.id.as_str(), e.triggers.as_slice()))
+        .collect();
+    let matches = crate::triggers::match_entries(&message, pairs);
+
+    // Index matches by id so we can carry triggers_matched alongside the entry.
+    let matched_triggers: std::collections::HashMap<&str, Vec<String>> = matches
+        .iter()
+        .map(|m| (m.id.as_str(), m.triggers_matched.clone()))
+        .collect();
+
+    // Collect the matched entries, then sort by resonance DESC (id asc as a
+    // deterministic tiebreaker) BEFORE applying the fire cap, so the highest-
+    // resonance memories win the 5 slots.
+    let mut matched_entries: Vec<&knowledge::KnowledgeEntry> = entries
+        .iter()
+        .filter(|e| matched_triggers.contains_key(e.id.as_str()))
+        .collect();
+    matched_entries.sort_by(|a, b| b.resonance.cmp(&a.resonance).then_with(|| a.id.cmp(&b.id)));
+
+    // Drop already-fired entries (one-shot dedup) using a read-only peek so the
+    // cap is computed over GENUINELY new matches. The authoritative mark happens
+    // atomically below; this read just lets us cap + count deferred correctly.
+    let fired_store = crate::triggers::FiredStore::open();
+    let already_fired = fired_store.read_fired()?;
+    let new_matches: Vec<&knowledge::KnowledgeEntry> = matched_entries
+        .into_iter()
+        .filter(|e| !already_fired.contains(&e.id))
+        .collect();
+
+    // Cap at TRIGGER_FIRE_CAP by resonance desc; overflow stays unfired.
+    let total_new = new_matches.len();
+    let to_fire: Vec<&knowledge::KnowledgeEntry> =
+        new_matches.into_iter().take(TRIGGER_FIRE_CAP).collect();
+    let deferred_count = total_new.saturating_sub(to_fire.len());
+
+    // Mark survivors fired atomically (unless dry-run). mark_survivors re-checks
+    // the fired set under flock, so even if a concurrent check fired one of these
+    // between our peek and now, it is excluded here — the returned survivors are
+    // the authoritative set that THIS invocation owns.
+    let fired_ids: Vec<String> = to_fire.iter().map(|e| e.id.clone()).collect();
+    let survivors: Vec<String> = if dry_run {
+        // Dry-run: do not mark. Report what WOULD fire.
+        fired_ids.clone()
+    } else {
+        fired_store.mark_survivors(&fired_ids)?
+    };
+    let survivor_set: std::collections::HashSet<&String> = survivors.iter().collect();
+
+    // Final fired list = the capped entries that this invocation actually owns,
+    // preserving resonance-desc order.
+    let fired: Vec<&knowledge::KnowledgeEntry> = to_fire
+        .iter()
+        .copied()
+        .filter(|e| survivor_set.contains(&e.id))
+        .collect();
+
+    if json {
+        let fired_json: Vec<serde_json::Value> = fired
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "title": e.title,
+                    "triggers_matched": matched_triggers
+                        .get(e.id.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "fired": fired_json,
+                "deferred_count": deferred_count,
+            }))?
+        );
+    } else {
+        // `context` format: title + body per fired memory, separated by `---`.
+        // EMPTY stdout when nothing fires (caller injects nothing).
+        let mut out = String::new();
+        for (i, e) in fired.iter().enumerate() {
+            if i > 0 {
+                out.push_str("\n---\n\n");
+            }
+            out.push_str("# ");
+            out.push_str(&e.title);
+            out.push('\n');
+            if let Some(body) = &e.body {
+                out.push('\n');
+                out.push_str(body);
+                out.push('\n');
+            }
+        }
+        if !out.is_empty() {
+            let mut stdout = std::io::stdout();
+            stdout.write_all(out.as_bytes())?;
+            stdout.flush()?;
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -288,6 +458,34 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 None => {
                     bail!("Entry '{}' not found", id);
                 }
+            }
+        }
+
+        MemoryCommands::TriggerCheck {
+            message,
+            json,
+            format,
+            dry_run,
+        } => {
+            handle_trigger_check(&config, verbose, message, json, format, dry_run)?;
+        }
+
+        MemoryCommands::TriggerReset { json } => {
+            let store = crate::triggers::FiredStore::open();
+            store.reset()?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "reset": true,
+                        "path": crate::triggers::fired_path().display().to_string(),
+                    }))?
+                );
+            } else {
+                eprintln!(
+                    "[mx] trigger fired-state cleared: {}",
+                    crate::triggers::fired_path().display()
+                );
             }
         }
 

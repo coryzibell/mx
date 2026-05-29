@@ -1362,6 +1362,72 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// List entries with at least one trigger keyword (Issue #246, PR3).
+    pub fn list_with_triggers(
+        &self,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.list_with_triggers_async(ctx))
+    }
+
+    async fn list_with_triggers_async(
+        &self,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Prefilter to only entries that actually have triggers, shrinking the
+        // scan. visibility_clause already begins with "AND", so it appends
+        // cleanly after this leading predicate.
+        //
+        // COALESCE IN THE WHERE (subtle, do not "simplify" away): the read-path
+        // `IF triggers THEN triggers ELSE [] END` coalesce lives only in the
+        // SELECT projection — it does NOT apply inside WHERE. Pre-existing rows
+        // (and freshly-defined SCHEMAFULL fields before any write) can still hold
+        // `triggers = NONE` at filter time, and `array::len(NONE)` is a hard
+        // ERROR ("Expected a array but found NONE"), not a falsy 0. So we coalesce
+        // here with `?? []` before measuring length. Verified against an on-disk
+        // store; the in-memory round-trip tests never hit it because every test
+        // row is written (and thus already an array).
+        //
+        // INDEX HONESTY (Verdictia, #246): PR1 added
+        // `DEFINE INDEX knowledge_triggers ON knowledge FIELDS triggers`. That
+        // is a per-ELEMENT index over the array contents — it accelerates
+        // equality lookups like `triggers CONTAINS 'brad'`, NOT this
+        // non-emptiness test, which the planner resolves with a full table scan
+        // regardless. We KEEP the index because the future hook-side fast path
+        // (and any "which memory owns trigger X" query) will want CONTAINS
+        // lookups, but for THIS query it is not consulted. See the PR body.
+        // ORDER BY id (not title) for the same #191 planner reason as list_all.
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE array::len(triggers ?? []) > 0 {}
+            ORDER BY id",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql);
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query
+                .await
+                .context("Failed to query knowledge entries with triggers")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     /// List entries by category
     pub fn list_by_category(
         &self,

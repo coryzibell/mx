@@ -1379,6 +1379,9 @@ mod tests {
             fn list_all(&self, _ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {
                 unreachable!()
             }
+            fn list_with_triggers(&self, _ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {
+                unreachable!()
+            }
             fn count(&self) -> Result<usize> {
                 unreachable!()
             }

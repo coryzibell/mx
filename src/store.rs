@@ -154,6 +154,14 @@ pub trait KnowledgeStore {
     /// List all entries
     fn list_all(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
 
+    /// List entries that have at least one trigger keyword, respecting agent
+    /// visibility (Issue #246). Used by `mx memory trigger-check` to scan only
+    /// candidate entries rather than every row. Private entries are returned
+    /// only to their owner — the visibility filter is the same one used by all
+    /// other read paths, so a triggered private memory never fires for another
+    /// agent.
+    fn list_with_triggers(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
+
     /// Count total entries
     fn count(&self) -> Result<usize>;
 
