@@ -2561,3 +2561,176 @@ fn test_triggers_default_empty_when_absent() {
         "an entry with no triggers must read back as an empty array"
     );
 }
+
+// =========================================================================
+// Issue #246 PR3: trigger-check matching engine + visibility + dedup + cap
+// =========================================================================
+
+/// `list_with_triggers` returns only entries with a non-empty `triggers` array,
+/// and applies the agent visibility filter (private entries only for owner).
+#[test]
+fn test_list_with_triggers_prefilters_and_respects_visibility() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Public entry WITH triggers -> should appear for everyone.
+    let mut public_trig = make_test_entry("kn-pub-trig", 5, 0.0);
+    public_trig.triggers = vec!["brad".to_string()];
+    db.upsert_knowledge(&public_trig).unwrap();
+
+    // Public entry WITHOUT triggers -> filtered out by array::len > 0.
+    let no_trig = make_test_entry("kn-pub-notrig", 5, 0.0);
+    db.upsert_knowledge(&no_trig).unwrap();
+
+    // Private entry WITH triggers, owned by agent-a -> only agent-a sees it.
+    let mut priv_trig = make_test_entry("kn-priv-trig", 5, 0.0);
+    priv_trig.triggers = vec!["secret".to_string()];
+    priv_trig.visibility = "private".to_string();
+    priv_trig.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&priv_trig).unwrap();
+
+    // agent-b: sees only the public trigger-bearing entry.
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let ids_b: HashSet<String> = db
+        .list_with_triggers(&ctx_b)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(ids_b.contains("kn-pub-trig"));
+    assert!(
+        !ids_b.contains("kn-pub-notrig"),
+        "entries without triggers must be prefiltered out"
+    );
+    assert!(
+        !ids_b.contains("kn-priv-trig"),
+        "agent-b must NOT see agent-a's private triggered memory"
+    );
+
+    // agent-a: sees both their private trigger entry and the public one.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let ids_a: HashSet<String> = db
+        .list_with_triggers(&ctx_a)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert!(ids_a.contains("kn-pub-trig"));
+    assert!(
+        ids_a.contains("kn-priv-trig"),
+        "agent-a must see their own private triggered memory"
+    );
+}
+
+/// End-to-end VISIBILITY at the matcher layer: agent-b's check does NOT fire
+/// agent-a's private triggered memory, even when the message contains the
+/// trigger word.
+#[test]
+fn test_trigger_check_visibility_private_does_not_fire_for_other_agent() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut priv_trig = make_test_entry("kn-brad-private", 8, 0.0);
+    priv_trig.triggers = vec!["brad".to_string()];
+    priv_trig.visibility = "private".to_string();
+    priv_trig.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&priv_trig).unwrap();
+
+    let message = "what is brad up to";
+
+    // agent-b: the private memory is not even in the candidate set -> no match.
+    let ctx_b = crate::store::AgentContext::for_agent("agent-b");
+    let entries_b = db.list_with_triggers(&ctx_b).unwrap();
+    let pairs_b: Vec<(&str, &[String])> = entries_b
+        .iter()
+        .map(|e| (e.id.as_str(), e.triggers.as_slice()))
+        .collect();
+    assert!(
+        crate::triggers::match_entries(message, pairs_b).is_empty(),
+        "agent-b must not fire agent-a's private memory"
+    );
+
+    // agent-a: same message DOES fire it.
+    let ctx_a = crate::store::AgentContext::for_agent("agent-a");
+    let entries_a = db.list_with_triggers(&ctx_a).unwrap();
+    let pairs_a: Vec<(&str, &[String])> = entries_a
+        .iter()
+        .map(|e| (e.id.as_str(), e.triggers.as_slice()))
+        .collect();
+    let matches_a = crate::triggers::match_entries(message, pairs_a);
+    assert_eq!(matches_a.len(), 1);
+    assert_eq!(matches_a[0].id, "kn-brad-private");
+}
+
+/// Fire cap of 5 by resonance desc: 6 matches -> top 5 fire, 1 deferred; the
+/// deferred one fires on a subsequent check (after the first five are marked).
+/// Exercises the same logic the handler uses (sort by resonance desc, cap,
+/// then FiredStore dedup), wired directly so it needs no CLI add-flag.
+#[test]
+fn test_trigger_check_cap_and_deferred_fires_next_turn() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Six entries, all triggered by "topic", distinct resonance 1..=6 so the
+    // ordering is unambiguous. Highest resonance should win the 5 slots.
+    for r in 1..=6 {
+        let mut e = make_test_entry(&format!("kn-cap-{r}"), r, 0.0);
+        e.triggers = vec!["topic".to_string()];
+        db.upsert_knowledge(&e).unwrap();
+    }
+
+    // Isolated fired-state file.
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::triggers::FiredStore::at(dir.path().join("fired.json"));
+
+    let run_check = |store: &crate::triggers::FiredStore| -> Vec<String> {
+        let ctx = crate::store::AgentContext::public_only();
+        let entries = db.list_with_triggers(&ctx).unwrap();
+        let matched: HashSet<String> = {
+            let pairs: Vec<(&str, &[String])> = entries
+                .iter()
+                .map(|e| (e.id.as_str(), e.triggers.as_slice()))
+                .collect();
+            crate::triggers::match_entries("a topic question", pairs)
+                .into_iter()
+                .map(|m| m.id)
+                .collect()
+        };
+        // Sort matched entries by resonance desc, id asc (handler's ordering).
+        let mut matched_entries: Vec<_> =
+            entries.iter().filter(|e| matched.contains(&e.id)).collect();
+        matched_entries.sort_by(|a, b| b.resonance.cmp(&a.resonance).then(a.id.cmp(&b.id)));
+        let already = store.read_fired().unwrap();
+        let to_fire: Vec<String> = matched_entries
+            .into_iter()
+            .filter(|e| !already.contains(&e.id))
+            .take(5)
+            .map(|e| e.id.clone())
+            .collect();
+        store.mark_survivors(&to_fire).unwrap()
+    };
+
+    // First check: top 5 by resonance (6,5,4,3,2) fire; resonance-1 deferred.
+    let fired1 = run_check(&store);
+    assert_eq!(
+        fired1,
+        vec![
+            "kn-cap-6".to_string(),
+            "kn-cap-5".to_string(),
+            "kn-cap-4".to_string(),
+            "kn-cap-3".to_string(),
+            "kn-cap-2".to_string(),
+        ],
+        "top 5 by resonance desc fire"
+    );
+
+    // Second check (same message): the 5 already fired are deduped, the deferred
+    // resonance-1 entry now fires.
+    let fired2 = run_check(&store);
+    assert_eq!(
+        fired2,
+        vec!["kn-cap-1".to_string()],
+        "the deferred (overflow) memory fires on a subsequent check"
+    );
+
+    // Third check: everything fired -> nothing new.
+    let fired3 = run_check(&store);
+    assert!(fired3.is_empty(), "all memories already fired this session");
+}

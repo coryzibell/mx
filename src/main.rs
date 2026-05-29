@@ -23,6 +23,7 @@ mod store_update;
 mod surreal_db;
 mod sync;
 mod tensor;
+mod triggers;
 mod types;
 mod wake_chunk;
 mod wake_ritual;

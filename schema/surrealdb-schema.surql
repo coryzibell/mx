@@ -148,6 +148,15 @@ DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
 --      written it gets a concrete array. No row is ever left stranded with NONE.
 -- Because both halves hold, there is no window in which a row needs a backfill.
 DEFINE FIELD IF NOT EXISTS triggers ON knowledge TYPE array<string> DEFAULT [];
+-- INDEX HONESTY (Issue #246, PR3): this is a per-ELEMENT index over the array
+-- contents. It accelerates equality/CONTAINS lookups (e.g.
+-- `WHERE triggers CONTAINS 'brad'`), NOT the `array::len(triggers ?? []) > 0`
+-- non-emptiness prefilter that `mx memory trigger-check` currently uses (that
+-- resolves via full scan regardless). It is kept deliberately: the actual
+-- matching is word-boundary + stemmed and happens in Rust (it cannot be pushed
+-- into a SurrealDB index), but a future hook-side fast path / "which memory owns
+-- trigger X" lookup will want CONTAINS, which this index serves. If those never
+-- materialize, this index is a candidate for removal.
 DEFINE INDEX IF NOT EXISTS knowledge_triggers ON knowledge FIELDS triggers;
 
 -- DEPRECATED: Kept for backward compatibility during migration

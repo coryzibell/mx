@@ -68,6 +68,10 @@ impl KnowledgeStore for SurrealDatabase {
         self.list_all(ctx)
     }
 
+    fn list_with_triggers(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
+        self.list_with_triggers(ctx)
+    }
+
     fn count(&self) -> Result<usize> {
         self.count()
     }

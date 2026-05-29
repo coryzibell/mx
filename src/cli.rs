@@ -400,6 +400,14 @@ pub enum RecentSortOrder {
     Resonance,
 }
 
+/// Output format for `mx memory trigger-check` (Issue #246).
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum TriggerFormat {
+    /// Rendered memory bodies ready for context injection (title + body per
+    /// fired memory, separated by `---`). Empty stdout when nothing fires.
+    Context,
+}
+
 #[derive(Subcommand)]
 pub enum MemoryCommands {
     /// Removed -- see follow-up for markdown ingest plans
@@ -452,6 +460,37 @@ pub enum MemoryCommands {
         /// Output only the body content (for piping)
         #[arg(long)]
         content_only: bool,
+    },
+
+    /// Check a message for trigger-word matches and inject matching memories
+    /// (Issue #246). Reactive memory: dormant memories whose triggers appear in
+    /// the message fire ONCE per session. Exit 0 = ran (firing nothing is still
+    /// success); exit 4 = empty message after stdin fallback.
+    TriggerCheck {
+        /// Message to check. If omitted/empty, read the message from stdin to EOF.
+        message: Option<String>,
+
+        /// Output as JSON: {"fired":[{"id","title","triggers_matched":[...]}],"deferred_count":N}
+        #[arg(long)]
+        json: bool,
+
+        /// Output format when not --json. `context` (default) renders memory
+        /// bodies for injection; empty stdout when nothing fires.
+        #[arg(long, value_enum, default_value_t = TriggerFormat::Context)]
+        format: TriggerFormat,
+
+        /// Report matches WITHOUT marking them fired (debugging). A subsequent
+        /// real check will still fire them.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Clear the session-scoped trigger fired-state file (Issue #246). Lets a
+    /// memory fire again — for testing or a deliberate mid-session reset.
+    TriggerReset {
+        /// Output as JSON: {"reset":true,"path":"..."}
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show index statistics
