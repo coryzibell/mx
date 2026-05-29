@@ -2592,16 +2592,29 @@ mod show_divert_tests {
     fn over_threshold_writes_file_and_pointer() {
         // One byte over the threshold must divert.
         let content = "a".repeat(BASH_STDOUT_DIVERT_THRESHOLD + 1);
-        let plan = plan_show_output(&content, ID, Path::new("/tmp"));
+        let temp_dir = Path::new("/tmp");
+        let plan = plan_show_output(&content, ID, temp_dir);
+        // Derive the expected path the same way the code does (`temp_dir.join`)
+        // so the assertion is platform-agnostic -- on Windows the joined
+        // separator is a backslash, so a hardcoded `/tmp/...` literal can never
+        // match. Comparing against the joined path proves the real derived path.
+        let expected_path = temp_dir.join("mx-memory-kn-99e08808.md");
         match plan {
             ShowOutput::Divert { path, pointer } => {
-                assert_eq!(path, Path::new("/tmp/mx-memory-kn-99e08808.md"));
+                assert_eq!(path, expected_path);
                 // Pointer reports the true BYTE length.
                 assert!(
                     pointer.contains(&format!("{} bytes", BASH_STDOUT_DIVERT_THRESHOLD + 1)),
                     "pointer missing byte count: {pointer}"
                 );
-                assert!(pointer.contains("/tmp/mx-memory-kn-99e08808.md"));
+                // The pointer renders the path via `Path::display()`, so derive
+                // the expected substring the same way rather than assuming a
+                // POSIX separator.
+                let expected_path_str = expected_path.display().to_string();
+                assert!(
+                    pointer.contains(&expected_path_str),
+                    "pointer missing path {expected_path_str}: {pointer}"
+                );
                 assert!(pointer.contains("Read the file to see full content."));
                 // The pointer itself must stay safely under the ceiling.
                 assert!(pointer.len() < BASH_STDOUT_DIVERT_THRESHOLD);
