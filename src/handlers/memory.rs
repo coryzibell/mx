@@ -673,6 +673,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             wake_phrase,
             wake_phrases,
             wake_order,
+            triggers,
             anchors,
             r#type,
             session,
@@ -713,6 +714,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 bail!("--visibility must be 'public' or 'private'");
             }
+
+            // Parse triggers CSV (Issue #246): normalize + dedupe via the shared
+            // helper so author-time values match the PR3 matcher. Used by both the
+            // fact-routing path and the standard entry construction below.
+            let trigger_list: Vec<String> = triggers
+                .as_deref()
+                .map(|t| knowledge::normalize_triggers(t.split(',')))
+                .unwrap_or_default();
 
             // Handle fact type routing mode (--type flag)
             if let Some(ref fact_type) = r#type {
@@ -835,8 +844,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     decay_rate: 0.0,
                     anchors: vec![],
                     wake_phrases: vec![],
-                    // Issue #246: triggers wired through the CLI in PR2; default empty for now.
-                    triggers: vec![],
+                    // Issue #246: triggers from the --triggers CLI flag (PR2).
+                    triggers: trigger_list.clone(),
                     wake_order: None,
                     wake_phrase: None,
                     embedding: None,
@@ -1008,8 +1017,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 decay_rate: 0.0,
                 anchors: anchor_list,
                 wake_phrases: wake_phrase_list,
-                // Issue #246: triggers wired through the CLI in PR2; default empty for now.
-                triggers: vec![],
+                // Issue #246: triggers from the --triggers CLI flag (PR2).
+                triggers: trigger_list,
                 wake_order,
                 wake_phrase,
                 embedding: None,
@@ -1065,6 +1074,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         "anchors": entry.anchors,
                         "wake_phrase": entry.wake_phrase,
                         "wake_phrases": entry.wake_phrases,
+                        "triggers": entry.triggers,
                     }))?
                 );
             } else {
@@ -1092,6 +1102,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
                 if let Some(ref phrase) = entry.wake_phrase {
                     println!("  Wake Phrase: {}", phrase);
+                }
+                if !entry.triggers.is_empty() {
+                    println!("  Triggers: {}", entry.triggers.join(", "));
                 }
             }
         }
@@ -1124,6 +1137,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             wake_phrases,
             add_wake_phrase,
             remove_wake_phrase,
+            triggers,
+            add_trigger,
+            remove_trigger,
             wake_order,
             private,
             visibility,
@@ -1385,6 +1401,35 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 entry.wake_phrases.remove(pos);
                 changes.push(format!("wake_phrases: removed '{}'", phrase_to_remove));
+            }
+
+            // Update triggers (replaces all; Issue #246). Normalize + dedupe via the
+            // shared helper so values line up with the PR3 matcher.
+            if let Some(ref triggers_str) = triggers {
+                let trigger_list = knowledge::normalize_triggers(triggers_str.split(','));
+                changes.push(format!(
+                    "triggers: {:?} -> {:?}",
+                    entry.triggers, trigger_list
+                ));
+                entry.triggers = trigger_list;
+            }
+
+            // Add a single trigger (normalized; no-op if already present)
+            if let Some(ref raw_trigger) = add_trigger
+                && let Some(norm) = knowledge::normalize_trigger(raw_trigger)
+                && !entry.triggers.contains(&norm)
+            {
+                entry.triggers.push(norm.clone());
+                changes.push(format!("triggers: added '{}'", norm));
+            }
+
+            // Remove a specific trigger (compare normalized forms; clean no-op if absent)
+            if let Some(ref raw_trigger) = remove_trigger
+                && let Some(norm) = knowledge::normalize_trigger(raw_trigger)
+                && let Some(pos) = entry.triggers.iter().position(|t| *t == norm)
+            {
+                entry.triggers.remove(pos);
+                changes.push(format!("triggers: removed '{}'", norm));
             }
 
             // Update wake_order (use '-' to clear)

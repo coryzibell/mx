@@ -409,6 +409,10 @@ pub enum TriggerFormat {
 }
 
 #[derive(Subcommand)]
+// The Add/Update variants carry many optional flags by design (clap arg structs);
+// boxing individual fields would fight the destructuring in handlers. Mirrors the
+// allow already on the top-level `Commands` enum above.
+#[allow(clippy::large_enum_variant)]
 pub enum MemoryCommands {
     /// Removed -- see follow-up for markdown ingest plans
     ///
@@ -640,6 +644,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         wake_order: Option<i32>,
 
+        /// Triggers (comma-separated phrases that surface this memory; Issue #246)
+        #[arg(long)]
+        triggers: Option<String>,
+
         /// Anchors (comma-separated bloom IDs this connects to)
         #[arg(long)]
         anchors: Option<String>,
@@ -770,6 +778,18 @@ pub enum MemoryCommands {
         /// Remove a specific wake phrase
         #[arg(long, conflicts_with = "wake_phrases")]
         remove_wake_phrase: Option<String>,
+
+        /// Update triggers (comma-separated, replaces all; Issue #246)
+        #[arg(long, conflicts_with_all = ["add_trigger", "remove_trigger"])]
+        triggers: Option<String>,
+
+        /// Add a single trigger to existing triggers
+        #[arg(long, conflicts_with = "triggers")]
+        add_trigger: Option<String>,
+
+        /// Remove a specific trigger
+        #[arg(long, conflicts_with = "triggers")]
+        remove_trigger: Option<String>,
 
         /// Update wake order (use '-' to clear)
         #[arg(long)]

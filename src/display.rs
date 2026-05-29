@@ -66,6 +66,9 @@ pub(crate) fn format_entry_full(entry: &knowledge::KnowledgeEntry) -> String {
     if !entry.wake_phrases.is_empty() {
         let _ = writeln!(out, "Wake Phrases: {}", entry.wake_phrases.join(", "));
     }
+    if !entry.triggers.is_empty() {
+        let _ = writeln!(out, "Triggers: {}", entry.triggers.join(", "));
+    }
     if let Some(path) = &entry.file_path {
         let _ = writeln!(out, "File:     {}", path);
     }
