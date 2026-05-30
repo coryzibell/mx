@@ -1150,17 +1150,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
 
-            // Auto-generate anchors if in network SurrealDB mode
-            // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-            // anchoring on the write path. The explicit `mx memory auto-anchor` command
-            // is never gated and always runs (nightly batch depends on it).
-            if !no_auto_anchor
-                && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                    .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-            {
+            // Auto-generate anchors if in network SurrealDB mode.
+            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+            // write_anchor_enabled). The entry is already durable here, so
+            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
+            // command is never gated and still anchors deferred writes.
+            if write_anchor_enabled(no_auto_anchor) {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1716,16 +1713,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             } else {
                 Some(explicitly_removed_anchors.as_slice())
             };
-            // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-            // anchoring on the write path. The explicit `mx memory auto-anchor` command
-            // is never gated and always runs (nightly batch depends on it).
-            if !no_auto_anchor
-                && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                    .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-            {
+            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+            // write_anchor_enabled). The entry is already durable here, so
+            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
+            // command is never gated and still anchors deferred writes.
+            if write_anchor_enabled(no_auto_anchor) {
                 auto_anchor(&id, db.as_ref(), removed)?;
             } else {
-                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1782,17 +1776,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
 
-            // Auto-generate anchors if in network SurrealDB mode
-            // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-            // anchoring on the write path. The explicit `mx memory auto-anchor` command
-            // is never gated and always runs (nightly batch depends on it).
-            if !no_auto_anchor
-                && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                    .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-            {
+            // Auto-generate anchors if in network SurrealDB mode.
+            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+            // write_anchor_enabled). The entry is already durable here, so
+            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
+            // command is never gated and still anchors deferred writes.
+            if write_anchor_enabled(no_auto_anchor) {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1865,17 +1856,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
 
-            // Auto-generate anchors if in network SurrealDB mode
-            // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-            // anchoring on the write path. The explicit `mx memory auto-anchor` command
-            // is never gated and always runs (nightly batch depends on it).
-            if !no_auto_anchor
-                && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                    .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-            {
+            // Auto-generate anchors if in network SurrealDB mode.
+            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+            // write_anchor_enabled). The entry is already durable here, so
+            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
+            // command is never gated and still anchors deferred writes.
+            if write_anchor_enabled(no_auto_anchor) {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1944,17 +1932,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Auto-generate embedding if in network SurrealDB mode
             auto_embed(&id, db.as_ref())?;
 
-            // Auto-generate anchors if in network SurrealDB mode
-            // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-            // anchoring on the write path. The explicit `mx memory auto-anchor` command
-            // is never gated and always runs (nightly batch depends on it).
-            if !no_auto_anchor
-                && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                    .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-            {
+            // Auto-generate anchors if in network SurrealDB mode.
+            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+            // write_anchor_enabled). The entry is already durable here, so
+            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
+            // command is never gated and still anchors deferred writes.
+            if write_anchor_enabled(no_auto_anchor) {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
-                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -2061,16 +2046,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 // #3: update embeddings and anchors like all other mutation paths
                 auto_embed(&id, db.as_ref())?;
-                // Gate: --no-auto-anchor flag OR MX_SKIP_WRITE_ANCHOR=1 disables automatic
-                // anchoring on the write path. The explicit `mx memory auto-anchor` command
-                // is never gated and always runs (nightly batch depends on it).
-                if !no_auto_anchor
-                    && !std::env::var("MX_SKIP_WRITE_ANCHOR")
-                        .is_ok_and(|v| v == "1" || v.to_lowercase() == "true")
-                {
+                // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
+                // write_anchor_enabled). The entry is already durable here, so
+                // skipping anchoring is safe; the explicit `mx memory
+                // auto-anchor` command is never gated and still anchors
+                // deferred writes.
+                if write_anchor_enabled(no_auto_anchor) {
                     auto_anchor(&id, db.as_ref(), None)?;
                 } else {
-                    commit_entry(&id, db.as_ref())?;
                     println!("  (auto-anchor skipped)");
                 }
 

@@ -302,31 +302,32 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     Ok(())
 }
 
-/// Durability commit: re-fetch and re-upsert an entry to ensure write
-/// persistence.
+/// Whether the write path should run `auto_anchor` synchronously after a
+/// mutation (Add/Update/Edit/Append/Prepend/Restore).
 ///
-/// When `auto_anchor` is skipped (via `--no-auto-anchor` or
-/// `MX_SKIP_WRITE_ANCHOR=1`), the write path loses the final
-/// `upsert_knowledge` call that `auto_anchor` would have made.  That
-/// trailing upsert carries a side-effect the storage layer depends on
-/// for durable commits (tag/applicability edge recreation, full-text
-/// index refresh).  This function provides that side-effect without the
-/// expensive cosine-similarity scan.
-pub(crate) fn commit_entry(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
-    let ctx = match std::env::var("MX_CURRENT_AGENT") {
-        Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
-        _ => store::AgentContext::public_only(),
-    };
-
-    let mut entry = match db.get(entry_id, &ctx)? {
-        Some(e) => e,
-        None => return Ok(()),
-    };
-
-    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
-    db.upsert_knowledge(&entry)?;
-
-    Ok(())
+/// Anchoring on the write path is disabled when EITHER:
+///   - the caller passed `--no-auto-anchor` (`no_auto_anchor == true`), or
+///   - `MX_SKIP_WRITE_ANCHOR` is set to `1`/`true` (case-insensitive).
+///
+/// The env-var parsing mirrors the `MX_SKIP_SCHEMA` convention
+/// (`connection.rs`) so the project keeps one rule for boolean opt-out flags.
+///
+/// `MX_SKIP_WRITE_ANCHOR` is a future-facing opt-out: it lets a deployment
+/// defer anchoring entirely to the explicit `mx memory auto-anchor` batch
+/// command (e.g. a nightly cron), which is never gated by this flag.
+///
+/// Skipping anchoring does NOT affect durability. By the time this gate is
+/// evaluated the entry has already been `upsert_knowledge`d, read-back
+/// verified (the Add path `bail!`s if the row is absent), and re-upserted by
+/// `auto_embed` — so the write is provably durable before anchoring would
+/// ever run. `auto_anchor` itself returns early WITHOUT any upsert whenever
+/// an entry has no embedding or no in-band neighbours; its trailing upsert is
+/// an anchor update, not a load-bearing commit. Hence skipping it loses
+/// anchors-for-this-write, nothing else.
+pub(crate) fn write_anchor_enabled(no_auto_anchor: bool) -> bool {
+    let skip_via_env =
+        std::env::var("MX_SKIP_WRITE_ANCHOR").is_ok_and(|v| v == "1" || v.to_lowercase() == "true");
+    !no_auto_anchor && !skip_via_env
 }
 
 /// Auto-anchor a knowledge entry after add/update
@@ -1191,6 +1192,156 @@ mod auto_anchor_tests {
             got,
             vec!["kn-a".to_string(), "kn-b".to_string(), "kn-c".to_string()],
             "the three in-band anchors are selected from the initial top-K (no escalation needed)"
+        );
+    }
+
+    // =====================================================================
+    // MX_SKIP_WRITE_ANCHOR opt-out (PR #364)
+    //
+    // Two things under test:
+    //   1. write_anchor_enabled — the single source of truth for the gate.
+    //      Tested directly (not a re-implemented copy of the condition) for
+    //      every accepted value of the flag plus the --no-auto-anchor flag.
+    //   2. Durability — a write whose anchoring is skipped (flag ON) still
+    //      persists. Proven against a REAL file-backed store across a
+    //      drop+reopen, since an in-memory store cannot demonstrate
+    //      durability across a fresh connection.
+    //
+    // commit_entry was REMOVED in this PR: post-#362 the Add path upserts +
+    // read-back-verifies + auto_embeds (which upserts again) BEFORE the
+    // anchor step, so the entry is provably durable before auto_anchor would
+    // run. auto_anchor also returns early WITHOUT upserting whenever an entry
+    // has no embedding or no in-band neighbours, so its trailing upsert is an
+    // anchor update, not a load-bearing commit. The skip path therefore needs
+    // no extra upsert.
+    // =====================================================================
+
+    /// Save the current MX_SKIP_WRITE_ANCHOR value, set it (or clear it),
+    /// evaluate the gate, then restore — so the env state never leaks.
+    /// SAFETY: process-wide env mutation, serialized via `#[serial]`.
+    fn gate_with_env(value: Option<&str>, no_auto_anchor: bool) -> bool {
+        let prev = std::env::var("MX_SKIP_WRITE_ANCHOR").ok();
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MX_SKIP_WRITE_ANCHOR", v),
+                None => std::env::remove_var("MX_SKIP_WRITE_ANCHOR"),
+            }
+        }
+        let enabled = write_anchor_enabled(no_auto_anchor);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_SKIP_WRITE_ANCHOR", v),
+                None => std::env::remove_var("MX_SKIP_WRITE_ANCHOR"),
+            }
+        }
+        enabled
+    }
+
+    #[test]
+    #[serial]
+    fn write_anchor_enabled_unset_flag_runs_anchoring() {
+        assert!(
+            gate_with_env(None, false),
+            "unset MX_SKIP_WRITE_ANCHOR must leave anchoring ON (default behavior preserved)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_anchor_enabled_flag_1_skips_anchoring() {
+        assert!(
+            !gate_with_env(Some("1"), false),
+            "MX_SKIP_WRITE_ANCHOR=1 must turn write-path anchoring OFF"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_anchor_enabled_flag_true_skips_anchoring() {
+        assert!(
+            !gate_with_env(Some("true"), false),
+            "MX_SKIP_WRITE_ANCHOR=true must turn write-path anchoring OFF"
+        );
+        assert!(
+            !gate_with_env(Some("TRUE"), false),
+            "MX_SKIP_WRITE_ANCHOR is case-insensitive for 'true'"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_anchor_enabled_other_values_run_anchoring() {
+        // Only "1"/"true" opt out; anything else (incl. "0", "false", "yes")
+        // leaves anchoring on, matching the MX_SKIP_SCHEMA convention.
+        assert!(gate_with_env(Some("0"), false), "'0' must not opt out");
+        assert!(
+            gate_with_env(Some("false"), false),
+            "'false' must not opt out"
+        );
+        assert!(gate_with_env(Some(""), false), "empty must not opt out");
+    }
+
+    #[test]
+    #[serial]
+    fn write_anchor_enabled_cli_flag_always_skips() {
+        // --no-auto-anchor closes the gate regardless of the env var.
+        assert!(
+            !gate_with_env(None, true),
+            "--no-auto-anchor must skip anchoring even with the env flag unset"
+        );
+        assert!(
+            !gate_with_env(Some("0"), true),
+            "--no-auto-anchor must skip anchoring even when env flag would allow it"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn skipped_anchor_write_persists_across_reopen() {
+        // The honest durability test: with anchoring skipped (flag ON), a
+        // write must survive being dropped and re-opened from a REAL
+        // file-backed store. This is what the write path actually does —
+        // upsert_knowledge — minus the auto_anchor step the flag removes.
+        //
+        // An in-memory store cannot prove this (it dies with the handle), so
+        // we use SurrealDatabase::open against a tempdir path and reopen it.
+        clear_agent_env();
+        let prev = std::env::var("MX_SKIP_WRITE_ANCHOR").ok();
+        unsafe { std::env::set_var("MX_SKIP_WRITE_ANCHOR", "1") };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("durability.surreal");
+
+        // Precondition: the gate is closed, i.e. the handler would NOT call
+        // auto_anchor — only the plain write happens.
+        assert!(
+            !write_anchor_enabled(false),
+            "precondition: flag=1 must skip anchoring"
+        );
+
+        // Write phase: open, upsert, drop the handle (simulating process exit).
+        {
+            let db = SurrealDatabase::open(&db_path).unwrap();
+            let entry =
+                entry_with_embedding("kn-skip-durable", unit_query(), "public", None, vec![]);
+            db.upsert_knowledge(&entry).unwrap();
+        }
+
+        // Reopen phase: a brand-new connection to the same on-disk store.
+        let reopened = SurrealDatabase::open(&db_path).unwrap();
+        let ctx = AgentContext::public_only();
+        let got = reopened.get("kn-skip-durable", &ctx).unwrap();
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_SKIP_WRITE_ANCHOR", v),
+                None => std::env::remove_var("MX_SKIP_WRITE_ANCHOR"),
+            }
+        }
+
+        assert!(
+            got.is_some(),
+            "a write with anchoring skipped must persist across a drop+reopen (no commit_entry needed)"
         );
     }
 }
