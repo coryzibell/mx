@@ -274,6 +274,71 @@ fn handle_trigger_check(
     Ok(())
 }
 
+/// Parse a `--exclude-tags` CSV value into a list of prefix strings.
+///
+/// Segments are trimmed; empty segments (from trailing commas, repeated commas,
+/// or whitespace-only input) are dropped. A `None` input yields an empty list.
+fn parse_exclude_prefixes(exclude_tags: Option<&str>) -> Vec<String> {
+    exclude_tags
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether a wake-fetch entry should be KEPT given the active exclude prefixes.
+///
+/// Returns `false` (exclude) when ANY of the entry's tags prefix-matches ANY of
+/// the requested exclude prefixes. An empty prefix list keeps every entry.
+fn keep_after_exclude(tags: &[String], exclude_prefixes: &[String]) -> bool {
+    if exclude_prefixes.is_empty() {
+        return true;
+    }
+    !tags.iter().any(|tag| {
+        exclude_prefixes
+            .iter()
+            .any(|prefix| tag.starts_with(prefix.as_str()))
+    })
+}
+
+/// Resolve the display `fact_type` label for a wake-fetch entry.
+///
+/// Older entries carry `fact_type` inside their `summary` JSON; newer entries
+/// leave `summary` null. When the label is absent the entry's `category_id` is a
+/// valid fallback, so a missing label never drops the entry from the wake set.
+fn resolve_fact_type(summary: Option<&str>, category_id: &str) -> String {
+    summary
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| {
+            v.get("fact_type")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| category_id.to_string())
+}
+
+/// Build the read-after-write verification context for a just-written entry.
+///
+/// The post-write read-back must use a context whose visibility matches the row
+/// that was actually stored, otherwise a *successful* write reads back as absent
+/// and is falsely reported as rejected. The visibility filter only admits a
+/// private row when `owner = $current_agent`, so for a private entry the context
+/// must carry the entry's stored `owner` — NOT the acting agent, which may differ
+/// when `--owner` targets someone else. A public entry is visible to any context,
+/// so the acting agent is fine there.
+fn write_verification_ctx(
+    visibility: &str,
+    entry_owner: Option<&str>,
+    acting_agent: &str,
+) -> store::AgentContext {
+    match entry_owner {
+        Some(owner) if visibility == "private" => store::AgentContext::for_agent(owner),
+        _ => store::AgentContext::for_agent(acting_agent),
+    }
+}
+
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -1046,12 +1111,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Insert into database (applicability already set in struct)
             db.upsert_knowledge(&entry)?;
 
-            // Verify the write landed. SurrealDB's PERMISSIONS clause silently
-            // rejects unauthorized writes (zero rows affected, no error). A
-            // read-after-write catches that and turns silent data-loss into a
-            // loud failure.
+            // Verify the write landed by reading it back. A genuinely lost write
+            // (e.g. a record-level PERMISSIONS denial that affects zero rows without
+            // erroring) reads back as absent, so we bail loudly instead of printing
+            // a false success. The read-back must use a context whose visibility
+            // matches the row we wrote: the entry's own `owner`. Reading a private
+            // entry back as the *acting* agent would falsely fail when --owner points
+            // at someone else, because the visibility filter only admits a private
+            // row when `owner = $current_agent`. A public entry is always visible, so
+            // any agent context (or none) matches.
             {
-                let ctx = store::AgentContext::for_agent(&agent_id);
+                let ctx =
+                    write_verification_ctx(&entry_visibility, entry_owner.as_deref(), &agent_id);
                 if db.get(&id, &ctx)?.is_none() {
                     bail!(
                         "write rejected: entry '{}' was not persisted (likely a permission denial — check that the writing agent owns the entry or has permission to create it)",
@@ -2531,14 +2602,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Parse --exclude-tags into a list of prefix strings.
             // Empty string segments (from trailing commas) are silently dropped.
-            let exclude_prefixes: Vec<String> = exclude_tags
-                .as_deref()
-                .unwrap_or("")
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(String::from)
-                .collect();
+            let exclude_prefixes = parse_exclude_prefixes(exclude_tags.as_deref());
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -2551,31 +2615,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let mut typed_facts: Vec<(crate::knowledge::KnowledgeEntry, String)> = facts
                 .drain(..)
                 .filter(|f| f.resonance >= 3)
-                .filter(|f| {
-                    if exclude_prefixes.is_empty() {
-                        return true;
-                    }
-                    // Exclude if ANY tag on the entry prefix-matches ANY exclude prefix.
-                    !f.tags.iter().any(|tag| {
-                        exclude_prefixes
-                            .iter()
-                            .any(|prefix| tag.starts_with(prefix.as_str()))
-                    })
-                })
+                .filter(|f| keep_after_exclude(&f.tags, &exclude_prefixes))
                 .map(|f| {
-                    // fact_type is a display label only. Older entries carry it in
-                    // summary JSON; newer entries leave summary null. Fall back to
-                    // the entry's category so a missing label never drops the entry.
-                    let ft = f
-                        .summary
-                        .as_ref()
-                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v| {
-                            v.get("fact_type")
-                                .and_then(|x| x.as_str())
-                                .map(String::from)
-                        })
-                        .unwrap_or_else(|| f.category_id.clone());
+                    let ft = resolve_fact_type(f.summary.as_deref(), &f.category_id);
                     (f, ft)
                 })
                 .collect();
@@ -2997,5 +3039,230 @@ mod show_divert_tests {
         assert_eq!(written, content, "diverted file must hold the full content");
 
         let _ = std::fs::remove_file(&expected);
+    }
+}
+
+#[cfg(test)]
+mod wake_fetch_filter_tests {
+    use super::*;
+
+    // ---- parse_exclude_prefixes / keep_after_exclude (pure) ----
+
+    fn prefixes(raw: &str) -> Vec<String> {
+        parse_exclude_prefixes(Some(raw))
+    }
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn single_prefix_drops_matching_tag_keeps_others() {
+        let ex = prefixes("project/");
+        // An entry tagged project/x is excluded.
+        assert!(!keep_after_exclude(&tags(&["project/x"]), &ex));
+        // An untagged entry survives.
+        assert!(keep_after_exclude(&[], &ex));
+        // An entry whose tags don't match the prefix survives.
+        assert!(keep_after_exclude(&tags(&["scratch/y", "notes"]), &ex));
+        // Mixed: one matching tag is enough to exclude the whole entry.
+        assert!(!keep_after_exclude(&tags(&["notes", "project/deep"]), &ex));
+    }
+
+    #[test]
+    fn multiple_prefixes_exclude_any_match() {
+        let ex = prefixes("project/,scratch/");
+        assert!(!keep_after_exclude(&tags(&["project/a"]), &ex));
+        assert!(!keep_after_exclude(&tags(&["scratch/b"]), &ex));
+        assert!(keep_after_exclude(&tags(&["docs/c"]), &ex));
+    }
+
+    #[test]
+    fn empty_whitespace_and_trailing_comma_input_yields_no_prefixes() {
+        // Each of these parses to an empty prefix list -> nothing is excluded.
+        for raw in ["", "   ", ",", ",,", "project/,", " , project/ "] {
+            let ex = parse_exclude_prefixes(Some(raw));
+            // Trailing/empty segments are dropped; only real prefixes remain.
+            let expected_excludes = raw.contains("project/");
+            // A project/ tag is excluded only when a real prefix survived parsing.
+            assert_eq!(
+                !keep_after_exclude(&tags(&["project/x"]), &ex),
+                expected_excludes,
+                "raw input {raw:?} produced prefixes {ex:?}"
+            );
+        }
+        // Pure empty/whitespace cases produce zero prefixes.
+        assert!(parse_exclude_prefixes(Some("")).is_empty());
+        assert!(parse_exclude_prefixes(Some("   ")).is_empty());
+        assert!(parse_exclude_prefixes(Some(",,")).is_empty());
+        // Trailing comma drops the empty segment but keeps the real one.
+        assert_eq!(parse_exclude_prefixes(Some("project/,")), vec!["project/"]);
+    }
+
+    #[test]
+    fn none_input_is_empty_prefix_list_and_keeps_everything() {
+        let ex = parse_exclude_prefixes(None);
+        assert!(ex.is_empty());
+        // Empty prefix list keeps every entry, even ones with tags.
+        assert!(keep_after_exclude(&tags(&["project/x", "anything"]), &ex));
+        assert!(keep_after_exclude(&[], &ex));
+    }
+
+    // ---- resolve_fact_type fallback (pure) ----
+
+    #[test]
+    fn fact_type_falls_back_to_category_when_summary_is_none() {
+        // No summary at all -> entry survives the gate, adopts category_id as label.
+        let label = resolve_fact_type(None, "decision");
+        assert_eq!(label, "decision");
+    }
+
+    #[test]
+    fn fact_type_falls_back_when_summary_lacks_fact_type_key() {
+        // Summary JSON present but without a fact_type key -> fall back to category.
+        let label = resolve_fact_type(Some(r#"{"other":"value"}"#), "discovery");
+        assert_eq!(label, "discovery");
+        // Malformed JSON also falls back rather than dropping the entry.
+        let label = resolve_fact_type(Some("not json"), "method");
+        assert_eq!(label, "method");
+    }
+
+    #[test]
+    fn fact_type_uses_summary_value_when_present() {
+        // When the label IS present in summary JSON, it wins over the category.
+        let label = resolve_fact_type(Some(r#"{"fact_type":"decree"}"#), "decision");
+        assert_eq!(label, "decree");
+    }
+}
+
+#[cfg(test)]
+mod write_verification_tests {
+    use super::*;
+    use crate::knowledge::KnowledgeEntry;
+    use crate::store::AgentContext;
+    use crate::store::KnowledgeStore;
+    use crate::surreal_db::SurrealDatabase;
+
+    /// Build an entry the way the standard `memory add` arm does, with explicit
+    /// owner/visibility so the read-back path can be exercised faithfully.
+    fn entry_with(id: &str, owner: Option<&str>, visibility: &str) -> KnowledgeEntry {
+        let now = chrono::Utc::now().to_rfc3339();
+        KnowledgeEntry {
+            id: id.to_string(),
+            category_id: "test".to_string(),
+            title: format!("Title {id}"),
+            body: Some("body".to_string()),
+            summary: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            tags: vec![],
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            content_hash: Some("hash".to_string()),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
+            content_type_id: Some("text".to_string()),
+            owner: owner.map(String::from),
+            visibility: visibility.to_string(),
+            resonance: 5,
+            resonance_type: Some("ephemeral".to_string()),
+            last_activated: Some(now),
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            triggers: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+            chunk_count: 0,
+            format: "markdown".to_string(),
+            effective_resonance: None,
+        }
+    }
+
+    #[test]
+    fn public_write_reads_back_present_no_false_bail() {
+        // A public write must verify present regardless of the acting agent: the
+        // verification context for a public entry uses the acting agent, and a
+        // public row is always visible.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let acting = "agent:writer";
+        let entry = entry_with("kn-pub-write", Some("agent:writer"), "public");
+        db.upsert_knowledge(&entry).unwrap();
+
+        let ctx = write_verification_ctx(&entry.visibility, entry.owner.as_deref(), acting);
+        assert!(
+            db.get(&entry.id, &ctx).unwrap().is_some(),
+            "public write must read back present (no false rejection)"
+        );
+    }
+
+    #[test]
+    fn private_write_with_foreign_owner_reads_back_present() {
+        // THE B1 REGRESSION: `mx memory add --private --owner someone-else` stores
+        // the row with owner=someone-else. The visibility filter only admits a
+        // private row when owner = $current_agent, so verifying with the ACTING
+        // agent (writer) would falsely fail. The fix builds the verification
+        // context from the entry's stored owner instead.
+        //
+        // Fail-before / pass-after: against the pre-fix code (which used
+        // for_agent(&agent_id)), this assertion FAILS because the read-back binds
+        // $current_agent=agent:writer while the row's owner is agent:someone-else.
+        // With the fix it PASSES.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let acting = "agent:writer";
+        let owner = "agent:someone-else";
+        let entry = entry_with("kn-priv-foreign", Some(owner), "private");
+        db.upsert_knowledge(&entry).unwrap();
+
+        // What the FIXED code does: verify against the written owner.
+        let ctx = write_verification_ctx(&entry.visibility, entry.owner.as_deref(), acting);
+        assert!(
+            db.get(&entry.id, &ctx).unwrap().is_some(),
+            "successful private write to a foreign owner must NOT be reported as rejected"
+        );
+
+        // Sanity: the pre-fix behavior (verify as the acting agent) is exactly what
+        // produced the false bail — proving the test discriminates the bug.
+        let pre_fix_ctx = AgentContext::for_agent(acting);
+        assert!(
+            db.get(&entry.id, &pre_fix_ctx).unwrap().is_none(),
+            "verifying a foreign-owned private row as the acting agent finds nothing (the old bug)"
+        );
+    }
+
+    #[test]
+    fn private_write_owned_by_acting_agent_reads_back_present() {
+        // The common private case (owner defaults to the acting agent) still
+        // verifies present under the fix.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let acting = "agent:writer";
+        let entry = entry_with("kn-priv-self", Some(acting), "private");
+        db.upsert_knowledge(&entry).unwrap();
+
+        let ctx = write_verification_ctx(&entry.visibility, entry.owner.as_deref(), acting);
+        assert!(
+            db.get(&entry.id, &ctx).unwrap().is_some(),
+            "private write owned by the acting agent must read back present"
+        );
+    }
+
+    #[test]
+    fn genuinely_absent_entry_is_reported_rejected() {
+        // Preserve Geoff's intent: a row that truly is not present (simulating a
+        // silently-rejected write) reads back as None and would bail loudly.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = write_verification_ctx("private", Some("agent:writer"), "agent:writer");
+        assert!(
+            db.get("kn-never-written", &ctx).unwrap().is_none(),
+            "an absent entry must read back None so the handler bails loudly"
+        );
     }
 }
