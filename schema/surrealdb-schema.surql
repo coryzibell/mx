@@ -168,6 +168,37 @@ DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
 -- Semantic search via fastembed-rs (BGE-Base-EN-v1.5, 768 dimensions)
 -- Strategy: Brute force (no HNSW index) - exact results for Luola's scale
 -- Reconsider HNSW when: >50K vectors OR >100ms query latency
+--
+-- RETRIEVAL PERF DECISION (Issue #361 — decided, do not relitigate)
+-- ---------------------------------------------------------------------------
+-- 1. Brute-force is deliberate, and exactness is load-bearing.
+--    `semantic_search_knowledge` runs the cosine DB-side
+--    (`vector::similarity::cosine(...) ORDER BY score LIMIT`), which is exact
+--    and O(n) over compact column data with a bounded top-K. We keep it exact
+--    because `auto_anchor`'s near-duplicate ceiling depends on exact similarity
+--    in the high-similarity region — precisely where approximate ANN/HNSW most
+--    often misses. Approximate recall there would cause missed dedups and wrong
+--    anchors, so trading exactness for speed is not acceptable at this layer.
+--
+-- 2. No persistent embedding daemon.
+--    The ~1.2-1.3s model load is per-CLI-invocation startup tax, accepted as
+--    such for a single-shot CLI. There is no repeated embed within one call, so
+--    an in-process cache does not amortize it; only a resident daemon would, and
+--    that is a different architectural contract we are not adopting for mx.
+--
+-- 3. ANN/HNSW deferred behind an explicit breakeven trigger.
+--    Revisit a vector index only when scale crosses: >50K vectors OR sustained
+--    query latency >100ms (the threshold above). Tradeoffs: ANN gives sub-linear
+--    queries but approximate recall, plus write amplification (every mutation
+--    updates the index — worse with #346 chunk vectors, multiple vectors/entry),
+--    index memory/tuning cost, and awkward deletes. At current scale (~5K
+--    vectors) we are ~10x under the trigger.
+--
+-- 4. The real perf win is #362, not the index.
+--    The bulk of measured cost is `auto_anchor`'s application-layer full-graph
+--    scan; #362 moves that off the app layer. Land #362 first; only revisit ANN
+--    when scale (not a one-time setup cost) crosses the trigger above.
+-- ---------------------------------------------------------------------------
 
 DEFINE FIELD IF NOT EXISTS embedding ON knowledge TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON knowledge TYPE option<string>;
