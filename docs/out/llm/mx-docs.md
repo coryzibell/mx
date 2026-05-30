@@ -1590,10 +1590,11 @@ data source for wake ritual presentation.
 
 ### Flags
 
-  **Flag**    **Type**   **Description**
-  ----------- ---------- ---------------------------------------------
-  `--days`    `int`      Number of days to look back. Default: `15`.
-  `--limit`   `int`      Maximum number of results. Default: `100`.
+  **Flag**           **Type**   **Description**
+  ------------------ ---------- --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `--days`           `int`      Number of days to look back. Default: `15`.
+  `--limit`          `int`      Maximum number of results. Default: `100`.
+  `--exclude-tags`   `string`   Comma-separated list of tag prefixes. Drops any entry that carries at least one tag prefix-matching at least one of these values -- useful for excluding whole tag namespaces (e.g. `project/` removes every entry tagged `project/<anything>`). Matching is OR across both the entry's tags and the supplied prefixes. Empty segments from trailing commas are ignored.
 
 ### Examples
 
@@ -1603,6 +1604,16 @@ mx memory wake-fetch
 
 ``` bash
 mx memory wake-fetch --days 30 --limit 50
+```
+
+``` bash
+# Exclude an entire tag namespace from the wake set
+mx memory wake-fetch --exclude-tags 'project/'
+```
+
+``` bash
+# Exclude multiple namespaces at once
+mx memory wake-fetch --exclude-tags 'project/,scratch/'
 ```
 
 ## Embeddings and anchoring {#embeddings}
