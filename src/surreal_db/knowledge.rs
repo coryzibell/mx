@@ -848,7 +848,12 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Semantic search using vector similarity (brute force cosine)
+    /// Semantic search using vector similarity (brute force cosine).
+    ///
+    /// Public entry point used by `mx memory search`. Returns entries ordered by
+    /// descending similarity, with scores discarded. Behavior is unchanged: this
+    /// now delegates to [`semantic_search_knowledge_scored`] and drops the score,
+    /// so callers see byte-identical results.
     pub fn semantic_search_knowledge(
         &self,
         query_embedding: &[f32],
@@ -856,6 +861,29 @@ impl SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
         limit: usize,
     ) -> Result<Vec<KnowledgeEntry>> {
+        Ok(self
+            .semantic_search_knowledge_scored(query_embedding, ctx, filter, limit)?
+            .into_iter()
+            .map(|(entry, _score)| entry)
+            .collect())
+    }
+
+    /// Scored variant of [`semantic_search_knowledge`]: returns `(entry, score)`
+    /// pairs ordered by descending cosine similarity. This is the shared core
+    /// that the public, score-discarding method delegates to — exposing the
+    /// `score` that the SQL already computes (Issue #362) without changing the
+    /// public search contract.
+    ///
+    /// Like the public method, this matches at both the entry level (mean-pooled
+    /// `embedding`) and the chunk level (`embedding_chunk`), deduplicating to one
+    /// row per entry by taking the max score (Issue #346).
+    pub fn semantic_search_knowledge_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
         Self::runtime().block_on(self.semantic_search_knowledge_async(
             query_embedding,
             ctx,
@@ -870,7 +898,7 @@ impl SurrealDatabase {
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
         limit: usize,
-    ) -> Result<Vec<KnowledgeEntry>> {
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
         let category_clause = Self::build_category_filter(filter);
@@ -991,7 +1019,87 @@ impl SurrealDatabase {
         sorted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         sorted.truncate(limit);
 
-        Ok(sorted.into_iter().map(|(_, entry)| entry).collect())
+        Ok(sorted
+            .into_iter()
+            .map(|(score, entry)| (entry, score))
+            .collect())
+    }
+
+    /// Entry-level scored vector search used by `auto_anchor` (Issue #362).
+    ///
+    /// Unlike [`semantic_search_knowledge_scored`], this scores ONLY against the
+    /// entry-level (mean-pooled) `embedding` column on the `knowledge` table and
+    /// does NOT consult `embedding_chunk`. It also imposes no `chunk_count`
+    /// restriction, so long (chunked) entries are scored on their mean vector
+    /// just like short ones.
+    ///
+    /// This exactly mirrors what the old `auto_anchor` did when it called
+    /// `list_all` and ran `cosine_similarity(entry.embedding, candidate.embedding)`
+    /// over every row — only now the cosine work runs DB-side and is bounded to
+    /// the top `limit` rows by score, instead of hydrating the whole graph and
+    /// looping in Rust. Anchoring therefore keeps strict entry-level-mean
+    /// semantics (no chunk-level matching leaks into anchor selection).
+    ///
+    /// Returns `(entry, score)` pairs ordered by descending cosine similarity.
+    pub fn semantic_search_entries_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+        Self::runtime().block_on(self.semantic_search_entries_scored_async(
+            query_embedding,
+            ctx,
+            limit,
+        ))
+    }
+
+    async fn semantic_search_entries_scored_async(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // Single-phase: score every embedded knowledge row on its entry-level
+        // vector, bounded to the top `limit` by score. Params are bound, never
+        // interpolated.
+        let sql = format!(
+            "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
+            FROM knowledge
+            WHERE embedding IS NOT NONE {}
+            ORDER BY score DESC
+            LIMIT $limit",
+            Self::knowledge_select_fields(),
+            visibility_clause,
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query_builder = db
+                .query(&sql)
+                .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("limit", limit));
+            if let Some(agent) = current_agent.clone() {
+                query_builder = query_builder.bind(("current_agent", agent));
+            }
+            query_builder
+                .await
+                .context("Failed to execute entry-level scored search query")
+        })?;
+
+        let results: Vec<serde_json::Value> = response
+            .take(0)
+            .context("Failed to parse entry-level scored search results")?;
+
+        let mut scored = Vec::with_capacity(results.len());
+        for obj in results {
+            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+            let entry = self.value_to_knowledge_entry(obj).await?;
+            scored.push((entry, score));
+        }
+
+        Ok(scored)
     }
 
     /// Helper: Convert SurrealDB query result to KnowledgeEntry

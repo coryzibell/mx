@@ -133,6 +133,31 @@ pub trait KnowledgeStore {
         limit: usize,
     ) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Scored variant of [`semantic_search`](Self::semantic_search): same ranking
+    /// and filtering, but returns `(entry, score)` pairs so callers that need the
+    /// cosine similarity (e.g. `auto_anchor`, Issue #362) don't have to recompute
+    /// it. The plain `semantic_search` is just this with the score dropped.
+    fn semantic_search_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>>;
+
+    /// Entry-level-only scored vector search (Issue #362). Scores against the
+    /// mean-pooled `embedding` on the knowledge row ONLY (no chunk-level
+    /// matching), bounded to the top `limit` by score. Used by `auto_anchor` to
+    /// fetch candidates while preserving strict entry-level-mean semantics —
+    /// the same vectors the old `list_all` + Rust cosine loop compared against,
+    /// only now scored DB-side and bounded.
+    fn semantic_search_entries_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &AgentContext,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>>;
+
     /// List entries by category
     fn list_by_category(
         &self,

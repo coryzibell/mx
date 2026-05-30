@@ -1360,6 +1360,23 @@ mod tests {
             ) -> Result<Vec<KnowledgeEntry>> {
                 unreachable!()
             }
+            fn semantic_search_scored(
+                &self,
+                _emb: &[f32],
+                _ctx: &AgentContext,
+                _f: &KnowledgeFilter,
+                _l: usize,
+            ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+                unreachable!()
+            }
+            fn semantic_search_entries_scored(
+                &self,
+                _emb: &[f32],
+                _ctx: &AgentContext,
+                _l: usize,
+            ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+                unreachable!()
+            }
             fn list_by_category(
                 &self,
                 _c: &str,
