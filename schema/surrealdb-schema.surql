@@ -112,16 +112,29 @@ DEFINE FIELD IF NOT EXISTS entry_type ON knowledge TYPE record<entry_type>;
 DEFINE FIELD IF NOT EXISTS content_type ON knowledge TYPE record<content_type> DEFAULT content_type:text;
 DEFINE FIELD IF NOT EXISTS session ON knowledge TYPE option<record<session>>;
 
--- Resonance fields for wake-up cascade
-DEFINE FIELD IF NOT EXISTS resonance ON knowledge TYPE int DEFAULT 0;
+-- Resonance fields for wake-up cascade.
+-- The `knowledge` table first shipped without these; they were added AFTER rows
+-- already existed (the wake-up cascade / "atomic facts" feature). So on any
+-- graph that predates the cascade, every legacy row holds NONE for resonance,
+-- activation_count, and decay_rate → the SAME cold-upgrade stranding hazard as
+-- triggers/wake_phrases/chunk_count/format (Issue #360). Required + legacy-added
+-- ⇒ loosen → backfill → OVERWRITE-tighten. The read path already coalesces these
+-- (IF resonance THEN resonance ELSE 0 END, etc. in knowledge_select_fields()),
+-- so reads survive — but the next WRITE touching a stranded row aborts
+-- whole-record validation with `Found NONE for field 'activation_count' ...
+-- but expected a int`, taking the all-or-nothing apply_schema down with it.
+-- OVERWRITE (not IF NOT EXISTS): loosen unconditionally so an upgrade from a
+-- prior version where the field was strict actually loosens. Backfilled to their
+-- DEFAULTs (0 / 0 / 0.0) and tightened in the COLD-UPGRADE BACKFILL block below.
+DEFINE FIELD OVERWRITE resonance ON knowledge TYPE option<int>;
 -- Note: 'session' was added to resonance_type allowed values as part of the session resonance
 -- type feature (PR #148), not the tag query feature. It appears here because both changes
 -- landed in the same schema file update.
 DEFINE FIELD IF NOT EXISTS resonance_type ON knowledge TYPE option<string>
   ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral', 'session'];
 DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
-DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
-DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
+DEFINE FIELD OVERWRITE activation_count ON knowledge TYPE option<int>;
+DEFINE FIELD OVERWRITE decay_rate ON knowledge TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS anchors ON knowledge TYPE option<array<string>>;
 
 -- Issue #72: Multiple wake phrases for ritual variety.
@@ -453,7 +466,7 @@ UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'd
 UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 
 -- =============================================================================
--- COLD-UPGRADE BACKFILL (Issues #72, #73, #122, #352, #360)
+-- COLD-UPGRADE BACKFILL (Issues #72, #73, #122, #352, #360 + resonance cascade)
 -- =============================================================================
 --
 -- WHY THIS SECTION EXISTS
@@ -478,7 +491,8 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 --   * the backfill UPDATE is ITSELF the first write touching legacy rows, and
 --   * a SCHEMAFULL write validates EVERY required field at once — so the very
 --     first backfill UPDATE (historically the wake_phrases migration) aborts
---     because triggers/chunk_count/format are still NONE on that same row.
+--     because triggers/chunk_count/format AND the resonance-cascade ints
+--     (resonance/activation_count/decay_rate) are still NONE on that same row.
 --   * apply_schema sends the whole file through one `db.query` and uses
 --     `take_errors()` (all-or-nothing), so one stranded row fails every connect.
 -- Reported by the hearth federation (Soren/Geoff) on a ~5,283-row graph; the
@@ -495,14 +509,20 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 --
 -- THE WORKING SEQUENCE (option → backfill → OVERWRITE-tighten):
 --   1. Each required, legacy-added field is LOOSENED to `option<...>` at its
---      site above (triggers, wake_phrases, chunk_count, format) with
---      `DEFINE FIELD OVERWRITE` — OVERWRITE, not IF NOT EXISTS, because on an
---      upgrade the field already exists as the strict type and IF NOT EXISTS
---      would skip, leaving it strict. Loosening lets a write touch the row
---      while the field is still NONE.
+--      site above — the full set is triggers, wake_phrases, chunk_count, format,
+--      resonance, activation_count, decay_rate (every REQUIRED knowledge field
+--      that the read path coalesces in knowledge_select_fields(), i.e. every one
+--      that can be NONE on a legacy row) — with `DEFINE FIELD OVERWRITE`:
+--      OVERWRITE, not IF NOT EXISTS, because on an upgrade the field already
+--      exists as the strict type and IF NOT EXISTS would skip, leaving it
+--      strict. Loosening lets a write touch the row while the field is NONE.
 --   2. Backfill ALL of them here, while every one is still loose. Because all
---      four are option<> at this point, these UPDATEs pass whole-record
+--      seven are option<> at this point, these UPDATEs pass whole-record
 --      validation even though the others have not been set yet on that row.
+--      ORDERING INVARIANT: every strand-hazard field is loosened (step 1, above
+--      the SEED DATA) before ANY write touches a knowledge row — the seed
+--      UPSERTs write only lookup tables, and the first knowledge-row write is
+--      the backfill block here, by which point all seven are loose.
 --   3. THEN tighten each back to its strict type with `DEFINE FIELD OVERWRITE`
 --      (NOT `IF NOT EXISTS`, which would skip). After the backfill no row holds
 --      NONE, so the strict type — enforced on the next write — is satisfied.
@@ -522,12 +542,11 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 -- `option<>` at its site (OVERWRITE so an upgrade from a strict prior version
 -- actually loosens), then add a `WHERE <field> IS NONE` backfill in THIS block,
 -- then a paired `DEFINE FIELD OVERWRITE ... TYPE <strict> DEFAULT <d>` tighten
--- here. Never
--- leave a field permanently `option<>` just to dodge this — downstream code
--- assumes presence; backfill + tighten is the correct fix. If the backfill
--- COMPUTES a value (not a constant), add a test that exercises the non-empty
--- case — assert the computed value matches the real count, not just that the
--- statement runs. Issue #352 is the cautionary tale: a chunk_count backfill
+-- here. Never leave a field permanently `option<>` just to dodge this —
+-- downstream code assumes presence; backfill + tighten is the correct fix. If
+-- the backfill COMPUTES a value (not a constant), add a test that exercises the
+-- non-empty case — assert the computed value matches the real count, not just
+-- that the statement runs. Issue #352 is the cautionary tale: a chunk_count backfill
 -- shipped relying on a non-obvious SurrealDB sub-select quirk with only a
 -- throwaway probe; the permanent test (test_backfill_chunk_count_* in
 -- src/surreal_db/tests.rs) now guards it. Issue #360 is the second cautionary
@@ -548,6 +567,13 @@ UPDATE knowledge SET triggers = [] WHERE triggers IS NONE;
 
 -- Issue #122: backfill format field for existing entries.
 UPDATE knowledge SET format = 'markdown' WHERE format IS NONE;
+
+-- Resonance cascade fields: legacy rows that predate the wake-up cascade hold
+-- NONE for these required ints/float. Backfill to their DEFAULTs while loose.
+-- (Same #360 hazard as the four above — see the field-site comment.)
+UPDATE knowledge SET resonance = 0 WHERE resonance IS NONE;
+UPDATE knowledge SET activation_count = 0 WHERE activation_count IS NONE;
+UPDATE knowledge SET decay_rate = 0.0 WHERE decay_rate IS NONE;
 
 -- Issue #352: backfill chunk_count for entries that predate chunking (Issue #346).
 -- chunk_count is `int DEFAULT 0` (required); rows that predate it are stranded
@@ -582,6 +608,11 @@ DEFINE FIELD OVERWRITE triggers ON knowledge TYPE array<string> DEFAULT [];
 DEFINE FIELD OVERWRITE format ON knowledge TYPE string DEFAULT 'markdown'
   ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', 'stele:light', 'stele:full'];
 DEFINE FIELD OVERWRITE chunk_count ON knowledge TYPE int DEFAULT 0;
+-- Resonance cascade fields (legacy-added, Issue #360 cohort): tighten back to
+-- their strict required types now that no row holds NONE.
+DEFINE FIELD OVERWRITE resonance ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE activation_count ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE decay_rate ON knowledge TYPE float DEFAULT 0.0;
 
 -- STEP 4 — define the triggers element index now that `triggers` is strict
 -- `array<string>` again.
