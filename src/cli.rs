@@ -1141,6 +1141,12 @@ pub enum MemoryCommands {
         /// Maximum number of results
         #[arg(long, default_value = "100")]
         limit: usize,
+
+        /// Exclude entries whose tags prefix-match any of these comma-separated values.
+        /// E.g. --exclude-tags 'project/' drops every entry tagged project/<anything>.
+        /// Multiple prefixes: --exclude-tags 'project/,foo/'
+        #[arg(long, value_name = "PREFIXES")]
+        exclude_tags: Option<String>,
     },
 
     /// List facts extracted from a specific session

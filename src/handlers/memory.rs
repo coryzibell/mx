@@ -859,6 +859,20 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // Insert the fact
                 db.upsert_knowledge(&entry)?;
 
+                // Verify the write landed. SurrealDB's PERMISSIONS clause silently
+                // rejects unauthorized writes (zero rows affected, no error). A
+                // read-after-write catches that and turns silent data-loss into a
+                // loud failure.
+                {
+                    let ctx = store::AgentContext::for_agent(&agent_id);
+                    if db.get(&id, &ctx)?.is_none() {
+                        bail!(
+                            "write rejected: fact '{}' was not persisted (likely a permission denial — check that the writing agent owns the entry or has permission to create it)",
+                            id
+                        );
+                    }
+                }
+
                 // Create EXTRACTED_FROM relationship to session if provided
                 if let Some(ref sess) = session {
                     let session_ref = if sess.starts_with("kn-") {
@@ -1031,6 +1045,20 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Insert into database (applicability already set in struct)
             db.upsert_knowledge(&entry)?;
+
+            // Verify the write landed. SurrealDB's PERMISSIONS clause silently
+            // rejects unauthorized writes (zero rows affected, no error). A
+            // read-after-write catches that and turns silent data-loss into a
+            // loud failure.
+            {
+                let ctx = store::AgentContext::for_agent(&agent_id);
+                if db.get(&id, &ctx)?.is_none() {
+                    bail!(
+                        "write rejected: entry '{}' was not persisted (likely a permission denial — check that the writing agent owns the entry or has permission to create it)",
+                        id
+                    );
+                }
+            }
 
             // Create EXTRACTED_FROM edge when --session-id is provided.
             // Standard mode stores session_id as a field but the for-session query
@@ -2492,10 +2520,25 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
-        MemoryCommands::WakeFetch { days, limit } => {
+        MemoryCommands::WakeFetch {
+            days,
+            limit,
+            exclude_tags,
+        } => {
             if days <= 0 {
                 bail!("--days must be a positive integer (got {days})");
             }
+
+            // Parse --exclude-tags into a list of prefix strings.
+            // Empty string segments (from trailing commas) are silently dropped.
+            let exclude_prefixes: Vec<String> = exclude_tags
+                .as_deref()
+                .unwrap_or("")
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
 
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -2503,16 +2546,37 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Filter to resonance >= 3 AND extract fact_type in a single pass.
             // Collect (entry, fact_type) pairs so we don't re-parse summary JSON later.
+            // Also apply tag-prefix exclusion: drop any entry whose tags include a value
+            // that starts with any of the requested exclude prefixes.
             let mut typed_facts: Vec<(crate::knowledge::KnowledgeEntry, String)> = facts
                 .drain(..)
                 .filter(|f| f.resonance >= 3)
-                .filter_map(|f| {
+                .filter(|f| {
+                    if exclude_prefixes.is_empty() {
+                        return true;
+                    }
+                    // Exclude if ANY tag on the entry prefix-matches ANY exclude prefix.
+                    !f.tags.iter().any(|tag| {
+                        exclude_prefixes
+                            .iter()
+                            .any(|prefix| tag.starts_with(prefix.as_str()))
+                    })
+                })
+                .map(|f| {
+                    // fact_type is a display label only. Older entries carry it in
+                    // summary JSON; newer entries leave summary null. Fall back to
+                    // the entry's category so a missing label never drops the entry.
                     let ft = f
                         .summary
                         .as_ref()
                         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                        .and_then(|v| v.get("fact_type")?.as_str().map(String::from))?;
-                    Some((f, ft))
+                        .and_then(|v| {
+                            v.get("fact_type")
+                                .and_then(|x| x.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| f.category_id.clone());
+                    (f, ft)
                 })
                 .collect();
 
