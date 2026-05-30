@@ -46,6 +46,25 @@ impl KnowledgeStore for SurrealDatabase {
         self.semantic_search_knowledge(query_embedding, ctx, filter, limit)
     }
 
+    fn semantic_search_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+        self.semantic_search_knowledge_scored(query_embedding, ctx, filter, limit)
+    }
+
+    fn semantic_search_entries_scored(
+        &self,
+        query_embedding: &[f32],
+        ctx: &crate::store::AgentContext,
+        limit: usize,
+    ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+        self.semantic_search_entries_scored(query_embedding, ctx, limit)
+    }
+
     fn list_by_category(
         &self,
         category: &str,
