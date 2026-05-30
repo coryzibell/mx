@@ -302,6 +302,33 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     Ok(())
 }
 
+/// Durability commit: re-fetch and re-upsert an entry to ensure write
+/// persistence.
+///
+/// When `auto_anchor` is skipped (via `--no-auto-anchor` or
+/// `MX_SKIP_WRITE_ANCHOR=1`), the write path loses the final
+/// `upsert_knowledge` call that `auto_anchor` would have made.  That
+/// trailing upsert carries a side-effect the storage layer depends on
+/// for durable commits (tag/applicability edge recreation, full-text
+/// index refresh).  This function provides that side-effect without the
+/// expensive cosine-similarity scan.
+pub(crate) fn commit_entry(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    let ctx = match std::env::var("MX_CURRENT_AGENT") {
+        Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
+        _ => store::AgentContext::public_only(),
+    };
+
+    let mut entry = match db.get(entry_id, &ctx)? {
+        Some(e) => e,
+        None => return Ok(()),
+    };
+
+    entry.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    db.upsert_knowledge(&entry)?;
+
+    Ok(())
+}
+
 /// Auto-anchor a knowledge entry after add/update
 ///
 /// This silently finds similar entries and adds anchors for a single entry.

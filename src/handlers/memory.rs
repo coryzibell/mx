@@ -1160,6 +1160,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
+                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1724,6 +1725,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 auto_anchor(&id, db.as_ref(), removed)?;
             } else {
+                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1790,6 +1792,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
+                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1872,6 +1875,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
+                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -1950,6 +1954,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             {
                 auto_anchor(&id, db.as_ref(), None)?;
             } else {
+                commit_entry(&id, db.as_ref())?;
                 println!("  (auto-anchor skipped)");
             }
 
@@ -2065,6 +2070,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 {
                     auto_anchor(&id, db.as_ref(), None)?;
                 } else {
+                    commit_entry(&id, db.as_ref())?;
                     println!("  (auto-anchor skipped)");
                 }
 
