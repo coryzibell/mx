@@ -176,6 +176,22 @@ pub(crate) const NEAR_DUPLICATE_CEILING: f32 = 0.95;
 /// Default minimum similarity for two entries to be considered anchor-worthy.
 pub(crate) const DEFAULT_ANCHOR_THRESHOLD: f32 = 0.75;
 
+/// Over-fetch factor for `auto_anchor`'s bounded candidate query (Issue #362):
+/// we fetch `MAX_ANCHORS * ANCHOR_CANDIDATE_OVERFETCH` rows by score, leaving
+/// headroom for the handful of high-scoring rows that get filtered out (self,
+/// near-duplicates above the ceiling, existing/removed anchors) before we run
+/// out of in-band candidates.
+pub(crate) const ANCHOR_CANDIDATE_OVERFETCH: usize = 5;
+
+/// Escalation cap for `auto_anchor`'s candidate query. When the normal
+/// over-fetch is *saturated* in a way that could truncate genuine in-band
+/// anchors (see the saturation signal at the call site, Issue #362 / PR #366),
+/// we re-query at this much larger bound so the selected anchors provably match
+/// the old exhaustive full-scan behavior. A single re-query at this cap is still
+/// far cheaper than the old per-write full hydrate + Rust cosine loop, and it
+/// only fires in the degenerate near-duplicate-flood case.
+pub(crate) const MAX_ANCHOR_CANDIDATES: usize = 500;
+
 /// Calculate cosine similarity between two vectors
 ///
 /// Returns a value between -1.0 and 1.0 (typically 0.0 to 1.0 for normalized embeddings)
@@ -338,15 +354,43 @@ pub(crate) fn auto_anchor(
     // existing anchors (re-handled separately below), and explicitly-removed
     // anchors. Over-fetching 5x max_anchors (25) leaves ample headroom for that
     // handful of high-scoring rejects before we run out of in-band candidates.
-    // Tradeoff: if a graph had MORE than (K - max_anchors) entries scoring
-    // above an in-band member (e.g. >20 near-duplicates of this entry), a band
-    // member ranked below K could be missed. At anchor scale (max 5) this is
-    // not a realistic configuration; the cap means we only ever keep the top
-    // max_anchors in-band anyway, so the highest-scoring band members — the
-    // ones we'd keep — are exactly the ones K surfaces first.
-    let candidate_fetch_k = max_anchors * 5;
-    let scored_candidates =
+    let candidate_fetch_k = max_anchors * ANCHOR_CANDIDATE_OVERFETCH;
+    let mut scored_candidates =
         db.semantic_search_entries_scored(entry_embedding, &ctx, candidate_fetch_k)?;
+
+    // ---- Saturation detection + escalation (PR #366, hardening #362) -----
+    //
+    // The bounded top-K fetch diverges from the old exhaustive scan in EXACTLY
+    // one degenerate case: if MORE than (K - max_anchors) rows score above an
+    // in-band member (e.g. >20 near-identical copies above the 0.95 ceiling),
+    // a legitimate in-band anchor could rank below K and be silently dropped —
+    // a behavior change vs. the old full scan.
+    //
+    // We detect this with an EXACT signal. We are only at risk of having
+    // truncated in-band rows when BOTH hold:
+    //   1. the result is K-saturated (`len == candidate_fetch_k`), i.e. the DB
+    //      had at least K candidates and the query hit its bound; AND
+    //   2. the lowest-scoring returned candidate still scores at/above the band
+    //      floor (>= threshold) — so scores had NOT yet dropped below 0.75 when
+    //      the bound cut us off, meaning additional in-band rows may exist past K.
+    //
+    // This is exact: if the lowest returned score is already below the floor,
+    // every row beyond K scores even lower (results are score-descending) and is
+    // therefore out-of-band — nothing the old scan would have kept was missed.
+    // Likewise, if the result is not saturated, the DB returned every candidate
+    // it had, identical to the full scan's candidate universe.
+    //
+    // On the saturated signal we ESCALATE: re-query at MAX_ANCHOR_CANDIDATES and
+    // proceed with that fuller set. This stays entirely on the bounded DB path
+    // (no per-write full hydrate) and only triggers in the degenerate flood.
+    let saturated = scored_candidates.len() == candidate_fetch_k
+        && scored_candidates
+            .last()
+            .is_some_and(|(_, score)| *score >= threshold);
+    if saturated {
+        scored_candidates =
+            db.semantic_search_entries_scored(entry_embedding, &ctx, MAX_ANCHOR_CANDIDATES)?;
+    }
 
     let mut similarities: Vec<(String, f32)> = Vec::new();
 
@@ -953,5 +997,173 @@ mod auto_anchor_tests {
         auto_anchor("kn-noemb", &db, None).unwrap();
         let got = anchors_of(&db, "kn-noemb");
         assert!(got.is_empty(), "no embedding -> no anchoring");
+    }
+
+    /// PR #366 hardening: the degenerate near-duplicate-flood case. When MORE
+    /// than (K - max_anchors) entries score above the band ceiling, the initial
+    /// bounded top-K (= max_anchors * ANCHOR_CANDIDATE_OVERFETCH = 25) is filled
+    /// almost entirely by out-of-band near-duplicates, pushing genuine in-band
+    /// anchors past slot K. Without escalation those in-band anchors would be
+    /// silently dropped vs. the old exhaustive scan. With saturation detection +
+    /// escalation to MAX_ANCHOR_CANDIDATES, auto_anchor must still select exactly
+    /// the in-band anchors the full-scan reference impl would.
+    #[test]
+    #[serial]
+    fn escalates_when_saturated_by_near_duplicate_flood() {
+        clear_agent_env();
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        // Sanity: the over-fetch K used by auto_anchor.
+        let max_anchors = 5usize;
+        let k = max_anchors * ANCHOR_CANDIDATE_OVERFETCH; // 25
+
+        let target = entry_with_embedding("kn-target", unit_query(), "public", None, vec![]);
+        let mut graph = vec![target.clone()];
+
+        // Flood: K-1 (24) near-duplicates ABOVE the 0.95 ceiling. They are NOT
+        // anchorable (band-excluded), but they crowd the score-descending top-K,
+        // leaving only a single slot for an in-band member in the initial fetch.
+        let flood = k - 1; // 24 > (K - max_anchors) = 20
+        for i in 0..flood {
+            // Distinct scores in (0.95, 1.0) so ordering is deterministic and
+            // every one sits strictly above the ceiling.
+            let cos = 0.999 - (i as f32) * 0.0005;
+            graph.push(entry_with_embedding(
+                &format!("kn-dup{i:02}"),
+                unit_vec(cos),
+                "public",
+                None,
+                vec![],
+            ));
+        }
+
+        // Genuine in-band anchors, all scoring BELOW every duplicate (so they
+        // rank past slot K and would be truncated without escalation), but well
+        // inside the [0.75, 0.95] band and within MAX_ANCHOR_CANDIDATES.
+        let in_band = [
+            ("kn-real-a", 0.90f32),
+            ("kn-real-b", 0.87),
+            ("kn-real-c", 0.84),
+            ("kn-real-d", 0.81),
+            ("kn-real-e", 0.78),
+        ];
+        for (id, cos) in in_band {
+            graph.push(entry_with_embedding(
+                id,
+                unit_vec(cos),
+                "public",
+                None,
+                vec![],
+            ));
+        }
+
+        for e in &graph {
+            db.upsert_knowledge(e).unwrap();
+        }
+
+        // Confirm the precondition: the INITIAL bounded fetch is saturated AND
+        // its lowest returned score is still at/above the floor — i.e. it would
+        // have truncated in-band rows without escalation.
+        let ctx = AgentContext::public_only();
+        let initial = db
+            .semantic_search_entries_scored(target.embedding.as_ref().unwrap(), &ctx, k)
+            .unwrap();
+        assert_eq!(initial.len(), k, "initial fetch must be K-saturated");
+        assert!(
+            initial.last().unwrap().1 >= DEFAULT_ANCHOR_THRESHOLD,
+            "lowest returned score must still be >= floor (saturation signal fires)"
+        );
+
+        auto_anchor("kn-target", &db, None).unwrap();
+
+        let got = anchors_of(&db, "kn-target");
+        let expected = reference_old_anchors(&target, &graph, max_anchors);
+
+        // Escalation must recover the full in-band set, matching the exhaustive
+        // reference exactly.
+        assert_eq!(
+            got, expected,
+            "escalation must select the same in-band anchors as the old full scan"
+        );
+        assert_eq!(
+            got,
+            vec![
+                "kn-real-a".to_string(),
+                "kn-real-b".to_string(),
+                "kn-real-c".to_string(),
+                "kn-real-d".to_string(),
+                "kn-real-e".to_string(),
+            ],
+            "all five genuine in-band anchors recovered despite the near-duplicate flood"
+        );
+    }
+
+    /// PR #366: the saturation signal is EXACT — escalation must NOT fire when
+    /// the bounded fetch is full but its lowest returned score is already below
+    /// the band floor. In that case every row beyond K is out-of-band, so the
+    /// top-K already contains every anchor-worthy candidate; re-querying would be
+    /// wasted work and a perf regression in a common shape (many low-similarity
+    /// neighbors). We assert correctness is preserved without relying on the
+    /// escalation path.
+    #[test]
+    #[serial]
+    fn does_not_escalate_when_lowest_score_below_floor() {
+        clear_agent_env();
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let max_anchors = 5usize;
+        let k = max_anchors * ANCHOR_CANDIDATE_OVERFETCH; // 25
+
+        let target = entry_with_embedding("kn-target", unit_query(), "public", None, vec![]);
+        let mut graph = vec![target.clone()];
+
+        // A few in-band anchors at the top...
+        let in_band = [("kn-a", 0.90f32), ("kn-b", 0.85), ("kn-c", 0.80)];
+        for (id, cos) in in_band {
+            graph.push(entry_with_embedding(
+                id,
+                unit_vec(cos),
+                "public",
+                None,
+                vec![],
+            ));
+        }
+        // ...then MANY below-floor neighbors so the fetch is K-saturated but its
+        // tail has already dropped under 0.75. (K + a margin of below-floor rows.)
+        for i in 0..(k + 10) {
+            let cos = 0.70 - (i as f32) * 0.001; // all strictly below 0.75 floor
+            graph.push(entry_with_embedding(
+                &format!("kn-lo{i:02}"),
+                unit_vec(cos),
+                "public",
+                None,
+                vec![],
+            ));
+        }
+
+        for e in &graph {
+            db.upsert_knowledge(e).unwrap();
+        }
+
+        // Precondition: K-saturated, but lowest returned score is BELOW the floor
+        // -> the exact signal says "no truncation possible", escalation suppressed.
+        let ctx = AgentContext::public_only();
+        let initial = db
+            .semantic_search_entries_scored(target.embedding.as_ref().unwrap(), &ctx, k)
+            .unwrap();
+        assert_eq!(initial.len(), k, "fetch is K-saturated");
+        assert!(
+            initial.last().unwrap().1 < DEFAULT_ANCHOR_THRESHOLD,
+            "lowest returned score is below floor -> escalation must NOT fire"
+        );
+
+        auto_anchor("kn-target", &db, None).unwrap();
+
+        let got = anchors_of(&db, "kn-target");
+        assert_eq!(
+            got,
+            vec!["kn-a".to_string(), "kn-b".to_string(), "kn-c".to_string()],
+            "the three in-band anchors are selected from the initial top-K (no escalation needed)"
+        );
     }
 }
