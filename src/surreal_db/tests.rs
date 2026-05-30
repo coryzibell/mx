@@ -17,19 +17,18 @@ fn test_schema_applies_without_error() {
 
 #[test]
 fn test_embedded_connect_creates_directory() {
-    use super::connection::SurrealConfig;
     use tempfile::tempdir;
 
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.surreal");
 
-    // Use connect() with default config to force embedded mode, same as
-    // open_in_memory(). The public open() reads MX_SURREAL_MODE from the
-    // environment, which may route to a network backend that never creates
-    // a local directory -- making the exists()/is_dir() assertions flaky
-    // on hosts where the factory runs in network mode.
-    let config = SurrealConfig::default(); // always Embedded
-    let _db = SurrealDatabase::connect(&db_path, &config).unwrap();
+    // Route through the guarded file-backed test constructor, which forces
+    // embedded mode regardless of MX_SURREAL_*. The public open() reads
+    // MX_SURREAL_MODE from the environment, which may route to a network
+    // backend that never creates a local directory -- making the
+    // exists()/is_dir() assertions flaky on hosts where the factory runs in
+    // network mode (and, worse, could write to the live DB).
+    let _db = SurrealDatabase::open_file_backed_for_test(&db_path).unwrap();
 
     // Verify directory was created
     assert!(db_path.exists());
@@ -2981,4 +2980,97 @@ fn test_trigger_check_cap_and_deferred_fires_next_turn() {
     // Third check: everything fired -> nothing new.
     let fired3 = run_check(&store);
     assert!(fired3.is_empty(), "all memories already fired this session");
+}
+
+// =========================================================================
+// Dimension-mismatch cosine guard regression (production incident).
+//
+// SurrealDB's `vector::similarity::cosine` ABORTS THE ENTIRE SCAN when it
+// encounters any row whose embedding dimension differs from the query
+// vector. A single off-dimension row (famously, a dim-4 unit-test fixture
+// that leaked into the live graph) therefore broke add-dedup, auto_anchor
+// (#362), semantic search, and trigger-check (#246) all at once.
+//
+// The fix adds `AND array::len(embedding) = $dim` to every cosine query so a
+// mismatched row is SKIPPED rather than aborting the scan. These tests would
+// have caught the production breakage: a store containing one off-dim row
+// alongside good rows must still return the good rows WITHOUT erroring.
+//
+// Isolation: uses `open_in_memory()` (forced embedded tempdir), so it can
+// never touch the live DB even if MX_SURREAL_* is set in the environment.
+// =========================================================================
+
+/// Build a knowledge entry carrying an embedding of an arbitrary dimension.
+/// Lets us seed both good (matching) and poisoned (mismatched) rows.
+fn entry_with_dim_embedding(id: &str, embedding: Vec<f32>) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 5, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.embedding = Some(embedding);
+    e.embedding_model = Some("test-model".to_string());
+    e.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    e
+}
+
+#[test]
+fn off_dim_row_does_not_abort_cosine_scan() {
+    use crate::store::{AgentContext, KnowledgeStore};
+
+    // Isolated, never-live store.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Two GOOD rows at the query dimension (N = 8).
+    const N: usize = 8;
+    let mut good_a = vec![0.0f32; N];
+    good_a[0] = 1.0; // unit vector aligned with the query
+    let mut good_b = vec![0.0f32; N];
+    good_b[1] = 1.0; // orthogonal-ish, still dim N
+    db.upsert_knowledge(&entry_with_dim_embedding("kn-good-a", good_a.clone()))
+        .unwrap();
+    db.upsert_knowledge(&entry_with_dim_embedding("kn-good-b", good_b))
+        .unwrap();
+
+    // One POISONED row: a dim-4 embedding (the exact shape of the leaked
+    // fixture). Before the guard, this row made cosine abort the whole scan.
+    db.upsert_knowledge(&entry_with_dim_embedding(
+        "kn-poison-dim4",
+        vec![1.0, 0.0, 0.0, 0.0],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
+    // Query vector at dimension N, aligned with kn-good-a.
+    let query = good_a;
+
+    // Two-phase semantic search must NOT error and must return the good rows.
+    let results = db
+        .semantic_search(&query, &ctx, &filter, 10)
+        .expect("semantic_search must skip the off-dim row, not abort the scan");
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&"kn-good-a"),
+        "the matching good row must be returned; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"kn-good-b"),
+        "the second good row must be returned; got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"kn-poison-dim4"),
+        "the off-dim row must be skipped by the guard; got {ids:?}"
+    );
+
+    // Entry-level scored search (the auto_anchor #362 path) must also survive.
+    let scored = db
+        .semantic_search_entries_scored(&query, &ctx, 10)
+        .expect("entries-scored search must skip the off-dim row, not abort the scan");
+    let scored_ids: Vec<&str> = scored.iter().map(|(e, _)| e.id.as_str()).collect();
+    assert!(
+        scored_ids.contains(&"kn-good-a") && scored_ids.contains(&"kn-good-b"),
+        "entry-level scored search must return the good rows; got {scored_ids:?}"
+    );
+    assert!(
+        !scored_ids.contains(&"kn-poison-dim4"),
+        "entry-level scored search must skip the off-dim row; got {scored_ids:?}"
+    );
 }
