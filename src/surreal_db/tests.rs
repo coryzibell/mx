@@ -2499,6 +2499,254 @@ fn test_backfill_chunk_count_idempotent() {
 }
 
 // =========================================================================
+// Issue #360 — cold-upgrade backfill, END-TO-END through apply_schema.
+//
+// THE CI BLIND SPOT THIS CLOSES: test_backfill_chunk_count_* (above) only run
+// the ISOLATED backfill UPDATE against a row whose chunk_count is already NONE.
+// They never replay the full SCHEMA const through the real apply path, so they
+// could not catch the production failure in #360: on a populated pre-existing
+// graph, the strict `DEFINE FIELD` leaves legacy rows holding NONE, and the
+// FIRST write in the schema's backfill block (the wake_phrases migration) then
+// aborts whole-record validation — taking the entire all-or-nothing
+// `db.query(SCHEMA)` (take_errors) down with it. These tests reproduce that by
+// stranding the legacy-added required fields as genuinely-NONE, replaying the
+// ACTUAL SCHEMA through apply_schema_explicit end-to-end, and asserting both
+// that apply succeeds AND that an ordinary subsequent write to a legacy row
+// succeeds (the exact production failure mode).
+//
+// Backing store: open_in_memory() uses the real embedded SurrealKV engine (not
+// a mock), so SCHEMAFULL strict-DEFINE whole-record validation reproduces
+// faithfully — the same mechanics as `surreal start memory`.
+// =========================================================================
+
+/// Strand a knowledge row so EVERY legacy-added required field is genuinely
+/// NONE — the exact production state of a row that predates each field. This is
+/// the COMPLETE post-release required-field set on `knowledge` (every required,
+/// non-`option<>` field the read path coalesces in knowledge_select_fields(),
+/// i.e. every one that can be NONE on a legacy row):
+///
+/// * triggers, wake_phrases, chunk_count, format  (Issue #360, PR #367)
+/// * resonance, activation_count, decay_rate      (wake-up cascade cohort)
+///
+/// Stranding the WHOLE set (not just the first four) is deliberate: it makes
+/// this helper structurally catch the entire class going forward. Add a row to
+/// the array here whenever a new required field is added after the table's first
+/// release, and the end-to-end test below will fail until the schema heals it.
+///
+/// We can't just `SET x = NONE` while the field is strict (SurrealDB rejects
+/// NONE for a required field), so for each field we reproduce the real history:
+/// drop the field constraint, set the value to NONE, then re-DEFINE the field as
+/// it existed in the PRE-fix schema (strict). This leaves the row holding NONE
+/// under a strict definition — precisely the cold-upgrade trap. Replaying the
+/// (fixed) SCHEMA must then heal it via option → backfill → OVERWRITE.
+fn strand_cold_upgrade_fields(db: &SurrealDatabase, record: &str) {
+    // (field name, the strict pre-fix DEFINE to restore)
+    let fields: [(&str, &str); 7] = [
+        (
+            "triggers",
+            "DEFINE FIELD triggers ON knowledge TYPE array<string> DEFAULT []",
+        ),
+        (
+            "wake_phrases",
+            "DEFINE FIELD wake_phrases ON knowledge TYPE array<string> DEFAULT []",
+        ),
+        (
+            "chunk_count",
+            "DEFINE FIELD chunk_count ON knowledge TYPE int DEFAULT 0",
+        ),
+        (
+            "format",
+            "DEFINE FIELD format ON knowledge TYPE string DEFAULT 'markdown' \
+             ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', \
+             'stele:light', 'stele:full']",
+        ),
+        (
+            "resonance",
+            "DEFINE FIELD resonance ON knowledge TYPE int DEFAULT 0",
+        ),
+        (
+            "activation_count",
+            "DEFINE FIELD activation_count ON knowledge TYPE int DEFAULT 0",
+        ),
+        (
+            "decay_rate",
+            "DEFINE FIELD decay_rate ON knowledge TYPE float DEFAULT 0.0",
+        ),
+    ];
+
+    // 1. Drop ALL field constraints first. We cannot strand them one at a
+    //    time: re-DEFINEing one as strict before the others are set to NONE
+    //    would make the NEXT `SET <other> = NONE` write fail whole-record
+    //    validation on the just-tightened field (that is literally the #360
+    //    trap). So unconstrain everything, THEN null everything, THEN restore
+    //    the strict defs last (pure DDL — no row write to validate).
+    for (name, _) in fields {
+        db.test_exec(&format!("REMOVE FIELD IF EXISTS {} ON knowledge", name))
+            .unwrap();
+    }
+    // 2. Null all of them in a single write (no strict field is in the way now).
+    let set_clause = fields
+        .iter()
+        .map(|(name, _)| format!("{} = NONE", name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.test_exec(&format!("UPDATE {} SET {}", record, set_clause))
+        .unwrap();
+    // 3. Restore the strict pre-fix definitions. The row keeps NONE under a
+    //    strict definition — the exact cold-upgrade stranded state.
+    for (_, strict_define) in fields {
+        db.test_exec(strict_define).unwrap();
+    }
+}
+
+/// Read the raw stored value of a knowledge field WITHOUT read-coalescing,
+/// returning the JSON value (`null` == NONE on disk).
+fn raw_field(db: &SurrealDatabase, record: &str, field: &str) -> serde_json::Value {
+    let sql = format!("SELECT {0} FROM {1}", field, record);
+    // test_exec swallows results; use a tiny inline query via the same runtime.
+    SurrealDatabase::runtime().block_on(async {
+        let mut response = with_db!(db, db, { db.query(&sql).await.unwrap() });
+        let rows: Vec<serde_json::Value> = response.take(0).unwrap();
+        rows.into_iter()
+            .next()
+            .and_then(|r| r.get(field).cloned())
+            .unwrap_or(serde_json::Value::Null)
+    })
+}
+
+#[test]
+fn test_cold_upgrade_apply_schema_heals_stranded_legacy_rows() {
+    // A populated pre-existing graph: a real knowledge row exists, then loses
+    // EVERY legacy-added required field to NONE (predating them) — the full
+    // post-release required-field set, including the resonance cascade cohort
+    // (resonance/activation_count/decay_rate) that the original #360 fix missed.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = make_test_entry("kn-legacy360", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    strand_cold_upgrade_fields(&db, "knowledge:legacy360");
+
+    // Precondition: the fields are genuinely NONE on disk (null), exactly the
+    // production stranded state.
+    assert!(
+        raw_field(&db, "knowledge:legacy360", "triggers").is_null(),
+        "precondition: triggers must be NONE before re-apply"
+    );
+    assert!(
+        raw_field(&db, "knowledge:legacy360", "chunk_count").is_null(),
+        "precondition: chunk_count must be NONE before re-apply"
+    );
+    // The resonance cascade cohort — the regression Verdictia proved strands the
+    // PR #367 head: apply ABORTS with `FieldCheck { value: "NONE", field:
+    // activation_count, check: "int" }` until these are treated too.
+    assert!(
+        raw_field(&db, "knowledge:legacy360", "resonance").is_null(),
+        "precondition: resonance must be NONE before re-apply"
+    );
+    assert!(
+        raw_field(&db, "knowledge:legacy360", "activation_count").is_null(),
+        "precondition: activation_count must be NONE before re-apply"
+    );
+    assert!(
+        raw_field(&db, "knowledge:legacy360", "decay_rate").is_null(),
+        "precondition: decay_rate must be NONE before re-apply"
+    );
+
+    // ACT: replay the FULL SCHEMA const through the real apply path,
+    // end-to-end. On the OLD ordering this aborts (the backfill UPDATE block is
+    // the failing write); on the fixed ordering option→backfill→OVERWRITE heals
+    // the rows first.
+    db.apply_schema_explicit(false)
+        .expect("apply_schema must succeed on a populated pre-existing graph (Issue #360)");
+
+    // ASSERT (a): the stranded fields were backfilled to their defaults.
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "triggers"),
+        serde_json::json!([]),
+        "triggers must be backfilled to []"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "chunk_count"),
+        serde_json::json!(0),
+        "chunk_count must be backfilled to 0 (no chunks for this entry)"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "format"),
+        serde_json::json!("markdown"),
+        "format must be backfilled to 'markdown'"
+    );
+    // The resonance cascade cohort backfills to its strict DEFAULTs (0/0/0.0).
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "resonance"),
+        serde_json::json!(0),
+        "resonance must be backfilled to 0"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "activation_count"),
+        serde_json::json!(0),
+        "activation_count must be backfilled to 0"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "decay_rate"),
+        serde_json::json!(0.0),
+        "decay_rate must be backfilled to 0.0"
+    );
+
+    // ASSERT (b): the EXACT production failure mode — an ordinary subsequent
+    // write to the (formerly) legacy row must succeed. update_activations does
+    // a partial `SET`, which still triggers SCHEMAFULL whole-record validation.
+    db.update_activations(&["kn-legacy360".to_string()])
+        .expect("ordinary write to a healed legacy row must succeed (Issue #360)");
+}
+
+#[test]
+fn test_cold_upgrade_apply_schema_idempotent_on_healthy_graph() {
+    // A second full apply over an already-healthy graph must succeed and not
+    // thrash: the WHERE <f> IS NONE backfills are no-ops and the OVERWRITE
+    // tightens re-apply cleanly.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = make_test_entry("kn-healthy360", 5, 0.0);
+    db.upsert_knowledge(&entry).unwrap();
+
+    // Re-apply twice more (schema already applied once on open).
+    db.apply_schema_explicit(false).unwrap();
+    db.apply_schema_explicit(false).unwrap();
+
+    // Fields stay strict + correct across the expanded set, and ordinary writes
+    // still work. Covers both the original #360 four and the resonance cohort.
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "chunk_count"),
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "triggers"),
+        serde_json::json!([])
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "format"),
+        serde_json::json!("markdown")
+    );
+    // OVERWRITE preserves real data on a healthy row: make_test_entry set
+    // resonance=5, decay_rate=0.0; activation_count defaults to 0. The IS NONE
+    // backfills must NOT clobber the live resonance value.
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "resonance"),
+        serde_json::json!(5),
+        "idempotent re-apply must NOT reset a healthy resonance to its default"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "activation_count"),
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:healthy360", "decay_rate"),
+        serde_json::json!(0.0)
+    );
+    db.update_activations(&["kn-healthy360".to_string()])
+        .expect("ordinary write after idempotent re-apply must succeed");
+}
+
+// =========================================================================
 // TRIGGERS (Issue #246, PR 1/4 -- data layer)
 // =========================================================================
 

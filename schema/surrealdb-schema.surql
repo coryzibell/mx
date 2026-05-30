@@ -112,52 +112,94 @@ DEFINE FIELD IF NOT EXISTS entry_type ON knowledge TYPE record<entry_type>;
 DEFINE FIELD IF NOT EXISTS content_type ON knowledge TYPE record<content_type> DEFAULT content_type:text;
 DEFINE FIELD IF NOT EXISTS session ON knowledge TYPE option<record<session>>;
 
--- Resonance fields for wake-up cascade
-DEFINE FIELD IF NOT EXISTS resonance ON knowledge TYPE int DEFAULT 0;
+-- Resonance fields for wake-up cascade.
+-- The `knowledge` table first shipped without these; they were added AFTER rows
+-- already existed (the wake-up cascade / "atomic facts" feature). So on any
+-- graph that predates the cascade, every legacy row holds NONE for resonance,
+-- activation_count, and decay_rate → the SAME cold-upgrade stranding hazard as
+-- triggers/wake_phrases/chunk_count/format (Issue #360). Required + legacy-added
+-- ⇒ loosen → backfill → OVERWRITE-tighten. The read path already coalesces these
+-- (IF resonance THEN resonance ELSE 0 END, etc. in knowledge_select_fields()),
+-- so reads survive — but the next WRITE touching a stranded row aborts
+-- whole-record validation with `Found NONE for field 'activation_count' ...
+-- but expected a int`, taking the all-or-nothing apply_schema down with it.
+-- OVERWRITE (not IF NOT EXISTS): loosen unconditionally so an upgrade from a
+-- prior version where the field was strict actually loosens. Backfilled to their
+-- DEFAULTs (0 / 0 / 0.0) and tightened in the COLD-UPGRADE BACKFILL block below.
+DEFINE FIELD OVERWRITE resonance ON knowledge TYPE option<int>;
 -- Note: 'session' was added to resonance_type allowed values as part of the session resonance
 -- type feature (PR #148), not the tag query feature. It appears here because both changes
 -- landed in the same schema file update.
 DEFINE FIELD IF NOT EXISTS resonance_type ON knowledge TYPE option<string>
   ASSERT $value IN [null, 'foundational', 'transformative', 'relational', 'operational', 'ephemeral', 'session'];
 DEFINE FIELD IF NOT EXISTS last_activated ON knowledge TYPE option<datetime>;
-DEFINE FIELD IF NOT EXISTS activation_count ON knowledge TYPE int DEFAULT 0;
-DEFINE FIELD IF NOT EXISTS decay_rate ON knowledge TYPE float DEFAULT 0.0;
+DEFINE FIELD OVERWRITE activation_count ON knowledge TYPE option<int>;
+DEFINE FIELD OVERWRITE decay_rate ON knowledge TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS anchors ON knowledge TYPE option<array<string>>;
 
--- Issue #72: Multiple wake phrases for ritual variety
-DEFINE FIELD IF NOT EXISTS wake_phrases ON knowledge TYPE array<string> DEFAULT [];
+-- Issue #72: Multiple wake phrases for ritual variety.
+-- Required field added after rows existed → cold-upgrade hazard (Issue #360).
+-- Defined as option<...> here; backfilled + tightened to strict array<string>
+-- in the COLD-UPGRADE BACKFILL block below. See the triggers comment for why.
+-- OVERWRITE (not IF NOT EXISTS): loosen unconditionally so an upgrade from a
+-- prior version where the field was strict actually loosens (Issue #360).
+DEFINE FIELD OVERWRITE wake_phrases ON knowledge TYPE option<array<string>>;
 
 -- Issue #73: Custom wake order (separate from resonance)
 DEFINE FIELD IF NOT EXISTS wake_order ON knowledge TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
 
 -- Issue #246: Trigger keywords for reactive memory injection.
--- Mirrors the wake_phrases field exactly: `array<string> DEFAULT []`.
+-- Mirrors the wake_phrases field: `array<string> DEFAULT []`.
 --
--- NO BACKFILL IS NEEDED HERE (and a future reader should NOT add one).
--- The stranding bug documented in the BACKFILL section below only afflicts
--- REQUIRED SCALAR fields (e.g. `int DEFAULT 0`): when such a field is added to
--- a SCHEMAFULL table, pre-existing rows hold NONE and the next write throws
--- "Found NONE for field X". `array<string> DEFAULT []` is the safe pattern and
--- is immune for two reasons working together:
---   1. READ PATH coalesce: knowledge_select_fields() projects
---      `IF triggers THEN triggers ELSE [] END`, so any pre-existing row whose
---      `triggers` is NONE reads back as `[]` -- never observed as NONE.
---   2. WRITE PATH always binds: upsert_knowledge_async always sets
---      `triggers = $triggers` (bound, never NONE), so the moment any row is
---      written it gets a concrete array. No row is ever left stranded with NONE.
--- Because both halves hold, there is no window in which a row needs a backfill.
-DEFINE FIELD IF NOT EXISTS triggers ON knowledge TYPE array<string> DEFAULT [];
--- INDEX HONESTY (Issue #246, PR3): this is a per-ELEMENT index over the array
--- contents. It accelerates equality/CONTAINS lookups (e.g.
--- `WHERE triggers CONTAINS 'brad'`), NOT the `array::len(triggers ?? []) > 0`
--- non-emptiness prefilter that `mx memory trigger-check` currently uses (that
--- resolves via full scan regardless). It is kept deliberately: the actual
--- matching is word-boundary + stemmed and happens in Rust (it cannot be pushed
--- into a SurrealDB index), but a future hook-side fast path / "which memory owns
--- trigger X" lookup will want CONTAINS, which this index serves. If those never
--- materialize, this index is a candidate for removal.
-DEFINE INDEX IF NOT EXISTS knowledge_triggers ON knowledge FIELDS triggers;
+-- COLD-UPGRADE BACKFILL REQUIRED (Issue #360 — corrects an earlier claim here).
+-- ---------------------------------------------------------------------------
+-- An earlier version of this comment asserted "no backfill is needed" for
+-- `triggers`, on the theory that read-path coalescing + write-path binding
+-- meant no row was ever stranded. That reasoning is WRONG for a populated
+-- pre-existing graph (Issue #360, ~5,283-row graph reported via the hearth
+-- federation, Soren/Geoff). Here is the real write path:
+--
+--   * `DEFINE FIELD ... TYPE array<string>` does NOT validate at define-time.
+--     The strict type is only enforced on the NEXT WRITE that touches a row.
+--   * On a SCHEMAFULL table, SurrealDB validates the ENTIRE record on ANY
+--     write. So when ANY backfill/seed/upsert below first writes a legacy row,
+--     the validator inspects every required field — including `triggers`.
+--   * Legacy rows that predate this field hold NONE for it (absent == NONE on
+--     disk in SurrealDB 2.6.x). The write therefore aborts with
+--     "Found NONE for field 'triggers' ... but expected a array<string>", and
+--     because apply_schema runs the whole file through one `db.query` with
+--     `take_errors()` (all-or-nothing), the entire connect fails.
+--   * A bare `UPDATE ... SET triggers = [] WHERE triggers IS NONE` placed AFTER
+--     the strict DEFINE does not help: that UPDATE is itself the failing write.
+--   * Backfilling BEFORE the DEFINE on a SCHEMAFULL table is silently DROPPED
+--     (you cannot `SET` an undefined field on a SCHEMAFULL table).
+--
+-- THE WORKING SEQUENCE (used here and for every required field added after
+-- rows already exist — see "THE RULE" in the BACKFILL section): define the
+-- field as `option<...>` first, backfill legacy NONE rows to the default, then
+-- tighten to the strict required type with `DEFINE FIELD OVERWRITE`. The
+-- tighten MUST use OVERWRITE: `IF NOT EXISTS` silently SKIPS because the field
+-- already exists, leaving it loose (`option<...>`) forever.
+--
+-- ORDERING NOTE: the backfill UPDATE and the OVERWRITE-tighten for this field
+-- live together with the other cold-upgrade fields in the COLD-UPGRADE
+-- BACKFILL block lower down (just before the SEED DATA), NOT here. The reason
+-- is whole-record validation: a backfill UPDATE only succeeds once EVERY
+-- required legacy-added field on the row is non-NONE, so all such fields must
+-- be defined as `option<...>` first (here, at their natural sites), then
+-- backfilled together, then tightened together — no write may happen while any
+-- one of them is still NONE.
+--
+-- This loosen MUST be OVERWRITE, not IF NOT EXISTS: on an upgrade from a prior
+-- mx version the field ALREADY EXISTS as the strict `array<string>`, so
+-- IF NOT EXISTS would silently skip and the field would stay strict — the
+-- backfill below would then die exactly as in #360. OVERWRITE loosens
+-- unconditionally (and creates it on a fresh graph).
+DEFINE FIELD OVERWRITE triggers ON knowledge TYPE option<array<string>>;
+-- NOTE: `knowledge_triggers` INDEX is defined in the COLD-UPGRADE BACKFILL
+-- block below, AFTER `triggers` is tightened back to the strict
+-- `array<string>` — index definitions must see the field in its final type.
 
 -- DEPRECATED: Kept for backward compatibility during migration
 DEFINE FIELD IF NOT EXISTS wake_phrase ON knowledge TYPE option<string>;
@@ -204,12 +246,21 @@ DEFINE FIELD IF NOT EXISTS embedding ON knowledge TYPE option<array<float>>;
 DEFINE FIELD IF NOT EXISTS embedding_model ON knowledge TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS embedded_at ON knowledge TYPE option<datetime>;
 
--- Embedding chunk count (Issue #346)
-DEFINE FIELD IF NOT EXISTS chunk_count ON knowledge TYPE int DEFAULT 0;
+-- Embedding chunk count (Issue #346).
+-- Required field added after rows existed → cold-upgrade hazard (Issue #360).
+-- Defined as option<int> here; backfilled to the per-entry chunk count +
+-- tightened to strict `int DEFAULT 0` in the COLD-UPGRADE BACKFILL block below.
+-- OVERWRITE (not IF NOT EXISTS): loosen unconditionally so an upgrade from a
+-- prior version where the field was strict actually loosens (Issue #360).
+DEFINE FIELD OVERWRITE chunk_count ON knowledge TYPE option<int>;
 
--- Issue #122: Stele encoding format
-DEFINE FIELD IF NOT EXISTS format ON knowledge TYPE string DEFAULT 'markdown'
-  ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', 'stele:light', 'stele:full'];
+-- Issue #122: Stele encoding format.
+-- Required field added after rows existed → cold-upgrade hazard (Issue #360).
+-- Defined as option<string> here; backfilled to 'markdown' + tightened to the
+-- strict asserted `string DEFAULT 'markdown'` in the COLD-UPGRADE block below.
+-- OVERWRITE (not IF NOT EXISTS): loosen unconditionally so an upgrade from a
+-- prior version where the field was strict actually loosens (Issue #360).
+DEFINE FIELD OVERWRITE format ON knowledge TYPE option<string>;
 
 -- Indexes for common queries
 DEFINE INDEX IF NOT EXISTS knowledge_category ON knowledge FIELDS category;
@@ -415,7 +466,7 @@ UPSERT applicability_type:cli SET description = 'Command-line tools', scope = 'd
 UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 
 -- =============================================================================
--- BACKFILL (Issues #72, #73, #122, #352)
+-- COLD-UPGRADE BACKFILL (Issues #72, #73, #122, #352, #360 + resonance cascade)
 -- =============================================================================
 --
 -- WHY THIS SECTION EXISTS
@@ -431,36 +482,102 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 -- that touches such a row throws
 -- `Found NONE for field X ... but expected a <type>`.
 --
+-- ISSUE #360 — THE COLD-UPGRADE TRAP (why this whole section was rewritten)
+-- ------------------------------------------------------------------------
+-- A `DEFINE FIELD ... TYPE <strict>` does NOT validate at define-time. The
+-- strict type is enforced only on the next WRITE touching a row. So the OLD
+-- ordering (strict DEFINE above, then a bare `UPDATE ... WHERE X IS NONE`
+-- backfill here) does not actually work on a populated pre-existing graph:
+--   * the backfill UPDATE is ITSELF the first write touching legacy rows, and
+--   * a SCHEMAFULL write validates EVERY required field at once — so the very
+--     first backfill UPDATE (historically the wake_phrases migration) aborts
+--     because triggers/chunk_count/format AND the resonance-cascade ints
+--     (resonance/activation_count/decay_rate) are still NONE on that same row.
+--   * apply_schema sends the whole file through one `db.query` and uses
+--     `take_errors()` (all-or-nothing), so one stranded row fails every connect.
+-- Reported by the hearth federation (Soren/Geoff) on a ~5,283-row graph; the
+-- interim workaround was MX_SKIP_SCHEMA=1.
+--
+-- WHAT DOESN'T WORK (do not relitigate — all tried, all fail):
+--   * DEFAULT [] / DEFAULT 0 — fires only on create, never backfills.
+--   * backfill placed AFTER the strict DEFINE — the backfill is the write that
+--     dies.
+--   * backfill placed BEFORE the DEFINE on a SCHEMAFULL table — `SET` of an
+--     undefined field is SILENTLY DROPPED, so the row is never conformed.
+--   * option<>-first then tighten with `IF NOT EXISTS` — the tighten is SKIPPED
+--     because the field already exists, leaving it loose forever.
+--
+-- THE WORKING SEQUENCE (option → backfill → OVERWRITE-tighten):
+--   1. Each required, legacy-added field is LOOSENED to `option<...>` at its
+--      site above — the full set is triggers, wake_phrases, chunk_count, format,
+--      resonance, activation_count, decay_rate (every REQUIRED knowledge field
+--      that the read path coalesces in knowledge_select_fields(), i.e. every one
+--      that can be NONE on a legacy row) — with `DEFINE FIELD OVERWRITE`:
+--      OVERWRITE, not IF NOT EXISTS, because on an upgrade the field already
+--      exists as the strict type and IF NOT EXISTS would skip, leaving it
+--      strict. Loosening lets a write touch the row while the field is NONE.
+--   2. Backfill ALL of them here, while every one is still loose. Because all
+--      seven are option<> at this point, these UPDATEs pass whole-record
+--      validation even though the others have not been set yet on that row.
+--      ORDERING INVARIANT: every strand-hazard field is loosened (step 1, above
+--      the SEED DATA) before ANY write touches a knowledge row — the seed
+--      UPSERTs write only lookup tables, and the first knowledge-row write is
+--      the backfill block here, by which point all seven are loose.
+--   3. THEN tighten each back to its strict type with `DEFINE FIELD OVERWRITE`
+--      (NOT `IF NOT EXISTS`, which would skip). After the backfill no row holds
+--      NONE, so the strict type — enforced on the next write — is satisfied.
+--   4. Define `triggers`' element index last, once `triggers` is strict again.
+--
 -- This file is replayed on EVERY connection (embedded AND network — see
--- connection.rs apply_schema) and on every `mx migrate`. The DEFINE statements
--- above are idempotent via `IF NOT EXISTS`; the statements below must be
--- idempotent too.
+-- connection.rs apply_schema) and on every `mx migrate`. IDEMPOTENCY: the
+-- `WHERE <f> IS NONE` backfills are no-ops on a healthy graph (nothing is NONE),
+-- and `DEFINE FIELD OVERWRITE` re-applies the same definition cleanly. A second
+-- full apply succeeds and changes nothing.
 --
 -- THE RULE (read this before adding a required field)
 -- ---------------------------------------------------
--- Whenever you add a new REQUIRED field to an existing table, add a PAIRED
--- backfill statement here. Each statement MUST be a no-op once applied —
--- always guard with `WHERE <field> IS NONE` so re-running over already-fixed
--- rows changes nothing. Never make a field `option<>` just to dodge this;
--- backfill is the correct fix because downstream code assumes presence.
--- If the backfill COMPUTES a value (not a constant), add a test that exercises
--- the non-empty case — assert the computed value matches the real count, not
--- just that the statement runs. Issue #352 is the cautionary tale: a chunk_count
--- backfill shipped relying on a non-obvious SurrealDB sub-select quirk with only
--- a throwaway probe; the permanent test (test_backfill_chunk_count_* in
--- src/surreal_db/tests.rs) now guards it.
+-- Whenever you add a new REQUIRED (non-`option<>`) field to an existing table,
+-- DO NOT just write `DEFINE FIELD ... TYPE <strict> DEFAULT <d>` above. Use the
+-- three-step cold-upgrade pattern: `DEFINE FIELD OVERWRITE` the field as
+-- `option<>` at its site (OVERWRITE so an upgrade from a strict prior version
+-- actually loosens), then add a `WHERE <field> IS NONE` backfill in THIS block,
+-- then a paired `DEFINE FIELD OVERWRITE ... TYPE <strict> DEFAULT <d>` tighten
+-- here. Never leave a field permanently `option<>` just to dodge this —
+-- downstream code assumes presence; backfill + tighten is the correct fix. If
+-- the backfill COMPUTES a value (not a constant), add a test that exercises the
+-- non-empty case — assert the computed value matches the real count, not just
+-- that the statement runs. Issue #352 is the cautionary tale: a chunk_count backfill
+-- shipped relying on a non-obvious SurrealDB sub-select quirk with only a
+-- throwaway probe; the permanent test (test_backfill_chunk_count_* in
+-- src/surreal_db/tests.rs) now guards it. Issue #360 is the second cautionary
+-- tale: the end-to-end apply_schema replay test (test_cold_upgrade_* in the
+-- same file) now guards the ordering itself.
+
+-- STEP 2 — backfill every legacy-added required field while all are still
+-- option<> (so each UPDATE passes whole-record validation regardless of the
+-- others still being NONE on the same row).
 
 -- Issues #72/#73: migrate single wake_phrase to wake_phrases array.
 -- Guard: only rows where wake_phrases was never set.
 UPDATE knowledge SET wake_phrases = IF wake_phrase != NONE THEN [wake_phrase] ELSE [] END
 WHERE wake_phrases IS NONE;
 
+-- Issue #246: triggers has no legacy value to recover — default empty.
+UPDATE knowledge SET triggers = [] WHERE triggers IS NONE;
+
 -- Issue #122: backfill format field for existing entries.
 UPDATE knowledge SET format = 'markdown' WHERE format IS NONE;
 
+-- Resonance cascade fields: legacy rows that predate the wake-up cascade hold
+-- NONE for these required ints/float. Backfill to their DEFAULTs while loose.
+-- (Same #360 hazard as the four above — see the field-site comment.)
+UPDATE knowledge SET resonance = 0 WHERE resonance IS NONE;
+UPDATE knowledge SET activation_count = 0 WHERE activation_count IS NONE;
+UPDATE knowledge SET decay_rate = 0.0 WHERE decay_rate IS NONE;
+
 -- Issue #352: backfill chunk_count for entries that predate chunking (Issue #346).
--- chunk_count is `int DEFAULT 0` (required); 340/368 rows predate it and are
--- stranded with NONE — broken on next write.
+-- chunk_count is `int DEFAULT 0` (required); rows that predate it are stranded
+-- with NONE — broken on next write.
 --
 -- The correct value is the actual number of embedding_chunk rows for the entry.
 -- ID MISMATCH: a knowledge record id is `knowledge:<hex>`, but
@@ -482,3 +599,30 @@ UPDATE knowledge SET chunk_count = array::len(
     WHERE entry_id = string::concat('kn-', meta::id($parent.id))
 )
 WHERE chunk_count IS NONE;
+
+-- STEP 3 — tighten each field back to its strict required type now that no row
+-- holds NONE. MUST be OVERWRITE: IF NOT EXISTS would silently skip and leave
+-- the field loose (option<>) forever (Issue #360).
+DEFINE FIELD OVERWRITE wake_phrases ON knowledge TYPE array<string> DEFAULT [];
+DEFINE FIELD OVERWRITE triggers ON knowledge TYPE array<string> DEFAULT [];
+DEFINE FIELD OVERWRITE format ON knowledge TYPE string DEFAULT 'markdown'
+  ASSERT $value IN ['markdown', 'json', 'stele:markdown', 'stele:ascii', 'stele:light', 'stele:full'];
+DEFINE FIELD OVERWRITE chunk_count ON knowledge TYPE int DEFAULT 0;
+-- Resonance cascade fields (legacy-added, Issue #360 cohort): tighten back to
+-- their strict required types now that no row holds NONE.
+DEFINE FIELD OVERWRITE resonance ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE activation_count ON knowledge TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE decay_rate ON knowledge TYPE float DEFAULT 0.0;
+
+-- STEP 4 — define the triggers element index now that `triggers` is strict
+-- `array<string>` again.
+-- INDEX HONESTY (Issue #246, PR3): this is a per-ELEMENT index over the array
+-- contents. It accelerates equality/CONTAINS lookups (e.g.
+-- `WHERE triggers CONTAINS 'brad'`), NOT the `array::len(triggers ?? []) > 0`
+-- non-emptiness prefilter that `mx memory trigger-check` currently uses (that
+-- resolves via full scan regardless). It is kept deliberately: the actual
+-- matching is word-boundary + stemmed and happens in Rust (it cannot be pushed
+-- into a SurrealDB index), but a future hook-side fast path / "which memory owns
+-- trigger X" lookup will want CONTAINS, which this index serves. If those never
+-- materialize, this index is a candidate for removal.
+DEFINE INDEX IF NOT EXISTS knowledge_triggers ON knowledge FIELDS triggers;
