@@ -499,6 +499,47 @@ impl SurrealDatabase {
         Self::connect(temp_dir.path(), &config)
     }
 
+    /// Test helper - open a *file-backed* store at an explicit `path`,
+    /// guaranteed local regardless of ambient `MX_SURREAL_*` env.
+    ///
+    /// This is the safe replacement for `SurrealDatabase::open(<tempdir>)`
+    /// in tests. `open()` reads `SurrealConfig::from_env()`, so when the
+    /// surrounding shell has `MX_SURREAL_MODE=network` (as a live/CI shell
+    /// often does) the explicit `path` is IGNORED and the connection lands
+    /// on the *live* network endpoint — which is exactly how a dim-4 test
+    /// fixture once leaked into the production graph and poisoned every
+    /// cosine scan.
+    ///
+    /// Here we force `SurrealConfig::default()` (always `Embedded`) and
+    /// assert the resolved endpoint is the local file path before handing
+    /// back the handle, so a future regression fails loudly instead of
+    /// silently writing to prod. Unlike `open_in_memory`, this persists to
+    /// disk at `path`, so a test can drop the handle and reopen the same
+    /// store to prove durability.
+    #[cfg(test)]
+    pub fn open_file_backed_for_test<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let config = SurrealConfig::default(); // always Embedded, never network
+
+        // Loudly refuse to proceed if anything ever flips this to a network
+        // endpoint — a test must NEVER be able to reach the live DB.
+        assert!(
+            !config.is_network(),
+            "open_file_backed_for_test must use an embedded (file-backed) store, \
+             never a network endpoint — refusing to risk a write to the live DB"
+        );
+        // The resolved endpoint is the explicit local path we were handed,
+        // not an env-configured one. Make that contract explicit.
+        assert_eq!(
+            config.mode,
+            SurrealMode::Embedded,
+            "test store must be file-backed at {}",
+            path.display()
+        );
+
+        Self::connect(path, &config)
+    }
+
     /// Apply the embedded schema to the connected database.
     ///
     /// All statements use `IF NOT EXISTS`, so this is idempotent and safe

@@ -1304,7 +1304,15 @@ mod auto_anchor_tests {
         // upsert_knowledge — minus the auto_anchor step the flag removes.
         //
         // An in-memory store cannot prove this (it dies with the handle), so
-        // we use SurrealDatabase::open against a tempdir path and reopen it.
+        // we use a file-backed store against a tempdir path and reopen it.
+        //
+        // CRITICAL: we go through `open_file_backed_for_test`, NOT the plain
+        // `SurrealDatabase::open`. `open` reads `MX_SURREAL_*` env, and if the
+        // ambient shell sets `MX_SURREAL_MODE=network` the explicit tempdir
+        // path is ignored and the write lands on the LIVE database — which is
+        // exactly how a dim-4 fixture once poisoned every production cosine
+        // scan. `open_file_backed_for_test` forces an embedded store at the
+        // tempdir and asserts the endpoint is local before any write.
         clear_agent_env();
         let prev = std::env::var("MX_SKIP_WRITE_ANCHOR").ok();
         unsafe { std::env::set_var("MX_SKIP_WRITE_ANCHOR", "1") };
@@ -1321,14 +1329,14 @@ mod auto_anchor_tests {
 
         // Write phase: open, upsert, drop the handle (simulating process exit).
         {
-            let db = SurrealDatabase::open(&db_path).unwrap();
+            let db = SurrealDatabase::open_file_backed_for_test(&db_path).unwrap();
             let entry =
                 entry_with_embedding("kn-skip-durable", unit_query(), "public", None, vec![]);
             db.upsert_knowledge(&entry).unwrap();
         }
 
         // Reopen phase: a brand-new connection to the same on-disk store.
-        let reopened = SurrealDatabase::open(&db_path).unwrap();
+        let reopened = SurrealDatabase::open_file_backed_for_test(&db_path).unwrap();
         let ctx = AgentContext::public_only();
         let got = reopened.get("kn-skip-durable", &ctx).unwrap();
 

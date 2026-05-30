@@ -903,11 +903,21 @@ impl SurrealDatabase {
         let resonance_clause = Self::build_resonance_filter(filter);
         let category_clause = Self::build_category_filter(filter);
 
+        // Dimension guard ($dim, bound below): SurrealDB's
+        // vector::similarity::cosine ABORTS THE ENTIRE SCAN when it hits any
+        // row whose embedding dimension differs from the query vector. One
+        // off-dim row (e.g. a leaked dim-4 test fixture) therefore breaks ALL
+        // search. Skip such rows defensively by requiring the stored embedding
+        // length to match the query length BEFORE the cosine is scored. Real
+        // rows are 768 and the query is 768, so normal search is unaffected;
+        // only mismatched rows are filtered out instead of aborting the scan.
+        let query_dim = query_embedding.len();
+
         // Phase 1a: Search unchunked entries (chunk_count <= 0 or absent)
         let unchunked_sql = format!(
             "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM knowledge
-            WHERE embedding IS NOT NONE AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {}
+            WHERE embedding IS NOT NONE AND array::len(embedding) = $dim AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {}
             ORDER BY score DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
@@ -916,10 +926,12 @@ impl SurrealDatabase {
             category_clause
         );
 
-        // Phase 1b: Search chunks (no visibility filter — applied after dedup)
+        // Phase 1b: Search chunks (no visibility filter — applied after dedup).
+        // Same dimension guard so an off-dim chunk embedding can't abort the scan.
         let chunk_sql =
             "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM embedding_chunk
+            WHERE array::len(embedding) = $dim
             ORDER BY score DESC
             LIMIT $chunk_limit";
 
@@ -930,6 +942,7 @@ impl SurrealDatabase {
                 .query(&unchunked_sql)
                 .query(chunk_sql)
                 .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("dim", query_dim))
                 .bind(("limit", limit))
                 .bind(("chunk_limit", chunk_limit));
             if let Some(agent) = current_agent.clone() {
@@ -1062,13 +1075,19 @@ impl SurrealDatabase {
     ) -> Result<Vec<(KnowledgeEntry, f32)>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
+        // Dimension guard ($dim): see semantic_search_knowledge_async — a single
+        // off-dim row otherwise aborts the whole cosine scan, breaking auto_anchor
+        // (#362) entirely. Require the stored embedding length to match the query
+        // length before scoring; real 768-dim rows pass, mismatches are skipped.
+        let query_dim = query_embedding.len();
+
         // Single-phase: score every embedded knowledge row on its entry-level
         // vector, bounded to the top `limit` by score. Params are bound, never
         // interpolated.
         let sql = format!(
             "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM knowledge
-            WHERE embedding IS NOT NONE {}
+            WHERE embedding IS NOT NONE AND array::len(embedding) = $dim {}
             ORDER BY score DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
@@ -1079,6 +1098,7 @@ impl SurrealDatabase {
             let mut query_builder = db
                 .query(&sql)
                 .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("dim", query_dim))
                 .bind(("limit", limit));
             if let Some(agent) = current_agent.clone() {
                 query_builder = query_builder.bind(("current_agent", agent));
@@ -1327,14 +1347,21 @@ impl SurrealDatabase {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
+        // Dimension guard ($dim): see semantic_search_knowledge_async — a single
+        // off-dim chunk embedding otherwise aborts the entire cosine scan. Require
+        // the stored embedding length to match the query length before scoring.
+        let query_dim = query_embedding.len();
+
         let sql = "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM embedding_chunk
+            WHERE array::len(embedding) = $dim
             ORDER BY score DESC
             LIMIT $limit";
 
         let mut response = with_db!(self, db, {
             db.query(sql)
                 .bind(("query_vec", query_embedding.to_vec()))
+                .bind(("dim", query_dim))
                 .bind(("limit", limit))
                 .await
                 .context("Failed to search embedding chunks")
