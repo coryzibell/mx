@@ -1158,8 +1158,7 @@ impl SurrealDatabase {
                         count() AS cnt
                     FROM knowledge
                     WHERE created_at > time::now() - duration::from::days(56)
-                    GROUP BY week_bucket
-                    ORDER BY week_bucket",
+                    GROUP BY week_bucket",
                 )
                 .await
                 .context("Failed to query growth sparkline")
