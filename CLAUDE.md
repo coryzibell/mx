@@ -11,5 +11,6 @@ The `--mine` flag scopes queries to the calling agent (`MX_CURRENT_AGENT`).
 
 ## Maintenance Rule
 
-If you change behavior of existing commands, note it in the CHANGELOG and
-verify companion-facing usage in `~/.soren/config/agents/` still holds.
+**Before working in this directory, read the runbook.** It has architecture decisions, known gotchas, and context you need.
+
+If you change code here, update the runbook to match. The runbook is only useful if it matches reality.
