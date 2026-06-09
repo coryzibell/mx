@@ -141,7 +141,13 @@ mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
 mx kv get decisions --id kv-A3fB              # look up by entry ID
 
-# Auto-create a key in the schema and push in one step
+# Define, list, edit, and remove keys with the schema subcommands
+mx kv schema add puns --type history --max-entries 500
+mx kv schema list                             # (replaces 'kv keys')
+mx kv schema update puns --description "the good ones"
+mx kv schema drop puns --force                # removes definition + data
+
+# Auto-create a key in the schema and push in one step (inline shortcut)
 mx kv push puns "the joke" --create history
 mx kv push ideas "wild thought" --create list --max-entries 500
 
@@ -171,7 +177,7 @@ mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
 # Rename a key (preserves all entries and data)
-mx kv rename old_decisions archived_decisions
+mx kv schema update old_decisions --name archived_decisions
 
 # JSON output for scripting and jq piping
 mx kv last projects --count 5 --json | jq '.[].data.status'
