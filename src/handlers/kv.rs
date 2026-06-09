@@ -4,8 +4,11 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::cli::{CreateType, DumpFormat, KvCommands};
-use crate::kv::{self, IdRef, KvError, KvStore, resolve_time_range};
+use crate::cli::{CreateType, DumpFormat, KvCommands, KvSchemaCommands, SchemaType};
+use crate::kv::{
+    self, DataFieldDef, DataFieldType, IdRef, KeyDef, KvError, KvStore, ValueType,
+    resolve_time_range,
+};
 
 /// Map a KvError to the appropriate exit code.
 fn exit_code_for(err: &KvError) -> Option<i32> {
@@ -1182,23 +1185,236 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Rename { old_key, new_key } => match store.rename_key(&old_key, &new_key) {
-            Ok(()) => {
-                println!("Renamed {} to {}", old_key, new_key);
-                Ok(kv::EXIT_OK)
-            }
-            Err(e) => handle_kv_err(e),
-        },
+        KvCommands::Rename { old_key, new_key } => {
+            eprintln!(
+                "note: 'mx kv rename' is deprecated; use 'mx kv schema update {} --name {}'",
+                old_key, new_key
+            );
+            rename_key_handler(&mut store, &old_key, &new_key)
+        }
 
         KvCommands::Keys => {
-            let keys = store.keys();
-            for (name, vtype, desc) in &keys {
-                match desc {
-                    Some(d) => println!("{:30} {:10} {}", name, vtype, d),
-                    None => println!("{:30} {:10}", name, vtype),
+            eprintln!("note: 'mx kv keys' is deprecated; use 'mx kv schema list'");
+            schema_list_handler(&store);
+            Ok(kv::EXIT_OK)
+        }
+
+        KvCommands::Schema { command } => handle_kv_schema(&mut store, command),
+    }
+}
+
+/// Print the schema key listing (shared by `schema list` and the deprecated
+/// `kv keys` alias). Output on stdout is byte-identical between the two.
+fn schema_list_handler(store: &KvStore) {
+    for (name, vtype, desc) in &store.keys() {
+        match desc {
+            Some(d) => println!("{:30} {:10} {}", name, vtype, d),
+            None => println!("{:30} {:10}", name, vtype),
+        }
+    }
+}
+
+/// Rename a key (shared by `schema update --name` and the deprecated
+/// top-level `kv rename`). Both route through `KvStore::rename_key`.
+fn rename_key_handler(store: &mut KvStore, old_key: &str, new_key: &str) -> Result<i32> {
+    match store.rename_key(old_key, new_key) {
+        Ok(()) => {
+            println!("Renamed {} to {}", old_key, new_key);
+            Ok(kv::EXIT_OK)
+        }
+        Err(e) => handle_kv_err(e),
+    }
+}
+
+/// Parse a `--data name:type[:required]` field definition spec.
+fn parse_data_field_spec(spec: &str) -> Result<(String, DataFieldDef), String> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(format!(
+            "invalid --data spec '{}': expected name:type[:required]",
+            spec
+        ));
+    }
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(format!("invalid --data spec '{}': empty field name", spec));
+    }
+    let field_type = match parts[1].trim().to_lowercase().as_str() {
+        "string" => DataFieldType::String,
+        "number" => DataFieldType::Number,
+        "boolean" => DataFieldType::Boolean,
+        "array" => DataFieldType::Array,
+        "object" => DataFieldType::Object,
+        other => {
+            return Err(format!(
+                "invalid --data type '{}': expected string|number|boolean|array|object",
+                other
+            ));
+        }
+    };
+    let required = match parts.get(2) {
+        None => false,
+        Some(r) => match r.trim().to_lowercase().as_str() {
+            "required" | "true" => true,
+            "optional" | "false" | "" => false,
+            other => {
+                return Err(format!(
+                    "invalid --data required flag '{}': expected 'required' or 'optional'",
+                    other
+                ));
+            }
+        },
+    };
+    Ok((
+        name.to_string(),
+        DataFieldDef {
+            field_type,
+            required,
+            default: None,
+        },
+    ))
+}
+
+fn handle_kv_schema(store: &mut KvStore, command: KvSchemaCommands) -> Result<i32> {
+    match command {
+        KvSchemaCommands::List => {
+            schema_list_handler(store);
+            Ok(kv::EXIT_OK)
+        }
+
+        KvSchemaCommands::Add {
+            key,
+            r#type,
+            max_entries,
+            default,
+            min,
+            max,
+            description,
+            fields,
+            data,
+        } => {
+            let value_type = match r#type {
+                SchemaType::Counter => ValueType::Counter,
+                SchemaType::History => ValueType::History,
+                SchemaType::State => ValueType::State,
+                SchemaType::String => ValueType::String,
+                SchemaType::List => ValueType::List,
+            };
+
+            // Parse typed --data field defs.
+            let mut data_defs = std::collections::BTreeMap::new();
+            for spec in &data {
+                match parse_data_field_spec(spec) {
+                    Ok((name, def)) => {
+                        data_defs.insert(name, def);
+                    }
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
                 }
             }
-            Ok(kv::EXIT_OK)
+
+            let def = KeyDef {
+                value_type,
+                min,
+                max,
+                default,
+                max_entries,
+                description,
+                fields: if fields.is_empty() { None } else { Some(fields) },
+                data: if data_defs.is_empty() {
+                    None
+                } else {
+                    Some(data_defs)
+                },
+            };
+
+            match store.add_key_def(&key, def) {
+                Ok(()) => {
+                    println!("Added {} ({})", key, value_type);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
+        KvSchemaCommands::Drop { key, force } => {
+            // Unregistered key -> KeyNotFound (exit 1), consistent with every
+            // other verb. (Issue prose says "exit 3" but the canonical KV
+            // exit-code table maps KeyNotFound -> 1; see PR notes.)
+            if !store.schema.keys.contains_key(&key) {
+                return handle_kv_err(KvError::KeyNotFound(key.clone()));
+            }
+
+            // Non-empty keys require --force; silent for empty/never-written.
+            if store.key_has_content(&key) && !force {
+                eprintln!(
+                    "Error: key '{}' has stored entries; pass --force to drop it and its data",
+                    key
+                );
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            match store.drop_key(&key) {
+                Ok(()) => {
+                    println!("Dropped {}", key);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
+        KvSchemaCommands::Update {
+            key,
+            name,
+            description,
+            max_entries,
+            min,
+            max,
+            add_field,
+            type_change,
+        } => {
+            // Forbidden: type changes route to `kv migrate`, no override.
+            if type_change.is_some() {
+                eprintln!(
+                    "Error: changing a key's type is not supported by 'schema update'. \
+                     Type changes are out of scope; use 'mx kv migrate' to reshape data."
+                );
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // --name delegates to the shared rename path.
+            if let Some(new_name) = name {
+                return rename_key_handler(store, &key, &new_name);
+            }
+
+            // Parse --add-field if present.
+            let add_field_def = match add_field {
+                Some(ref spec) => match parse_data_field_spec(spec) {
+                    Ok(parsed) => Some(parsed),
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                },
+                None => None,
+            };
+
+            match store.update_key_meta(
+                &key,
+                description,
+                max_entries,
+                min,
+                max,
+                add_field_def,
+            ) {
+                Ok(()) => {
+                    println!("Updated {}", key);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
         }
     }
 }
@@ -1210,6 +1426,52 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- parse_data_field_spec (schema add/update --data, --add-field) --
+
+    #[test]
+    fn parse_data_field_name_type() {
+        let (name, def) = parse_data_field_spec("note:string").unwrap();
+        assert_eq!(name, "note");
+        assert_eq!(def.field_type, DataFieldType::String);
+        assert!(!def.required);
+    }
+
+    #[test]
+    fn parse_data_field_required() {
+        let (name, def) = parse_data_field_spec("score:number:required").unwrap();
+        assert_eq!(name, "score");
+        assert_eq!(def.field_type, DataFieldType::Number);
+        assert!(def.required);
+    }
+
+    #[test]
+    fn parse_data_field_all_types() {
+        for (spec, ty) in [
+            ("a:string", DataFieldType::String),
+            ("b:number", DataFieldType::Number),
+            ("c:boolean", DataFieldType::Boolean),
+            ("d:array", DataFieldType::Array),
+            ("e:object", DataFieldType::Object),
+        ] {
+            assert_eq!(parse_data_field_spec(spec).unwrap().1.field_type, ty);
+        }
+    }
+
+    #[test]
+    fn parse_data_field_rejects_bad_type() {
+        assert!(parse_data_field_spec("x:notatype").is_err());
+    }
+
+    #[test]
+    fn parse_data_field_rejects_missing_type() {
+        assert!(parse_data_field_spec("justaname").is_err());
+    }
+
+    #[test]
+    fn parse_data_field_rejects_empty_name() {
+        assert!(parse_data_field_spec(":string").is_err());
+    }
 
     // -- parse_id_spec --
 
