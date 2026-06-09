@@ -1322,7 +1322,11 @@ fn handle_kv_schema(store: &mut KvStore, command: KvSchemaCommands) -> Result<i3
                 default,
                 max_entries,
                 description,
-                fields: if fields.is_empty() { None } else { Some(fields) },
+                fields: if fields.is_empty() {
+                    None
+                } else {
+                    Some(fields)
+                },
                 data: if data_defs.is_empty() {
                     None
                 } else {
@@ -1401,14 +1405,7 @@ fn handle_kv_schema(store: &mut KvStore, command: KvSchemaCommands) -> Result<i3
                 None => None,
             };
 
-            match store.update_key_meta(
-                &key,
-                description,
-                max_entries,
-                min,
-                max,
-                add_field_def,
-            ) {
+            match store.update_key_meta(&key, description, max_entries, min, max, add_field_def) {
                 Ok(()) => {
                     println!("Updated {}", key);
                     Ok(kv::EXIT_OK)

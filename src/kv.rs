@@ -1228,9 +1228,7 @@ impl KvStore {
             Some(DataValue::String { value }) => !value.is_empty(),
             Some(DataValue::History { entries, .. }) => !entries.is_empty(),
             Some(DataValue::List { items, .. }) => !items.is_empty(),
-            Some(DataValue::State { fields, .. }) => {
-                fields.values().any(|v| !v.is_empty())
-            }
+            Some(DataValue::State { fields, .. }) => fields.values().any(|v| !v.is_empty()),
         }
     }
 
@@ -8810,7 +8808,10 @@ count = { type = "number" }
 
         // Persisted: reload from disk and confirm.
         let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
-        assert_eq!(reloaded.schema.keys["new_counter"].value_type, ValueType::Counter);
+        assert_eq!(
+            reloaded.schema.keys["new_counter"].value_type,
+            ValueType::Counter
+        );
         assert_eq!(reloaded.schema.keys["new_list"].value_type, ValueType::List);
     }
 
