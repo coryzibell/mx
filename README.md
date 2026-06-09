@@ -26,7 +26,12 @@ Requires Rust 2024 edition. The binary is named `mx`.
 
 `mx commit` wraps `git commit` but encodes the message using [base-d](https://crates.io/crates/base-d). The commit title is hashed and the body is compressed, each encoded through a randomly selected dictionary. The result looks like hieroglyphs in `git log` but decodes cleanly with `mx log`.
 
+Like plain `git commit`, `mx commit` does **not** stage changes on its own — it only commits what is already staged, and errors with `No staged changes to commit` if nothing is staged. Pass `-a` / `--all` to stage all changes (tracked and untracked) before committing.
+
 ```bash
+# Commit only what is already staged (no auto-staging)
+mx commit "fix already-staged typo"
+
 # Stage all and commit with an encoded message
 mx commit "fix session export crash on empty JSONL" -a
 
