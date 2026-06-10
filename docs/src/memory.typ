@@ -16,8 +16,8 @@ can be linked via typed relationships, anchored to each other by embedding
 similarity, and surfaced through keyword or semantic search.
 
 #note[The database schema is applied automatically on every connection, in both
-embedded and network mode. All schema statements are idempotent (`IF NOT EXISTS`
-/ `UPSERT`), so no manual setup is required. Set `MX_SKIP_SCHEMA=1` to skip
+embedded and network mode. All schema statements are idempotent
+(`IF NOT EXISTS` / `UPSERT`), so no manual setup is required. Set `MX_SKIP_SCHEMA=1` to skip
 auto-apply in environments with restricted DB permissions. Run `mx migrate` to
 explicitly apply the schema (it ignores `MX_SKIP_SCHEMA`).]
 
