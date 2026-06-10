@@ -1118,13 +1118,16 @@ impl KvStore {
         Ok(())
     }
 
-    /// Add a new `history`/`list` key to the schema file (the `push --create`
-    /// inline shortcut path) by appending a `[keys.<name>]` block to the TOML
-    /// file (preserving existing content exactly) and re-parsing.
+    /// Add a new `history`/`list` key to the schema file by appending a
+    /// `[keys.<name>]` block to the TOML file (preserving existing content
+    /// exactly) and re-parsing.
     ///
-    /// `schema add` uses the richer [`KvStore::add_key_def`] path instead;
-    /// this method is retained so `push --create` keeps its append-based,
-    /// comment-preserving behavior.
+    /// NOTE (C1, #363): `push --create` no longer uses this method. To satisfy
+    /// the acceptance criterion that `push --create` route through the SAME
+    /// creation path as `schema add`, both now go through
+    /// [`KvStore::add_key_def`]. This append-based, comment-preserving variant
+    /// is retained as a standalone engine helper (and for its existing tests)
+    /// but is no longer wired to any CLI verb.
     pub fn add_key_to_schema(
         &mut self,
         key: &str,
@@ -9053,5 +9056,129 @@ count = { type = "number" }
             .update_key_meta("ghost", Some("x".to_string()), None, None, None, None)
             .unwrap_err();
         assert!(matches!(err, KvError::KeyNotFound(ref k) if k == "ghost"));
+    }
+
+    // -- W2: rollback-on-failure (drop / update / rename) --
+    //
+    // The transaction pattern persists data-first, then schema, and rolls back
+    // in-memory mutations if a write fails. To force a write failure portably
+    // we redirect the relevant path so that `create_dir_all(parent)` (the first
+    // step of both `save` and `save_schema`) fails: we point the path *inside*
+    // a regular file, so its "parent" is a file, not a directory. This makes
+    // the write deterministically error without relying on permission bits.
+
+    /// Redirect `path` to live under a freshly-created blocker *file*, so any
+    /// `create_dir_all(parent)` against it fails. Returns the doomed path.
+    fn unwritable_under_file(dir: &std::path::Path, name: &str) -> PathBuf {
+        let blocker = dir.join("blocker_file");
+        fs::write(&blocker, b"not a directory").unwrap();
+        // parent of the returned path is `blocker_file`, which is a file.
+        blocker.join(name)
+    }
+
+    #[test]
+    fn drop_key_rollback_on_data_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store.save().unwrap();
+
+        // Snapshot good on-disk state for the later assertion.
+        let good_data_path = store.data_path.clone();
+        let good_schema_path = store.schema_path.clone();
+
+        // Force the data write (the first persist in drop_key) to fail.
+        store.data_path = unwritable_under_file(dir.path(), "data.json");
+
+        let err = store.drop_key("flavor_history").unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory state fully rolled back: schema def and data both restored.
+        assert!(store.schema.keys.contains_key("flavor_history"));
+        assert!(store.data.entries.contains_key("flavor_history"));
+        match store.data.entries.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].value, "matcha");
+            }
+            other => panic!("expected History, got {other:?}"),
+        }
+
+        // On-disk state untouched: the good files still hold the key.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        assert!(reloaded.schema.keys.contains_key("flavor_history"));
+        assert!(reloaded.data.entries.contains_key("flavor_history"));
+    }
+
+    #[test]
+    fn update_key_meta_rollback_on_schema_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        let good_schema_path = store.schema_path.clone();
+        let good_data_path = store.data_path.clone();
+
+        // Force the schema write (the only persist in update_key_meta) to fail.
+        store.schema_path = unwritable_under_file(dir.path(), "schema.toml");
+
+        let err = store
+            .update_key_meta(
+                "capped",
+                Some("changed".to_string()),
+                None,
+                Some(-99),
+                Some(99),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory def fully restored to its original values.
+        let kd = &store.schema.keys["capped"];
+        assert_eq!(kd.description, None);
+        assert_eq!(kd.min, Some(0));
+        assert_eq!(kd.max, Some(100));
+
+        // On-disk schema untouched.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        let rkd = &reloaded.schema.keys["capped"];
+        assert_eq!(rkd.description, None);
+        assert_eq!(rkd.min, Some(0));
+        assert_eq!(rkd.max, Some(100));
+    }
+
+    #[test]
+    fn rename_key_rollback_on_data_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store.save().unwrap();
+
+        let good_schema_path = store.schema_path.clone();
+        let good_data_path = store.data_path.clone();
+
+        // Force the data write (first persist in rename_key) to fail.
+        store.data_path = unwritable_under_file(dir.path(), "data.json");
+
+        let err = store
+            .rename_key("flavor_history", "tea_history")
+            .unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory state rolled back: old key present, new key absent.
+        assert!(store.schema.keys.contains_key("flavor_history"));
+        assert!(!store.schema.keys.contains_key("tea_history"));
+        assert!(store.data.entries.contains_key("flavor_history"));
+        assert!(!store.data.entries.contains_key("tea_history"));
+
+        // On-disk state untouched.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        assert!(reloaded.schema.keys.contains_key("flavor_history"));
+        assert!(!reloaded.schema.keys.contains_key("tea_history"));
     }
 }

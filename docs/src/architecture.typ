@@ -766,18 +766,28 @@ Schema lifecycle operations are exposed at the CLI layer under the
 `data_path`). The legacy top-level `kv keys` and `kv rename` verbs survive as
 deprecated aliases.
 
-The `add_key_to_schema()` method validates the key name (alphanumeric,
-underscores, hyphens; max 128 chars; no dots), appends a `[keys.<name>]` block
-to the TOML file without reformatting existing content, and re-parses the file
-to update the in-memory `Schema`. It handles `history`/`list` only and backs
-the `push --create <type>` inline shortcut. If the key already exists, the
-method is a no-op.
-
-The `add_key_def()` method backs `kv schema add` and is the general path: it
+The `add_key_def()` method is the single creation path, shared by both
+`kv schema add` and the `push --create <type>` inline shortcut. It validates
+the key name (alphanumeric, underscores, hyphens; max 128 chars; no dots),
 accepts a fully-formed `KeyDef` so all five `ValueType`s can be declared with
 their type-appropriate options, inserts it in-memory, and persists via
 `save_schema()` (which round-trips the TOML, dropping comments). Duplicate or
-invalid names error.
+invalid names error. `push --create` constructs a history/list `KeyDef` and
+calls the same method -- its user-facing surface stays limited to those two
+types, but the engine path is unified (#363 acceptance criterion).
+
+Type-appropriate options are enforced at the CLI layer for both `schema add`
+and `schema update`: a `validate_type_options` gate rejects options that do
+not apply to the declared/existing `ValueType` (e.g. `--min` on a history key,
+`--add-field` on a counter) with exit code 4, before any persist. A no-op
+`schema update` (no flags set) is likewise rejected rather than rewriting the
+schema file.
+
+A legacy `add_key_to_schema()` method still exists as a standalone engine
+helper -- it appends a `[keys.<name>]` block to the TOML without reformatting,
+preserving comments, for `history`/`list` only. It is no longer wired to any
+CLI verb (it formerly backed `push --create`); it is retained for its existing
+tests and as an append-based alternative.
 
 The `drop_key()` method backs `kv schema drop`: it removes both the schema
 definition and the stored data entry. It follows the `rename_key` transaction

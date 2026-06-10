@@ -92,14 +92,19 @@ Schema fields:
 
 Keys can be added to the schema on the fly with `mx kv push --create`.
 When a key does not exist in the schema, `--create history` or
-`--create list` appends a new `[keys.<name>]` block to the TOML file
-and reloads the in-memory schema. This avoids manual schema editing for
-simple cases. See #link(<push>)[push] for details and validation rules.
+`--create list` defines it and reloads the in-memory schema. This avoids
+manual schema editing for simple cases. See #link(<push>)[push] for
+details and validation rules.
 
 For defining keys of *any* type up front (not just `history`/`list`), and
 for removing or editing existing definitions, use the
 #link(<schema>)[`mx kv schema`] subcommands. `push --create` is an inline
-shortcut that routes through the same engine path as `schema add`.
+shortcut whose user-facing surface stays limited to `history`/`list`, but
+it routes through the *same* engine path as `schema add` (the shared
+`add_key_def` method). One consequence: like every `schema` write, the
+create rewrites the schema file by round-tripping the TOML, which drops
+comments and custom formatting. If you hand-annotate your schema, expect
+those annotations to be lost when a key is created via `--create`.
 
 === Agent keying
 
@@ -325,8 +330,10 @@ filtering (`--where` on queries). Only lists support `pop`. Only history support
 
   Key names are validated on creation: alphanumeric characters, underscores,
   and hyphens only, maximum 128 characters. Dots are rejected because they
-  conflict with TOML key quoting. The new key block is appended to the
-  schema file without reformatting existing content.],
+  conflict with TOML key quoting. Creation shares the `schema add` engine
+  path, so it persists by round-tripping the schema TOML -- comments and
+  custom formatting in the schema file are dropped, the same as any other
+  `schema` write.],
   flags: (
     ([`--data <json>`], [string], [Attach a JSON object to the entry. Must be a valid JSON object (not an array, string, or other type).]),
     ([`--memory <kn-id>`], [string], [Link this entry to a memory knowledge node (e.g. `kn-abc123`). Resolved when `--memory` is passed on read commands.]),
@@ -1009,17 +1016,23 @@ annotations to be lost on the next schema-mutating command.]
   underscores, and hyphens only; maximum 128 characters; no dots. Defining a
   key that already exists is an error.
 
+  Options are *type-appropriate*: passing an option that does not apply to the
+  declared `--type` is rejected (exit code 4) rather than silently persisted.
+  The valid pairings are: `--max-entries` (history, list); `--default`
+  (counter, string, state); `--min` / `--max` (counter); `--fields` (state);
+  `--data` (state, list). `--description` applies to every type.
+
   Only the schema file is written -- no data entry is created until the key is
   first written to.],
   flags: (
     ([`--type <type>`], [enum], [Required. One of `counter`, `history`, `state`, `string`, `list`.]),
     ([`--max-entries <n>`], [int], [Cap for history/list keys; oldest entries drop when exceeded.]),
-    ([`--default <v>`], [str], [Initial value for counter/string keys.]),
+    ([`--default <v>`], [str], [Initial value for counter/string/state keys.]),
     ([`--min <n>`], [int], [Minimum value for counters (clamped). Accepts negatives.]),
     ([`--max <n>`], [int], [Maximum value for counters (clamped). Accepts negatives.]),
-    ([`--description <text>`], [str], [Human-readable description, shown by `schema list`.]),
+    ([`--description <text>`], [str], [Human-readable description, shown by `schema list`. Applies to all types.]),
     ([`--fields <a,b,c>`], [list], [Valid field names for a state key (comma-separated or repeatable).]),
-    ([`--data <name:type[:required]>`], [str], [Typed data-field definition (repeatable). `type` is one of `string`, `number`, `boolean`, `array`, `object`.]),
+    ([`--data <name:type[:required]>`], [str], [Typed data-field definition for state/list keys (repeatable). `type` is one of `string`, `number`, `boolean`, `array`, `object`.]),
   ),
   examples: (
     "mx kv schema add builds --type counter --default 0 --min 0",
@@ -1074,16 +1087,26 @@ annotations to be lost on the next schema-mutating command.]
   (deprecated) top-level `mx kv rename`. All entries, IDs, timestamps,
   structured data, and memory links are preserved.
 
+  Options are *type-appropriate*, gated against the key's *existing* type:
+  `--max-entries` (history, list); `--min` / `--max` (counter); `--add-field`
+  (state, list). `--description` applies to any type. Passing an inapplicable
+  option is rejected (exit code 4) rather than silently persisted -- you cannot,
+  for example, bolt a data field onto a counter.
+
+  A *no-op* update (no `--name` and no metadata flags set) is rejected with a
+  notice (exit code 4) instead of needlessly rewriting the schema file -- which
+  would drop comments for no benefit.
+
   Like `schema add`/`drop`, this round-trips the schema TOML (dropping
   comments). When only metadata changes (no `--name`), only the schema file is
   written, and the in-memory mutation is rolled back if that write fails.],
   flags: (
     ([`--name <new>`], [str], [Rename the key (shares the `rename` path).]),
-    ([`--description <text>`], [str], [Replace the description; pass `""` to clear it.]),
+    ([`--description <text>`], [str], [Replace the description; pass `""` to clear it. Applies to any type.]),
     ([`--max-entries <n>`], [int], [New cap for history/list keys.]),
     ([`--min <n>`], [int], [New minimum for counters. Accepts negatives.]),
     ([`--max <n>`], [int], [New maximum for counters. Accepts negatives.]),
-    ([`--add-field <name:type>`], [str], [Add a new *optional* data field to the key.]),
+    ([`--add-field <name:type>`], [str], [Add a new *optional* data field to a state/list key.]),
   ),
   examples: (
     "mx kv schema update builds --description \"successful CI builds\"",
