@@ -1118,13 +1118,16 @@ impl KvStore {
         Ok(())
     }
 
-    /// Add a new key to the schema file and reload the in-memory schema.
+    /// Add a new `history`/`list` key to the schema file by appending a
+    /// `[keys.<name>]` block to the TOML file (preserving existing content
+    /// exactly) and re-parsing.
     ///
-    /// Appends a `[keys.<name>]` block to the TOML file (preserving existing
-    /// content exactly) and re-parses the file to update `self.schema`.
-    ///
-    /// Only `history` and `list` types are accepted -- those are the types
-    /// that support `push`.
+    /// NOTE (C1, #363): `push --create` no longer uses this method. To satisfy
+    /// the acceptance criterion that `push --create` route through the SAME
+    /// creation path as `schema add`, both now go through
+    /// [`KvStore::add_key_def`]. This append-based, comment-preserving variant
+    /// is retained as a standalone engine helper (and for its existing tests)
+    /// but is no longer wired to any CLI verb.
     pub fn add_key_to_schema(
         &mut self,
         key: &str,
@@ -1181,6 +1184,169 @@ impl KvStore {
             ))
         })?;
         self.schema = schema;
+
+        Ok(())
+    }
+
+    /// First-class key definition (`mx kv schema add`).
+    ///
+    /// Inserts a fully-formed [`KeyDef`] into the in-memory schema and
+    /// persists it via [`KvStore::save_schema`]. Unlike [`add_key_to_schema`],
+    /// this accepts any of the five [`ValueType`]s and the full set of
+    /// type-appropriate options.
+    ///
+    /// Schema round-trips through `toml = "0.8"`, which drops comments and
+    /// custom formatting -- acceptable and consistent with `save_schema`.
+    ///
+    /// Errors:
+    /// - invalid key name (`validate_key_name`)
+    /// - duplicate key -> `DataValidation`
+    pub fn add_key_def(&mut self, key: &str, def: KeyDef) -> Result<(), KvError> {
+        Self::validate_key_name(key)?;
+
+        if self.schema.keys.contains_key(key) {
+            return Err(KvError::DataValidation {
+                message: format!("Key already exists: {}", key),
+            });
+        }
+
+        self.schema.keys.insert(key.to_string(), def);
+
+        // No data is written on definition; only the schema changes.
+        self.save_schema().map_err(KvError::Other)?;
+
+        Ok(())
+    }
+
+    /// Returns true if the key has stored data entries that are non-empty.
+    ///
+    /// "Empty" means: never written (no data entry), or written but holding
+    /// only default/empty content (zero-length string, empty history/list,
+    /// or a state with no populated fields). Used by `schema drop` to decide
+    /// whether `--force` is required.
+    pub fn key_has_content(&self, key: &str) -> bool {
+        match self.data.entries.get(key) {
+            None => false,
+            Some(DataValue::Counter { value }) => *value != 0,
+            Some(DataValue::String { value }) => !value.is_empty(),
+            Some(DataValue::History { entries, .. }) => !entries.is_empty(),
+            Some(DataValue::List { items, .. }) => !items.is_empty(),
+            Some(DataValue::State { fields, .. }) => fields.values().any(|v| !v.is_empty()),
+        }
+    }
+
+    /// Drop a key entirely: remove both its schema definition and its stored
+    /// data entry (full removal, not the entry-clearing that `remove` does).
+    ///
+    /// Mirrors the [`rename_key`](KvStore::rename_key) transaction pattern:
+    /// mutate in-memory fully, persist data first (higher-value file) then
+    /// schema, and roll back the in-memory mutations if the data write fails.
+    ///
+    /// Any `--memory` (`kn-`) links the key carried are outbound pointers with
+    /// no reverse reference from the memory store, so dropping the key simply
+    /// discards them -- nothing downstream breaks.
+    ///
+    /// Errors:
+    /// - unregistered key -> `KeyNotFound`
+    pub fn drop_key(&mut self, key: &str) -> Result<(), KvError> {
+        // Key must be registered in the schema.
+        if !self.schema.keys.contains_key(key) {
+            return Err(KvError::KeyNotFound(key.to_string()));
+        }
+
+        // Mutate in-memory fully before any write.
+        let removed_def = self.schema.keys.remove(key).expect("checked above");
+        let removed_data = self.data.entries.remove(key);
+
+        // Persist data first, then schema -- matching rename_key.
+        if let Err(e) = self.save() {
+            // Roll back so the KvStore stays clean.
+            self.schema.keys.insert(key.to_string(), removed_def);
+            if let Some(data_value) = removed_data {
+                self.data.entries.insert(key.to_string(), data_value);
+            }
+            return Err(KvError::Other(e));
+        }
+
+        // Schema write -- if this fails, the data file already lacks the key
+        // while the schema still references it. Same narrow consistency gap
+        // documented on `rename_key`; both writes target the same directory.
+        self.save_schema().map_err(KvError::Other)?;
+
+        Ok(())
+    }
+
+    /// Apply safe metadata changes to an existing key's definition
+    /// (`mx kv schema update`). Scoped to non-destructive edits only.
+    ///
+    /// Supported (all optional; `None` leaves the field untouched):
+    /// - `description`: replace the description (pass `Some("")` to clear)
+    /// - `max_entries`: history/list cap
+    /// - `min` / `max`: counter clamp bounds
+    /// - `add_field`: append a new *optional* `[keys.X.data]` field def
+    ///
+    /// Type changes are intentionally **not** representable here -- they are
+    /// forbidden and routed to `kv migrate` at the CLI layer.
+    ///
+    /// Follows the [`rename_key`](KvStore::rename_key) transaction pattern:
+    /// because `update` never touches the data file, only the schema is
+    /// written, and the in-memory mutation is rolled back if that write fails.
+    ///
+    /// Errors:
+    /// - unregistered key -> `KeyNotFound`
+    /// - duplicate data field -> `DataValidation`
+    pub fn update_key_meta(
+        &mut self,
+        key: &str,
+        description: Option<String>,
+        max_entries: Option<usize>,
+        min: Option<i64>,
+        max: Option<i64>,
+        add_field: Option<(String, DataFieldDef)>,
+    ) -> Result<(), KvError> {
+        if !self.schema.keys.contains_key(key) {
+            return Err(KvError::KeyNotFound(key.to_string()));
+        }
+
+        // Snapshot for rollback.
+        let original = self.schema.keys.get(key).expect("checked above").clone();
+
+        {
+            let def = self.schema.keys.get_mut(key).expect("checked above");
+
+            if let Some(desc) = description {
+                def.description = if desc.is_empty() { None } else { Some(desc) };
+            }
+            if let Some(me) = max_entries {
+                def.max_entries = Some(me);
+            }
+            if let Some(mn) = min {
+                def.min = Some(mn);
+            }
+            if let Some(mx) = max {
+                def.max = Some(mx);
+            }
+            if let Some((field_name, field_def)) = add_field {
+                let data = def.data.get_or_insert_with(BTreeMap::new);
+                if data.contains_key(&field_name) {
+                    // Restore and bail.
+                    self.schema.keys.insert(key.to_string(), original);
+                    return Err(KvError::DataValidation {
+                        message: format!(
+                            "data field '{}' already exists on key '{}'",
+                            field_name, key
+                        ),
+                    });
+                }
+                data.insert(field_name, field_def);
+            }
+        }
+
+        // Only the schema changes; persist it, rolling back on failure.
+        if let Err(e) = self.save_schema() {
+            self.schema.keys.insert(key.to_string(), original);
+            return Err(KvError::Other(e));
+        }
 
         Ok(())
     }
@@ -8611,5 +8777,408 @@ count = { type = "number" }
             before, after,
             "Serialized data should be identical after rename"
         );
+    }
+
+    // -- add_key_def (schema add) --
+
+    fn empty_def(value_type: ValueType) -> KeyDef {
+        KeyDef {
+            value_type,
+            min: None,
+            max: None,
+            default: None,
+            max_entries: None,
+            description: None,
+            fields: None,
+            data: None,
+        }
+    }
+
+    #[test]
+    fn add_key_def_each_type() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        for (name, vt) in [
+            ("new_counter", ValueType::Counter),
+            ("new_history", ValueType::History),
+            ("new_state", ValueType::State),
+            ("new_string", ValueType::String),
+            ("new_list", ValueType::List),
+        ] {
+            store.add_key_def(name, empty_def(vt)).unwrap();
+            assert_eq!(store.schema.keys[name].value_type, vt);
+        }
+
+        // Persisted: reload from disk and confirm.
+        let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        assert_eq!(
+            reloaded.schema.keys["new_counter"].value_type,
+            ValueType::Counter
+        );
+        assert_eq!(reloaded.schema.keys["new_list"].value_type, ValueType::List);
+    }
+
+    #[test]
+    fn add_key_def_preserves_options() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let mut def = empty_def(ValueType::Counter);
+        def.min = Some(-5);
+        def.max = Some(5);
+        def.default = Some("0".to_string());
+        def.description = Some("a bounded counter".to_string());
+
+        store.add_key_def("bounded", def).unwrap();
+        let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        let kd = &reloaded.schema.keys["bounded"];
+        assert_eq!(kd.min, Some(-5));
+        assert_eq!(kd.max, Some(5));
+        assert_eq!(kd.description.as_deref(), Some("a bounded counter"));
+    }
+
+    #[test]
+    fn add_key_def_duplicate_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let err = store
+            .add_key_def("warmth", empty_def(ValueType::Counter))
+            .unwrap_err();
+        assert!(
+            matches!(err, KvError::DataValidation { .. }),
+            "Expected DataValidation, got: {err}"
+        );
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn add_key_def_invalid_name_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let err = store
+            .add_key_def("bad.name", empty_def(ValueType::String))
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }));
+    }
+
+    // -- key_has_content --
+
+    #[test]
+    fn key_has_content_never_written() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .add_key_def("fresh", empty_def(ValueType::History))
+            .unwrap();
+        assert!(!store.key_has_content("fresh"));
+    }
+
+    #[test]
+    fn key_has_content_empty_vs_populated() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // History with entries is content; empty string is not.
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        assert!(store.key_has_content("flavor_history"));
+
+        store.set("current_mood", "", None).unwrap();
+        assert!(!store.key_has_content("current_mood"));
+        store.set("current_mood", "calm", None).unwrap();
+        assert!(store.key_has_content("current_mood"));
+    }
+
+    // -- drop_key --
+
+    #[test]
+    fn drop_key_empty_removes_schema_only() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .add_key_def("scratch", empty_def(ValueType::History))
+            .unwrap();
+        assert!(!store.key_has_content("scratch"));
+
+        store.drop_key("scratch").unwrap();
+        assert!(!store.schema.keys.contains_key("scratch"));
+
+        let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        assert!(!reloaded.schema.keys.contains_key("scratch"));
+    }
+
+    #[test]
+    fn drop_key_non_empty_removes_schema_and_data() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store.save().unwrap();
+        assert!(store.data.entries.contains_key("flavor_history"));
+
+        store.drop_key("flavor_history").unwrap();
+        assert!(!store.schema.keys.contains_key("flavor_history"));
+        assert!(!store.data.entries.contains_key("flavor_history"));
+
+        let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        assert!(!reloaded.schema.keys.contains_key("flavor_history"));
+        assert!(!reloaded.data.entries.contains_key("flavor_history"));
+    }
+
+    #[test]
+    fn drop_key_unregistered_errors_key_not_found() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let err = store.drop_key("ghost").unwrap_err();
+        assert!(
+            matches!(err, KvError::KeyNotFound(ref k) if k == "ghost"),
+            "Expected KeyNotFound, got: {err}"
+        );
+    }
+
+    #[test]
+    fn drop_key_with_memory_link_discards_pointer() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .set_memory("flavor_history", Some("kn-abc123".to_string()))
+            .unwrap();
+        store.save().unwrap();
+        assert_eq!(
+            store.get_memory("flavor_history").unwrap(),
+            Some("kn-abc123")
+        );
+
+        // Dropping simply discards the outbound pointer; no error.
+        store.drop_key("flavor_history").unwrap();
+        assert!(!store.schema.keys.contains_key("flavor_history"));
+        assert!(!store.data.entries.contains_key("flavor_history"));
+    }
+
+    // -- update_key_meta --
+
+    #[test]
+    fn update_key_meta_safe_changes() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .update_key_meta(
+                "capped",
+                Some("max warmth allowed".to_string()),
+                None,
+                Some(-10),
+                Some(200),
+                None,
+            )
+            .unwrap();
+
+        let reloaded = KvStore::load(&store.schema_path, &store.data_path).unwrap();
+        let kd = &reloaded.schema.keys["capped"];
+        assert_eq!(kd.description.as_deref(), Some("max warmth allowed"));
+        assert_eq!(kd.min, Some(-10));
+        assert_eq!(kd.max, Some(200));
+        // Type unchanged.
+        assert_eq!(kd.value_type, ValueType::Counter);
+    }
+
+    #[test]
+    fn update_key_meta_clear_description() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .update_key_meta("warmth", Some("desc".to_string()), None, None, None, None)
+            .unwrap();
+        assert_eq!(
+            store.schema.keys["warmth"].description.as_deref(),
+            Some("desc")
+        );
+        // Empty string clears.
+        store
+            .update_key_meta("warmth", Some(String::new()), None, None, None, None)
+            .unwrap();
+        assert_eq!(store.schema.keys["warmth"].description, None);
+    }
+
+    #[test]
+    fn update_key_meta_add_optional_field() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let field = DataFieldDef {
+            field_type: DataFieldType::String,
+            required: false,
+            default: None,
+        };
+        store
+            .update_key_meta(
+                "flavor_history",
+                None,
+                None,
+                None,
+                None,
+                Some(("note".to_string(), field)),
+            )
+            .unwrap();
+        let kd = &store.schema.keys["flavor_history"];
+        assert!(kd.data.as_ref().unwrap().contains_key("note"));
+        assert!(!kd.data.as_ref().unwrap()["note"].required);
+    }
+
+    #[test]
+    fn update_key_meta_duplicate_field_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let field = DataFieldDef {
+            field_type: DataFieldType::String,
+            required: false,
+            default: None,
+        };
+        store
+            .update_key_meta(
+                "flavor_history",
+                None,
+                None,
+                None,
+                None,
+                Some(("note".to_string(), field.clone())),
+            )
+            .unwrap();
+        // Second add of same field name errors and does not corrupt schema.
+        let err = store
+            .update_key_meta(
+                "flavor_history",
+                None,
+                None,
+                None,
+                None,
+                Some(("note".to_string(), field)),
+            )
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }));
+        // Still exactly one field def.
+        assert_eq!(
+            store.schema.keys["flavor_history"]
+                .data
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn update_key_meta_unregistered_errors() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let err = store
+            .update_key_meta("ghost", Some("x".to_string()), None, None, None, None)
+            .unwrap_err();
+        assert!(matches!(err, KvError::KeyNotFound(ref k) if k == "ghost"));
+    }
+
+    // -- W2: rollback-on-failure (drop / update / rename) --
+    //
+    // The transaction pattern persists data-first, then schema, and rolls back
+    // in-memory mutations if a write fails. To force a write failure portably
+    // we redirect the relevant path so that `create_dir_all(parent)` (the first
+    // step of both `save` and `save_schema`) fails: we point the path *inside*
+    // a regular file, so its "parent" is a file, not a directory. This makes
+    // the write deterministically error without relying on permission bits.
+
+    /// Redirect `path` to live under a freshly-created blocker *file*, so any
+    /// `create_dir_all(parent)` against it fails. Returns the doomed path.
+    fn unwritable_under_file(dir: &std::path::Path, name: &str) -> PathBuf {
+        let blocker = dir.join("blocker_file");
+        fs::write(&blocker, b"not a directory").unwrap();
+        // parent of the returned path is `blocker_file`, which is a file.
+        blocker.join(name)
+    }
+
+    #[test]
+    fn drop_key_rollback_on_data_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store.save().unwrap();
+
+        // Snapshot good on-disk state for the later assertion.
+        let good_data_path = store.data_path.clone();
+        let good_schema_path = store.schema_path.clone();
+
+        // Force the data write (the first persist in drop_key) to fail.
+        store.data_path = unwritable_under_file(dir.path(), "data.json");
+
+        let err = store.drop_key("flavor_history").unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory state fully rolled back: schema def and data both restored.
+        assert!(store.schema.keys.contains_key("flavor_history"));
+        assert!(store.data.entries.contains_key("flavor_history"));
+        match store.data.entries.get("flavor_history").unwrap() {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].value, "matcha");
+            }
+            other => panic!("expected History, got {other:?}"),
+        }
+
+        // On-disk state untouched: the good files still hold the key.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        assert!(reloaded.schema.keys.contains_key("flavor_history"));
+        assert!(reloaded.data.entries.contains_key("flavor_history"));
+    }
+
+    #[test]
+    fn update_key_meta_rollback_on_schema_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        let good_schema_path = store.schema_path.clone();
+        let good_data_path = store.data_path.clone();
+
+        // Force the schema write (the only persist in update_key_meta) to fail.
+        store.schema_path = unwritable_under_file(dir.path(), "schema.toml");
+
+        let err = store
+            .update_key_meta(
+                "capped",
+                Some("changed".to_string()),
+                None,
+                Some(-99),
+                Some(99),
+                None,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory def fully restored to its original values.
+        let kd = &store.schema.keys["capped"];
+        assert_eq!(kd.description, None);
+        assert_eq!(kd.min, Some(0));
+        assert_eq!(kd.max, Some(100));
+
+        // On-disk schema untouched.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        let rkd = &reloaded.schema.keys["capped"];
+        assert_eq!(rkd.description, None);
+        assert_eq!(rkd.min, Some(0));
+        assert_eq!(rkd.max, Some(100));
+    }
+
+    #[test]
+    fn rename_key_rollback_on_data_write_failure() {
+        let (mut store, dir) = setup_store(test_schema());
+        store.push("flavor_history", "matcha", None, None).unwrap();
+        store.save().unwrap();
+
+        let good_schema_path = store.schema_path.clone();
+        let good_data_path = store.data_path.clone();
+
+        // Force the data write (first persist in rename_key) to fail.
+        store.data_path = unwritable_under_file(dir.path(), "data.json");
+
+        let err = store
+            .rename_key("flavor_history", "tea_history")
+            .unwrap_err();
+        assert!(
+            matches!(err, KvError::Other(_)),
+            "expected a write failure, got: {err}"
+        );
+
+        // In-memory state rolled back: old key present, new key absent.
+        assert!(store.schema.keys.contains_key("flavor_history"));
+        assert!(!store.schema.keys.contains_key("tea_history"));
+        assert!(store.data.entries.contains_key("flavor_history"));
+        assert!(!store.data.entries.contains_key("tea_history"));
+
+        // On-disk state untouched.
+        let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
+        assert!(reloaded.schema.keys.contains_key("flavor_history"));
+        assert!(!reloaded.schema.keys.contains_key("tea_history"));
     }
 }

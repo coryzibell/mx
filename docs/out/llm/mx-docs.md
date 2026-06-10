@@ -271,7 +271,13 @@ mx kv last decisions --since 1w
 mx kv count decisions --day 2026-05-07
 mx kv get decisions --id kv-A3fB              # look up by entry ID
 
-# Auto-create a key in the schema and push in one step
+# Define, list, edit, and remove keys with the schema subcommands
+mx kv schema add puns --type history --max-entries 500
+mx kv schema list                             # (replaces 'kv keys')
+mx kv schema update puns --description "the good ones"
+mx kv schema drop puns --force                # removes definition + data
+
+# Auto-create a key in the schema and push in one step (inline shortcut)
 mx kv push puns "the joke" --create history
 mx kv push ideas "wild thought" --create list --max-entries 500
 
@@ -301,7 +307,7 @@ mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
 # Rename a key (preserves all entries and data)
-mx kv rename old_decisions archived_decisions
+mx kv schema update old_decisions --name archived_decisions
 
 # JSON output for scripting and jq piping
 mx kv last projects --count 5 --json | jq '.[].data.status'
@@ -2861,7 +2867,7 @@ Schema fields:
 `description`
 
 :   Optional. Human-readable description of the key's purpose. Displayed
-    as a third column by `mx kv keys`.
+    as a third column by `mx kv schema list`.
 
 `fields`
 
@@ -2872,9 +2878,19 @@ Schema fields:
 
 Keys can be added to the schema on the fly with `mx kv push --create`.
 When a key does not exist in the schema, `--create history` or
-`--create list` appends a new `[keys.<name>]` block to the TOML file and
-reloads the in-memory schema. This avoids manual schema editing for
-simple cases. See push for details and validation rules.
+`--create list` defines it and reloads the in-memory schema. This avoids
+manual schema editing for simple cases. See push for details and
+validation rules.
+
+For defining keys of **any** type up front (not just `history`/`list`),
+and for removing or editing existing definitions, use the `mx kv schema`
+subcommands. `push --create` is an inline shortcut whose user-facing
+surface stays limited to `history`/`list`, but it routes through the
+**same** engine path as `schema add` (the shared `add_key_def` method).
+One consequence: like every `schema` write, the create rewrites the
+schema file by round-tripping the TOML, which drops comments and custom
+formatting. If you hand-annotate your schema, expect those annotations
+to be lost when a key is created via `--create`.
 
 ### Agent keying
 
@@ -3128,6 +3144,11 @@ mx kv set decisions --id 17 --memory ""
 
 ## `mx kv keys`
 
+**Deprecated.** A thin alias for `mx kv schema list`. Output on stdout
+is unchanged (so existing scripts keep working), but a one-line
+deprecation notice is printed to stderr. Use `mx kv schema list`
+instead.
+
 List all keys defined in the schema with their types. Output is two
 columns: key name (left-aligned, 30 chars) and type. When a key has a
 `description` in the schema, it is shown as a third column.
@@ -3244,8 +3265,10 @@ requires `--create` and has no effect if the key already exists.
 
 Key names are validated on creation: alphanumeric characters,
 underscores, and hyphens only, maximum 128 characters. Dots are rejected
-because they conflict with TOML key quoting. The new key block is
-appended to the schema file without reformatting existing content.
+because they conflict with TOML key quoting. Creation shares the
+`schema add` engine path, so it persists by round-tripping the schema
+TOML -- comments and custom formatting in the schema file are dropped,
+the same as any other `schema` write.
 
 ### Flags
 
@@ -4135,6 +4158,11 @@ mx kv reset context
 
 ## `mx kv rename <old-key> <new-key>`
 
+**Deprecated.** Use `mx kv schema update <key> --name <new>` instead,
+which shares the exact same rename path. The top-level `mx kv rename`
+verb still works and prints a one-line deprecation notice to stderr; it
+is slated for removal in a future major version.
+
 Rename a key, preserving all entries and data. The old key is removed
 from both the schema (TOML) and data (JSON) files, and all its content
 -- type definition, constraints, entries, timestamps, structured data,
@@ -4157,6 +4185,197 @@ mx kv rename session_goal current_goal
 
 ``` bash
 mx kv rename old_decisions archived_decisions
+```
+
+## Schema management {#schema}
+
+All schema lifecycle operations -- listing, defining, removing, and
+editing key definitions -- live under the `mx kv schema` namespace. This
+consolidates what used to be scattered across `kv keys`,
+`kv push --create`, and `kv rename` (the latter two remain as ergonomic
+/ deprecated aliases).
+
+::: {.admonition .note}
+**NOTE:** Schema writes via `schema add`, `schema drop`, and
+`schema update` round-trip the TOML schema file through the serializer,
+which **drops comments and custom formatting**. This matches the
+existing behavior of `push --create`. If you hand-annotate your schema
+file, expect those annotations to be lost on the next schema-mutating
+command.
+:::
+
+### schema list
+
+## `mx kv schema list`
+
+List every key in the schema with its type and optional description.
+Output is identical to the (deprecated) `mx kv keys`: two columns -- key
+name (left-aligned, 30 chars) and type -- with the `description` shown
+as a third column when present.
+
+### Examples
+
+``` bash
+mx kv schema list
+```
+
+### schema add
+
+## `mx kv schema add <key> --type <type>`
+
+Define a new key of any of the five types. This is the first-class
+replacement for the buried `push --create` flag, which is retained as an
+inline shortcut and routes through the same engine path.
+
+The key name is validated the same way as elsewhere: alphanumeric,
+underscores, and hyphens only; maximum 128 characters; no dots. Defining
+a key that already exists is an error.
+
+Options are **type-appropriate**: passing an option that does not apply
+to the declared `--type` is rejected (exit code 4) rather than silently
+persisted. The valid pairings are: `--max-entries` (history, list);
+`--default` (counter, string, state); `--min` / `--max` (counter);
+`--fields` (state); `--data` (state, list). `--description` applies to
+every type.
+
+Only the schema file is written -- no data entry is created until the
+key is first written to.
+
+### Flags
+
+  **Flag**                          **Type**   **Description**
+  --------------------------------- ---------- ----------------------------------------------------------------------------------------------------------------------------------
+  `--type <type>`                   enum       Required. One of `counter`, `history`, `state`, `string`, `list`.
+  `--max-entries <n>`               int        Cap for history/list keys; oldest entries drop when exceeded.
+  `--default <v>`                   str        Initial value for counter/string/state keys.
+  `--min <n>`                       int        Minimum value for counters (clamped). Accepts negatives.
+  `--max <n>`                       int        Maximum value for counters (clamped). Accepts negatives.
+  `--description <text>`            str        Human-readable description, shown by `schema list`. Applies to all types.
+  `--fields <a,b,c>`                list       Valid field names for a state key (comma-separated or repeatable).
+  `--data <name:type[:required]>`   str        Typed data-field definition for state/list keys (repeatable). `type` is one of `string`, `number`, `boolean`, `array`, `object`.
+
+### Examples
+
+``` bash
+mx kv schema add builds --type counter --default 0 --min 0
+```
+
+``` bash
+mx kv schema add decisions --type history --max-entries 50
+```
+
+``` bash
+mx kv schema add context --type state --fields task,phase,blocker
+```
+
+``` bash
+mx kv schema add session_goal --type string --default "ship the docs"
+```
+
+``` bash
+mx kv schema add todos --type list --data "done:boolean"
+```
+
+### schema drop
+
+## `mx kv schema drop <key>`
+
+Remove a key's schema definition **and** its stored data entries in one
+operation (unlike `remove`, which only clears entries but leaves the key
+registered). This closes the orphaned-key gap: previously there was no
+way to fully delete a key short of hand-editing the TOML.
+
+`--force` is required when the key has stored entries; it is silently
+allowed for empty or never-written keys. Dropping an unregistered key is
+an error (exit code 1, key-not-found -- consistent with every other
+verb).
+
+Any `--memory` (`kn-`) links the key carried are outbound pointers with
+no reverse reference from the memory store, so dropping the key simply
+discards them. Nothing in the memory store is touched.
+
+Persistence follows the same transaction pattern as `rename`: the data
+file is written first, then the schema; in-memory state is rolled back
+if the data write fails.
+
+### Flags
+
+  **Flag**    **Type**   **Description**
+  ----------- ---------- -------------------------------------------------
+  `--force`   flag       Required to drop a key that has stored entries.
+
+### Examples
+
+``` bash
+mx kv schema drop scratch_key
+```
+
+``` bash
+mx kv schema drop old_decisions --force
+```
+
+### schema update
+
+## `mx kv schema update <key>`
+
+Apply **safe** metadata changes to an existing key's definition. Scoped
+to non-destructive edits.
+
+Changing a key's `--type` is **forbidden** -- type changes are out of
+scope and any `--type` argument errors and points you at
+`mx kv migrate`. There is no `--force` override.
+
+`--name` renames the key, delegating to the exact same path as the
+(deprecated) top-level `mx kv rename`. All entries, IDs, timestamps,
+structured data, and memory links are preserved.
+
+Options are **type-appropriate**, gated against the key's **existing**
+type: `--max-entries` (history, list); `--min` / `--max` (counter);
+`--add-field` (state, list). `--description` applies to any type.
+Passing an inapplicable option is rejected (exit code 4) rather than
+silently persisted -- you cannot, for example, bolt a data field onto a
+counter.
+
+A **no-op** update (no `--name` and no metadata flags set) is rejected
+with a notice (exit code 4) instead of needlessly rewriting the schema
+file -- which would drop comments for no benefit.
+
+Like `schema add`/`drop`, this round-trips the schema TOML (dropping
+comments). When only metadata changes (no `--name`), only the schema
+file is written, and the in-memory mutation is rolled back if that write
+fails.
+
+### Flags
+
+  **Flag**                    **Type**   **Description**
+  --------------------------- ---------- ----------------------------------------------------------------------
+  `--name <new>`              str        Rename the key (shares the `rename` path).
+  `--description <text>`      str        Replace the description; pass `""` to clear it. Applies to any type.
+  `--max-entries <n>`         int        New cap for history/list keys.
+  `--min <n>`                 int        New minimum for counters. Accepts negatives.
+  `--max <n>`                 int        New maximum for counters. Accepts negatives.
+  `--add-field <name:type>`   str        Add a new **optional** data field to a state/list key.
+
+### Examples
+
+``` bash
+mx kv schema update builds --description "successful CI builds"
+```
+
+``` bash
+mx kv schema update decisions --max-entries 100
+```
+
+``` bash
+mx kv schema update warmth --min -10 --max 100
+```
+
+``` bash
+mx kv schema update decisions --add-field "author:string"
+```
+
+``` bash
+mx kv schema update session_goal --name current_goal
 ```
 
 ## Memory linking
@@ -7601,14 +7820,49 @@ back-filled on first load (IDs are generated, data and memory default to
 
 ### Schema mutation
 
-The `KvStore` struct holds a `schema_path` field alongside the existing
-`data_path`. The `add_key_to_schema()` method validates the key name
-(alphanumeric, underscores, hyphens; max 128 chars; no dots), appends a
-`[keys.<name>]` block to the TOML file without reformatting existing
-content, and re-parses the file to update the in-memory `Schema`. This
-is exposed through `push --create <type>` at the CLI layer, where the
-handler calls `add_key_to_schema` before the normal push path. If the
-key already exists, the method is a no-op.
+Schema lifecycle operations are exposed at the CLI layer under the
+`mx kv schema [list | add | drop | update]` namespace, backed by methods
+on `KvStore` (which holds a `schema_path` field alongside the existing
+`data_path`). The legacy top-level `kv keys` and `kv rename` verbs
+survive as deprecated aliases.
+
+The `add_key_def()` method is the single creation path, shared by both
+`kv schema add` and the `push --create <type>` inline shortcut. It
+validates the key name (alphanumeric, underscores, hyphens; max 128
+chars; no dots), accepts a fully-formed `KeyDef` so all five
+`ValueType`s can be declared with their type-appropriate options,
+inserts it in-memory, and persists via `save_schema()` (which
+round-trips the TOML, dropping comments). Duplicate or invalid names
+error. `push --create` constructs a history/list `KeyDef` and calls the
+same method -- its user-facing surface stays limited to those two types,
+but the engine path is unified (363 acceptance criterion).
+
+Type-appropriate options are enforced at the CLI layer for both
+`schema add` and `schema update`: a `validate_type_options` gate rejects
+options that do not apply to the declared/existing `ValueType` (e.g.
+`--min` on a history key, `--add-field` on a counter) with exit code 4,
+before any persist. A no-op `schema update` (no flags set) is likewise
+rejected rather than rewriting the schema file.
+
+A legacy `add_key_to_schema()` method still exists as a standalone
+engine helper -- it appends a `[keys.<name>]` block to the TOML without
+reformatting, preserving comments, for `history`/`list` only. It is no
+longer wired to any CLI verb (it formerly backed `push --create`); it is
+retained for its existing tests and as an append-based alternative.
+
+The `drop_key()` method backs `kv schema drop`: it removes both the
+schema definition and the stored data entry. It follows the `rename_key`
+transaction pattern -- mutate in-memory fully, persist data first then
+schema, roll back on data-write failure. The handler enforces `--force`
+for keys with stored content (`key_has_content()`) and returns
+`KeyNotFound` for unregistered keys. Outbound `kn-` memory links are
+simply discarded; the memory store is never touched.
+
+The `update_key_meta()` method backs `kv schema update` for **safe**
+metadata edits (description, `max_entries`, `min`/`max`, adding an
+optional data field). Type changes are not representable here -- they
+are forbidden and routed to `kv migrate` at the CLI layer, with no
+override. A `--name` argument instead delegates to `rename_key`.
 
 The `rename_key()` method moves a key from one name to another in both
 the schema and data files. It validates the new name, checks that the
@@ -7617,7 +7871,8 @@ in-memory entries before persisting. Data is written first (higher-value
 file), then schema. If the data write fails, in-memory mutations are
 rolled back. Entry IDs are stable across renames -- they were hashed
 from the original key name at creation time and are never regenerated.
-This is exposed through `mx kv rename <old> <new>` at the CLI layer.
+It is shared by both `mx kv schema update <key> --name <new>` and the
+deprecated `mx kv rename <old> <new>`.
 
 ### Per-agent keying
 

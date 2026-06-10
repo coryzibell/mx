@@ -760,14 +760,47 @@ back-filled on first load (IDs are generated, data and memory default to
 
 === Schema mutation
 
-The `KvStore` struct holds a `schema_path` field alongside the existing
-`data_path`. The `add_key_to_schema()` method validates the key name
-(alphanumeric, underscores, hyphens; max 128 chars; no dots), appends a
-`[keys.<name>]` block to the TOML file without reformatting existing
-content, and re-parses the file to update the in-memory `Schema`. This is
-exposed through `push --create <type>` at the CLI layer, where the handler
-calls `add_key_to_schema` before the normal push path. If the key already
-exists, the method is a no-op.
+Schema lifecycle operations are exposed at the CLI layer under the
+`mx kv schema [list | add | drop | update]` namespace, backed by methods on
+`KvStore` (which holds a `schema_path` field alongside the existing
+`data_path`). The legacy top-level `kv keys` and `kv rename` verbs survive as
+deprecated aliases.
+
+The `add_key_def()` method is the single creation path, shared by both
+`kv schema add` and the `push --create <type>` inline shortcut. It validates
+the key name (alphanumeric, underscores, hyphens; max 128 chars; no dots),
+accepts a fully-formed `KeyDef` so all five `ValueType`s can be declared with
+their type-appropriate options, inserts it in-memory, and persists via
+`save_schema()` (which round-trips the TOML, dropping comments). Duplicate or
+invalid names error. `push --create` constructs a history/list `KeyDef` and
+calls the same method -- its user-facing surface stays limited to those two
+types, but the engine path is unified (#363 acceptance criterion).
+
+Type-appropriate options are enforced at the CLI layer for both `schema add`
+and `schema update`: a `validate_type_options` gate rejects options that do
+not apply to the declared/existing `ValueType` (e.g. `--min` on a history key,
+`--add-field` on a counter) with exit code 4, before any persist. A no-op
+`schema update` (no flags set) is likewise rejected rather than rewriting the
+schema file.
+
+A legacy `add_key_to_schema()` method still exists as a standalone engine
+helper -- it appends a `[keys.<name>]` block to the TOML without reformatting,
+preserving comments, for `history`/`list` only. It is no longer wired to any
+CLI verb (it formerly backed `push --create`); it is retained for its existing
+tests and as an append-based alternative.
+
+The `drop_key()` method backs `kv schema drop`: it removes both the schema
+definition and the stored data entry. It follows the `rename_key` transaction
+pattern -- mutate in-memory fully, persist data first then schema, roll back on
+data-write failure. The handler enforces `--force` for keys with stored content
+(`key_has_content()`) and returns `KeyNotFound` for unregistered keys. Outbound
+`kn-` memory links are simply discarded; the memory store is never touched.
+
+The `update_key_meta()` method backs `kv schema update` for *safe* metadata
+edits (description, `max_entries`, `min`/`max`, adding an optional data field).
+Type changes are not representable here -- they are forbidden and routed to
+`kv migrate` at the CLI layer, with no override. A `--name` argument instead
+delegates to `rename_key`.
 
 The `rename_key()` method moves a key from one name to another in both the
 schema and data files. It validates the new name, checks that the old key
@@ -775,8 +808,9 @@ exists and the new key does not, then atomically swaps the in-memory
 entries before persisting. Data is written first (higher-value file), then
 schema. If the data write fails, in-memory mutations are rolled back. Entry
 IDs are stable across renames -- they were hashed from the original key
-name at creation time and are never regenerated. This is exposed through
-`mx kv rename <old> <new>` at the CLI layer.
+name at creation time and are never regenerated. It is shared by both
+`mx kv schema update <key> --name <new>` and the deprecated
+`mx kv rename <old> <new>`.
 
 === Per-agent keying
 

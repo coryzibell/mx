@@ -4,8 +4,11 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::cli::{CreateType, DumpFormat, KvCommands};
-use crate::kv::{self, IdRef, KvError, KvStore, resolve_time_range};
+use crate::cli::{CreateType, DumpFormat, KvCommands, KvSchemaCommands, SchemaType};
+use crate::kv::{
+    self, DataFieldDef, DataFieldType, IdRef, KeyDef, KvError, KvStore, ValueType,
+    resolve_time_range,
+};
 
 /// Map a KvError to the appropriate exit code.
 fn exit_code_for(err: &KvError) -> Option<i32> {
@@ -676,16 +679,34 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             create,
             max_entries,
         } => {
-            // Handle --create: auto-add key to schema if missing
+            // Handle --create: auto-add key to schema if missing.
+            //
+            // C1 (#363 AC): `push --create` routes through the SAME engine
+            // path as `schema add` -- `add_key_def`. The user-facing surface
+            // stays history/list-limited (CreateType), but creation is now
+            // unified so both verbs share one persistence path. (This trades
+            // the old append-based, comment-preserving write for the
+            // round-tripping `save_schema`, which drops comments -- documented
+            // and accepted for schema writes.)
             if let Some(ref create_type) = create {
-                let type_str = match create_type {
-                    CreateType::History => "history",
-                    CreateType::List => "list",
+                let value_type = match create_type {
+                    CreateType::History => ValueType::History,
+                    CreateType::List => ValueType::List,
                 };
-                if !store.schema.keys.contains_key(&key)
-                    && let Err(e) = store.add_key_to_schema(&key, type_str, max_entries)
-                {
-                    return handle_kv_err(e);
+                if !store.schema.keys.contains_key(&key) {
+                    let def = KeyDef {
+                        value_type,
+                        min: None,
+                        max: None,
+                        default: None,
+                        max_entries,
+                        description: None,
+                        fields: None,
+                        data: None,
+                    };
+                    if let Err(e) = store.add_key_def(&key, def) {
+                        return handle_kv_err(e);
+                    }
                 }
                 // If key already exists, silently ignore --create
             }
@@ -1182,23 +1203,341 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Err(e) => handle_kv_err(e),
         },
 
-        KvCommands::Rename { old_key, new_key } => match store.rename_key(&old_key, &new_key) {
-            Ok(()) => {
-                println!("Renamed {} to {}", old_key, new_key);
-                Ok(kv::EXIT_OK)
-            }
-            Err(e) => handle_kv_err(e),
-        },
+        KvCommands::Rename { old_key, new_key } => {
+            eprintln!(
+                "note: 'mx kv rename' is deprecated; use 'mx kv schema update {} --name {}'",
+                old_key, new_key
+            );
+            rename_key_handler(&mut store, &old_key, &new_key)
+        }
 
         KvCommands::Keys => {
-            let keys = store.keys();
-            for (name, vtype, desc) in &keys {
-                match desc {
-                    Some(d) => println!("{:30} {:10} {}", name, vtype, d),
-                    None => println!("{:30} {:10}", name, vtype),
+            eprintln!("note: 'mx kv keys' is deprecated; use 'mx kv schema list'");
+            schema_list_handler(&store);
+            Ok(kv::EXIT_OK)
+        }
+
+        KvCommands::Schema { command } => handle_kv_schema(&mut store, command),
+    }
+}
+
+/// Print the schema key listing (shared by `schema list` and the deprecated
+/// `kv keys` alias). Output on stdout is byte-identical between the two.
+fn schema_list_handler(store: &KvStore) {
+    for (name, vtype, desc) in &store.keys() {
+        match desc {
+            Some(d) => println!("{:30} {:10} {}", name, vtype, d),
+            None => println!("{:30} {:10}", name, vtype),
+        }
+    }
+}
+
+/// Rename a key (shared by `schema update --name` and the deprecated
+/// top-level `kv rename`). Both route through `KvStore::rename_key`.
+fn rename_key_handler(store: &mut KvStore, old_key: &str, new_key: &str) -> Result<i32> {
+    match store.rename_key(old_key, new_key) {
+        Ok(()) => {
+            println!("Renamed {} to {}", old_key, new_key);
+            Ok(kv::EXIT_OK)
+        }
+        Err(e) => handle_kv_err(e),
+    }
+}
+
+/// Parse a `--data name:type[:required]` field definition spec.
+fn parse_data_field_spec(spec: &str) -> Result<(String, DataFieldDef), String> {
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 || parts.len() > 3 {
+        return Err(format!(
+            "invalid --data spec '{}': expected name:type[:required]",
+            spec
+        ));
+    }
+    let name = parts[0].trim();
+    if name.is_empty() {
+        return Err(format!("invalid --data spec '{}': empty field name", spec));
+    }
+    let field_type = match parts[1].trim().to_lowercase().as_str() {
+        "string" => DataFieldType::String,
+        "number" => DataFieldType::Number,
+        "boolean" => DataFieldType::Boolean,
+        "array" => DataFieldType::Array,
+        "object" => DataFieldType::Object,
+        other => {
+            return Err(format!(
+                "invalid --data type '{}': expected string|number|boolean|array|object",
+                other
+            ));
+        }
+    };
+    let required = match parts.get(2) {
+        None => false,
+        Some(r) => match r.trim().to_lowercase().as_str() {
+            "required" | "true" => true,
+            "optional" | "false" | "" => false,
+            other => {
+                return Err(format!(
+                    "invalid --data required flag '{}': expected 'required' or 'optional'",
+                    other
+                ));
+            }
+        },
+    };
+    Ok((
+        name.to_string(),
+        DataFieldDef {
+            field_type,
+            required,
+            default: None,
+        },
+    ))
+}
+
+/// W1 (#363): reject type-inappropriate options on `schema add`/`schema update`.
+///
+/// Each option only makes sense for a subset of value types (the issue's
+/// "type-appropriate options" table):
+///   - `--max-entries`        -> history, list
+///   - `--default`            -> counter, string, state
+///   - `--min` / `--max`      -> counter
+///   - `--fields`             -> state
+///   - `--data` / `--add-field` -> state, list
+///   - `--description`        -> all types
+///
+/// `which` is a flag set: each present flag is checked against `value_type`.
+/// Returns a usage-style error message naming the offending flag and the
+/// type it does not apply to. The caller maps `Err` to exit 4.
+struct OptionFlags {
+    max_entries: bool,
+    default: bool,
+    min: bool,
+    max: bool,
+    fields: bool,
+    data: bool,
+}
+
+fn validate_type_options(value_type: ValueType, flags: &OptionFlags) -> Result<(), String> {
+    use ValueType::*;
+
+    let bad = |flag: &str, allowed: &str| {
+        Err(format!(
+            "--{flag} does not apply to a '{value_type}' key (only valid for: {allowed})"
+        ))
+    };
+
+    if flags.max_entries && !matches!(value_type, History | List) {
+        return bad("max-entries", "history, list");
+    }
+    if flags.default && !matches!(value_type, Counter | String | State) {
+        return bad("default", "counter, string, state");
+    }
+    if flags.min && !matches!(value_type, Counter) {
+        return bad("min", "counter");
+    }
+    if flags.max && !matches!(value_type, Counter) {
+        return bad("max", "counter");
+    }
+    if flags.fields && !matches!(value_type, State) {
+        return bad("fields", "state");
+    }
+    if flags.data && !matches!(value_type, State | List) {
+        // Covers `--data` (schema add) and `--add-field` (schema update).
+        return Err(format!(
+            "--data/--add-field does not apply to a '{value_type}' key \
+             (only valid for: state, list)"
+        ));
+    }
+    Ok(())
+}
+
+fn handle_kv_schema(store: &mut KvStore, command: KvSchemaCommands) -> Result<i32> {
+    match command {
+        KvSchemaCommands::List => {
+            schema_list_handler(store);
+            Ok(kv::EXIT_OK)
+        }
+
+        KvSchemaCommands::Add {
+            key,
+            r#type,
+            max_entries,
+            default,
+            min,
+            max,
+            description,
+            fields,
+            data,
+        } => {
+            let value_type = match r#type {
+                SchemaType::Counter => ValueType::Counter,
+                SchemaType::History => ValueType::History,
+                SchemaType::State => ValueType::State,
+                SchemaType::String => ValueType::String,
+                SchemaType::List => ValueType::List,
+            };
+
+            // W1: reject type-inappropriate options before persisting.
+            let flags = OptionFlags {
+                max_entries: max_entries.is_some(),
+                default: default.is_some(),
+                min: min.is_some(),
+                max: max.is_some(),
+                fields: !fields.is_empty(),
+                data: !data.is_empty(),
+            };
+            if let Err(msg) = validate_type_options(value_type, &flags) {
+                eprintln!("Error: {}", msg);
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // Parse typed --data field defs.
+            let mut data_defs = std::collections::BTreeMap::new();
+            for spec in &data {
+                match parse_data_field_spec(spec) {
+                    Ok((name, def)) => {
+                        data_defs.insert(name, def);
+                    }
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
                 }
             }
-            Ok(kv::EXIT_OK)
+
+            let def = KeyDef {
+                value_type,
+                min,
+                max,
+                default,
+                max_entries,
+                description,
+                fields: if fields.is_empty() {
+                    None
+                } else {
+                    Some(fields)
+                },
+                data: if data_defs.is_empty() {
+                    None
+                } else {
+                    Some(data_defs)
+                },
+            };
+
+            match store.add_key_def(&key, def) {
+                Ok(()) => {
+                    println!("Added {} ({})", key, value_type);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
+        KvSchemaCommands::Drop { key, force } => {
+            // Unregistered key -> KeyNotFound (exit 1), consistent with every
+            // other verb. (Issue prose says "exit 3" but the canonical KV
+            // exit-code table maps KeyNotFound -> 1; see PR notes.)
+            if !store.schema.keys.contains_key(&key) {
+                return handle_kv_err(KvError::KeyNotFound(key.clone()));
+            }
+
+            // Non-empty keys require --force; silent for empty/never-written.
+            if store.key_has_content(&key) && !force {
+                eprintln!(
+                    "Error: key '{}' has stored entries; pass --force to drop it and its data",
+                    key
+                );
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            match store.drop_key(&key) {
+                Ok(()) => {
+                    println!("Dropped {}", key);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
+        }
+
+        KvSchemaCommands::Update {
+            key,
+            name,
+            description,
+            max_entries,
+            min,
+            max,
+            add_field,
+            type_change,
+        } => {
+            // Forbidden: type changes route to `kv migrate`, no override.
+            if type_change.is_some() {
+                eprintln!(
+                    "Error: changing a key's type is not supported by 'schema update'. \
+                     Type changes are out of scope; use 'mx kv migrate' to reshape data."
+                );
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // --name delegates to the shared rename path.
+            if let Some(new_name) = name {
+                return rename_key_handler(store, &key, &new_name);
+            }
+
+            // S1: a no-op update (no metadata flags set) would re-serialize the
+            // schema for nothing -- dropping comments/formatting. Short-circuit
+            // with a notice instead of rewriting the file.
+            if description.is_none()
+                && max_entries.is_none()
+                && min.is_none()
+                && max.is_none()
+                && add_field.is_none()
+            {
+                eprintln!(
+                    "Error: 'schema update {}' had no changes to apply \
+                     (set at least one of --description, --max-entries, --min, \
+                     --max, --add-field, or --name)",
+                    key
+                );
+                return Ok(kv::EXIT_INVALID_INPUT);
+            }
+
+            // W1: reject options that don't apply to this key's existing type.
+            // The key must exist for a type to gate against; if it doesn't,
+            // let update_key_meta report KeyNotFound (exit 1) below.
+            if let Some(def) = store.schema.keys.get(&key) {
+                let existing_type = def.value_type;
+                let flags = OptionFlags {
+                    max_entries: max_entries.is_some(),
+                    default: false, // `schema update` exposes no --default
+                    min: min.is_some(),
+                    max: max.is_some(),
+                    fields: false, // `schema update` exposes no --fields
+                    data: add_field.is_some(),
+                };
+                if let Err(msg) = validate_type_options(existing_type, &flags) {
+                    eprintln!("Error: {}", msg);
+                    return Ok(kv::EXIT_INVALID_INPUT);
+                }
+            }
+
+            // Parse --add-field if present.
+            let add_field_def = match add_field {
+                Some(ref spec) => match parse_data_field_spec(spec) {
+                    Ok(parsed) => Some(parsed),
+                    Err(msg) => {
+                        eprintln!("Error: {}", msg);
+                        return Ok(kv::EXIT_INVALID_INPUT);
+                    }
+                },
+                None => None,
+            };
+
+            match store.update_key_meta(&key, description, max_entries, min, max, add_field_def) {
+                Ok(()) => {
+                    println!("Updated {}", key);
+                    Ok(kv::EXIT_OK)
+                }
+                Err(e) => handle_kv_err(e),
+            }
         }
     }
 }
@@ -1210,6 +1549,52 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- parse_data_field_spec (schema add/update --data, --add-field) --
+
+    #[test]
+    fn parse_data_field_name_type() {
+        let (name, def) = parse_data_field_spec("note:string").unwrap();
+        assert_eq!(name, "note");
+        assert_eq!(def.field_type, DataFieldType::String);
+        assert!(!def.required);
+    }
+
+    #[test]
+    fn parse_data_field_required() {
+        let (name, def) = parse_data_field_spec("score:number:required").unwrap();
+        assert_eq!(name, "score");
+        assert_eq!(def.field_type, DataFieldType::Number);
+        assert!(def.required);
+    }
+
+    #[test]
+    fn parse_data_field_all_types() {
+        for (spec, ty) in [
+            ("a:string", DataFieldType::String),
+            ("b:number", DataFieldType::Number),
+            ("c:boolean", DataFieldType::Boolean),
+            ("d:array", DataFieldType::Array),
+            ("e:object", DataFieldType::Object),
+        ] {
+            assert_eq!(parse_data_field_spec(spec).unwrap().1.field_type, ty);
+        }
+    }
+
+    #[test]
+    fn parse_data_field_rejects_bad_type() {
+        assert!(parse_data_field_spec("x:notatype").is_err());
+    }
+
+    #[test]
+    fn parse_data_field_rejects_missing_type() {
+        assert!(parse_data_field_spec("justaname").is_err());
+    }
+
+    #[test]
+    fn parse_data_field_rejects_empty_name() {
+        assert!(parse_data_field_spec(":string").is_err());
+    }
 
     // -- parse_id_spec --
 
@@ -1618,5 +2003,355 @@ mod tests {
         ]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty field name"));
+    }
+
+    // -- W1: validate_type_options (pure gate) --
+
+    fn no_flags() -> OptionFlags {
+        OptionFlags {
+            max_entries: false,
+            default: false,
+            min: false,
+            max: false,
+            fields: false,
+            data: false,
+        }
+    }
+
+    #[test]
+    fn type_options_max_entries_only_history_list() {
+        let f = OptionFlags {
+            max_entries: true,
+            ..no_flags()
+        };
+        assert!(validate_type_options(ValueType::History, &f).is_ok());
+        assert!(validate_type_options(ValueType::List, &f).is_ok());
+        for vt in [ValueType::Counter, ValueType::String, ValueType::State] {
+            let err = validate_type_options(vt, &f).unwrap_err();
+            assert!(err.contains("--max-entries"), "{err}");
+        }
+    }
+
+    #[test]
+    fn type_options_min_max_only_counter() {
+        let fmin = OptionFlags {
+            min: true,
+            ..no_flags()
+        };
+        let fmax = OptionFlags {
+            max: true,
+            ..no_flags()
+        };
+        assert!(validate_type_options(ValueType::Counter, &fmin).is_ok());
+        assert!(validate_type_options(ValueType::Counter, &fmax).is_ok());
+        for vt in [
+            ValueType::History,
+            ValueType::List,
+            ValueType::String,
+            ValueType::State,
+        ] {
+            assert!(
+                validate_type_options(vt, &fmin)
+                    .unwrap_err()
+                    .contains("--min")
+            );
+            assert!(
+                validate_type_options(vt, &fmax)
+                    .unwrap_err()
+                    .contains("--max")
+            );
+        }
+    }
+
+    #[test]
+    fn type_options_default_only_counter_string_state() {
+        let f = OptionFlags {
+            default: true,
+            ..no_flags()
+        };
+        for vt in [ValueType::Counter, ValueType::String, ValueType::State] {
+            assert!(validate_type_options(vt, &f).is_ok());
+        }
+        for vt in [ValueType::History, ValueType::List] {
+            assert!(
+                validate_type_options(vt, &f)
+                    .unwrap_err()
+                    .contains("--default")
+            );
+        }
+    }
+
+    #[test]
+    fn type_options_fields_only_state() {
+        let f = OptionFlags {
+            fields: true,
+            ..no_flags()
+        };
+        assert!(validate_type_options(ValueType::State, &f).is_ok());
+        for vt in [
+            ValueType::Counter,
+            ValueType::History,
+            ValueType::List,
+            ValueType::String,
+        ] {
+            assert!(
+                validate_type_options(vt, &f)
+                    .unwrap_err()
+                    .contains("--fields")
+            );
+        }
+    }
+
+    #[test]
+    fn type_options_data_only_state_list() {
+        let f = OptionFlags {
+            data: true,
+            ..no_flags()
+        };
+        assert!(validate_type_options(ValueType::State, &f).is_ok());
+        assert!(validate_type_options(ValueType::List, &f).is_ok());
+        for vt in [ValueType::Counter, ValueType::History, ValueType::String] {
+            let err = validate_type_options(vt, &f).unwrap_err();
+            assert!(err.contains("--data/--add-field"), "{err}");
+        }
+    }
+
+    #[test]
+    fn type_options_no_flags_always_ok() {
+        for vt in [
+            ValueType::Counter,
+            ValueType::History,
+            ValueType::State,
+            ValueType::String,
+            ValueType::List,
+        ] {
+            assert!(validate_type_options(vt, &no_flags()).is_ok());
+        }
+    }
+
+    // -- W1 / S1: handler-path integration (exit codes + persistence) --
+
+    use crate::kv::KvStore;
+    use tempfile::TempDir;
+
+    fn store_for(schema_toml: &str) -> (KvStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("schema.toml");
+        let data_path = dir.path().join("data.json");
+        std::fs::write(&schema_path, schema_toml).unwrap();
+        let store = KvStore::load(&schema_path, &data_path).unwrap();
+        (store, dir)
+    }
+
+    const SCHEMA: &str = r#"
+[keys.ctr]
+type = "counter"
+min = 0
+
+[keys.hist]
+type = "history"
+max_entries = 5
+
+[keys.st]
+type = "state"
+fields = ["a", "b"]
+"#;
+
+    #[test]
+    fn schema_add_rejects_min_on_history() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Add {
+            key: "h2".to_string(),
+            r#type: SchemaType::History,
+            max_entries: None,
+            default: None,
+            min: Some(-5),
+            max: None,
+            description: None,
+            fields: vec![],
+            data: vec![],
+        };
+        let code = handle_kv_schema(&mut store, cmd).unwrap();
+        assert_eq!(code, kv::EXIT_INVALID_INPUT);
+        // Nonsense was not persisted.
+        assert!(!store.schema.keys.contains_key("h2"));
+    }
+
+    #[test]
+    fn schema_add_rejects_max_entries_on_counter() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Add {
+            key: "c2".to_string(),
+            r#type: SchemaType::Counter,
+            max_entries: Some(10),
+            default: None,
+            min: None,
+            max: None,
+            description: None,
+            fields: vec![],
+            data: vec![],
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+        assert!(!store.schema.keys.contains_key("c2"));
+    }
+
+    #[test]
+    fn schema_add_rejects_fields_on_list() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Add {
+            key: "l2".to_string(),
+            r#type: SchemaType::List,
+            max_entries: None,
+            default: None,
+            min: None,
+            max: None,
+            description: None,
+            fields: vec!["a".to_string()],
+            data: vec![],
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+        assert!(!store.schema.keys.contains_key("l2"));
+    }
+
+    #[test]
+    fn schema_add_accepts_appropriate_options() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Add {
+            key: "bounded".to_string(),
+            r#type: SchemaType::Counter,
+            max_entries: None,
+            default: Some("0".to_string()),
+            min: Some(-5),
+            max: Some(5),
+            description: Some("ok".to_string()),
+            fields: vec![],
+            data: vec![],
+        };
+        assert_eq!(handle_kv_schema(&mut store, cmd).unwrap(), kv::EXIT_OK);
+        assert!(store.schema.keys.contains_key("bounded"));
+    }
+
+    #[test]
+    fn schema_update_rejects_add_field_on_counter() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Update {
+            key: "ctr".to_string(),
+            name: None,
+            description: None,
+            max_entries: None,
+            min: None,
+            max: None,
+            add_field: Some("note:string".to_string()),
+            type_change: None,
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+        // No data block was written onto the counter.
+        assert!(store.schema.keys["ctr"].data.is_none());
+    }
+
+    #[test]
+    fn schema_update_rejects_max_entries_on_counter() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Update {
+            key: "ctr".to_string(),
+            name: None,
+            description: None,
+            max_entries: Some(99),
+            min: None,
+            max: None,
+            add_field: None,
+            type_change: None,
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+        assert!(store.schema.keys["ctr"].max_entries.is_none());
+    }
+
+    #[test]
+    fn schema_update_rejects_min_on_history() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Update {
+            key: "hist".to_string(),
+            name: None,
+            description: None,
+            max_entries: None,
+            min: Some(-1),
+            max: None,
+            add_field: None,
+            type_change: None,
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+        assert!(store.schema.keys["hist"].min.is_none());
+    }
+
+    #[test]
+    fn schema_update_accepts_appropriate_options() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let cmd = KvSchemaCommands::Update {
+            key: "hist".to_string(),
+            name: None,
+            description: Some("a log".to_string()),
+            max_entries: Some(10),
+            min: None,
+            max: None,
+            add_field: None,
+            type_change: None,
+        };
+        assert_eq!(handle_kv_schema(&mut store, cmd).unwrap(), kv::EXIT_OK);
+        assert_eq!(store.schema.keys["hist"].max_entries, Some(10));
+        assert_eq!(
+            store.schema.keys["hist"].description.as_deref(),
+            Some("a log")
+        );
+    }
+
+    // S1: a no-op update short-circuits with an error and does NOT rewrite.
+    #[test]
+    fn schema_update_noop_short_circuits() {
+        let (mut store, _dir) = store_for(SCHEMA);
+        let mtime_before = std::fs::metadata(&store.schema_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let cmd = KvSchemaCommands::Update {
+            key: "ctr".to_string(),
+            name: None,
+            description: None,
+            max_entries: None,
+            min: None,
+            max: None,
+            add_field: None,
+            type_change: None,
+        };
+        assert_eq!(
+            handle_kv_schema(&mut store, cmd).unwrap(),
+            kv::EXIT_INVALID_INPUT
+        );
+
+        // Schema file untouched (comments/formatting preserved): same content.
+        let after = std::fs::read_to_string(&store.schema_path).unwrap();
+        assert!(after.contains("[keys.ctr]"));
+        // And the original file (with comments-as-written) is byte-identical.
+        assert_eq!(after, SCHEMA);
+        let mtime_after = std::fs::metadata(&store.schema_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(mtime_before, mtime_after);
     }
 }

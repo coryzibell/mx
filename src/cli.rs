@@ -1770,6 +1770,21 @@ pub enum CreateType {
     List,
 }
 
+/// All five schema value types, for `kv schema add --type`.
+#[derive(Clone, Debug, ValueEnum)]
+pub enum SchemaType {
+    /// Counter (integer, optional min/max clamp)
+    Counter,
+    /// History (append-only, timestamped)
+    History,
+    /// State (named string fields)
+    State,
+    /// String (single scalar value)
+    String,
+    /// List (push/pop, ordered)
+    List,
+}
+
 /// Output format for `kv dump`.
 #[derive(Clone, Debug, ValueEnum)]
 pub enum DumpFormat {
@@ -2084,6 +2099,7 @@ pub enum KvCommands {
     },
 
     /// Rename a key, preserving all entries and data
+    /// (deprecated: use 'mx kv schema update <key> --name <new>')
     Rename {
         /// Current key name
         old_key: String,
@@ -2092,7 +2108,103 @@ pub enum KvCommands {
     },
 
     /// List all defined keys with their types and descriptions
+    /// (deprecated: use 'mx kv schema list')
     Keys,
+
+    /// Manage the schema: list, add, drop, and update key definitions
+    Schema {
+        #[command(subcommand)]
+        command: KvSchemaCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KvSchemaCommands {
+    /// List all defined keys with their types and descriptions
+    List,
+
+    /// Define a new key of any type
+    Add {
+        /// Key name
+        key: String,
+
+        /// Value type
+        #[arg(long, value_enum)]
+        r#type: SchemaType,
+
+        /// Maximum entries (history/list); oldest dropped when exceeded
+        #[arg(long)]
+        max_entries: Option<usize>,
+
+        /// Initial value (counter/string)
+        #[arg(long)]
+        default: Option<String>,
+
+        /// Minimum value, clamped (counter)
+        #[arg(long, allow_hyphen_values = true)]
+        min: Option<i64>,
+
+        /// Maximum value, clamped (counter)
+        #[arg(long, allow_hyphen_values = true)]
+        max: Option<i64>,
+
+        /// Human-readable description of the key's purpose
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Valid field names for a state key (repeatable or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        fields: Vec<String>,
+
+        /// Typed data field definition: name:type[:required] (repeatable).
+        /// type is one of string|number|boolean|array|object.
+        #[arg(long = "data")]
+        data: Vec<String>,
+    },
+
+    /// Remove a key's schema definition and its stored data entries
+    Drop {
+        /// Key name
+        key: String,
+
+        /// Required to drop a key that has stored entries
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Apply safe metadata changes to an existing key (no type changes)
+    Update {
+        /// Key name
+        key: String,
+
+        /// Rename the key (shares the same path as 'mx kv rename')
+        #[arg(long)]
+        name: Option<String>,
+
+        /// New description (pass "" to clear)
+        #[arg(long)]
+        description: Option<String>,
+
+        /// New max entries (history/list)
+        #[arg(long)]
+        max_entries: Option<usize>,
+
+        /// New minimum value (counter)
+        #[arg(long, allow_hyphen_values = true)]
+        min: Option<i64>,
+
+        /// New maximum value (counter)
+        #[arg(long, allow_hyphen_values = true)]
+        max: Option<i64>,
+
+        /// Add a new optional data field: name:type (e.g. note:string)
+        #[arg(long = "add-field")]
+        add_field: Option<String>,
+
+        /// Forbidden: type changes are not allowed; use 'mx kv migrate'
+        #[arg(long = "type")]
+        type_change: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

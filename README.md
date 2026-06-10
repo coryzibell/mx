@@ -131,7 +131,13 @@ mx kv set context --json '{"goal":"done","phase":"writing"}'
 mx kv set mytensor --json '[0.4, 0.6, 0.5]'
 echo '{"goal":"done"}' | mx kv set context --json -
 
-# Auto-create a key in the schema and push in one step
+# Schema management: define, list, edit, and remove keys
+mx kv schema add puns --type history --max-entries 500
+mx kv schema list                              # replaces 'kv keys'
+mx kv schema update puns --description "the good ones"
+mx kv schema drop puns --force                 # removes definition + data
+
+# Auto-create a key in the schema and push in one step (inline shortcut)
 mx kv push puns "the joke" --create history
 mx kv push ideas "wild thought" --create list --max-entries 500
 
@@ -182,7 +188,8 @@ mx kv migrate projects --dry-run
 mx kv migrate projects --prune
 
 # Rename a key (preserves all entries, IDs, and data)
-mx kv rename old_decisions archived_decisions
+mx kv schema update old_decisions --name archived_decisions
+# (the top-level 'mx kv rename' still works but is deprecated)
 
 # Per-entry memory links (bridge KV entries to the knowledge graph)
 mx kv push decisions "adopted memory links" --memory kn-abc123
