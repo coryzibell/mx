@@ -164,9 +164,14 @@ echo "hello" > test.txt
 mx commit "add test file" -a
 ```
 
-The `-a` flag stages all changes before committing, just like
-`git commit -a`. You will see a footer line showing which algorithms and
-dictionaries were used, something like `[sha256:ocean|zstd:forest]`.
+The `-a` flag stages all changes (tracked **and** untracked, via
+`git add -A`) before committing. Without `-a`, `mx commit` behaves like
+plain `git commit`: it commits only what is already staged and exits
+with `No staged changes to
+commit` if nothing is staged -- it does not auto-stage your working
+tree. After a successful commit you will see a footer line showing which
+algorithms and dictionaries were used, something like
+`[sha256:ocean|zstd:forest]`.
 
 ### Read it back
 
