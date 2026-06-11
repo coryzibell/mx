@@ -211,15 +211,24 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot_product / (magnitude_a * magnitude_b)
 }
 
-/// Auto-embed a knowledge entry after add/update.
+/// Auto-embed a knowledge entry using a pre-constructed provider and tokenizer.
+///
+/// This is the core embedding implementation. It accepts an already-constructed
+/// `TractProvider` and tokenizer so a batch caller can hoist model construction
+/// ONCE above a loop and amortize the ~435 MB cold-load across N entries.
 ///
 /// For short entries (<=400 tokens): stores a single embedding on the entry.
 /// For long entries (>400 tokens): splits into overlapping chunks, embeds each
 /// chunk separately, stores chunks in `embedding_chunk` table, and stores a
 /// mean vector on the entry for auto_anchor compatibility.
-pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+pub(crate) fn auto_embed_with(
+    entry_id: &str,
+    db: &dyn store::KnowledgeStore,
+    provider: &crate::embeddings::TractProvider,
+    chunking_tokenizer: &tokenizers::Tokenizer,
+) -> Result<()> {
     use crate::chunking::{ChunkConfig, chunk_text};
-    use crate::embeddings::{EmbeddingProvider, TractProvider};
+    use crate::embeddings::EmbeddingProvider;
 
     let ctx = match std::env::var("MX_CURRENT_AGENT") {
         Ok(agent) if !agent.is_empty() => store::AgentContext::for_agent(agent),
@@ -231,14 +240,12 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
         None => return Ok(()),
     };
 
-    let provider = TractProvider::new()?;
     let embedding_text = entry.embedding_text();
     let config = ChunkConfig::default();
     // Use load_tokenizer() (no truncation) for chunking — the provider's
     // tokenizer truncates at 512 which would hide content beyond that point.
     // Chunking must see ALL tokens to split them correctly.
-    let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
-    let chunks = chunk_text(&embedding_text, &chunking_tokenizer, &config);
+    let chunks = chunk_text(&embedding_text, chunking_tokenizer, &config);
 
     if chunks.len() == 1 {
         // Short entry: single embedding, no chunks
@@ -302,6 +309,23 @@ pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Resu
     Ok(())
 }
 
+/// Auto-embed a knowledge entry after add/update.
+///
+/// Thin wrapper around `auto_embed_with` that constructs the `TractProvider`
+/// and chunking tokenizer inline. Use this on single-entry write paths
+/// (Add, Update, Edit, Append, Prepend, Restore) where paying one model
+/// cold-load per call is acceptable.
+///
+/// For batch callers that need to amortize the ~435 MB model cold-load across
+/// N entries, use `auto_embed_with` directly: construct the provider and
+/// tokenizer once, then call `auto_embed_with` in the loop.
+pub(crate) fn auto_embed(entry_id: &str, db: &dyn store::KnowledgeStore) -> Result<()> {
+    use crate::embeddings::TractProvider;
+    let provider = TractProvider::new()?;
+    let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
+    auto_embed_with(entry_id, db, &provider, &chunking_tokenizer)
+}
+
 /// Whether the write path should run `auto_anchor` synchronously after a
 /// mutation (Add/Update/Edit/Append/Prepend/Restore).
 ///
@@ -328,6 +352,32 @@ pub(crate) fn write_anchor_enabled(no_auto_anchor: bool) -> bool {
     let skip_via_env =
         std::env::var("MX_SKIP_WRITE_ANCHOR").is_ok_and(|v| v == "1" || v.to_lowercase() == "true");
     !no_auto_anchor && !skip_via_env
+}
+
+/// Whether the write path should run `auto_embed` synchronously after a
+/// mutation (Add/Update/Edit/Append/Prepend/Restore).
+///
+/// Embedding on the write path is disabled when EITHER:
+///   - the caller passed `--no-embed` (`no_embed == true`), or
+///   - `MX_SKIP_WRITE_EMBED` is set to `1`/`true` (case-insensitive).
+///
+/// The env-var parsing mirrors the `MX_SKIP_SCHEMA` convention
+/// (`connection.rs`) so the project keeps one rule for boolean opt-out flags.
+///
+/// `MX_SKIP_WRITE_EMBED` is a deployment opt-out: it lets a caller defer
+/// embedding entirely to the explicit `mx memory embed --all` batch command
+/// (e.g. a nightly cron), which is never gated by this flag.
+///
+/// Skipping embedding does NOT affect durability or keyword/tag search.
+/// By the time this gate is evaluated the entry has already been
+/// `upsert_knowledge`d and read-back verified, so the write is provably
+/// durable. Entries written with `--no-embed` appear in keyword and tag
+/// searches but are absent from `--semantic` (vector) search results until
+/// `mx memory embed --all` runs.
+pub(crate) fn write_embed_enabled(no_embed: bool) -> bool {
+    let skip_via_env =
+        std::env::var("MX_SKIP_WRITE_EMBED").is_ok_and(|v| v == "1" || v.to_lowercase() == "true");
+    !no_embed && !skip_via_env
 }
 
 /// Auto-anchor a knowledge entry after add/update
@@ -1350,6 +1400,96 @@ mod auto_anchor_tests {
         assert!(
             got.is_some(),
             "a write with anchoring skipped must persist across a drop+reopen (no commit_entry needed)"
+        );
+    }
+
+    // =====================================================================
+    // MX_SKIP_WRITE_EMBED opt-out
+    //
+    // Mirrors the MX_SKIP_WRITE_ANCHOR tests above. `write_embed_enabled` is
+    // the single source of truth for the embed gate; these tests cover every
+    // accepted value plus the `--no-embed` CLI flag.
+    // =====================================================================
+
+    /// Save the current MX_SKIP_WRITE_EMBED value, set it (or clear it),
+    /// evaluate the gate, then restore — so the env state never leaks.
+    /// SAFETY: process-wide env mutation, serialized via `#[serial]`.
+    fn embed_gate_with_env(value: Option<&str>, no_embed: bool) -> bool {
+        let prev = std::env::var("MX_SKIP_WRITE_EMBED").ok();
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MX_SKIP_WRITE_EMBED", v),
+                None => std::env::remove_var("MX_SKIP_WRITE_EMBED"),
+            }
+        }
+        let enabled = write_embed_enabled(no_embed);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_SKIP_WRITE_EMBED", v),
+                None => std::env::remove_var("MX_SKIP_WRITE_EMBED"),
+            }
+        }
+        enabled
+    }
+
+    #[test]
+    #[serial]
+    fn write_embed_enabled_unset_flag_runs_embedding() {
+        assert!(
+            embed_gate_with_env(None, false),
+            "unset MX_SKIP_WRITE_EMBED must leave embedding ON (default behavior preserved)"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_embed_enabled_flag_1_skips_embedding() {
+        assert!(
+            !embed_gate_with_env(Some("1"), false),
+            "MX_SKIP_WRITE_EMBED=1 must turn write-path embedding OFF"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_embed_enabled_flag_true_skips_embedding() {
+        assert!(
+            !embed_gate_with_env(Some("true"), false),
+            "MX_SKIP_WRITE_EMBED=true must turn write-path embedding OFF"
+        );
+        assert!(
+            !embed_gate_with_env(Some("TRUE"), false),
+            "MX_SKIP_WRITE_EMBED is case-insensitive for 'true'"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_embed_enabled_other_values_run_embedding() {
+        // Only "1"/"true" opt out; anything else (incl. "0", "false", "yes")
+        // leaves embedding on, matching the MX_SKIP_SCHEMA convention.
+        assert!(embed_gate_with_env(Some("0"), false), "'0' must not opt out");
+        assert!(
+            embed_gate_with_env(Some("false"), false),
+            "'false' must not opt out"
+        );
+        assert!(
+            embed_gate_with_env(Some(""), false),
+            "empty must not opt out"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn write_embed_enabled_cli_flag_always_skips() {
+        // --no-embed closes the gate regardless of the env var.
+        assert!(
+            !embed_gate_with_env(None, true),
+            "--no-embed must skip embedding even with the env flag unset"
+        );
+        assert!(
+            !embed_gate_with_env(Some("0"), true),
+            "--no-embed must skip embedding even when env flag would allow it"
         );
     }
 }

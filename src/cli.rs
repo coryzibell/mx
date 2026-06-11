@@ -668,6 +668,10 @@ pub enum MemoryCommands {
         /// Skip automatic anchor generation
         #[arg(long)]
         no_auto_anchor: bool,
+
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
     },
 
     /// Update an existing entry in the database
@@ -819,6 +823,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         no_auto_anchor: bool,
 
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -849,6 +857,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         no_auto_anchor: bool,
 
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -875,6 +887,10 @@ pub enum MemoryCommands {
         /// Skip automatic anchor generation
         #[arg(long)]
         no_auto_anchor: bool,
+
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -903,6 +919,10 @@ pub enum MemoryCommands {
         #[arg(long)]
         no_auto_anchor: bool,
 
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -921,9 +941,44 @@ pub enum MemoryCommands {
         #[arg(long)]
         no_auto_anchor: bool,
 
+        /// Skip synchronous embedding generation on write
+        #[arg(long)]
+        no_embed: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Add multiple entries in a single invocation from a JSONL file or stdin.
+    ///
+    /// Each line of input must be a JSON object whose fields match the `mx
+    /// memory add` arguments (category, title, content, tags, source_agent,
+    /// etc.). The store is opened ONCE and the embedding model is loaded ONCE
+    /// for the whole batch, amortizing the ~435 MB cold-load across all
+    /// entries. Malformed lines are skipped and reported; one bad entry does
+    /// not abort the rest (partial-success semantics). Exits non-zero when any
+    /// entry failed.
+    ///
+    /// Example (stdin):
+    ///   printf '{"category":"insight","title":"T1","content":"C1","source_agent":"soren"}\n...' \
+    ///     | mx memory add-batch
+    ///
+    /// Example (file):
+    ///   mx memory add-batch --file entries.jsonl
+    AddBatch {
+        /// Path to a JSONL file (one JSON object per line). If omitted, reads
+        /// from stdin. Use --file when piping through a sudo wrapper that may
+        /// consume stdin.
+        #[arg(short, long)]
+        file: Option<String>,
+
+        /// Skip synchronous embedding generation for the whole batch.
+        /// Defers embedding to the next `mx memory embed --all` run (e.g. a
+        /// nightly cron). Keyword and tag search are unaffected; only
+        /// `--semantic` search misses uembedded entries.
+        #[arg(long)]
+        no_embed: bool,
     },
 
     /// Generate embedding for a knowledge entry
