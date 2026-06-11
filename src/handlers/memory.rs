@@ -2247,9 +2247,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let str_field = |key: &str| -> Option<String> {
                     v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
                 };
-                let bool_field = |key: &str| -> bool {
-                    v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
-                };
+                let bool_field =
+                    |key: &str| -> bool { v.get(key).and_then(|x| x.as_bool()).unwrap_or(false) };
                 let int_field = |key: &str| -> Option<i32> {
                     v.get(key).and_then(|x| x.as_i64()).map(|n| n as i32)
                 };
@@ -2287,8 +2286,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     let routing = match route_fact_type(&fact_type) {
                         Ok(r) => r,
                         Err(e) => {
-                            entry_errors
-                                .push((line_idx + 1, format!("invalid fact type: {}", e)));
+                            entry_errors.push((line_idx + 1, format!("invalid fact type: {}", e)));
                             continue;
                         }
                     };
@@ -2303,7 +2301,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     let trigger_list: Vec<String> = str_field("triggers")
                         .map(|t| knowledge::normalize_triggers(t.split(',')))
                         .unwrap_or_default();
-                    let mut tag_list: Vec<String> = routing.tags.iter().map(|s| s.to_string()).collect();
+                    let mut tag_list: Vec<String> =
+                        routing.tags.iter().map(|s| s.to_string()).collect();
                     if let Some(t) = str_field("tags") {
                         tag_list.extend(
                             t.split(',')
@@ -2323,7 +2322,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     );
                     metadata.insert(
                         "date".to_string(),
-                        serde_json::Value::String(chrono::Local::now().format("%Y-%m-%d").to_string()),
+                        serde_json::Value::String(
+                            chrono::Local::now().format("%Y-%m-%d").to_string(),
+                        ),
                     );
                     if routing.category == "thread" {
                         metadata.insert(
@@ -2414,7 +2415,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                                 );
                             }
                             Ok(Some(_)) => {
-                                if let Err(e) = db.add_relationship(&id, &session_ref, "extracted_from") {
+                                if let Err(e) =
+                                    db.add_relationship(&id, &session_ref, "extracted_from")
+                                {
                                     eprintln!(
                                         "  line {}: Warning: EXTRACTED_FROM edge failed: {}",
                                         line_idx + 1,
@@ -2614,8 +2617,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             added_ids.push(entry.id);
                         }
                         Err(e) => {
-                            entry_errors
-                                .push((line_idx + 1, format!("write error: {}", e)));
+                            entry_errors.push((line_idx + 1, format!("write error: {}", e)));
                             continue;
                         }
                     }
@@ -2624,7 +2626,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Report any per-entry errors (partial success: don't abort on them).
             if !entry_errors.is_empty() {
-                eprintln!("\nBatch errors ({} of {} entries failed):", entry_errors.len(), lines.len());
+                eprintln!(
+                    "\nBatch errors ({} of {} entries failed):",
+                    entry_errors.len(),
+                    lines.len()
+                );
                 for (lineno, msg) in &entry_errors {
                     eprintln!("  line {}: {}", lineno, msg);
                 }
@@ -2635,16 +2641,15 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // load across N entries rather than paying it N times.
             if !added_ids.is_empty() && !no_embed {
                 use crate::embeddings::TractProvider;
-                println!("\nEmbedding {} entr{}...", added_ids.len(), if added_ids.len() == 1 { "y" } else { "ies" });
+                println!(
+                    "\nEmbedding {} entr{}...",
+                    added_ids.len(),
+                    if added_ids.len() == 1 { "y" } else { "ies" }
+                );
                 let provider = TractProvider::new()?;
                 let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
                 for (i, entry_id) in added_ids.iter().enumerate() {
-                    println!(
-                        "  Embedding {}/{}: {}",
-                        i + 1,
-                        added_ids.len(),
-                        entry_id
-                    );
+                    println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
                     crate::helpers::auto_embed_with(
                         entry_id,
                         db.as_ref(),
@@ -2654,7 +2659,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
                 println!("Embedding complete.");
             } else if no_embed && !added_ids.is_empty() {
-                println!("\n(embed skipped for {} entries — run `mx memory embed --all` to embed)", added_ids.len());
+                println!(
+                    "\n(embed skipped for {} entries — run `mx memory embed --all` to embed)",
+                    added_ids.len()
+                );
             }
 
             // Summary

@@ -1468,7 +1468,10 @@ mod auto_anchor_tests {
     fn write_embed_enabled_other_values_run_embedding() {
         // Only "1"/"true" opt out; anything else (incl. "0", "false", "yes")
         // leaves embedding on, matching the MX_SKIP_SCHEMA convention.
-        assert!(embed_gate_with_env(Some("0"), false), "'0' must not opt out");
+        assert!(
+            embed_gate_with_env(Some("0"), false),
+            "'0' must not opt out"
+        );
         assert!(
             embed_gate_with_env(Some("false"), false),
             "'false' must not opt out"
