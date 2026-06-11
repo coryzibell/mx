@@ -1852,7 +1852,6 @@ pub enum KvCommands {
 
         /// Positional arguments: value (string/counter), field value (state),
         /// or key=value pairs (batch state set)
-        #[arg(trailing_var_arg = true)]
         args: Vec<String>,
 
         /// JSON value: object for state batch, array for tensor positional set.
