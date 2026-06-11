@@ -239,14 +239,14 @@ Key environment variables recognized by mx. All boolean opt-outs follow the
 same convention: `"1"` or `"true"` (case-insensitive) to disable; any other
 value leaves the default behavior on.
 
+SurrealDB connection variables (`MX_SURREAL_MODE`, `MX_SURREAL_URL`,
+`MX_SURREAL_NS`, `MX_SURREAL_DB`, etc.) are documented in full with their
+defaults in #link("paths.html#env-surreal")[filesystem layout → SurrealDB connection].
+
 #table(
   columns: (auto, auto, auto, 1fr),
   [*Variable*], [*Type*], [*Default*], [*Description*],
   [`MX_HOME`], [path], [`~/.mx/`], [Root directory for all mx data. Override to move the whole tree.],
-  [`MX_SURREAL_MODE`], [string], [`embedded`], [`embedded` (local SurrealKV file) or `network` (remote WebSocket). Embedding model calls only work in network mode.],
-  [`MX_SURREAL_URL`], [string], [—], [WebSocket URL for network mode (e.g. `ws://localhost:8000`).],
-  [`MX_SURREAL_NS`], [string], [—], [SurrealDB namespace for network mode.],
-  [`MX_SURREAL_DB`], [string], [—], [SurrealDB database name for network mode.],
   [`MX_CURRENT_AGENT`], [string], [—], [Active agent identifier. Used as default `source_agent` on writes and to scope private entry visibility.],
   [`MX_SKIP_SCHEMA`], [bool], [`false`], [Skip automatic schema application on connection. Use `mx migrate` to apply the schema explicitly when set.],
   [`MX_SKIP_WRITE_ANCHOR`], [bool], [`false`], [Skip synchronous `auto-anchor` on every write. Equivalent to passing `--no-auto-anchor` globally. Useful when a nightly `mx memory auto-anchor` handles anchoring in batch.],
