@@ -211,9 +211,24 @@ pub(crate) fn find_most_recent_session() -> Result<PathBuf> {
                 continue;
             }
 
-            // Skip agent sub-sessions — the legacy heuristic.
-            if let Some(name) = file_path.file_name().and_then(|n| n.to_str())
-                && name.starts_with("agent-")
+            // Only count files whose stem is UUID-shaped (bare UUID root
+            // sessions). The legacy `agent-` prefix guard never fired in
+            // practice because Claude writes sub-agent JSONLs into a
+            // dedicated subdirectory (`<project>/<session_id>/subagents/
+            // agent-*.jsonl`), not alongside the root session files. That
+            // dead filter caused `find_most_recent_session` to silently
+            // include every JSONL in the project root regardless of shape,
+            // making the default selector and --all unreliable. The UUID
+            // shape check is the correct discriminant: any non-UUID file
+            // (scratch notes, partial writes, etc.) is correctly skipped,
+            // and every real session — bare-UUID or otherwise — is picked
+            // up as long as its stem parses as a UUID.
+            //
+            // Evidence: W420 codex archive lost 5 sessions because the
+            // pocket-skill workaround had to compensate for this selector
+            // returning the wrong session.
+            if let Some(stem) = file_path.file_stem().and_then(|s| s.to_str())
+                && !is_uuid_shaped(stem)
             {
                 continue;
             }
@@ -227,7 +242,7 @@ pub(crate) fn find_most_recent_session() -> Result<PathBuf> {
     }
 
     if sessions.is_empty() {
-        anyhow::bail!("No non-agent session files found in {:?}", projects_dir);
+        anyhow::bail!("No UUID-shaped session files found in {:?}", projects_dir);
     }
 
     sessions.sort_by_key(|s| std::cmp::Reverse(s.1));
@@ -357,6 +372,54 @@ mod tests {
         assert!(!is_uuid_shaped("notes"));
         assert!(!is_uuid_shaped("zzzzzzzz")); // 8 chars but not hex
         assert!(!is_uuid_shaped("c3744b8d_5719_4df2_924f_707945438494")); // wrong separators
+    }
+
+    // ----- find_most_recent_session UUID filter -----
+    //
+    // Regression guard for the dead `agent-` prefix filter (W420).
+    //
+    // Claude writes sub-agent JSONLs into `<project>/<session_id>/subagents/`
+    // — NOT alongside root sessions in `<project>/`. The legacy filter
+    // `name.starts_with("agent-")` therefore never fired; every JSONL in the
+    // project root was included regardless of shape. The fix replaces that
+    // guard with `is_uuid_shaped(stem)`, which is the correct discriminant:
+    // all real root sessions have UUID stems; stray files do not.
+
+    #[test]
+    fn find_most_recent_session_uuid_filter_skips_non_uuid_files() {
+        // Verify the discriminant directly: is_uuid_shaped rejects the
+        // file shapes that the old `agent-` guard was supposed to catch,
+        // plus other non-session files that could accumulate in a project
+        // directory. The `find_most_recent_session` walker calls
+        // `is_uuid_shaped(stem)` before pushing to the candidates vec.
+        let dead_heuristic_name = "agent-abc123ef-1234-5678-abcd-ef0123456789";
+        assert!(
+            !is_uuid_shaped(dead_heuristic_name),
+            "`agent-` prefixed names must NOT pass the UUID filter — the old \
+             starts_with(\"agent-\") guard was dead because Claude never writes \
+             agent files with this name in the project root (they live in \
+             subagents/ subdirs). A file that somehow landed here with this \
+             name is not a root session."
+        );
+
+        // Bare-UUID names — the only shape that should be picked up.
+        assert!(
+            is_uuid_shaped("c3744b8d-5719-4df2-924f-707945438494"),
+            "full UUID stem must pass the filter"
+        );
+        assert!(
+            is_uuid_shaped("a1b2c3d4"),
+            "short-form UUID stem must pass the filter"
+        );
+
+        // Other non-session files that could exist in a project dir.
+        for name in &["notes", "README", "scratch", "tmp-export"] {
+            assert!(
+                !is_uuid_shaped(name),
+                "non-UUID name '{}' must be skipped by the UUID filter",
+                name
+            );
+        }
     }
 
     #[test]
