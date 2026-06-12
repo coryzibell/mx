@@ -89,4 +89,8 @@ proptest = "1"
 name = "mx"
 path = "src/main.rs"
 
+[patch.crates-io]
+tract-linalg = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
+tract-data = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
+
 
