@@ -89,6 +89,14 @@ proptest = "1"
 name = "mx"
 path = "src/main.rs"
 
+# DO NOT REMOVE: tract upstream cannot build aarch64-pc-windows-msvc — cl.exe
+# silently ignores the GAS-syntax .S SIMD kernels and lib.exe fails with
+# LNK1181. The fork branch carries the fix (clang override + masm gate,
+# linalg/build.rs). Removing this section kills the arm64-windows release leg
+# (proven: PR #395 removed it, v0.1.207 release failed; restored in #394).
+# The fork branch must be rebased when bumping tract; old revs are preserved
+# as patch-* tags. A "patch was not used" warning means the fork version no
+# longer matches resolution — fix the mismatch, do not delete the patch.
 [patch.crates-io]
 tract-linalg = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
 tract-data = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
