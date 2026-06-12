@@ -516,10 +516,75 @@ impl SurrealDatabase {
     /// silently writing to prod. Unlike `open_in_memory`, this persists to
     /// disk at `path`, so a test can drop the handle and reopen the same
     /// store to prove durability.
+    ///
+    /// **`path` MUST live under the OS temp dir** (e.g. derived from
+    /// `tempfile::tempdir()`). A fixed/literal absolute path gets baked into
+    /// the SurrealKV manifest and outlives the OS that wrote it — a
+    /// Windows-absolute path once materialized as a literal `C:` directory on
+    /// Linux (mx #388). This call asserts the constraint and panics on a
+    /// non-temp path; pass a `tempdir()`-derived path.
     #[cfg(test)]
     pub fn open_file_backed_for_test<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         let config = SurrealConfig::default(); // always Embedded, never network
+
+        // GUARDRAIL (#388): the supplied `path` MUST live under the OS temp
+        // dir. A fixed/literal absolute path (e.g. a hardcoded "examples/foo"
+        // or a Windows "C:\\..." string) opened as a SurrealKV store gets its
+        // OS-bound absolute path string baked into the SurrealKV manifest.
+        // That path then OUTLIVES the OS it was created on: a manifest written
+        // on a Windows CI runner materialized a literal `C:` directory when the
+        // store was later opened on Linux. Forcing tempdir() keeps every
+        // file-backed test store ephemeral and OS-local, so the pattern that
+        // produced #388 cannot regress.
+        //
+        // We canonicalize before comparing because temp_dir() is frequently a
+        // symlink (/tmp -> /private/tmp on macOS, /var -> /private/var, etc.).
+        // Canonicalizing only resolves symlinks for components that EXIST on
+        // disk, and the store path (and possibly several of its parents) does
+        // not exist yet at this point — the connect step creates it. A caller
+        // may legitimately pass `tempdir().path().join("a/b/store.surreal")`,
+        // where `a/` and `b/` have not been created. Canonicalizing such a
+        // path (or its immediate parent) Errs, and falling back to the
+        // UN-resolved literal defeats the whole point: on macOS the temp root
+        // canonicalizes to /private/var/... while the unresolved probe stays
+        // /var/..., so starts_with() would FALSE-REJECT a genuinely-temp path.
+        //
+        // Fix: walk the probe up to its NEAREST EXISTING ANCESTOR and
+        // canonicalize THAT. The non-existent tail (a/b/store.surreal) cannot
+        // affect containment — if the nearest existing ancestor is under the
+        // canonicalized temp root, every descendant is too. We apply the same
+        // fallback discipline to both sides: each is canonicalized when it
+        // exists and left as its literal self only when canonicalization is
+        // genuinely impossible (so the two sides are resolved symmetrically).
+        fn nearest_existing_ancestor(p: &Path) -> &Path {
+            let mut cur = p;
+            loop {
+                if cur.exists() {
+                    return cur;
+                }
+                match cur.parent() {
+                    Some(parent) => cur = parent,
+                    None => return cur,
+                }
+            }
+        }
+
+        let temp_root = std::env::temp_dir();
+        let canon_temp = std::fs::canonicalize(&temp_root).unwrap_or(temp_root);
+        let probe = nearest_existing_ancestor(path);
+        let canon_probe = std::fs::canonicalize(probe).unwrap_or_else(|_| probe.to_path_buf());
+        assert!(
+            canon_probe.starts_with(&canon_temp),
+            "open_file_backed_for_test refuses a path outside the OS temp dir: \
+             {} is not under {} — fixed/literal absolute paths get persisted \
+             into SurrealKV manifests and outlive the OS that wrote them \
+             (a Windows-absolute path once materialized as a literal `C:` dir \
+             on Linux; see mx issue #388). Pass a tempfile::tempdir()-derived \
+             path instead.",
+            path.display(),
+            canon_temp.display()
+        );
 
         // Loudly refuse to proceed if anything ever flips this to a network
         // endpoint — a test must NEVER be able to reach the live DB.
