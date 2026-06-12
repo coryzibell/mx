@@ -85,10 +85,6 @@ features = ["user-hooks"]
 serial_test = "3"
 proptest = "1"
 
-[patch.crates-io]
-tract-linalg = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
-tract-data = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
-
 [[bin]]
 name = "mx"
 path = "src/main.rs"

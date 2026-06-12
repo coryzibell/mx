@@ -1,5 +1,8 @@
 # Rust
 /target
+# Also ignore nested Cargo target/ dirs (e.g. sub-crate experiments) — the
+# root-anchored /target above only matches the workspace root.
+target/
 **/*.rs.bk
 *.pdb
 
