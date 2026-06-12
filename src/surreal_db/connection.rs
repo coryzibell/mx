@@ -521,6 +521,38 @@ impl SurrealDatabase {
         let path = path.as_ref();
         let config = SurrealConfig::default(); // always Embedded, never network
 
+        // GUARDRAIL (#388): the supplied `path` MUST live under the OS temp
+        // dir. A fixed/literal absolute path (e.g. a hardcoded "examples/foo"
+        // or a Windows "C:\\..." string) opened as a SurrealKV store gets its
+        // OS-bound absolute path string baked into the SurrealKV manifest.
+        // That path then OUTLIVES the OS it was created on: a manifest written
+        // on a Windows CI runner materialized a literal `C:` directory when the
+        // store was later opened on Linux. Forcing tempdir() keeps every
+        // file-backed test store ephemeral and OS-local, so the pattern that
+        // produced #388 cannot regress.
+        //
+        // We canonicalize before comparing because temp_dir() is frequently a
+        // symlink (/tmp -> /private/tmp on macOS, /var -> /private/var, etc.).
+        // The store path itself usually does not exist yet at this point (the
+        // connect step creates it), so we canonicalize its *parent* — which a
+        // tempdir()-derived caller has already created — and compare that
+        // against the canonicalized temp root.
+        let temp_root = std::env::temp_dir();
+        let canon_temp = std::fs::canonicalize(&temp_root).unwrap_or(temp_root);
+        let probe = path.parent().unwrap_or(path);
+        let canon_probe = std::fs::canonicalize(probe).unwrap_or_else(|_| probe.to_path_buf());
+        assert!(
+            canon_probe.starts_with(&canon_temp),
+            "open_file_backed_for_test refuses a path outside the OS temp dir: \
+             {} is not under {} — fixed/literal absolute paths get persisted \
+             into SurrealKV manifests and outlive the OS that wrote them \
+             (a Windows-absolute path once materialized as a literal `C:` dir \
+             on Linux; see mx issue #388). Pass a tempfile::tempdir()-derived \
+             path instead.",
+            path.display(),
+            canon_temp.display()
+        );
+
         // Loudly refuse to proceed if anything ever flips this to a network
         // endpoint — a test must NEVER be able to reach the live DB.
         assert!(

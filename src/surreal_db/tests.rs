@@ -36,6 +36,20 @@ fn test_embedded_connect_creates_directory() {
 }
 
 #[test]
+#[should_panic(expected = "outside the OS temp dir")]
+fn test_open_file_backed_for_test_rejects_non_temp_path() {
+    // GUARDRAIL (#388): a fixed/literal absolute path outside the OS temp
+    // dir must be refused, because SurrealKV bakes the absolute path string
+    // into its manifest and that path outlives the OS that wrote it (a
+    // Windows-absolute path once materialized as a literal `C:` dir on
+    // Linux). We use CARGO_MANIFEST_DIR: a stable, existing, non-temp
+    // absolute path on every platform, so its parent canonicalizes cleanly
+    // and the guardrail (not a missing-dir error) is what trips.
+    let non_temp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixed.surreal");
+    let _ = SurrealDatabase::open_file_backed_for_test(&non_temp);
+}
+
+#[test]
 fn test_upsert_applicability_type_with_datetime() {
     use crate::types::ApplicabilityType;
 
