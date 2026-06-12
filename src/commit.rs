@@ -588,6 +588,16 @@ fn get_pr_diff(number: u32) -> Result<String> {
 /// so the squash subject -- and thus GitHub's "(#NNN)" issue auto-close
 /// behavior -- is unchanged when those flags are present.
 ///
+/// NOTE: the garble protection only actually engages for `squash` and
+/// `merge` (merge-commit) -- the two methods that produce a *new* merge
+/// commit whose message gh would otherwise auto-concatenate. On the
+/// `rebase` path there is no merge commit: gh replays the branch's
+/// per-commit encoded commits verbatim, each of which decodes fine on its
+/// own. Consequently `--subject`/`--body` have nothing to title on rebase
+/// and gh silently ignores them (it does not error). We still pass them
+/// uniformly here for code simplicity; a future reader should not assume
+/// `--subject` takes effect on the rebase path.
+///
 /// `--admin` (immediate, admin-privilege merge that bypasses base-branch
 /// policy such as REVIEW_REQUIRED) and `--auto` (merge once requirements are
 /// met) are simple passthroughs to gh; clap enforces their mutual exclusivity.
@@ -705,10 +715,27 @@ pub fn pr_merge(
         .context("Failed to run gh pr merge")?;
 
     if !output.status.success() {
-        bail!(
-            "gh pr merge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface the raw stderr verbatim, then ADD actionable interpretation
+        // for the two failure modes the new --admin/--auto flags introduce.
+        // Only hint when the relevant flag was actually used and gh's stderr
+        // matches -- substring match is deliberately loose; gh's exact wording
+        // varies, so we key on stable fragments.
+        let lower = stderr.to_lowercase();
+        let mut hint = String::new();
+        if admin
+            && (lower.contains("admin")
+                || lower.contains("permission")
+                || lower.contains("not authorized")
+                || lower.contains("must be a")
+                || lower.contains("forbidden"))
+        {
+            hint = "\nhint: --admin requires admin merge rights on this repository; you appear to lack them.".to_string();
+        } else if auto && (lower.contains("auto-merge") || lower.contains("auto merge")) {
+            hint = "\nhint: --auto requires auto-merge to be enabled in the repository settings."
+                .to_string();
+        }
+        bail!("gh pr merge failed: {}{}", stderr, hint);
     }
 
     if auto {
@@ -716,6 +743,10 @@ pub fn pr_merge(
         // cleanup (the source branch still exists and the target branch is
         // not yet updated). Deleting/switching now would be premature.
         println!("Queued PR #{} for auto-merge ({})", number, method);
+        println!(
+            "Branch cleanup is deferred until the queued merge completes; \
+             re-run cleanup or delete the source branch manually afterward."
+        );
         println!("{}", String::from_utf8_lossy(&output.stdout));
         return Ok(());
     }

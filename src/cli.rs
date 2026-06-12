@@ -289,14 +289,18 @@ pub enum PrCommands {
         no_cleanup: bool,
 
         /// Merge immediately with admin privileges, bypassing base-branch policy
-        /// (e.g. REVIEW_REQUIRED). Passes --admin to gh while keeping mx's encoded
-        /// squash message. Mutually exclusive with --auto.
+        /// (e.g. REVIEW_REQUIRED). Passes --admin to gh while keeping mx's message
+        /// encoded for the selected merge method. Mutually exclusive with --auto.
+        /// clap's conflicts_with is symmetric, so declaring it once here also
+        /// rejects --auto --admin; no need to repeat it on `auto`.
         #[arg(long, conflicts_with = "auto")]
         admin: bool,
 
         /// Merge automatically once all merge requirements are met. Passes --auto to
-        /// gh while keeping mx's encoded squash message. Mutually exclusive with --admin.
-        #[arg(long, conflicts_with = "admin")]
+        /// gh while keeping mx's message encoded for the selected merge method.
+        /// Mutually exclusive with --admin (enforced by the conflict declared on
+        /// `admin`).
+        #[arg(long)]
         auto: bool,
     },
 }
@@ -2322,6 +2326,14 @@ mod tests {
         for mode in ["--rebase", "--merge-commit"] {
             let (admin, _) = merge_flags(&["mx", "pr", "merge", "375", mode, "--admin"]);
             assert!(admin, "--admin with {mode} should parse and set admin");
+        }
+    }
+
+    #[test]
+    fn pr_merge_auto_works_with_rebase_and_merge_commit() {
+        for mode in ["--rebase", "--merge-commit"] {
+            let (_, auto) = merge_flags(&["mx", "pr", "merge", "375", mode, "--auto"]);
+            assert!(auto, "--auto with {mode} should parse and set auto");
         }
     }
 }
