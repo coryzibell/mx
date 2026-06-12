@@ -578,6 +578,56 @@ fn get_pr_diff(number: u32) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Build the argument vector for `gh pr merge`.
+///
+/// Always supplies an explicit, encoded `--subject`/`--body`. This is THE
+/// design constraint behind `mx pr merge`: never let gh default-concatenate
+/// the branch's per-commit mx-ENCODED bodies (which produces an undecodable
+/// composite that `mx log` renders as gibberish). The encoded message path
+/// is identical across all flag combinations, including `--admin`/`--auto`,
+/// so the squash subject -- and thus GitHub's "(#NNN)" issue auto-close
+/// behavior -- is unchanged when those flags are present.
+///
+/// NOTE: the garble protection only actually engages for `squash` and
+/// `merge` (merge-commit) -- the two methods that produce a *new* merge
+/// commit whose message gh would otherwise auto-concatenate. On the
+/// `rebase` path there is no merge commit: gh replays the branch's
+/// per-commit encoded commits verbatim, each of which decodes fine on its
+/// own. Consequently `--subject`/`--body` have nothing to title on rebase
+/// and gh silently ignores them (it does not error). We still pass them
+/// uniformly here for code simplicity; a future reader should not assume
+/// `--subject` takes effect on the rebase path.
+///
+/// `--admin` (immediate, admin-privilege merge that bypasses base-branch
+/// policy such as REVIEW_REQUIRED) and `--auto` (merge once requirements are
+/// met) are simple passthroughs to gh; clap enforces their mutual exclusivity.
+fn build_gh_merge_args(
+    number: u32,
+    method: &str,
+    subject: &str,
+    body: &str,
+    admin: bool,
+    auto: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "pr".to_string(),
+        "merge".to_string(),
+        number.to_string(),
+        format!("--{}", method),
+        "--subject".to_string(),
+        subject.to_string(),
+        "--body".to_string(),
+        body.to_string(),
+    ];
+    if admin {
+        args.push("--admin".to_string());
+    }
+    if auto {
+        args.push("--auto".to_string());
+    }
+    args
+}
+
 /// Merge a pull request with encoded commit message.
 ///
 /// When `no_cleanup` is false (the default), performs post-merge cleanup:
@@ -585,7 +635,22 @@ fn get_pr_diff(number: u32) -> Result<String> {
 /// pulls, and deletes the local source branch. This prevents the common
 /// footgun where `git pull --rebase` fails because the remote source
 /// branch has been deleted by GitHub.
-pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool, no_cleanup: bool) -> Result<()> {
+///
+/// `admin` passes `--admin` through to gh for an immediate, admin-privilege
+/// merge that bypasses base-branch policy (e.g. REVIEW_REQUIRED, which
+/// single-account agent workflows hit because GitHub forbids self-approval).
+/// `auto` passes `--auto` through so gh merges once requirements are met.
+/// The two are mutually exclusive (enforced at the clap layer). Both keep
+/// mx's encoded `--subject`/`--body` construction rather than letting gh
+/// default-concatenate per-commit encoded bodies.
+pub fn pr_merge(
+    number: u32,
+    rebase: bool,
+    merge_commit: bool,
+    no_cleanup: bool,
+    admin: bool,
+    auto: bool,
+) -> Result<()> {
     // Get PR diff for title hash
     let diff = get_pr_diff(number)?;
 
@@ -633,27 +698,57 @@ pub fn pr_merge(number: u32, rebase: bool, merge_commit: bool, no_cleanup: bool)
         "squash"
     };
 
-    // Merge with gh - pass encoded title and body+footer separately
+    // Merge with gh - pass encoded title and body+footer separately.
+    // --admin/--auto (if set) slot into this same encoded-message invocation.
     let body_with_footer = format!("{}\n\n{}", encoded.body, encoded.footer);
+    let merge_args = build_gh_merge_args(
+        number,
+        method,
+        &encoded.title,
+        &body_with_footer,
+        admin,
+        auto,
+    );
     let output = Command::new("gh")
-        .args([
-            "pr",
-            "merge",
-            &number.to_string(),
-            &format!("--{}", method),
-            "--subject",
-            &encoded.title,
-            "--body",
-            &body_with_footer,
-        ])
+        .args(&merge_args)
         .output()
         .context("Failed to run gh pr merge")?;
 
     if !output.status.success() {
-        bail!(
-            "gh pr merge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Surface the raw stderr verbatim, then ADD actionable interpretation
+        // for the two failure modes the new --admin/--auto flags introduce.
+        // Only hint when the relevant flag was actually used and gh's stderr
+        // matches -- substring match is deliberately loose; gh's exact wording
+        // varies, so we key on stable fragments.
+        let lower = stderr.to_lowercase();
+        let mut hint = String::new();
+        if admin
+            && (lower.contains("admin")
+                || lower.contains("permission")
+                || lower.contains("not authorized")
+                || lower.contains("must be a")
+                || lower.contains("forbidden"))
+        {
+            hint = "\nhint: --admin requires admin merge rights on this repository; you appear to lack them.".to_string();
+        } else if auto && (lower.contains("auto-merge") || lower.contains("auto merge")) {
+            hint = "\nhint: --auto requires auto-merge to be enabled in the repository settings."
+                .to_string();
+        }
+        bail!("gh pr merge failed: {}{}", stderr, hint);
+    }
+
+    if auto {
+        // --auto only queues the merge; the PR is not merged yet, so skip
+        // cleanup (the source branch still exists and the target branch is
+        // not yet updated). Deleting/switching now would be premature.
+        println!("Queued PR #{} for auto-merge ({})", number, method);
+        println!(
+            "Branch cleanup is deferred until the queued merge completes; \
+             re-run cleanup or delete the source branch manually afterward."
         );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        return Ok(());
     }
 
     println!("Merged PR #{} ({})", number, method);
@@ -1567,5 +1662,101 @@ mod tests {
         let unpushed = check_unpushed_in_dir(path, "feature-x");
         assert!(unpushed.is_ok());
         assert!(!unpushed.unwrap(), "feature branch is pushed");
+    }
+
+    // --- build_gh_merge_args ---
+
+    #[test]
+    fn test_build_gh_merge_args_squash_default() {
+        let args = build_gh_merge_args(
+            42,
+            "squash",
+            "encoded-subject",
+            "encoded-body",
+            false,
+            false,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "pr",
+                "merge",
+                "42",
+                "--squash",
+                "--subject",
+                "encoded-subject",
+                "--body",
+                "encoded-body",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_gh_merge_args_always_supplies_subject_and_body() {
+        // THE design constraint: an explicit encoded --subject/--body is
+        // present for every flag combination, so gh never default-concatenates
+        // per-commit encoded bodies into an undecodable composite.
+        for (method, admin, auto) in [
+            ("squash", false, false),
+            ("rebase", false, false),
+            ("merge", false, false),
+            ("squash", true, false),
+            ("rebase", true, false),
+            ("merge", true, false),
+            ("squash", false, true),
+            ("rebase", false, true),
+            ("merge", false, true),
+        ] {
+            let args = build_gh_merge_args(7, method, "subj", "body", admin, auto);
+            let subj_idx = args
+                .iter()
+                .position(|a| a == "--subject")
+                .expect("--subject present");
+            assert_eq!(args[subj_idx + 1], "subj");
+            let body_idx = args
+                .iter()
+                .position(|a| a == "--body")
+                .expect("--body present");
+            assert_eq!(args[body_idx + 1], "body");
+            assert!(args.contains(&format!("--{}", method)));
+        }
+    }
+
+    #[test]
+    fn test_build_gh_merge_args_admin_passthrough() {
+        let args = build_gh_merge_args(99, "squash", "s", "b", true, false);
+        assert!(args.contains(&"--admin".to_string()));
+        assert!(!args.contains(&"--auto".to_string()));
+    }
+
+    #[test]
+    fn test_build_gh_merge_args_auto_passthrough() {
+        let args = build_gh_merge_args(99, "squash", "s", "b", false, true);
+        assert!(args.contains(&"--auto".to_string()));
+        assert!(!args.contains(&"--admin".to_string()));
+    }
+
+    #[test]
+    fn test_build_gh_merge_args_admin_with_rebase_and_merge_commit() {
+        let rebase = build_gh_merge_args(1, "rebase", "s", "b", true, false);
+        assert!(rebase.contains(&"--rebase".to_string()));
+        assert!(rebase.contains(&"--admin".to_string()));
+
+        let merge = build_gh_merge_args(1, "merge", "s", "b", true, false);
+        assert!(merge.contains(&"--merge".to_string()));
+        assert!(merge.contains(&"--admin".to_string()));
+    }
+
+    #[test]
+    fn test_build_gh_merge_args_admin_does_not_change_subject() {
+        // Auto-close behavior depends on the subject carrying "(#NNN)";
+        // --admin must produce the identical subject as the plain path.
+        let plain = build_gh_merge_args(375, "squash", "Fix the thing (#375)", "b", false, false);
+        let with_admin =
+            build_gh_merge_args(375, "squash", "Fix the thing (#375)", "b", true, false);
+        let plain_subj = &plain[plain.iter().position(|a| a == "--subject").unwrap() + 1];
+        let admin_subj = &with_admin[with_admin.iter().position(|a| a == "--subject").unwrap() + 1];
+        assert_eq!(plain_subj, admin_subj);
+        assert_eq!(plain_subj, "Fix the thing (#375)");
     }
 }

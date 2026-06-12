@@ -339,11 +339,14 @@ mx state schemas
 ### PR
 
 PR merge handles pull request merging with encoded commit messages.
-Supports squash (default), rebase, and standard merge commits.
+Supports squash (default), rebase, and standard merge commits, plus
+`--admin` (merge now, bypassing branch policy like `REVIEW_REQUIRED`)
+and `--auto` (queue the merge until requirements are met).
 
 ``` bash
 mx pr merge 42             # squash merge
 mx pr merge 42 --rebase    # rebase merge
+mx pr merge 42 --admin     # bypass REVIEW_REQUIRED (single-account agents)
 ```
 
 ### Sync
@@ -5452,9 +5455,11 @@ workflow and keeps the target branch history linear.
 ### Flags
 
   **Flag**           **Type**   **Description**
-  ------------------ ---------- ----------------------------------------------------------------------------------------------------------------------------------------------
-  `--rebase`         flag       Use rebase merge instead of squash. Replays the PR's commits onto the target branch individually. The final commit message is still encoded.
+  ------------------ ---------- ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `--rebase`         flag       Use rebase merge instead of squash. Replays the PR's already-encoded commits onto the target branch individually. There is no new merge commit, so each replayed commit keeps its own encoded message and decodes on its own through `mx log`.
   `--merge-commit`   flag       Use a standard merge commit instead of squash. Preserves the full branch topology in the target branch history.
+  `--admin`          flag       Merge immediately with admin privileges, bypassing base-branch policy such as `REVIEW_REQUIRED`. Mutually exclusive with `--auto`. See *Admin and auto-merge* below.
+  `--auto`           flag       Queue the merge and let GitHub complete it once all branch requirements are met. Does not merge immediately. Mutually exclusive with `--admin`. See *Admin and auto-merge* below.
 
 ### Examples
 
@@ -5470,6 +5475,14 @@ mx pr merge 42 --rebase
 mx pr merge 42 --merge-commit
 ```
 
+``` bash
+mx pr merge 42 --admin
+```
+
+``` bash
+mx pr merge 42 --auto
+```
+
 When deciding which strategy to use:
 
 - **Squash** (default) is best for feature branches where individual
@@ -5480,6 +5493,72 @@ When deciding which strategy to use:
 
 - **Merge commit** preserves full branch topology. Useful for long-lived
   branches where the merge point itself is significant.
+
+## Admin and auto-merge
+
+Two passthrough flags control *when* and *under what authority* the
+merge happens. They are mutually exclusive and compose with any of the
+three merge strategies above.
+
+## `mx pr merge <number> --admin`
+
+Merge immediately with admin privileges, passing `--admin` through to
+`gh`. This bypasses base-branch protection -- most importantly the
+`REVIEW_REQUIRED` policy. It is the sanctioned path for single-account
+agent workflows: GitHub forbids approving your own pull request, so an
+agent that authors and commits under one account can never satisfy a
+required-review rule on its own. `--admin` merges anyway, using the
+caller's admin merge rights on the repository.
+
+### Examples
+
+``` bash
+mx pr merge 42 --admin
+```
+
+``` bash
+mx pr merge 42 --rebase --admin
+```
+
+``` bash
+mx pr merge 42 --merge-commit --admin
+```
+
+The encoded message is constructed exactly as it is on a normal merge,
+so an admin merge produces a decodable squash commit -- it does not
+regress to the undecodable, default-concatenated body that an unencoded
+admin merge would leave behind.
+
+## `mx pr merge <number> --auto`
+
+Queue the merge instead of performing it now. Passes `--auto` through to
+`gh`, which completes the merge automatically once every branch
+requirement (status checks, required reviews) is satisfied. The command
+returns as soon as the merge is queued.
+
+### Examples
+
+``` bash
+mx pr merge 42 --auto
+```
+
+``` bash
+mx pr merge 42 --rebase --auto
+```
+
+::: {.admonition .warning}
+**WARNING:** `--auto` does not merge the PR -- it only schedules the
+merge. Because the merge has not happened, post-merge cleanup is
+**skipped**: the target branch is not checked out and the local source
+branch is not deleted. The command prints a deferred-cleanup notice. Run
+cleanup or delete the source branch manually once GitHub completes the
+queued merge.
+
+If a merge fails because the flag's precondition is not met, the command
+surfaces the raw `gh` error and adds a targeted hint -- that `--admin`
+requires admin merge rights on the repository, or that `--auto` requires
+auto-merge to be enabled in repository settings.
+:::
 
 ## Post-merge cleanup
 
@@ -7848,6 +7927,12 @@ options that do not apply to the declared/existing `ValueType` (e.g.
 `--min` on a history key, `--add-field` on a counter) with exit code 4,
 before any persist. A no-op `schema update` (no flags set) is likewise
 rejected rather than rewriting the schema file.
+
+A legacy `add_key_to_schema()` method still exists as a standalone
+engine helper -- it appends a `[keys.<name>]` block to the TOML without
+reformatting, preserving comments, for `history`/`list` only. It is no
+longer wired to any CLI verb (it formerly backed `push --create`); it is
+retained for its existing tests and as an append-based alternative.
 
 The `drop_key()` method backs `kv schema drop`: it removes both the
 schema definition and the stored data entry. It follows the `rename_key`

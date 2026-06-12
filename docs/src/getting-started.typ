@@ -207,11 +207,14 @@ mx state schemas
 === PR
 
 #link("pr.html")[PR merge] handles pull request merging with encoded commit
-messages. Supports squash (default), rebase, and standard merge commits.
+messages. Supports squash (default), rebase, and standard merge commits, plus
+`--admin` (merge now, bypassing branch policy like `REVIEW_REQUIRED`) and
+`--auto` (queue the merge until requirements are met).
 
 ```bash
 mx pr merge 42             # squash merge
 mx pr merge 42 --rebase    # rebase merge
+mx pr merge 42 --admin     # bypass REVIEW_REQUIRED (single-account agents)
 ```
 
 === Sync

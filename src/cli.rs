@@ -287,6 +287,21 @@ pub enum PrCommands {
         /// Skip post-merge cleanup (don't switch to target branch or delete local source branch)
         #[arg(long)]
         no_cleanup: bool,
+
+        /// Merge immediately with admin privileges, bypassing base-branch policy
+        /// (e.g. REVIEW_REQUIRED). Passes --admin to gh while keeping mx's message
+        /// encoded for the selected merge method. Mutually exclusive with --auto.
+        /// clap's conflicts_with is symmetric, so declaring it once here also
+        /// rejects --auto --admin; no need to repeat it on `auto`.
+        #[arg(long, conflicts_with = "auto")]
+        admin: bool,
+
+        /// Merge automatically once all merge requirements are met. Passes --auto to
+        /// gh while keeping mx's message encoded for the selected merge method.
+        /// Mutually exclusive with --admin (enforced by the conflict declared on
+        /// `admin`).
+        #[arg(long)]
+        auto: bool,
     },
 }
 
@@ -2242,4 +2257,83 @@ pub enum WorktreeCommands {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        // Catches clap config errors (e.g. conflicts_with referencing a
+        // nonexistent arg) at test time rather than at runtime.
+        Cli::command().debug_assert();
+    }
+
+    // `Cli` intentionally does not derive `Debug`, so these helpers match on
+    // the parse result rather than using `Result::expect`/`expect_err`.
+    fn merge_flags(args: &[&str]) -> (bool, bool) {
+        match Cli::try_parse_from(args) {
+            Ok(Cli {
+                command:
+                    Commands::Pr {
+                        command: PrCommands::Merge { admin, auto, .. },
+                    },
+                ..
+            }) => (admin, auto),
+            Ok(_) => panic!("expected pr merge subcommand"),
+            Err(e) => panic!("parse should succeed for {args:?}: {e}"),
+        }
+    }
+
+    fn parse_err(args: &[&str]) -> clap::Error {
+        match Cli::try_parse_from(args) {
+            Ok(_) => panic!("expected parse error for {args:?}"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn pr_merge_accepts_admin() {
+        let (admin, auto) = merge_flags(&["mx", "pr", "merge", "375", "--admin"]);
+        assert!(admin);
+        assert!(!auto);
+    }
+
+    #[test]
+    fn pr_merge_accepts_auto() {
+        let (admin, auto) = merge_flags(&["mx", "pr", "merge", "375", "--auto"]);
+        assert!(!admin);
+        assert!(auto);
+    }
+
+    #[test]
+    fn pr_merge_defaults_admin_and_auto_off() {
+        let (admin, auto) = merge_flags(&["mx", "pr", "merge", "375"]);
+        assert!(!admin);
+        assert!(!auto);
+    }
+
+    #[test]
+    fn pr_merge_admin_and_auto_conflict() {
+        let err = parse_err(&["mx", "pr", "merge", "375", "--admin", "--auto"]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn pr_merge_admin_works_with_rebase_and_merge_commit() {
+        for mode in ["--rebase", "--merge-commit"] {
+            let (admin, _) = merge_flags(&["mx", "pr", "merge", "375", mode, "--admin"]);
+            assert!(admin, "--admin with {mode} should parse and set admin");
+        }
+    }
+
+    #[test]
+    fn pr_merge_auto_works_with_rebase_and_merge_commit() {
+        for mode in ["--rebase", "--merge-commit"] {
+            let (_, auto) = merge_flags(&["mx", "pr", "merge", "375", mode, "--auto"]);
+            assert!(auto, "--auto with {mode} should parse and set auto");
+        }
+    }
 }
