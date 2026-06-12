@@ -226,7 +226,15 @@ mx pr merge 42 --rebase
 
 # Standard merge commit
 mx pr merge 42 --merge-commit
+
+# Merge now with admin privileges, bypassing branch policy (e.g. REVIEW_REQUIRED)
+mx pr merge 42 --admin
+
+# Queue the merge until all branch requirements are met
+mx pr merge 42 --auto
 ```
+
+`--admin` and `--auto` are mutually exclusive and work with any merge mode. `--admin` passes `--admin` through to `gh` for an immediate merge that bypasses base-branch protection. This is the sanctioned path for single-account agent workflows: GitHub forbids approving your own pull request, so an agent committing under one account cannot satisfy a `REVIEW_REQUIRED` policy on its own — `--admin` merges anyway, using admin merge rights. `--auto` queues the merge and lets GitHub complete it once requirements are met; it does not merge immediately, so post-merge cleanup (branch switch and local source-branch deletion) is deferred. In both cases mx still constructs the encoded `--subject`/`--body`, so admin merges produce a decodable commit like any other.
 
 ### Session Archival (Codex)
 
