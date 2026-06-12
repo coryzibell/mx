@@ -5834,7 +5834,8 @@ dependencies = [
 [[package]]
 name = "tract-data"
 version = "0.22.1"
-source = "git+https://github.com/coryzibell/tract.git?branch=fix%2Faarch64-msvc-asm#3b821b0d4a8287a56c30b5e4c2c0dd3b0544d2c5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73cd7fda1e5e8b854ea3abdd09126a87fc4af81e6d1e29ec1710a8a4abf4f13a"
 dependencies = [
  "anyhow",
  "downcast-rs",
@@ -5870,7 +5871,8 @@ dependencies = [
 [[package]]
 name = "tract-linalg"
 version = "0.22.1"
-source = "git+https://github.com/coryzibell/tract.git?branch=fix%2Faarch64-msvc-asm#3b821b0d4a8287a56c30b5e4c2c0dd3b0544d2c5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e72097a89cc4e7c5f1bc4f854b9294dd30fa6f6d8f7f409c556953b49078c94f"
 dependencies = [
  "byteorder",
  "cc",
