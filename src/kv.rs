@@ -1508,6 +1508,14 @@ impl KvStore {
 
         match def.value_type {
             ValueType::String => {
+                if let Some(extra) = field {
+                    return Err(KvError::DataValidation {
+                        message: format!(
+                            "key '{}' is string; got 2 values ('{}' and '{}') — quote the value if it contains spaces",
+                            key, extra, value
+                        ),
+                    });
+                }
                 self.data.entries.insert(
                     key.to_string(),
                     DataValue::String {
@@ -1516,6 +1524,14 @@ impl KvStore {
                 );
             }
             ValueType::Counter => {
+                if let Some(extra) = field {
+                    return Err(KvError::DataValidation {
+                        message: format!(
+                            "key '{}' is counter; got 2 values ('{}' and '{}') — counters take a single value",
+                            key, extra, value
+                        ),
+                    });
+                }
                 let v: i64 = value.parse().map_err(|_| {
                     KvError::Other(anyhow::anyhow!("Invalid counter value: {}", value))
                 })?;
@@ -3396,6 +3412,38 @@ max_entries = 5
         match store.get("current_mood").unwrap() {
             DataValue::String { value } => assert_eq!(value, "elated"),
             _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn string_set_rejects_two_values() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("current_mood", "calm", None).unwrap();
+
+        let err = store.set("current_mood", "words", Some("two")).unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("is string"));
+        assert!(msg.contains("quote the value"));
+
+        match store.get("current_mood").unwrap() {
+            DataValue::String { value } => assert_eq!(value, "calm"),
+            _ => panic!("Expected string"),
+        }
+    }
+
+    #[test]
+    fn counter_set_rejects_two_values() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "3", None).unwrap();
+
+        let err = store.set("warmth", "5", Some("1")).unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }));
+        assert!(err.to_string().contains("is counter"));
+
+        match store.get("warmth").unwrap() {
+            DataValue::Counter { value } => assert_eq!(*value, 3),
+            _ => panic!("Expected counter"),
         }
     }
 
