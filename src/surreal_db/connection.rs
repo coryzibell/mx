@@ -516,6 +516,13 @@ impl SurrealDatabase {
     /// silently writing to prod. Unlike `open_in_memory`, this persists to
     /// disk at `path`, so a test can drop the handle and reopen the same
     /// store to prove durability.
+    ///
+    /// **`path` MUST live under the OS temp dir** (e.g. derived from
+    /// `tempfile::tempdir()`). A fixed/literal absolute path gets baked into
+    /// the SurrealKV manifest and outlives the OS that wrote it — a
+    /// Windows-absolute path once materialized as a literal `C:` directory on
+    /// Linux (mx #388). This call asserts the constraint and panics on a
+    /// non-temp path; pass a `tempdir()`-derived path.
     #[cfg(test)]
     pub fn open_file_backed_for_test<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
