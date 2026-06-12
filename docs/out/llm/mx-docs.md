@@ -7849,12 +7849,6 @@ options that do not apply to the declared/existing `ValueType` (e.g.
 before any persist. A no-op `schema update` (no flags set) is likewise
 rejected rather than rewriting the schema file.
 
-A legacy `add_key_to_schema()` method still exists as a standalone
-engine helper -- it appends a `[keys.<name>]` block to the TOML without
-reformatting, preserving comments, for `history`/`list` only. It is no
-longer wired to any CLI verb (it formerly backed `push --create`); it is
-retained for its existing tests and as an append-based alternative.
-
 The `drop_key()` method backs `kv schema drop`: it removes both the
 schema definition and the stored data entry. It follows the `rename_key`
 transaction pattern -- mutate in-memory fully, persist data first then
