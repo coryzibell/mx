@@ -137,3 +137,6 @@ SESSION_CONTEXT.md
 Cargo.lock
 .fastembed_cache/
 history.txt
+
+# mx memory export output (regenerates via `mx memory export`; live SurrealDB is canonical)
+/memory-export/
