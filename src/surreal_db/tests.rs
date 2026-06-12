@@ -36,17 +36,80 @@ fn test_embedded_connect_creates_directory() {
 }
 
 #[test]
-#[should_panic(expected = "outside the OS temp dir")]
 fn test_open_file_backed_for_test_rejects_non_temp_path() {
     // GUARDRAIL (#388): a fixed/literal absolute path outside the OS temp
     // dir must be refused, because SurrealKV bakes the absolute path string
     // into its manifest and that path outlives the OS that wrote it (a
     // Windows-absolute path once materialized as a literal `C:` dir on
     // Linux). We use CARGO_MANIFEST_DIR: a stable, existing, non-temp
-    // absolute path on every platform, so its parent canonicalizes cleanly
-    // and the guardrail (not a missing-dir error) is what trips.
-    let non_temp = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixed.surreal");
-    let _ = SurrealDatabase::open_file_backed_for_test(&non_temp);
+    // absolute path on every platform, so its nearest-existing ancestor
+    // canonicalizes cleanly and the guardrail (not a missing-dir error) is
+    // what trips.
+    //
+    // Robustness guard: under a temp-sandbox build CARGO_MANIFEST_DIR can
+    // ITSELF live under temp_dir(), in which case the guardrail correctly
+    // ACCEPTS the path and no panic occurs. A bare #[should_panic] would
+    // then spuriously fail. We deliberately avoid #[should_panic] here:
+    // an early `return` inside a #[should_panic] body counts as "no panic"
+    // and fails the test, so there is no clean way to skip. Instead we use a
+    // plain #[test] + catch_unwind: the skip path returns normally, and the
+    // normal path asserts BOTH that a panic occurred AND that it carried the
+    // expected guardrail message (which #[should_panic(expected = ...)] only
+    // substring-matches anyway).
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canon_manifest =
+        std::fs::canonicalize(manifest_dir).unwrap_or_else(|_| manifest_dir.to_path_buf());
+    let temp_root = std::env::temp_dir();
+    let canon_temp = std::fs::canonicalize(&temp_root).unwrap_or(temp_root);
+    if canon_manifest.starts_with(&canon_temp) {
+        eprintln!(
+            "skipping test_open_file_backed_for_test_rejects_non_temp_path: \
+             CARGO_MANIFEST_DIR ({}) is itself under temp_dir ({}) — \
+             temp-sandbox build, the guardrail would (correctly) accept it",
+            canon_manifest.display(),
+            canon_temp.display()
+        );
+        return;
+    }
+
+    let non_temp = manifest_dir.join("fixed.surreal");
+    let result = std::panic::catch_unwind(|| {
+        let _ = SurrealDatabase::open_file_backed_for_test(&non_temp);
+    });
+    let payload = result.expect_err(
+        "open_file_backed_for_test must panic when handed a non-temp path, but it returned",
+    );
+    let msg = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        msg.contains("outside the OS temp dir"),
+        "guardrail panicked with an unexpected message: {msg:?}"
+    );
+}
+
+#[test]
+fn test_open_file_backed_for_test_accepts_nested_nonexistent_parent() {
+    use tempfile::tempdir;
+
+    // S-1 regression: a caller may pass a path whose PARENT (and grandparent)
+    // do not exist yet — e.g. `tempdir().path().join("a/b/store.surreal")`.
+    // The connect step creates them. The guardrail must not canonicalize the
+    // (missing) immediate parent and fall back to an UN-resolved literal that
+    // then false-rejects against a canonicalized temp root (the macOS
+    // /var -> /private/var symlink case). Walking up to the nearest existing
+    // ancestor and canonicalizing THAT keeps a legitimately-temp nested path
+    // accepted. On Linux this exercises the ancestor-walk path because `a/`
+    // and `b/` genuinely do not exist when the guard runs.
+    let temp_dir = tempdir().unwrap();
+    let nested = temp_dir.path().join("a/b/store.surreal");
+    assert!(!nested.parent().unwrap().exists());
+
+    // Must NOT panic and must successfully open the store.
+    let _db = SurrealDatabase::open_file_backed_for_test(&nested).unwrap();
+    assert!(nested.exists());
 }
 
 #[test]

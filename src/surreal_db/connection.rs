@@ -533,13 +533,39 @@ impl SurrealDatabase {
         //
         // We canonicalize before comparing because temp_dir() is frequently a
         // symlink (/tmp -> /private/tmp on macOS, /var -> /private/var, etc.).
-        // The store path itself usually does not exist yet at this point (the
-        // connect step creates it), so we canonicalize its *parent* — which a
-        // tempdir()-derived caller has already created — and compare that
-        // against the canonicalized temp root.
+        // Canonicalizing only resolves symlinks for components that EXIST on
+        // disk, and the store path (and possibly several of its parents) does
+        // not exist yet at this point — the connect step creates it. A caller
+        // may legitimately pass `tempdir().path().join("a/b/store.surreal")`,
+        // where `a/` and `b/` have not been created. Canonicalizing such a
+        // path (or its immediate parent) Errs, and falling back to the
+        // UN-resolved literal defeats the whole point: on macOS the temp root
+        // canonicalizes to /private/var/... while the unresolved probe stays
+        // /var/..., so starts_with() would FALSE-REJECT a genuinely-temp path.
+        //
+        // Fix: walk the probe up to its NEAREST EXISTING ANCESTOR and
+        // canonicalize THAT. The non-existent tail (a/b/store.surreal) cannot
+        // affect containment — if the nearest existing ancestor is under the
+        // canonicalized temp root, every descendant is too. We apply the same
+        // fallback discipline to both sides: each is canonicalized when it
+        // exists and left as its literal self only when canonicalization is
+        // genuinely impossible (so the two sides are resolved symmetrically).
+        fn nearest_existing_ancestor(p: &Path) -> &Path {
+            let mut cur = p;
+            loop {
+                if cur.exists() {
+                    return cur;
+                }
+                match cur.parent() {
+                    Some(parent) => cur = parent,
+                    None => return cur,
+                }
+            }
+        }
+
         let temp_root = std::env::temp_dir();
         let canon_temp = std::fs::canonicalize(&temp_root).unwrap_or(temp_root);
-        let probe = path.parent().unwrap_or(path);
+        let probe = nearest_existing_ancestor(path);
         let canon_probe = std::fs::canonicalize(probe).unwrap_or_else(|_| probe.to_path_buf());
         assert!(
             canon_probe.starts_with(&canon_temp),
