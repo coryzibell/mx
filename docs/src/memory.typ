@@ -76,6 +76,7 @@ explicitly apply the schema (it ignores `MX_SKIP_SCHEMA`).]
     ([`--session`],    [`string`], [Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.]),
     ([`--thread-id`],  [`string`], [Thread ID for `thread_closed` operations. Requires `--type`.]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
+    ([`--no-embed`],   [`flag`],   [Skip synchronous embedding generation on write.]),
     ([`--json`],       [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -89,6 +90,38 @@ explicitly apply the schema (it ignores `MX_SKIP_SCHEMA`).]
 #tip[When `--type` is provided, `--category` and `--title` become optional. The
 fact type routes to an appropriate category and generates a title from the
 content automatically.]
+
+#command(
+  "mx memory add-batch",
+  [Add multiple entries in a single invocation from a JSONL file or stdin.
+  Each line is a JSON object whose fields match `mx memory add` arguments
+  (`category`, `title`, `content`, `tags`, `source_agent`, `type`, etc.).
+  The store is opened once and the ~435 MB embedding model is loaded once for
+  the whole batch, so a 30-entry bulk caller pays one cold-load instead of
+  thirty. Malformed lines are skipped and reported at the end; one bad entry
+  does not abort the rest (partial-success semantics). Exits non-zero when any
+  entry failed.
+
+  *Recommended delivery:* pass a JSONL file via `--file` when calling through
+  a `sudo` wrapper (e.g. the hearth `_secret-exec` proxy) — a file path
+  survives wrapper layers where a piped stdin may not.],
+  flags: (
+    ([`-f, --file`], [`path`],  [Path to a JSONL file (one JSON object per line). Reads from stdin when omitted.]),
+    ([`--no-embed`], [`flag`],  [Skip embedding for the whole batch. Defers to the next `mx memory embed --all` run (e.g. a nightly cron). Keyword and tag search are unaffected; only `--semantic` search misses un-embedded entries until then.]),
+  ),
+  examples: (
+    "# Stdin pipe\nprintf '{\"category\":\"insight\",\"title\":\"T1\",\"content\":\"C1\",\"source_agent\":\"soren\"}\\n{\"type\":\"decision\",\"content\":\"chose Rust\",\"source_agent\":\"soren\"}\\n' \\\n  | mx memory add-batch",
+    "# File (safer through sudo wrappers)\nmx memory add-batch --file /tmp/pocket-entries.jsonl",
+    "# Skip embedding — defer to nightly embed --all\nmx memory add-batch --file entries.jsonl --no-embed",
+  ),
+)
+
+#note[Each JSONL line for `add-batch` is a self-describing payload: include all
+per-entry fields (`category`, `title`, `content`, `source_agent`, `tags`,
+`private`, `resonance`, `type`, etc.) on each line. There are no batch-wide
+field overrides except `--no-embed`. This design supports heterogeneous batches
+(facts, person nodes, summaries, blooms) in a single invocation --- which is
+the primary pocket use-case.]
 
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -237,6 +270,7 @@ engagement. Use `--activate` when you are intentionally consuming the results
     ([`--session-id`],    [`string`], [Update session ID (for retrofitting entries with wrong or missing session linkage).]),
     ([`--force`],         [`flag`],   [Force dangerous visibility changes (e.g., making blooms public).]),
     ([`--no-auto-anchor`], [`flag`],  [Skip automatic anchor generation.]),
+    ([`--no-embed`],      [`flag`],  [Skip synchronous embedding generation on write.]),
     ([`--json`],          [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -258,6 +292,7 @@ engagement. Use `--activate` when you are intentionally consuming the results
     ([`--replace-all`], [`flag`],   [Replace all occurrences (default: error if multiple matches).]),
     ([`--nth`],         [`int`],    [Replace only the Nth occurrence (1-indexed).]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
+    ([`--no-embed`],    [`flag`],   [Skip synchronous embedding generation on write.]),
     ([`--json`],        [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -274,6 +309,7 @@ engagement. Use `--activate` when you are intentionally consuming the results
     ([`--content`], [`string`], [Content to append (omit to read from stdin).]),
     ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
+    ([`--no-embed`], [`flag`],  [Skip synchronous embedding generation on write.]),
     ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -290,6 +326,7 @@ engagement. Use `--activate` when you are intentionally consuming the results
     ([`--content`], [`string`], [Content to prepend (omit to read from stdin).]),
     ([`-f, --file`], [`path`],  [Read content from file. Also accepts `--content-file`.]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
+    ([`--no-embed`], [`flag`],  [Skip synchronous embedding generation on write.]),
     ([`--json`],    [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -304,6 +341,7 @@ engagement. Use `--activate` when you are intentionally consuming the results
   flags: (
     ([`--list`], [`flag`], [List available backups instead of restoring.]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
+    ([`--no-embed`], [`flag`], [Skip synchronous embedding generation on write.]),
     ([`--json`], [`flag`], [Output as JSON.]),
   ),
   examples: (
@@ -489,6 +527,22 @@ mx re-evaluates anchors and prunes stale ones using the same similarity
 thresholds. Pass `--no-auto-anchor` on any of these commands to skip this
 step -- useful for bulk operations or cleanup scripts where the overhead is
 unwanted.]
+
+#note[*Deferred embedding:* Pass `--no-embed` (or set `MX_SKIP_WRITE_EMBED=1`)
+on any write command (`add`, `update`, `edit`, `append`, `prepend`, `restore`,
+`add-batch`) to skip synchronous embedding generation on that write. The entry
+is written and fully durable immediately; only the vector embedding is deferred.
+
+*Trade-off:* entries written with `--no-embed` are absent from `--semantic`
+(vector) search results until a later `mx memory embed --all` run fills the
+gap. Keyword search (`mx memory search <query>`) and tag-based filters are
+unaffected.
+
+This flag exists to amortize the ~435 MB embedding model cold-load: use it with
+`add-batch` (which does its own single hoisted embed pass at the end), or set
+`MX_SKIP_WRITE_EMBED=1` globally in a deployment where a nightly
+`mx memory embed --all` (e.g. via Cinder's `embed.nix` timer) keeps the graph
+fresh.]
 
 
 // ═══════════════════════════════════════════════════════════════════════
