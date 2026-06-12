@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.205"
+version = "0.1.206"
 edition = "2024"
 description = "A Swiss army knife for Claude Code and multi-agent toolkits"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
@@ -85,12 +85,12 @@ features = ["user-hooks"]
 serial_test = "3"
 proptest = "1"
 
-[patch.crates-io]
-tract-linalg = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
-tract-data = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
-
 [[bin]]
 name = "mx"
 path = "src/main.rs"
+
+[patch.crates-io]
+tract-linalg = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
+tract-data = { git = "https://github.com/coryzibell/tract.git", branch = "fix/aarch64-msvc-asm" }
 
 

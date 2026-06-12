@@ -371,6 +371,79 @@ mx migrate            # apply schema (ignores MX_SKIP_SCHEMA)
 mx migrate -v         # verbose: see connection and schema details
 ```
 
+## Environment variable reference {#env-vars}
+
+Key environment variables recognized by mx. All boolean opt-outs follow
+the same convention: `"1"` or `"true"` (case-insensitive) to disable;
+any other value leaves the default behavior on.
+
++------------------------+-----------------+-----------------+-------------------------+
+| **Variable**           | **Type**        | **Default**     | **Description**         |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_HOME`              | path            | `~/.mx/`        | Root directory for all  |
+|                        |                 |                 | mx data. Override to    |
+|                        |                 |                 | move the whole tree.    |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SURREAL_MODE`      | string          | `embedded`      | `embedded` (local       |
+|                        |                 |                 | SurrealKV file) or      |
+|                        |                 |                 | `network` (remote       |
+|                        |                 |                 | WebSocket). Embedding   |
+|                        |                 |                 | model calls only work   |
+|                        |                 |                 | in network mode.        |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SURREAL_URL`       | string          | ---             | WebSocket URL for       |
+|                        |                 |                 | network mode (e.g.      |
+|                        |                 |                 | `ws://localhost:8000`). |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SURREAL_NS`        | string          | ---             | SurrealDB namespace for |
+|                        |                 |                 | network mode.           |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SURREAL_DB`        | string          | ---             | SurrealDB database name |
+|                        |                 |                 | for network mode.       |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_CURRENT_AGENT`     | string          | ---             | Active agent            |
+|                        |                 |                 | identifier. Used as     |
+|                        |                 |                 | default `source_agent`  |
+|                        |                 |                 | on writes and to scope  |
+|                        |                 |                 | private entry           |
+|                        |                 |                 | visibility.             |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SKIP_SCHEMA`       | bool            | `false`         | Skip automatic schema   |
+|                        |                 |                 | application on          |
+|                        |                 |                 | connection. Use         |
+|                        |                 |                 | `mx migrate` to apply   |
+|                        |                 |                 | the schema explicitly   |
+|                        |                 |                 | when set.               |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SKIP_WRITE_ANCHOR` | bool            | `false`         | Skip synchronous        |
+|                        |                 |                 | `auto-anchor` on every  |
+|                        |                 |                 | write. Equivalent to    |
+|                        |                 |                 | passing                 |
+|                        |                 |                 | `--no-auto-anchor`      |
+|                        |                 |                 | globally. Useful when a |
+|                        |                 |                 | nightly                 |
+|                        |                 |                 | `mx memory auto-anchor` |
+|                        |                 |                 | handles anchoring in    |
+|                        |                 |                 | batch.                  |
++------------------------+-----------------+-----------------+-------------------------+
+| `MX_SKIP_WRITE_EMBED`  | bool            | `false`         | Skip synchronous        |
+|                        |                 |                 | embedding generation on |
+|                        |                 |                 | every write. Equivalent |
+|                        |                 |                 | to passing `--no-embed` |
+|                        |                 |                 | globally. Entries       |
+|                        |                 |                 | written with this set   |
+|                        |                 |                 | are absent from         |
+|                        |                 |                 | `--semantic` search     |
+|                        |                 |                 | until                   |
+|                        |                 |                 | `mx memory embed --all` |
+|                        |                 |                 | runs. Intended for      |
+|                        |                 |                 | deployments where a     |
+|                        |                 |                 | nightly embed timer     |
+|                        |                 |                 | (e.g. Cinder's          |
+|                        |                 |                 | `embed.nix`) keeps the  |
+|                        |                 |                 | graph fresh.            |
++------------------------+-----------------+-----------------+-------------------------+
+
 ## What's next
 
 - Read the commit, log, and show reference pages for the full flag
@@ -1178,6 +1251,7 @@ the category and generates a title from content).
   `--session`             `string`   Session to link fact to via EXTRACTED_FROM relationship. Requires `--type`.
   `--thread-id`           `string`   Thread ID for `thread_closed` operations. Requires `--type`.
   `--no-auto-anchor`      `flag`     Skip automatic anchor generation.
+  `--no-embed`            `flag`     Skip synchronous embedding generation on write.
   `--json`                `flag`     Output as JSON.
 
 ### Examples
@@ -1210,6 +1284,55 @@ mx memory add --category ingredient -t "API reference" -f api-notes.md
 **TIP:** When `--type` is provided, `--category` and `--title` become
 optional. The fact type routes to an appropriate category and generates
 a title from the content automatically.
+:::
+
+## `mx memory add-batch`
+
+Add multiple entries in a single invocation from a JSONL file or stdin.
+Each line is a JSON object whose fields match `mx memory add` arguments
+(`category`, `title`, `content`, `tags`, `source_agent`, `type`, etc.).
+The store is opened once and the  435 MB embedding model is loaded once
+for the whole batch, so a 30-entry bulk caller pays one cold-load
+instead of thirty. Malformed lines are skipped and reported at the end;
+one bad entry does not abort the rest (partial-success semantics). Exits
+non-zero when any entry failed.
+
+**Recommended delivery:** pass a JSONL file via `--file` when calling
+through a `sudo` wrapper (e.g. the hearth `_secret-exec` proxy) --- a
+file path survives wrapper layers where a piped stdin may not.
+
+### Flags
+
+  **Flag**       **Type**   **Description**
+  -------------- ---------- ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `-f, --file`   `path`     Path to a JSONL file (one JSON object per line). Reads from stdin when omitted.
+  `--no-embed`   `flag`     Skip embedding for the whole batch. Defers to the next `mx memory embed --all` run (e.g. a nightly cron). Keyword and tag search are unaffected; only `--semantic` search misses un-embedded entries until then.
+
+### Examples
+
+``` bash
+# Stdin pipe
+printf '{"category":"insight","title":"T1","content":"C1","source_agent":"soren"}\n{"type":"decision","content":"chose Rust","source_agent":"soren"}\n' \
+  | mx memory add-batch
+```
+
+``` bash
+# File (safer through sudo wrappers)
+mx memory add-batch --file /tmp/pocket-entries.jsonl
+```
+
+``` bash
+# Skip embedding — defer to nightly embed --all
+mx memory add-batch --file entries.jsonl --no-embed
+```
+
+::: {.admonition .note}
+**NOTE:** Each JSONL line for `add-batch` is a self-describing payload:
+include all per-entry fields (`category`, `title`, `content`,
+`source_agent`, `tags`, `private`, `resonance`, `type`, etc.) on each
+line. There are no batch-wide field overrides except `--no-embed`. This
+design supports heterogeneous batches (facts, person nodes, summaries,
+blooms) in a single invocation --- which is the primary pocket use-case.
 :::
 
 ## Reading entries {#reading}
@@ -1399,6 +1522,7 @@ field. Content mutation modes are mutually exclusive.
   `--session-id`           `string`   Update session ID (for retrofitting entries with wrong or missing session linkage).
   `--force`                `flag`     Force dangerous visibility changes (e.g., making blooms public).
   `--no-auto-anchor`       `flag`     Skip automatic anchor generation.
+  `--no-embed`             `flag`     Skip synchronous embedding generation on write.
   `--json`                 `flag`     Output as JSON.
 
 ### Examples
@@ -1438,6 +1562,7 @@ interface.
   `--replace-all`      `flag`     Replace all occurrences (default: error if multiple matches).
   `--nth`              `int`      Replace only the Nth occurrence (1-indexed).
   `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--no-embed`         `flag`     Skip synchronous embedding generation on write.
   `--json`             `flag`     Output as JSON.
 
 ### Examples
@@ -1462,6 +1587,7 @@ Append content to the end of an entry's body. Shortcut for
   `--content`          `string`   Content to append (omit to read from stdin).
   `-f, --file`         `path`     Read content from file. Also accepts `--content-file`.
   `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--no-embed`         `flag`     Skip synchronous embedding generation on write.
   `--json`             `flag`     Output as JSON.
 
 ### Examples
@@ -1486,6 +1612,7 @@ Prepend content to the start of an entry's body. Shortcut for
   `--content`          `string`   Content to prepend (omit to read from stdin).
   `-f, --file`         `path`     Read content from file. Also accepts `--content-file`.
   `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--no-embed`         `flag`     Skip synchronous embedding generation on write.
   `--json`             `flag`     Output as JSON.
 
 ### Examples
@@ -1502,9 +1629,10 @@ backups before restoring.
 ### Flags
 
   **Flag**             **Type**   **Description**
-  -------------------- ---------- ----------------------------------------------
+  -------------------- ---------- -------------------------------------------------
   `--list`             `flag`     List available backups instead of restoring.
   `--no-auto-anchor`   `flag`     Skip automatic anchor generation.
+  `--no-embed`         `flag`     Skip synchronous embedding generation on write.
   `--json`             `flag`     Output as JSON.
 
 ### Examples
@@ -1768,6 +1896,25 @@ After each write, mx re-evaluates anchors and prunes stale ones using
 the same similarity thresholds. Pass `--no-auto-anchor` on any of these
 commands to skip this step -- useful for bulk operations or cleanup
 scripts where the overhead is unwanted.
+:::
+
+::: {.admonition .note}
+**NOTE:** **Deferred embedding:** Pass `--no-embed` (or set
+`MX_SKIP_WRITE_EMBED=1`) on any write command (`add`, `update`, `edit`,
+`append`, `prepend`, `restore`, `add-batch`) to skip synchronous
+embedding generation on that write. The entry is written and fully
+durable immediately; only the vector embedding is deferred.
+
+**Trade-off:** entries written with `--no-embed` are absent from
+`--semantic` (vector) search results until a later
+`mx memory embed --all` run fills the gap. Keyword search
+(`mx memory search <query>`) and tag-based filters are unaffected.
+
+This flag exists to amortize the  435 MB embedding model cold-load: use
+it with `add-batch` (which does its own single hoisted embed pass at the
+end), or set `MX_SKIP_WRITE_EMBED=1` globally in a deployment where a
+nightly `mx memory embed --all` (e.g. via Cinder's `embed.nix` timer)
+keeps the graph fresh.
 :::
 
 ## Relationships

@@ -339,6 +339,151 @@ fn write_verification_ctx(
     }
 }
 
+/// Resolved arguments for a single standard-mode `memory add` write.
+///
+/// Both the `Add` CLI arm and `AddBatch` JSONL path construct this struct from
+/// their respective sources (flag values vs JSON fields) and call `add_one` as
+/// the single shared write path. This ensures both callers are identical in
+/// what they write — fact-type routing, edge creation, embedding, and anchoring
+/// all happen in one place so neither path can silently drift.
+struct AddOneArgs {
+    agent_id: String,
+    category: String,
+    title: String,
+    body: String,
+    tag_list: Vec<String>,
+    applicability_list: Vec<String>,
+    anchor_list: Vec<String>,
+    trigger_list: Vec<String>,
+    wake_phrase_list: Vec<String>,
+    wake_phrase: Option<String>,
+    wake_order: Option<i32>,
+    entry_visibility: String,
+    entry_owner: Option<String>,
+    session_id: Option<String>,
+    ephemeral: bool,
+    source_type: String,
+    entry_type: String,
+    content_type: String,
+    domain: Option<String>,
+    resonance: i32,
+    resonance_type: Option<String>,
+    project: Option<String>,
+}
+
+/// Core standard-mode write path shared by `Add` and `AddBatch`.
+///
+/// Inserts one entry, verifies the write, wires the EXTRACTED_FROM edge, and
+/// (when not suppressed) runs embed and auto-anchor. Returns the inserted
+/// `KnowledgeEntry` so the caller can format output without duplicating field
+/// reads.
+///
+/// `embed`           — when `true` calls `auto_embed`; pass
+///                     `write_embed_enabled(no_embed)` from the caller.
+/// `no_auto_anchor`  — passed through to `write_anchor_enabled`; mirrors the
+///                     same flag on the single-add path.
+fn add_one(
+    args: AddOneArgs,
+    db: &dyn store::KnowledgeStore,
+    embed: bool,
+    no_auto_anchor: bool,
+) -> Result<knowledge::KnowledgeEntry> {
+    let path_hint = args.domain.unwrap_or_else(|| args.category.clone());
+    let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &args.title);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let entry = knowledge::KnowledgeEntry {
+        id: id.clone(),
+        category_id: args.category.clone(),
+        title: args.title.clone(),
+        body: Some(args.body.clone()),
+        summary: None,
+        applicability: args.applicability_list.clone(),
+        source_project_id: args.project,
+        source_agent_id: Some(args.agent_id.clone()),
+        file_path: None,
+        tags: args.tag_list,
+        created_at: Some(now.clone()),
+        updated_at: Some(now),
+        content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&args.title)),
+        source_type_id: Some(args.source_type),
+        entry_type_id: Some(args.entry_type),
+        session_id: args.session_id.clone(),
+        ephemeral: args.ephemeral,
+        content_type_id: Some(args.content_type),
+        owner: args.entry_owner.clone(),
+        visibility: args.entry_visibility.clone(),
+        resonance: args.resonance,
+        resonance_type: args.resonance_type,
+        last_activated: None,
+        activation_count: 0,
+        decay_rate: 0.0,
+        anchors: args.anchor_list,
+        wake_phrases: args.wake_phrase_list,
+        triggers: args.trigger_list,
+        wake_order: args.wake_order,
+        wake_phrase: args.wake_phrase,
+        embedding: None,
+        embedding_model: None,
+        embedded_at: None,
+        chunk_count: 0,
+        format: "markdown".to_string(),
+        effective_resonance: None,
+    };
+
+    // Insert into database.
+    db.upsert_knowledge(&entry)?;
+
+    // Verify the write landed. SurrealDB's PERMISSIONS clause silently rejects
+    // unauthorized writes (zero rows affected, no error). A read-after-write
+    // catches that and turns silent data-loss into a loud failure.
+    {
+        let ctx = write_verification_ctx(
+            &args.entry_visibility,
+            args.entry_owner.as_deref(),
+            &args.agent_id,
+        );
+        if db.get(&id, &ctx)?.is_none() {
+            bail!(
+                "write rejected: entry '{}' was not persisted (likely a permission denial — \
+                 check that the writing agent owns the entry or has permission to create it)",
+                id
+            );
+        }
+    }
+
+    // Wire EXTRACTED_FROM edge when session_id is provided.
+    if let Some(ref sess_id) = args.session_id {
+        let session_ref = normalize_id(sess_id);
+        let ctx = store::AgentContext::public_only();
+        if db.get(&session_ref, &ctx)?.is_none() {
+            eprintln!(
+                "Warning: Session {} not found - EXTRACTED_FROM edge not created",
+                session_ref
+            );
+        } else {
+            db.add_relationship(&id, &session_ref, "extracted_from")?;
+        }
+    }
+
+    // Auto-generate embedding. Gated by the caller-resolved `embed` flag
+    // (which reflects both --no-embed and MX_SKIP_WRITE_EMBED).
+    if embed {
+        auto_embed(&id, db)?;
+    } else {
+        println!("  (embed skipped)");
+    }
+
+    // Auto-generate anchors. Gated by --no-auto-anchor / MX_SKIP_WRITE_ANCHOR.
+    if write_anchor_enabled(no_auto_anchor) {
+        auto_anchor(&id, db, None)?;
+    } else {
+        println!("  (auto-anchor skipped)");
+    }
+
+    Ok(entry)
+}
+
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
     let config = IndexConfig::default();
 
@@ -744,6 +889,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             session,
             thread_id,
             no_auto_anchor,
+            no_embed,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -962,8 +1108,16 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("  Category: {}", routing.category);
                 println!("  Content: {}", body);
 
-                // Auto-generate embedding if in network SurrealDB mode
-                auto_embed(&id, db.as_ref())?;
+                // Auto-generate embedding if in network SurrealDB mode.
+                // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see
+                // write_embed_enabled). The entry is already durable here, so
+                // skipping embedding is safe; the explicit `mx memory embed --all`
+                // command is never gated and still embeds deferred entries.
+                if write_embed_enabled(no_embed) {
+                    auto_embed(&id, db.as_ref())?;
+                } else {
+                    println!("  (embed skipped)");
+                }
 
                 return Ok(());
             }
@@ -1062,104 +1216,40 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
             }
 
-            // Generate ID
-            let path_hint = domain.unwrap_or_else(|| category.clone());
-            let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &title);
+            // Delegate to the shared single-entry write path. Both `Add` and
+            // `AddBatch` route through `add_one` so the write contract (insert,
+            // verify, edge, embed, anchor) stays in one place.
+            let entry = add_one(
+                AddOneArgs {
+                    agent_id: agent_id.clone(),
+                    category: category.clone(),
+                    title: title.clone(),
+                    body,
+                    tag_list,
+                    applicability_list,
+                    anchor_list,
+                    trigger_list,
+                    wake_phrase_list,
+                    wake_phrase,
+                    wake_order,
+                    entry_visibility: entry_visibility.clone(),
+                    entry_owner: entry_owner.clone(),
+                    session_id,
+                    ephemeral,
+                    source_type,
+                    entry_type,
+                    content_type,
+                    domain,
+                    resonance: resonance.unwrap_or(0),
+                    resonance_type,
+                    project,
+                },
+                db.as_ref(),
+                write_embed_enabled(no_embed),
+                no_auto_anchor,
+            )?;
 
-            // Create entry
-            let now = chrono::Utc::now().to_rfc3339();
-            let entry = knowledge::KnowledgeEntry {
-                id: id.clone(),
-                category_id: category.clone(),
-                title: title.clone(),
-                body: Some(body),
-                summary: None,
-                applicability: applicability_list.clone(),
-                source_project_id: project,
-                source_agent_id: Some(agent_id.clone()),
-                file_path: None,
-                tags: tag_list,
-                created_at: Some(now.clone()),
-                updated_at: Some(now),
-                content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&title)),
-                source_type_id: Some(source_type),
-                entry_type_id: Some(entry_type),
-                session_id: session_id.clone(),
-                ephemeral,
-                content_type_id: Some(content_type),
-                owner: entry_owner.clone(),
-                visibility: entry_visibility.clone(),
-                resonance: resonance.unwrap_or(0),
-                resonance_type,
-                last_activated: None,
-                activation_count: 0,
-                decay_rate: 0.0,
-                anchors: anchor_list,
-                wake_phrases: wake_phrase_list,
-                // Issue #246: triggers from the --triggers CLI flag (PR2).
-                triggers: trigger_list,
-                wake_order,
-                wake_phrase,
-                embedding: None,
-                embedding_model: None,
-                embedded_at: None,
-                chunk_count: 0,
-                format: "markdown".to_string(),
-                effective_resonance: None,
-            };
-
-            // Insert into database (applicability already set in struct)
-            db.upsert_knowledge(&entry)?;
-
-            // Verify the write landed by reading it back. A genuinely lost write
-            // (e.g. a record-level PERMISSIONS denial that affects zero rows without
-            // erroring) reads back as absent, so we bail loudly instead of printing
-            // a false success. The read-back must use a context whose visibility
-            // matches the row we wrote: the entry's own `owner`. Reading a private
-            // entry back as the *acting* agent would falsely fail when --owner points
-            // at someone else, because the visibility filter only admits a private
-            // row when `owner = $current_agent`. A public entry is always visible, so
-            // any agent context (or none) matches.
-            {
-                let ctx =
-                    write_verification_ctx(&entry_visibility, entry_owner.as_deref(), &agent_id);
-                if db.get(&id, &ctx)?.is_none() {
-                    bail!(
-                        "write rejected: entry '{}' was not persisted (likely a permission denial — check that the writing agent owns the entry or has permission to create it)",
-                        id
-                    );
-                }
-            }
-
-            // Create EXTRACTED_FROM edge when --session-id is provided.
-            // Standard mode stores session_id as a field but the for-session query
-            // traverses the relates_to edge — wire both paths for consistency.
-            if let Some(ref sess_id) = session_id {
-                let session_ref = normalize_id(sess_id);
-                let ctx = crate::store::AgentContext::public_only();
-                if db.get(&session_ref, &ctx)?.is_none() {
-                    eprintln!(
-                        "Warning: Session {} not found - EXTRACTED_FROM edge not created",
-                        session_ref
-                    );
-                } else {
-                    db.add_relationship(&id, &session_ref, "extracted_from")?;
-                }
-            }
-
-            // Auto-generate embedding if in network SurrealDB mode
-            auto_embed(&id, db.as_ref())?;
-
-            // Auto-generate anchors if in network SurrealDB mode.
-            // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
-            // write_anchor_enabled). The entry is already durable here, so
-            // skipping anchoring is safe; the explicit `mx memory auto-anchor`
-            // command is never gated and still anchors deferred writes.
-            if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
-            } else {
-                println!("  (auto-anchor skipped)");
-            }
+            let id = entry.id.clone();
 
             if json {
                 println!(
@@ -1250,6 +1340,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             session_id,
             force,
             no_auto_anchor,
+            no_embed,
             json,
         } => {
             use anyhow::Context;
@@ -1701,8 +1792,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 db.upsert_knowledge(&entry)?;
             }
 
-            // Auto-generate embedding if in network SurrealDB mode
-            auto_embed(&id, db.as_ref())?;
+            // Auto-generate embedding if in network SurrealDB mode.
+            // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            if write_embed_enabled(no_embed) {
+                auto_embed(&id, db.as_ref())?;
+            } else {
+                println!("  (embed skipped)");
+            }
 
             // Auto-generate anchors if in network SurrealDB mode
             // Pass explicitly removed anchors so auto_anchor respects user intent:
@@ -1750,6 +1846,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             replace_all,
             nth,
             no_auto_anchor,
+            no_embed,
             json,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -1773,8 +1870,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             let result = db.edit_content(&id, &ctx, &find, &replace, replace_all, nth)?;
 
-            // Auto-generate embedding if in network SurrealDB mode
-            auto_embed(&id, db.as_ref())?;
+            // Auto-generate embedding if in network SurrealDB mode.
+            // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            if write_embed_enabled(no_embed) {
+                auto_embed(&id, db.as_ref())?;
+            } else {
+                println!("  (embed skipped)");
+            }
 
             // Auto-generate anchors if in network SurrealDB mode.
             // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
@@ -1810,6 +1912,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             content,
             file,
             no_auto_anchor,
+            no_embed,
             json,
         } => {
             use std::io::{self, Read};
@@ -1853,8 +1956,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             db.append_content(&id, &ctx, &text)?;
 
-            // Auto-generate embedding if in network SurrealDB mode
-            auto_embed(&id, db.as_ref())?;
+            // Auto-generate embedding if in network SurrealDB mode.
+            // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            if write_embed_enabled(no_embed) {
+                auto_embed(&id, db.as_ref())?;
+            } else {
+                println!("  (embed skipped)");
+            }
 
             // Auto-generate anchors if in network SurrealDB mode.
             // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
@@ -1886,6 +1994,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             content,
             file,
             no_auto_anchor,
+            no_embed,
             json,
         } => {
             use std::io::{self, Read};
@@ -1929,8 +2038,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             db.prepend_content(&id, &ctx, &text)?;
 
-            // Auto-generate embedding if in network SurrealDB mode
-            auto_embed(&id, db.as_ref())?;
+            // Auto-generate embedding if in network SurrealDB mode.
+            // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            if write_embed_enabled(no_embed) {
+                auto_embed(&id, db.as_ref())?;
+            } else {
+                println!("  (embed skipped)");
+            }
 
             // Auto-generate anchors if in network SurrealDB mode.
             // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
@@ -1961,6 +2075,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             id,
             list,
             no_auto_anchor,
+            no_embed,
             json,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
@@ -2044,8 +2159,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 db.upsert_knowledge(&entry)?;
 
-                // #3: update embeddings and anchors like all other mutation paths
-                auto_embed(&id, db.as_ref())?;
+                // #3: update embeddings and anchors like all other mutation paths.
+                // Embedding gated by --no-embed or MX_SKIP_WRITE_EMBED (see
+                // write_embed_enabled). The entry is already durable here.
+                if write_embed_enabled(no_embed) {
+                    auto_embed(&id, db.as_ref())?;
+                } else {
+                    println!("  (embed skipped)");
+                }
                 // Gated by --no-auto-anchor or MX_SKIP_WRITE_ANCHOR (see
                 // write_anchor_enabled). The entry is already durable here, so
                 // skipping anchoring is safe; the explicit `mx memory
@@ -2080,6 +2201,483 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
+        MemoryCommands::AddBatch { file, no_embed } => {
+            use std::io::BufRead;
+
+            // Read JSONL lines from --file or stdin.
+            let lines: Vec<String> = if let Some(ref path) = file {
+                let f = std::fs::File::open(path)
+                    .with_context(|| format!("Failed to open batch file: {}", path))?;
+                std::io::BufReader::new(f)
+                    .lines()
+                    .collect::<std::result::Result<_, _>>()
+                    .context("Failed to read batch file")?
+            } else {
+                let stdin = std::io::stdin();
+                stdin
+                    .lock()
+                    .lines()
+                    .collect::<std::result::Result<_, _>>()
+                    .context("Failed to read from stdin")?
+            };
+
+            // Open store ONCE for the whole batch.
+            let db = store::create_store_with_verbose(&config.db_path, verbose)?;
+
+            let mut added_ids: Vec<String> = Vec::new();
+            let mut entry_errors: Vec<(usize, String)> = Vec::new();
+
+            for (line_idx, raw) in lines.iter().enumerate() {
+                let raw = raw.trim();
+                if raw.is_empty() || raw.starts_with('#') {
+                    continue;
+                }
+
+                // Parse the JSON line.
+                let v: serde_json::Value = match serde_json::from_str(raw) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        entry_errors.push((line_idx + 1, format!("JSON parse error: {}", e)));
+                        continue;
+                    }
+                };
+
+                // Extract fields matching the Add command signature.
+                // Each JSONL line is a self-describing Add payload.
+                let str_field = |key: &str| -> Option<String> {
+                    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
+                };
+                let bool_field =
+                    |key: &str| -> bool { v.get(key).and_then(|x| x.as_bool()).unwrap_or(false) };
+                let int_field = |key: &str| -> Option<i32> {
+                    v.get(key).and_then(|x| x.as_i64()).map(|n| n as i32)
+                };
+
+                // Resolve agent: source_agent field or MX_CURRENT_AGENT env.
+                let agent_id = match str_field("source_agent").filter(|s| !s.is_empty()) {
+                    Some(a) => a,
+                    None => match std::env::var("MX_CURRENT_AGENT") {
+                        Ok(a) if !a.is_empty() => a,
+                        _ => {
+                            entry_errors.push((
+                                line_idx + 1,
+                                "source_agent not provided and MX_CURRENT_AGENT not set"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                    },
+                };
+
+                // Determine the fact-type path vs standard path.
+                if let Some(fact_type) = str_field("type") {
+                    // Fact-type routing path.
+                    let body = match str_field("content") {
+                        Some(b) if !b.is_empty() => b,
+                        _ => {
+                            entry_errors.push((
+                                line_idx + 1,
+                                "fact entries require a 'content' field".to_string(),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let routing = match route_fact_type(&fact_type) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            entry_errors.push((line_idx + 1, format!("invalid fact type: {}", e)));
+                            continue;
+                        }
+                    };
+
+                    let session = str_field("session");
+                    let session_hint = session.as_deref().unwrap_or("fact");
+                    let truncated_title = crate::display::safe_truncate(&body, 60);
+                    let fact_title = format!("{}: {}", fact_type, truncated_title);
+                    let id = knowledge::KnowledgeEntry::generate_id(session_hint, &fact_title);
+
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let trigger_list: Vec<String> = str_field("triggers")
+                        .map(|t| knowledge::normalize_triggers(t.split(',')))
+                        .unwrap_or_default();
+                    let mut tag_list: Vec<String> =
+                        routing.tags.iter().map(|s| s.to_string()).collect();
+                    if let Some(t) = str_field("tags") {
+                        tag_list.extend(
+                            t.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty()),
+                        );
+                    }
+
+                    let mut metadata = serde_json::Map::new();
+                    metadata.insert(
+                        "fact_type".to_string(),
+                        serde_json::Value::String(fact_type.clone()),
+                    );
+                    metadata.insert(
+                        "agent".to_string(),
+                        serde_json::Value::String(agent_id.clone()),
+                    );
+                    metadata.insert(
+                        "date".to_string(),
+                        serde_json::Value::String(
+                            chrono::Local::now().format("%Y-%m-%d").to_string(),
+                        ),
+                    );
+                    if routing.category == "thread" {
+                        metadata.insert(
+                            "state".to_string(),
+                            serde_json::Value::String("open".to_string()),
+                        );
+                    }
+                    let summary_json = serde_json::Value::Object(metadata).to_string();
+
+                    let entry = knowledge::KnowledgeEntry {
+                        id: id.clone(),
+                        category_id: routing.category.to_string(),
+                        title: fact_title,
+                        body: Some(body.clone()),
+                        summary: Some(summary_json),
+                        applicability: vec![],
+                        source_project_id: str_field("project"),
+                        source_agent_id: Some(format!("agent:{}", agent_id)),
+                        file_path: None,
+                        tags: tag_list,
+                        created_at: Some(now.clone()),
+                        updated_at: Some(now),
+                        content_hash: Some(knowledge::KnowledgeEntry::compute_hash(&body)),
+                        source_type_id: Some("source_type:agent_session".to_string()),
+                        entry_type_id: Some("entry_type:primary".to_string()),
+                        session_id: session.clone(),
+                        ephemeral: true,
+                        content_type_id: Some("content_type:text".to_string()),
+                        owner: Some(format!("agent:{}", agent_id)),
+                        visibility: "public".to_string(),
+                        resonance: int_field("resonance").unwrap_or(3),
+                        resonance_type: Some("ephemeral".to_string()),
+                        last_activated: None,
+                        activation_count: 0,
+                        decay_rate: 0.0,
+                        anchors: vec![],
+                        wake_phrases: vec![],
+                        triggers: trigger_list,
+                        wake_order: None,
+                        wake_phrase: None,
+                        embedding: None,
+                        embedding_model: None,
+                        embedded_at: None,
+                        chunk_count: 0,
+                        format: "markdown".to_string(),
+                        effective_resonance: None,
+                    };
+
+                    match db.upsert_knowledge(&entry) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            entry_errors.push((line_idx + 1, format!("db write error: {}", e)));
+                            continue;
+                        }
+                    }
+
+                    // Read-back verify (same as single-add path)
+                    let ctx = store::AgentContext::for_agent(&agent_id);
+                    match db.get(&id, &ctx) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            entry_errors.push((
+                                line_idx + 1,
+                                format!("write rejected: fact '{}' not persisted", id),
+                            ));
+                            continue;
+                        }
+                        Err(e) => {
+                            entry_errors.push((line_idx + 1, format!("read-back error: {}", e)));
+                            continue;
+                        }
+                    }
+
+                    // EXTRACTED_FROM edge if session provided
+                    if let Some(ref sess) = session {
+                        let session_ref = if sess.starts_with("kn-") {
+                            sess.clone()
+                        } else {
+                            format!("kn-{}", sess)
+                        };
+                        let pub_ctx = store::AgentContext::public_only();
+                        match db.get(&session_ref, &pub_ctx) {
+                            Ok(None) => {
+                                eprintln!(
+                                    "  line {}: Warning: Session {} not found - relationship not created",
+                                    line_idx + 1,
+                                    session_ref
+                                );
+                            }
+                            Ok(Some(_)) => {
+                                if let Err(e) =
+                                    db.add_relationship(&id, &session_ref, "extracted_from")
+                                {
+                                    eprintln!(
+                                        "  line {}: Warning: EXTRACTED_FROM edge failed: {}",
+                                        line_idx + 1,
+                                        e
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  line {}: Warning: session lookup error for {}: {}",
+                                    line_idx + 1,
+                                    session_ref,
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    println!("  [{}] Added fact: {}", line_idx + 1, id);
+                    added_ids.push(id);
+                } else {
+                    // Standard add path — delegate to add_one(), the shared single-
+                    // entry write path. This ensures batch-added standard entries get
+                    // the same insert, verify, edge, embed (deferred), and anchor
+                    // logic as single adds, with no drift possible between the paths.
+                    let category = match str_field("category") {
+                        Some(c) if !c.is_empty() => c,
+                        _ => {
+                            entry_errors.push((
+                                line_idx + 1,
+                                "missing 'category' field (required when 'type' not set)"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                    };
+                    let title = match str_field("title") {
+                        Some(t) if !t.is_empty() => t,
+                        _ => {
+                            entry_errors.push((
+                                line_idx + 1,
+                                "missing 'title' field (required when 'type' not set)".to_string(),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    // Resolve body from 'content' or 'file'.
+                    let body = if let Some(c) = str_field("content") {
+                        c
+                    } else if let Some(file_path) = str_field("file") {
+                        match std::fs::read_to_string(&file_path) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                entry_errors.push((
+                                    line_idx + 1,
+                                    format!("failed to read file '{}': {}", file_path, e),
+                                ));
+                                continue;
+                            }
+                        }
+                    } else {
+                        entry_errors.push((
+                            line_idx + 1,
+                            "missing 'content' or 'file' field".to_string(),
+                        ));
+                        continue;
+                    };
+
+                    // Validate category (done before add_one to provide skip-and-continue).
+                    match db.get_category(&category) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            match db.list_categories() {
+                                Ok(cats) => {
+                                    let valid: Vec<&str> =
+                                        cats.iter().map(|c| c.id.as_str()).collect();
+                                    entry_errors.push((
+                                        line_idx + 1,
+                                        format!(
+                                            "invalid category '{}'. Valid: {}",
+                                            category,
+                                            valid.join(", ")
+                                        ),
+                                    ));
+                                }
+                                Err(e) => {
+                                    entry_errors.push((
+                                        line_idx + 1,
+                                        format!("category lookup error: {}", e),
+                                    ));
+                                }
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            entry_errors
+                                .push((line_idx + 1, format!("category lookup error: {}", e)));
+                            continue;
+                        }
+                    }
+
+                    let is_private = bool_field("private")
+                        || str_field("visibility").as_deref() == Some("private");
+                    let entry_visibility = if is_private {
+                        "private".to_string()
+                    } else {
+                        "public".to_string()
+                    };
+                    let entry_owner: Option<String> = if is_private {
+                        Some(str_field("owner").unwrap_or_else(|| agent_id.clone()))
+                    } else {
+                        str_field("owner")
+                    };
+
+                    let tag_list: Vec<String> = str_field("tags")
+                        .map(|t| {
+                            t.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let applicability_list: Vec<String> = str_field("applicability")
+                        .map(|a| {
+                            a.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let anchor_list: Vec<String> = str_field("anchors")
+                        .map(|a| {
+                            a.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let trigger_list: Vec<String> = str_field("triggers")
+                        .map(|t| knowledge::normalize_triggers(t.split(',')))
+                        .unwrap_or_default();
+                    let wake_phrase_list: Vec<String> = str_field("wake_phrases")
+                        .map(|p| {
+                            p.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_else(|| {
+                            str_field("wake_phrase")
+                                .map(|p| vec![p])
+                                .unwrap_or_default()
+                        });
+
+                    // Call the shared write path. Batch passes embed=false so the
+                    // hoisted embedding pass at the end of the loop handles it once.
+                    // no_auto_anchor mirrors the batch-level --no-embed: the batch
+                    // contract is defer-and-hoist for embedding; anchoring runs
+                    // per-entry here (same as single-add) because add_one handles it.
+                    let entry_result = add_one(
+                        AddOneArgs {
+                            agent_id: agent_id.clone(),
+                            category: category.clone(),
+                            title: title.clone(),
+                            body,
+                            tag_list,
+                            applicability_list,
+                            anchor_list,
+                            trigger_list,
+                            wake_phrase_list,
+                            wake_phrase: str_field("wake_phrase"),
+                            wake_order: int_field("wake_order"),
+                            entry_visibility,
+                            entry_owner,
+                            session_id: str_field("session_id"),
+                            ephemeral: bool_field("ephemeral"),
+                            source_type: str_field("source_type")
+                                .unwrap_or_else(|| "manual".to_string()),
+                            entry_type: str_field("entry_type")
+                                .unwrap_or_else(|| "primary".to_string()),
+                            content_type: str_field("content_type")
+                                .unwrap_or_else(|| "text".to_string()),
+                            domain: str_field("domain"),
+                            resonance: int_field("resonance").unwrap_or(0),
+                            resonance_type: str_field("resonance_type"),
+                            project: str_field("project"),
+                        },
+                        db.as_ref(),
+                        false, // embed=false — hoisted pass below embeds all at once
+                        true,  // no_auto_anchor=true — batch anchoring via nightly run
+                    );
+
+                    match entry_result {
+                        Ok(entry) => {
+                            println!("  [{}] Added entry: {} ({})", line_idx + 1, entry.id, title);
+                            added_ids.push(entry.id);
+                        }
+                        Err(e) => {
+                            entry_errors.push((line_idx + 1, format!("write error: {}", e)));
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Report any per-entry errors (partial success: don't abort on them).
+            if !entry_errors.is_empty() {
+                eprintln!(
+                    "\nBatch errors ({} of {} entries failed):",
+                    entry_errors.len(),
+                    lines.len()
+                );
+                for (lineno, msg) in &entry_errors {
+                    eprintln!("  line {}: {}", lineno, msg);
+                }
+            }
+
+            // Single hoisted embedding pass — ONE model cold-load for all entries.
+            // This is the entire point of add-batch: amortize the ~435 MB TractProvider
+            // load across N entries rather than paying it N times.
+            if !added_ids.is_empty() && !no_embed {
+                use crate::embeddings::TractProvider;
+                println!(
+                    "\nEmbedding {} entr{}...",
+                    added_ids.len(),
+                    if added_ids.len() == 1 { "y" } else { "ies" }
+                );
+                let provider = TractProvider::new()?;
+                let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
+                for (i, entry_id) in added_ids.iter().enumerate() {
+                    println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
+                    crate::helpers::auto_embed_with(
+                        entry_id,
+                        db.as_ref(),
+                        &provider,
+                        &chunking_tokenizer,
+                    )?;
+                }
+                println!("Embedding complete.");
+            } else if no_embed && !added_ids.is_empty() {
+                println!(
+                    "\n(embed skipped for {} entries — run `mx memory embed --all` to embed)",
+                    added_ids.len()
+                );
+            }
+
+            // Summary
+            println!(
+                "\nBatch complete: {} added, {} failed.",
+                added_ids.len(),
+                entry_errors.len()
+            );
+
+            // Exit non-zero if any entries failed.
+            if !entry_errors.is_empty() {
+                std::process::exit(1);
+            }
+        }
+
         MemoryCommands::Embed { id, all, long_only } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
 
@@ -2093,12 +2691,15 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let entries = db.list_all(&ctx)?;
                 let total = entries.len();
 
-                // If --long-only is specified, load tokenizer for token counting
-                let tokenizer = if long_only.is_some() {
-                    Some(crate::embeddings::load_tokenizer()?)
-                } else {
-                    None
-                };
+                // Hoist provider construction ONCE above the loop so the whole
+                // --all batch pays one ~435 MB cold-load instead of one per entry.
+                // Uses auto_embed_with (provider injected) rather than auto_embed
+                // (which constructs internally on every call).
+                use crate::embeddings::TractProvider;
+                let provider = TractProvider::new()?;
+                // Load the chunking tokenizer once. When --long-only is also set
+                // this tokenizer serves double duty: token-count gate + chunking.
+                let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
 
                 let mut embedded = 0;
                 let mut skipped = 0;
@@ -2106,11 +2707,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 println!("Found {} entries to embed", total);
                 for entry in &entries {
                     // Check token count if --long-only is specified
-                    if let Some(min_tokens) = long_only
-                        && let Some(ref tok) = tokenizer
-                    {
+                    if let Some(min_tokens) = long_only {
                         let text = entry.embedding_text();
-                        let encoding = tok
+                        let encoding = chunking_tokenizer
                             .encode(text.as_str(), false)
                             .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
                         if encoding.get_ids().len() <= min_tokens {
@@ -2126,7 +2725,12 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         total - skipped,
                         entry.title
                     );
-                    crate::helpers::auto_embed(&entry.id, db.as_ref())?;
+                    crate::helpers::auto_embed_with(
+                        &entry.id,
+                        db.as_ref(),
+                        &provider,
+                        &chunking_tokenizer,
+                    )?;
                 }
                 if long_only.is_some() {
                     println!(
