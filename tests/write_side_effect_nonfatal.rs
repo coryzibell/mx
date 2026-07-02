@@ -188,6 +188,65 @@ fn add_embed_failure_is_non_fatal_and_entry_persists() {
     assert_eq!(show_body(&dir, &id), "brand new entry");
 }
 
+#[test]
+fn add_batch_embed_failure_is_non_fatal_and_entries_persist() {
+    let dir = setup();
+
+    let batch_file = dir.dir.path().join("batch.jsonl");
+    std::fs::write(
+        &batch_file,
+        concat!(
+            r#"{"category":"insight","title":"Batch Nonfatal 1","content":"first entry","source_agent":"test"}"#,
+            "\n",
+            r#"{"category":"insight","title":"Batch Nonfatal 2","content":"second entry","source_agent":"test"}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let out = mx_with_broken_model_cache(
+        &dir,
+        &[
+            "memory",
+            "add-batch",
+            "--file",
+            batch_file.to_str().unwrap(),
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "add-batch must exit 0 even when the hoisted post-write embed pass fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("post-write batch embed failed") && stderr.contains("entries durable"),
+        "expected a non-fatal batch embed warning naming the entries as durable: {stderr}"
+    );
+
+    // Both entries landed despite the hoisted embed pass failing entirely
+    // (the model cold-load itself is what's broken here, so no entry embeds).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ids: Vec<&str> = stdout
+        .lines()
+        .filter_map(|l| l.split_whitespace().find(|w| w.starts_with("kn-")))
+        .map(|w| w.trim_end_matches(':').trim_start_matches('[').trim())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "expected both batch entries to report an id in stdout, got: {stdout}"
+    );
+    for id in ids {
+        let body = show_body(&dir, id);
+        assert!(
+            body == "first entry" || body == "second entry",
+            "batch entry {id} should be durable with its content, got body: {body}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A genuine write failure must still exit non-zero
 // ---------------------------------------------------------------------------
