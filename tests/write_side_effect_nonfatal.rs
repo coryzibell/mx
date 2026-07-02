@@ -81,6 +81,13 @@ fn mx_with_broken_model_cache(env: &Env, args: &[&str]) -> std::process::Output 
 
 /// Add an entry with embed/anchor skipped, so entry creation itself never
 /// touches the model cache. Returns its `kn-` id.
+///
+/// Deliberately omits `--json`: `add_one`'s `--no-embed`/`--no-auto-anchor`
+/// branches `println!` a "(... skipped)" notice to stdout ahead of whatever
+/// the caller prints, which corrupts `--json`'s stdout-is-JSON contract.
+/// That's a pre-existing bug independent of this test file, so this helper
+/// works around it by parsing the plain-text "Added entry: <id>" line
+/// instead of asking for JSON.
 fn add_plain_no_embed(env: &Env) -> String {
     let out = mx(
         env,
@@ -95,7 +102,6 @@ fn add_plain_no_embed(env: &Env) -> String {
             "original body",
             "--no-embed",
             "--no-auto-anchor",
-            "--json",
         ],
     );
     assert!(
@@ -103,8 +109,12 @@ fn add_plain_no_embed(env: &Env) -> String {
         "setup add failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    v["id"].as_str().unwrap().to_string()
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("Added entry: "))
+        .map(|id| id.trim().to_string())
+        .unwrap_or_else(|| panic!("expected an 'Added entry: <id>' line, got: {stdout}"))
 }
 
 fn show_body(env: &Env, id: &str) -> String {
