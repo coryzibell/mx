@@ -3211,18 +3211,36 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     added_ids.len(),
                     if added_ids.len() == 1 { "y" } else { "ies" }
                 );
-                let provider = TractProvider::new()?;
-                let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
-                for (i, entry_id) in added_ids.iter().enumerate() {
-                    println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
-                    crate::helpers::auto_embed_with(
-                        entry_id,
-                        db.as_ref(),
-                        &provider,
-                        &chunking_tokenizer,
-                    )?;
+                // All added_ids are already durably written above (add_one committed
+                // each entry before this pass runs). A failure anywhere in here —
+                // model cold-load, tokenizer load, or a single entry's embed — must
+                // NOT propagate to exit 1: the batch already landed and a non-zero
+                // exit here would make the caller re-fire and duplicate the whole
+                // batch. Mirrors the non-fatal post-write side-effect pattern used
+                // for the six single-entry commands (Append/Add/Update/Edit/Prepend/
+                // Restore); unembedded entries are reconciled later by
+                // `mx memory embed --all`.
+                let embed_result: anyhow::Result<()> = (|| {
+                    let provider = TractProvider::new()?;
+                    let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
+                    for (i, entry_id) in added_ids.iter().enumerate() {
+                        println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
+                        crate::helpers::auto_embed_with(
+                            entry_id,
+                            db.as_ref(),
+                            &provider,
+                            &chunking_tokenizer,
+                        )?;
+                    }
+                    Ok(())
+                })();
+                match embed_result {
+                    Ok(()) => println!("Embedding complete."),
+                    Err(e) => eprintln!(
+                        "Warning: post-write batch embed failed ({} entries durable): {e}",
+                        added_ids.len()
+                    ),
                 }
-                println!("Embedding complete.");
             } else if no_embed && !added_ids.is_empty() {
                 println!(
                     "\n(embed skipped for {} entries — run `mx memory embed --all` to embed)",
