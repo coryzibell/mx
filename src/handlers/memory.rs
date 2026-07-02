@@ -772,15 +772,23 @@ fn add_one(
 
     // Auto-generate embedding. Gated by the caller-resolved `embed` flag
     // (which reflects both --no-embed and MX_SKIP_WRITE_EMBED).
+    //
+    // Non-fatal: the entry is already durable (upserted + read-back verified
+    // above), so a transient embed failure here must not surface as a
+    // process exit failure -- that would make callers retry and duplicate
+    // an entry that already landed.
     if embed {
-        auto_embed(&id, db)?;
+        let _ = auto_embed(&id, db)
+            .map_err(|e| eprintln!("Warning: post-write embed failed (entry durable): {e}"));
     } else {
         println!("  (embed skipped)");
     }
 
     // Auto-generate anchors. Gated by --no-auto-anchor / MX_SKIP_WRITE_ANCHOR.
+    // Non-fatal for the same reason as the embed step above.
     if write_anchor_enabled(no_auto_anchor) {
-        auto_anchor(&id, db, None)?;
+        let _ = auto_anchor(&id, db, None)
+            .map_err(|e| eprintln!("Warning: post-write anchor failed (entry durable): {e}"));
     } else {
         println!("  (auto-anchor skipped)");
     }
@@ -1484,8 +1492,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // write_embed_enabled). The entry is already durable here, so
                 // skipping embedding is safe; the explicit `mx memory embed --all`
                 // command is never gated and still embeds deferred entries.
+                //
+                // Non-fatal: a transient embed failure must not exit non-zero
+                // once the fact has already landed, or callers will retry and
+                // duplicate it.
                 if write_embed_enabled(no_embed) {
-                    auto_embed(&id, db.as_ref())?;
+                    let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                        eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                    });
                 } else {
                     println!("  (embed skipped)");
                 }
@@ -2222,8 +2236,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the entry is already durable (upserted above), so a
+            // transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate an update that already landed.
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                    eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                });
             } else {
                 println!("  (embed skipped)");
             }
@@ -2241,8 +2260,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above.
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), removed)?;
+                let _ = auto_anchor(&id, db.as_ref(), removed).map_err(|e| {
+                    eprintln!("Warning: post-write anchor failed (entry durable): {e}")
+                });
             } else {
                 println!("  (auto-anchor skipped)");
             }
@@ -2300,8 +2322,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the edit already landed via edit_content above, so a
+            // transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate the edit.
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                    eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                });
             } else {
                 println!("  (embed skipped)");
             }
@@ -2311,8 +2338,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above.
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                let _ = auto_anchor(&id, db.as_ref(), None).map_err(|e| {
+                    eprintln!("Warning: post-write anchor failed (entry durable): {e}")
+                });
             } else {
                 println!("  (auto-anchor skipped)");
             }
@@ -2386,8 +2416,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the append already landed via append_content above, so
+            // a transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate the append.
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                    eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                });
             } else {
                 println!("  (embed skipped)");
             }
@@ -2397,8 +2432,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above.
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                let _ = auto_anchor(&id, db.as_ref(), None).map_err(|e| {
+                    eprintln!("Warning: post-write anchor failed (entry durable): {e}")
+                });
             } else {
                 println!("  (auto-anchor skipped)");
             }
@@ -2468,8 +2506,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the prepend already landed via prepend_content above,
+            // so a transient embed failure must not exit non-zero -- that
+            // would make callers retry and duplicate the prepend.
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                    eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                });
             } else {
                 println!("  (embed skipped)");
             }
@@ -2479,8 +2522,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above.
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                let _ = auto_anchor(&id, db.as_ref(), None).map_err(|e| {
+                    eprintln!("Warning: post-write anchor failed (entry durable): {e}")
+                });
             } else {
                 println!("  (auto-anchor skipped)");
             }
@@ -2590,8 +2636,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // #3: update embeddings and anchors like all other mutation paths.
                 // Embedding gated by --no-embed or MX_SKIP_WRITE_EMBED (see
                 // write_embed_enabled). The entry is already durable here.
+                // Non-fatal: the restore already landed via upsert_knowledge
+                // above, so a transient embed failure must not exit non-zero
+                // -- that would make callers retry and duplicate the restore.
                 if write_embed_enabled(no_embed) {
-                    auto_embed(&id, db.as_ref())?;
+                    let _ = auto_embed(&id, db.as_ref()).map_err(|e| {
+                        eprintln!("Warning: post-write embed failed (entry durable): {e}")
+                    });
                 } else {
                     println!("  (embed skipped)");
                 }
@@ -2600,8 +2651,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // skipping anchoring is safe; the explicit `mx memory
                 // auto-anchor` command is never gated and still anchors
                 // deferred writes.
+                // Non-fatal for the same reason as the embed step above.
                 if write_anchor_enabled(no_auto_anchor) {
-                    auto_anchor(&id, db.as_ref(), None)?;
+                    let _ = auto_anchor(&id, db.as_ref(), None).map_err(|e| {
+                        eprintln!("Warning: post-write anchor failed (entry durable): {e}")
+                    });
                 } else {
                     println!("  (auto-anchor skipped)");
                 }
