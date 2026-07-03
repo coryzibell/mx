@@ -694,6 +694,14 @@ pub enum MemoryCommands {
         /// Skip synchronous embedding generation on write
         #[arg(long)]
         no_embed: bool,
+
+        /// Write through even if an identical (same session, same owner)
+        /// entry already exists this session. Without this flag, a
+        /// recased/repunctuated near-duplicate is skipped (exit 0) rather
+        /// than written -- this is a deliberate override for an intentional
+        /// re-add, not "permission" for an accidental one.
+        #[arg(long)]
+        allow_duplicate: bool,
     },
 
     /// Update an existing entry in the database

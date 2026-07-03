@@ -339,6 +339,135 @@ fn write_verification_ctx(
     }
 }
 
+/// Write-boundary dedup decision (W447): either the content is fresh, or a
+/// same-(session, owner) entry with an equal `dedup_hash` already exists.
+enum DedupDecision {
+    Fresh,
+    Duplicate { existing_id: String },
+}
+
+/// In-process, best-effort write-boundary dedup index for a single `mx
+/// memory add` / `add-batch` invocation (W447).
+///
+/// Candidates are fetched from the store LAZILY, one query per distinct
+/// `(session_id, owner)` group actually encountered -- not one per entry.
+/// For the common case (a whole batch sharing one session and one owner,
+/// which is how the pocket writes it) this is exactly one query, satisfying
+/// the "single query per batch" perf goal. For a batch that legitimately
+/// spans multiple sessions and/or owners (add-batch resolves both per line),
+/// this issues one query per distinct group instead of either (a) a single
+/// query that silently mis-scopes every other group, or (b) one query per
+/// entry -- resolving the tension the round-2 panel (Wren/Vale) flagged
+/// between "exactly one query" and correct per-line owner/session scoping.
+///
+/// Keyed by `(session_id, owner, dedup_hash)`: owner is part of the key so a
+/// hash collision under one owner never shadows a distinct write by another
+/// owner (W447 rulings #2); session is part of the key so the same hash in a
+/// DIFFERENT session is never treated as a duplicate.
+///
+/// TOCTOU: read-then-write, per-process, with no DB-level unique constraint
+/// backing it. Two concurrent `mx` invocations can still both write the same
+/// normalized content. Accepted (W447 rulings #8): prevention, not a
+/// store-level uniqueness guarantee.
+#[derive(Default)]
+struct DedupIndex {
+    seen: std::collections::HashMap<(String, Option<String>, String), String>,
+    fetched_groups: std::collections::HashSet<(String, Option<String>)>,
+}
+
+impl DedupIndex {
+    /// Ensure the `(session_id, owner)` group's DB candidates are loaded.
+    /// No query at all when `session_id` is `None` -- dedup is bypassed
+    /// entirely for session-less writes (settled, W447 rulings #6) -- and no
+    /// REPEAT query when the group was already fetched by an earlier line in
+    /// this run.
+    fn ensure_group(
+        &mut self,
+        db: &dyn store::KnowledgeStore,
+        session_id: Option<&str>,
+        owner: Option<&str>,
+    ) -> Result<()> {
+        let Some(sid) = session_id else {
+            return Ok(());
+        };
+        let group = (sid.to_string(), owner.map(String::from));
+        if self.fetched_groups.contains(&group) {
+            return Ok(());
+        }
+        // ctx is only the visibility-filter BACKSTOP -- the hard owner scope
+        // lives in the SQL predicate (`owner = $owner` / `owner IS NONE`).
+        // A `Some(owner)` entry may be private, so ctx must be for_agent(the
+        // SAME owner string) or the private branch of the backstop degrades
+        // to public-only. A `None`-owner row is always public in this
+        // codebase (private writes always set an owner), so public_only()
+        // is correct and honest there -- never a fabricated agent id.
+        let ctx = match owner {
+            Some(o) => store::AgentContext::for_agent(o.to_string()),
+            None => store::AgentContext::public_only(),
+        };
+        let candidates = db.get_entries_for_session(sid, owner, &ctx)?;
+        for c in candidates {
+            let hash = knowledge::dedup_hash(&c.title, &c.body);
+            self.seen
+                .insert((sid.to_string(), owner.map(String::from), hash), c.id);
+        }
+        self.fetched_groups.insert(group);
+        Ok(())
+    }
+
+    /// Check whether `(session_id, owner)` already has an entry whose
+    /// title+body normalizes to the same hash. Always `Fresh` when
+    /// `session_id` is `None` (dedup bypassed by design).
+    fn check(
+        &self,
+        session_id: Option<&str>,
+        owner: Option<&str>,
+        title: &str,
+        body: &str,
+    ) -> DedupDecision {
+        let Some(sid) = session_id else {
+            return DedupDecision::Fresh;
+        };
+        let hash = knowledge::dedup_hash(title, body);
+        let key = (sid.to_string(), owner.map(String::from), hash);
+        match self.seen.get(&key) {
+            Some(existing_id) => DedupDecision::Duplicate {
+                existing_id: existing_id.clone(),
+            },
+            None => DedupDecision::Fresh,
+        }
+    }
+
+    /// Record a just-written entry so LATER lines in the same run dedup
+    /// against it too. Call ONLY after a successful upsert + read-back
+    /// verify -- never on the skip path, never before the write actually
+    /// landed (a poisoned record would drop a real, distinct later write).
+    /// No-op when `session_id` is `None` (nothing to key it by).
+    fn record(
+        &mut self,
+        session_id: Option<&str>,
+        owner: Option<&str>,
+        title: &str,
+        body: &str,
+        id: String,
+    ) {
+        if let Some(sid) = session_id {
+            let hash = knowledge::dedup_hash(title, body);
+            self.seen
+                .insert((sid.to_string(), owner.map(String::from), hash), id);
+        }
+    }
+}
+
+/// Result of [`add_one`]: either the entry was written, or the write-boundary
+/// dedup gate (W447) found a same-owner, same-session match and skipped the
+/// write. `Skipped` is an `Ok` variant, never `Err` -- an `Err` would abort
+/// the whole batch via `?` for what is, by design, a successful no-op.
+enum WriteOutcome {
+    Written(Box<knowledge::KnowledgeEntry>),
+    Skipped { duplicate_of: String },
+}
+
 /// Resolved arguments for a single standard-mode `memory add` write.
 ///
 /// Both the `Add` CLI arm and `AddBatch` JSONL path construct this struct from
@@ -382,12 +511,23 @@ struct AddOneArgs {
 ///                     `write_embed_enabled(no_embed)` from the caller.
 /// `no_auto_anchor`  — passed through to `write_anchor_enabled`; mirrors the
 ///                     same flag on the single-add path.
+/// `dedup`           — write-boundary dedup index (W447), threaded `&mut`
+///                     across a whole add/add-batch run so later lines
+///                     dedup against earlier ones too.
+/// `allow_duplicate` — caller's explicit override (`--allow-duplicate` /
+///                     JSONL `allow_duplicate`); when `true` the dedup gate
+///                     is bypassed entirely for this write (no check, no
+///                     record -- the write is not offered as a future
+///                     dedup candidate either, since the caller asked for it
+///                     deliberately).
 fn add_one(
     args: AddOneArgs,
     db: &dyn store::KnowledgeStore,
     embed: bool,
     no_auto_anchor: bool,
-) -> Result<knowledge::KnowledgeEntry> {
+    dedup: &mut DedupIndex,
+    allow_duplicate: bool,
+) -> Result<WriteOutcome> {
     let path_hint = args.domain.unwrap_or_else(|| args.category.clone());
     let id = knowledge::KnowledgeEntry::generate_id(&path_hint, &args.title);
     let now = chrono::Utc::now().to_rfc3339();
@@ -430,6 +570,22 @@ fn add_one(
         format: "markdown".to_string(),
         effective_resonance: None,
     };
+
+    // Write-boundary dedup gate (W447). Runs BEFORE any side effect (upsert,
+    // edge, embed, anchor) so a skip is a true no-op -- not a partial write.
+    if !allow_duplicate {
+        dedup.ensure_group(db, args.session_id.as_deref(), args.entry_owner.as_deref())?;
+        if let DedupDecision::Duplicate { existing_id } = dedup.check(
+            args.session_id.as_deref(),
+            args.entry_owner.as_deref(),
+            &args.title,
+            &args.body,
+        ) {
+            return Ok(WriteOutcome::Skipped {
+                duplicate_of: existing_id,
+            });
+        }
+    }
 
     // Insert into database.
     db.upsert_knowledge(&entry)?;
@@ -481,7 +637,19 @@ fn add_one(
         println!("  (auto-anchor skipped)");
     }
 
-    Ok(entry)
+    // Record AFTER the write is durable and verified -- never before, and
+    // never on the skip path above (which returns early).
+    if !allow_duplicate {
+        dedup.record(
+            args.session_id.as_deref(),
+            args.entry_owner.as_deref(),
+            &args.title,
+            &args.body,
+            id.clone(),
+        );
+    }
+
+    Ok(WriteOutcome::Written(Box::new(entry)))
 }
 
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
@@ -901,6 +1069,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             thread_id,
             no_auto_anchor,
             no_embed,
+            allow_duplicate,
         } => {
             use anyhow::Context;
             use std::fs;
@@ -1230,7 +1399,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // Delegate to the shared single-entry write path. Both `Add` and
             // `AddBatch` route through `add_one` so the write contract (insert,
             // verify, edge, embed, anchor) stays in one place.
-            let entry = add_one(
+            let mut dedup = DedupIndex::default();
+            let outcome = add_one(
                 AddOneArgs {
                     agent_id: agent_id.clone(),
                     category: category.clone(),
@@ -1258,29 +1428,65 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 db.as_ref(),
                 write_embed_enabled(no_embed),
                 no_auto_anchor,
+                &mut dedup,
+                allow_duplicate,
             )?;
+
+            // Skip = success, not failure: an identical entry already exists
+            // this session, so there is nothing to write and nothing wrong.
+            let entry = match outcome {
+                WriteOutcome::Written(e) => e,
+                WriteOutcome::Skipped { duplicate_of } => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "skipped": true,
+                                "duplicate_of": duplicate_of,
+                                "status": "already_persisted",
+                                "note": "identical entry exists this session; no write needed",
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Already saved as {} (identical entry this session — nothing to do).",
+                            duplicate_of
+                        );
+                    }
+                    return Ok(());
+                }
+            };
+
+            // W447 rulings #6: session_id=None bypasses dedup entirely with no
+            // candidate query. Surface that bypass rather than let a silent
+            // "the store dedups now" assumption creep in for session-less
+            // writes. Stderr only -- never pollutes --json stdout.
+            if entry.session_id.is_none() {
+                eprintln!("  (dedup bypassed: no --session-id provided)");
+            }
 
             let id = entry.id.clone();
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "id": id,
-                        "category": category,
-                        "title": title,
-                        "visibility": entry_visibility,
-                        "owner": entry_owner,
-                        "resonance": entry.resonance,
-                        "resonance_type": entry.resonance_type,
-                        "tags": entry.tags,
-                        "applicability": entry.applicability,
-                        "anchors": entry.anchors,
-                        "wake_phrase": entry.wake_phrase,
-                        "wake_phrases": entry.wake_phrases,
-                        "triggers": entry.triggers,
-                    }))?
-                );
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "category": category,
+                    "title": title,
+                    "visibility": entry_visibility,
+                    "owner": entry_owner,
+                    "resonance": entry.resonance,
+                    "resonance_type": entry.resonance_type,
+                    "tags": entry.tags,
+                    "applicability": entry.applicability,
+                    "anchors": entry.anchors,
+                    "wake_phrase": entry.wake_phrase,
+                    "wake_phrases": entry.wake_phrases,
+                    "triggers": entry.triggers,
+                });
+                if entry.session_id.is_none() {
+                    payload["dedup"] = serde_json::json!("bypassed_no_session");
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!("Added entry: {}", id);
                 println!("  Category: {}", category);
@@ -2237,6 +2443,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             let mut added_ids: Vec<String> = Vec::new();
             let mut entry_errors: Vec<(usize, String)> = Vec::new();
+            let mut skipped_count: usize = 0;
+            // Write-boundary dedup (W447), threaded across the whole batch so
+            // later lines dedup against earlier ones. See `DedupIndex` --
+            // fetches lazily, one query per distinct (session, owner) group.
+            let mut dedup = DedupIndex::default();
 
             for (line_idx, raw) in lines.iter().enumerate() {
                 let raw = raw.trim();
@@ -2384,6 +2595,37 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         effective_resonance: None,
                     };
 
+                    // Write-boundary dedup gate (W447). This inline fact-type
+                    // path is the funnel round-1 missed: it never touches
+                    // add_one, so it needs its OWN gate, immediately before
+                    // the upsert, with the SAME shared DedupIndex.
+                    let allow_duplicate = bool_field("allow_duplicate");
+                    if !allow_duplicate {
+                        if let Err(e) = dedup.ensure_group(
+                            db.as_ref(),
+                            session.as_deref(),
+                            entry.owner.as_deref(),
+                        ) {
+                            entry_errors.push((line_idx + 1, format!("dedup lookup error: {}", e)));
+                            continue;
+                        }
+                        if let DedupDecision::Duplicate { existing_id } = dedup.check(
+                            session.as_deref(),
+                            entry.owner.as_deref(),
+                            &entry.title,
+                            entry.body.as_deref().unwrap_or(""),
+                        ) {
+                            println!(
+                                "  [{}] Already saved: {} ({}) — identical this session, no action",
+                                line_idx + 1,
+                                existing_id,
+                                entry.title
+                            );
+                            skipped_count += 1;
+                            continue;
+                        }
+                    }
+
                     match db.upsert_knowledge(&entry) {
                         Ok(_) => {}
                         Err(e) => {
@@ -2407,6 +2649,17 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             entry_errors.push((line_idx + 1, format!("read-back error: {}", e)));
                             continue;
                         }
+                    }
+
+                    // Record AFTER the write is durable and verified.
+                    if !allow_duplicate {
+                        dedup.record(
+                            session.as_deref(),
+                            entry.owner.as_deref(),
+                            &entry.title,
+                            entry.body.as_deref().unwrap_or(""),
+                            id.clone(),
+                        );
                     }
 
                     // EXTRACTED_FROM edge if session provided
@@ -2620,12 +2873,23 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         db.as_ref(),
                         false, // embed=false — hoisted pass below embeds all at once
                         true,  // no_auto_anchor=true — batch anchoring via nightly run
+                        &mut dedup,
+                        bool_field("allow_duplicate"),
                     );
 
                     match entry_result {
-                        Ok(entry) => {
+                        Ok(WriteOutcome::Written(entry)) => {
                             println!("  [{}] Added entry: {} ({})", line_idx + 1, entry.id, title);
                             added_ids.push(entry.id);
+                        }
+                        Ok(WriteOutcome::Skipped { duplicate_of }) => {
+                            println!(
+                                "  [{}] Already saved: {} ({}) — identical this session, no action",
+                                line_idx + 1,
+                                duplicate_of,
+                                title
+                            );
+                            skipped_count += 1;
                         }
                         Err(e) => {
                             entry_errors.push((line_idx + 1, format!("write error: {}", e)));
@@ -2676,10 +2940,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 );
             }
 
-            // Summary
+            // Summary. Skips get their OWN reassuring category, never folded
+            // into "failed" -- a duplicate-skip is a successful no-op, not
+            // an error (W447).
             println!(
-                "\nBatch complete: {} added, {} failed.",
+                "\nBatch complete: {} added, {} already saved (no action needed), {} failed.",
                 added_ids.len(),
+                skipped_count,
                 entry_errors.len()
             );
 
@@ -3903,6 +4170,642 @@ mod write_verification_tests {
         assert!(
             db.get("kn-never-written", &ctx).unwrap().is_none(),
             "an absent entry must read back None so the handler bails loudly"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dedup_gate_tests {
+    use super::*;
+    use crate::store::{AgentContext, DedupCandidate, KnowledgeStore};
+    use crate::surreal_db::SurrealDatabase;
+    use std::cell::Cell;
+
+    /// Wraps a real in-memory SurrealDB store and counts
+    /// `get_entries_for_session` calls. Every OTHER method is a straight
+    /// pass-through to the real store -- this is real-store correctness plus
+    /// one counter, not a mock of the logic under test. Proves the batch
+    /// dedup gate issues ONE query per distinct `(session, owner)` group,
+    /// not one per entry (W447 acceptance gate).
+    struct CountingStore {
+        inner: Box<dyn KnowledgeStore>,
+        calls: Cell<usize>,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                inner: Box::new(SurrealDatabase::open_in_memory().unwrap()),
+                calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl KnowledgeStore for CountingStore {
+        fn upsert_knowledge(&self, entry: &knowledge::KnowledgeEntry) -> Result<()> {
+            self.inner.upsert_knowledge(entry)
+        }
+        fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get(id, ctx)
+        }
+        fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.delete(id, ctx)
+        }
+        fn search(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search(query, ctx, filter)
+        }
+        fn semantic_search(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner
+                .semantic_search(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<(knowledge::KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_scored(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_entries_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            limit: usize,
+        ) -> Result<Vec<(knowledge::KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_entries_scored(query_embedding, ctx, limit)
+        }
+        fn list_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category(category, ctx, filter)
+        }
+        fn count_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<usize> {
+            self.inner.count_by_category(category, ctx, filter)
+        }
+        fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_all(ctx)
+        }
+        fn list_with_triggers(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_with_triggers(ctx)
+        }
+        fn count(&self) -> Result<usize> {
+            self.inner.count()
+        }
+        fn wake_cascade(
+            &self,
+            ctx: &AgentContext,
+            limit: usize,
+            min_resonance: Option<i32>,
+            days: i64,
+        ) -> Result<store::WakeCascade> {
+            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+        }
+        fn update_activations(&self, ids: &[String]) -> Result<()> {
+            self.inner.update_activations(ids)
+        }
+        fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.update_summary(id, summary, ctx)
+        }
+        fn apply_update(
+            &self,
+            id: &str,
+            spec: &crate::store_update::UpdateSpec,
+            ctx: &AgentContext,
+        ) -> Result<crate::store_update::UpdateOutcome> {
+            self.inner.apply_update(id, spec, ctx)
+        }
+        fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+            self.inner.increment_activation_count(ids)
+        }
+        fn query_recent_facts(&self, days: i32) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.query_recent_facts(days)
+        }
+        fn query_recent_facts_all_types(
+            &self,
+            days: i32,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.query_recent_facts_all_types(days)
+        }
+        fn reinforce(
+            &self,
+            id: &str,
+            amount: i32,
+            cap: Option<i32>,
+            ctx: &AgentContext,
+        ) -> Result<Option<store::ReinforcementResult>> {
+            self.inner.reinforce(id, amount, cap, ctx)
+        }
+        fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+            self.inner.delete_embedding_chunks(entry_id)
+        }
+        fn insert_embedding_chunk(
+            &self,
+            entry_id: &str,
+            chunk_index: usize,
+            chunk_text: &str,
+            token_offset: usize,
+            token_count: usize,
+            embedding: &[f32],
+            model_id: &str,
+        ) -> Result<()> {
+            self.inner.insert_embedding_chunk(
+                entry_id,
+                chunk_index,
+                chunk_text,
+                token_offset,
+                token_count,
+                embedding,
+                model_id,
+            )
+        }
+        fn semantic_search_chunks(
+            &self,
+            query_embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<(String, f32)>> {
+            self.inner.semantic_search_chunks(query_embedding, limit)
+        }
+        fn edit_content(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+            old_text: &str,
+            new_text: &str,
+            replace_all: bool,
+            nth: Option<usize>,
+        ) -> Result<store::EditResult> {
+            self.inner
+                .edit_content(id, ctx, old_text, new_text, replace_all, nth)
+        }
+        fn append_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.append_content(id, ctx, content)
+        }
+        fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.prepend_content(id, ctx, content)
+        }
+        fn backup_content(
+            &self,
+            entry: &knowledge::KnowledgeEntry,
+            operation: &str,
+            agent: Option<&str>,
+        ) -> Result<String> {
+            self.inner.backup_content(entry, operation, agent)
+        }
+        fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+            self.inner.list_backups(entry_id)
+        }
+        fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>> {
+            self.inner.latest_backup(entry_id)
+        }
+        fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
+            self.inner.purge_backups(entry_id, keep)
+        }
+        fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_entry(entry_id)
+        }
+        fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_entry(entry_id, tags)
+        }
+        fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+            self.inner.list_all_tags(category)
+        }
+        fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_entry(entry_id)
+        }
+        fn set_applicability_for_entry(&self, entry_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_entry(entry_id, ids)
+        }
+        fn list_applicability_types(&self) -> Result<Vec<crate::types::ApplicabilityType>> {
+            self.inner.list_applicability_types()
+        }
+        fn upsert_applicability_type(&self, atype: &crate::types::ApplicabilityType) -> Result<()> {
+            self.inner.upsert_applicability_type(atype)
+        }
+        fn list_categories(&self) -> Result<Vec<crate::types::Category>> {
+            self.inner.list_categories()
+        }
+        fn get_category(&self, id: &str) -> Result<Option<crate::types::Category>> {
+            self.inner.get_category(id)
+        }
+        fn upsert_category(&self, category: &crate::types::Category) -> Result<()> {
+            self.inner.upsert_category(category)
+        }
+        fn delete_category(&self, id: &str) -> Result<bool> {
+            self.inner.delete_category(id)
+        }
+        fn list_projects(&self, active_only: bool) -> Result<Vec<crate::types::Project>> {
+            self.inner.list_projects(active_only)
+        }
+        fn get_project(&self, id: &str) -> Result<Option<crate::types::Project>> {
+            self.inner.get_project(id)
+        }
+        fn upsert_project(&self, project: &crate::types::Project) -> Result<()> {
+            self.inner.upsert_project(project)
+        }
+        fn get_tags_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_project(project_id)
+        }
+        fn set_tags_for_project(&self, project_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_project(project_id, tags)
+        }
+        fn get_applicability_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_project(project_id)
+        }
+        fn set_applicability_for_project(&self, project_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_project(project_id, ids)
+        }
+        fn list_agents(&self) -> Result<Vec<crate::types::Agent>> {
+            self.inner.list_agents()
+        }
+        fn get_agent(&self, id: &str) -> Result<Option<crate::types::Agent>> {
+            self.inner.get_agent(id)
+        }
+        fn upsert_agent(&self, agent: &crate::types::Agent) -> Result<()> {
+            self.inner.upsert_agent(agent)
+        }
+        fn list_relationships_for_entry(
+            &self,
+            entry_id: &str,
+        ) -> Result<Vec<crate::types::Relationship>> {
+            self.inner.list_relationships_for_entry(entry_id)
+        }
+        fn add_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<String> {
+            self.inner.add_relationship(from, to, rel_type)
+        }
+        fn delete_relationship(&self, id: &str) -> Result<bool> {
+            self.inner.delete_relationship(id)
+        }
+        fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+            self.inner.get_facts_for_session(session_id)
+        }
+        fn get_entries_for_session(
+            &self,
+            session_id: &str,
+            owner: Option<&str>,
+            ctx: &AgentContext,
+        ) -> Result<Vec<DedupCandidate>> {
+            self.calls.set(self.calls.get() + 1);
+            self.inner.get_entries_for_session(session_id, owner, ctx)
+        }
+        fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+            self.inner.get_session_for_fact(fact_id)
+        }
+        fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<crate::types::Session>> {
+            self.inner.list_sessions(project_id)
+        }
+        fn get_session(&self, id: &str) -> Result<Option<crate::types::Session>> {
+            self.inner.get_session(id)
+        }
+        fn upsert_session(&self, session: &crate::types::Session) -> Result<()> {
+            self.inner.upsert_session(session)
+        }
+        fn list_source_types(&self) -> Result<Vec<crate::types::SourceType>> {
+            self.inner.list_source_types()
+        }
+        fn list_entry_types(&self) -> Result<Vec<crate::types::EntryType>> {
+            self.inner.list_entry_types()
+        }
+        fn list_content_types(&self) -> Result<Vec<crate::types::ContentType>> {
+            self.inner.list_content_types()
+        }
+        fn list_session_types(&self) -> Result<Vec<crate::types::SessionType>> {
+            self.inner.list_session_types()
+        }
+        fn list_relationship_types(&self) -> Result<Vec<crate::types::RelationshipType>> {
+            self.inner.list_relationship_types()
+        }
+        fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String> {
+            self.inner.create_wake_session(session)
+        }
+        fn get_wake_session(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<crate::wake_token::WakeSession>> {
+            self.inner.get_wake_session(session_id)
+        }
+        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
+            self.inner.update_wake_session(session)
+        }
+        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
+            self.inner.delete_wake_session(session_id)
+        }
+        fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
+            self.inner.sweep_ghost_anchors(dry_run)
+        }
+        fn list_tables(&self) -> Result<Vec<String>> {
+            self.inner.list_tables()
+        }
+    }
+
+    fn one_line_args(
+        agent: &str,
+        owner: Option<&str>,
+        category: &str,
+        title: &str,
+        body: &str,
+        session_id: Option<&str>,
+    ) -> AddOneArgs {
+        AddOneArgs {
+            agent_id: agent.to_string(),
+            category: category.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+            tag_list: vec![],
+            applicability_list: vec![],
+            anchor_list: vec![],
+            trigger_list: vec![],
+            wake_phrase_list: vec![],
+            wake_phrase: None,
+            wake_order: None,
+            entry_visibility: "public".to_string(),
+            entry_owner: owner.map(String::from),
+            session_id: session_id.map(String::from),
+            ephemeral: false,
+            source_type: "manual".to_string(),
+            entry_type: "primary".to_string(),
+            content_type: "text".to_string(),
+            domain: None,
+            resonance: 0,
+            resonance_type: None,
+            project: None,
+        }
+    }
+
+    #[test]
+    fn standard_path_recased_duplicate_is_skipped_with_duplicate_of() {
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        let first = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "test",
+                "The External Plan",
+                "Ship it.",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        let first_id = match first {
+            WriteOutcome::Written(e) => e.id,
+            WriteOutcome::Skipped { .. } => panic!("first write must not be a duplicate"),
+        };
+
+        let second = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "test",
+                "the external plan",
+                "ship it.",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+
+        match second {
+            WriteOutcome::Written(_) => panic!("recased re-add must be skipped, not written"),
+            WriteOutcome::Skipped { duplicate_of } => assert_eq!(duplicate_of, first_id),
+        }
+    }
+
+    #[test]
+    fn allow_duplicate_forces_the_write_through() {
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "test",
+                "Title",
+                "Body text.",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+
+        let forced = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "test",
+                "Title Two",
+                "Body text.",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            true, // allow_duplicate
+        )
+        .unwrap();
+
+        assert!(
+            matches!(forced, WriteOutcome::Written(_)),
+            "--allow-duplicate must force the write through even for identical body text"
+        );
+    }
+
+    #[test]
+    fn session_id_none_bypasses_dedup_with_no_candidate_query() {
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        add_one(
+            one_line_args("agent-a", None, "test", "Title", "Body.", None),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        add_one(
+            // recased, still no session_id
+            one_line_args("agent-a", None, "test", "title", "body.", None),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.calls.get(),
+            0,
+            "session_id=None must never issue a get_entries_for_session query"
+        );
+    }
+
+    #[test]
+    fn one_query_per_distinct_session_owner_group_not_per_entry() {
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        // Three entries, same (session, owner) group -- one query total.
+        for i in 0..3 {
+            add_one(
+                one_line_args(
+                    "agent-a",
+                    None,
+                    "test",
+                    &format!("Title {i}"),
+                    &format!("Body {i}"),
+                    Some("sess-1"),
+                ),
+                &db,
+                false,
+                true,
+                &mut dedup,
+                false,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.calls.get(),
+            1,
+            "a single-session single-owner batch must issue exactly one get_entries_for_session call"
+        );
+
+        // A second, distinct owner in the SAME session: one MORE query for
+        // the new group (not zero -- which would silently skip owner-B's
+        // candidates -- and not one-per-entry).
+        add_one(
+            one_line_args(
+                "agent-b",
+                Some("agent-b"),
+                "test",
+                "Owner B Title",
+                "Owner B body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            db.calls.get(),
+            2,
+            "a second distinct owner in the same session must trigger exactly one more query"
+        );
+
+        // A recased duplicate for owner B must be caught by owner B's OWN
+        // fetched group, without re-querying for owner A's group and
+        // without cross-owner shadowing.
+        let dup_b = add_one(
+            one_line_args(
+                "agent-b",
+                Some("agent-b"),
+                "test",
+                "owner b title",
+                "owner b body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(dup_b, WriteOutcome::Skipped { .. }));
+        assert_eq!(
+            db.calls.get(),
+            2,
+            "a cached group must not trigger a repeat query"
+        );
+    }
+
+    #[test]
+    fn cross_owner_public_entry_is_not_a_dedup_candidate() {
+        // RIFT: two owners writing normalized-identical content in the same
+        // session must both land -- a same-hash PUBLIC row from a different
+        // owner must never cause a false-positive skip or leak its id.
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        let a = add_one(
+            one_line_args(
+                "agent-a",
+                Some("agent-a"),
+                "test",
+                "Shared Title",
+                "Shared body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(a, WriteOutcome::Written(_)));
+
+        let b = add_one(
+            one_line_args(
+                "agent-b",
+                Some("agent-b"),
+                "test",
+                "Shared Title",
+                "Shared body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(b, WriteOutcome::Written(_)),
+            "agent-b's identical-text entry must land, not be skipped against agent-a's row"
         );
     }
 }

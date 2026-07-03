@@ -82,6 +82,17 @@ pub struct EditResult {
     pub new_content: String,
 }
 
+/// Lightweight candidate row for write-boundary dedup (W447): id/title/body
+/// only, NEVER the full `KnowledgeEntry` (which carries a 768-dim
+/// embedding). Used to compute `dedup_hash` for each candidate without
+/// paying for the embedding on every dedup check.
+#[derive(Debug, Clone)]
+pub struct DedupCandidate {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+}
+
 /// Result of a reinforce operation
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ReinforcementResult {
@@ -479,6 +490,30 @@ pub trait KnowledgeStore {
 
     /// Get facts extracted from a specific session
     fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>>;
+
+    /// Write-boundary dedup candidates (W447): entries whose `session`
+    /// record-link FIELD equals `session_id` (indexed: `knowledge_session`),
+    /// scoped by `owner` (indexed: `knowledge_owner`). Field-scoped, NOT the
+    /// `EXTRACTED_FROM` edge that [`get_facts_for_session`](Self::get_facts_for_session)
+    /// uses -- that edge is frequently absent (session-not-found is a
+    /// warn-and-skip elsewhere in the write path), which would under-fetch
+    /// exactly the entries most prone to duplication.
+    ///
+    /// `owner = None` matches rows where `owner` is unset (public unowned
+    /// adds) -- it does NOT mean "any owner". Cross-owner rows are never
+    /// candidates: this is a hard AND-conjoined predicate in application
+    /// SQL, not a request for `build_visibility_filter`'s public-permissive
+    /// backstop to do the scoping (it admits every owner's public rows and
+    /// provides no owner isolation on its own).
+    ///
+    /// Projects only `id, title, body` -- never the full `KnowledgeEntry`
+    /// with its 768-dim embedding.
+    fn get_entries_for_session(
+        &self,
+        session_id: &str,
+        owner: Option<&str>,
+        ctx: &AgentContext,
+    ) -> Result<Vec<DedupCandidate>>;
 
     /// Get the session a fact was extracted from
     fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>>;

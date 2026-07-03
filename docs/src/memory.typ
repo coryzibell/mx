@@ -24,6 +24,7 @@ explicitly apply the schema (it ignores `MX_SKIP_SCHEMA`).]
 == Table of contents
 
 - #link(<adding>)[Adding entries]
+- #link(<dedup>)[Write-boundary deduplication]
 - #link(<reading>)[Reading entries]
 - #link(<updating>)[Updating entries]
 - #link(<deleting>)[Deleting entries]
@@ -77,6 +78,7 @@ explicitly apply the schema (it ignores `MX_SKIP_SCHEMA`).]
     ([`--thread-id`],  [`string`], [Thread ID for `thread_closed` operations. Requires `--type`.]),
     ([`--no-auto-anchor`], [`flag`], [Skip automatic anchor generation.]),
     ([`--no-embed`],   [`flag`],   [Skip synchronous embedding generation on write.]),
+    ([`--allow-duplicate`], [`flag`], [Write through even if an identical (same session, same owner) entry already exists this session. Without this flag, a recased/repunctuated near-duplicate is skipped (exit 0) rather than written -- see #link(<dedup>)[Write-boundary deduplication] below.]),
     ([`--json`],       [`flag`],   [Output as JSON.]),
   ),
   examples: (
@@ -99,8 +101,11 @@ content automatically.]
   The store is opened once and the ~435 MB embedding model is loaded once for
   the whole batch, so a 30-entry bulk caller pays one cold-load instead of
   thirty. Malformed lines are skipped and reported at the end; one bad entry
-  does not abort the rest (partial-success semantics). Exits non-zero when any
-  entry failed.
+  does not abort the rest (partial-success semantics). A duplicate-skip
+  (#link(<dedup>)[write-boundary dedup]) is NOT a malformed-line failure --
+  it counts toward "already saved," not "failed." Exits non-zero only when a
+  line was malformed or the write itself errored; exits 0 when every line
+  either wrote or was a legitimate duplicate-skip.
 
   *Recommended delivery:* pass a JSONL file via `--file` when calling through
   a `sudo` wrapper (e.g. the hearth `_secret-exec` proxy) — a file path
@@ -121,7 +126,53 @@ per-entry fields (`category`, `title`, `content`, `source_agent`, `tags`,
 `private`, `resonance`, `type`, etc.) on each line. There are no batch-wide
 field overrides except `--no-embed`. This design supports heterogeneous batches
 (facts, person nodes, summaries, blooms) in a single invocation --- which is
-the primary pocket use-case.]
+the primary pocket use-case. Per line, `allow_duplicate: true` mirrors
+`--allow-duplicate` on the single-add path -- see below.]
+
+// ═══════════════════════════════════════════════════════════════════════
+// WRITE-BOUNDARY DEDUPLICATION
+// ═══════════════════════════════════════════════════════════════════════
+
+=== Write-boundary deduplication <dedup>
+
+Both write paths (`mx memory add` and `mx memory add-batch`, including its
+`--type`/fact-routing lines) check a normalized `dedup_hash` of `title+body`
+(lowercase, punctuation stripped, whitespace collapsed) against the writing
+agent's OWN entries in the SAME session before writing. A regenerated
+duplicate that differs only by case, punctuation, or whitespace -- the
+common shape when an LLM re-derives the same fact across turns -- is
+detected and the write is SKIPPED rather than landing as a second row.
+
+A skip is treated as *success, not failure*: it means the content is already
+durably saved, and there is nothing further to do.
+
+- *Plain mode:* `Already saved as kn-XXXX (identical entry this session — nothing to do).`
+- `--json` *mode:* `{"skipped": true, "duplicate_of": "kn-XXXX", "status": "already_persisted", "note": "..."}`,
+  with clean JSON on stdout (no other text) and exit code `0`.
+- *`add-batch` per-entry line:* `[N] Already saved: kn-XXXX (title) — identical this session, no action` --
+  never the bare words "skipped" or "duplicate" -- and the batch summary
+  carries its own `K already saved (no action needed)` category, separate
+  from `added` and `failed`.
+- Pass `--allow-duplicate` (single add) or `allow_duplicate: true` (per JSONL
+  line) to force the write through when a re-add is deliberate.
+
+#note[*Coverage boundary, read this before assuming full coverage:* the gate
+catches recased/repunctuated re-adds within the SAME session and SAME owner.
+It does NOT catch: cross-session regenerations (a fact re-derived in a later
+wake under a different `session_id`), reworded duplicates (different words,
+same meaning -- e.g. "shipped" vs "published"), or writes with no
+`session_id` at all (dedup is bypassed entirely when `session_id` is absent
+-- a bypass signal, `"dedup": "bypassed_no_session"`, is emitted in `--json`
+mode, and a stderr note in plain mode, so the bypass is never silent). Keep
+marking back captured entries; this is a store-boundary backstop, not a
+substitute for careful write discipline.]
+
+#note[*In-process, best-effort -- not a database-level uniqueness guarantee.*
+The dedup index is read-then-write within a single `mx` process invocation
+(TOCTOU: two concurrent `mx` invocations can still both write the same
+normalized content). It is NOT wired to the legacy `content_hash` field
+(title-only, import-time change detection, unenforced) and there is no
+`DEFINE INDEX ... UNIQUE` backing it at the schema level.]
 
 
 // ═══════════════════════════════════════════════════════════════════════

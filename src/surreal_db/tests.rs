@@ -3300,3 +3300,185 @@ fn off_dim_row_does_not_abort_cosine_scan() {
         "entry-level scored search must skip the off-dim row; got {scored_ids:?}"
     );
 }
+
+// =========================================================================
+// get_entries_for_session -- write-boundary dedup candidate fetch (W447)
+//
+// Real-store tests (open_in_memory, never a mock) proving the query's
+// field-scoping, hard owner isolation, and None-owner semantics -- the exact
+// seams the W447 round-1/round-2 panels flagged as false-confidence traps.
+// =========================================================================
+
+/// Build an entry for dedup-candidate tests: same shape as `make_test_entry`
+/// but with session/owner/visibility/title/body under test control.
+fn dedup_candidate_entry(
+    id: &str,
+    session_id: &str,
+    owner: Option<&str>,
+    visibility: &str,
+    title: &str,
+    body: &str,
+) -> crate::knowledge::KnowledgeEntry {
+    crate::knowledge::KnowledgeEntry {
+        session_id: Some(session_id.to_string()),
+        owner: owner.map(String::from),
+        visibility: visibility.to_string(),
+        title: title.to_string(),
+        body: Some(body.to_string()),
+        ..make_test_entry(id, 3, 0.0)
+    }
+}
+
+#[test]
+fn test_get_entries_for_session_field_scoped_not_edge_scoped() {
+    // No EXTRACTED_FROM edge is ever created here -- only the `session`
+    // FIELD is set. If the query were edge-scoped (like
+    // get_facts_for_session), this candidate would never be found.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = dedup_candidate_entry(
+        "kn-field-scoped",
+        "sess-1",
+        Some("soren"),
+        "public",
+        "A Title",
+        "Some body",
+    );
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("soren");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("soren"), &ctx)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, "kn-field-scoped");
+    assert_eq!(candidates[0].title, "A Title");
+    assert_eq!(candidates[0].body, "Some body");
+}
+
+#[test]
+fn test_get_entries_for_session_owner_scope_excludes_other_owners_public_entry() {
+    // RIFT: a same-session PUBLIC entry from a DIFFERENT owner must never be
+    // a dedup candidate -- the owner predicate is a hard AND, not delegated
+    // to the public-permissive visibility backstop.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry_b = dedup_candidate_entry(
+        "kn-owner-b-public",
+        "sess-1",
+        Some("agent-b"),
+        "public",
+        "Shared Title",
+        "Shared body",
+    );
+    db.upsert_knowledge(&entry_b).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-a");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .unwrap();
+    assert!(
+        candidates.is_empty(),
+        "agent-a's candidate set must never include agent-b's public entry; got {candidates:?}"
+    );
+}
+
+#[test]
+fn test_get_entries_for_session_same_owner_private_entry_is_included() {
+    // Same-owner private regenerations are exactly what W447 targets --
+    // must be visible to the owner's own dedup check.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = dedup_candidate_entry(
+        "kn-owner-a-private",
+        "sess-1",
+        Some("agent-a"),
+        "private",
+        "Private Title",
+        "Private body",
+    );
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-a");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, "kn-owner-a-private");
+}
+
+#[test]
+fn test_get_entries_for_session_none_owner_matches_only_unowned_rows() {
+    // owner=None must match ownerless rows (`owner IS NONE`) -- NOT "any
+    // owner". An owned row must never appear in the None-owner candidate set.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let unowned = dedup_candidate_entry(
+        "kn-unowned",
+        "sess-1",
+        None,
+        "public",
+        "Unowned Title",
+        "Unowned body",
+    );
+    let owned = dedup_candidate_entry(
+        "kn-owned",
+        "sess-1",
+        Some("agent-a"),
+        "public",
+        "Owned Title",
+        "Owned body",
+    );
+    db.upsert_knowledge(&unowned).unwrap();
+    db.upsert_knowledge(&owned).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let candidates = db.get_entries_for_session("sess-1", None, &ctx).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].id, "kn-unowned");
+}
+
+#[test]
+fn test_get_entries_for_session_scoped_to_session_field_only() {
+    // A same-owner entry in a DIFFERENT session must not appear.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = dedup_candidate_entry(
+        "kn-other-session",
+        "sess-2",
+        Some("agent-a"),
+        "public",
+        "Title",
+        "Body",
+    );
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-a");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .unwrap();
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn test_get_entries_for_session_projection_has_no_embedding_field() {
+    // DedupCandidate structurally carries no embedding field -- this test
+    // documents/pins that the projection is title/body/id only, matching
+    // the perf requirement (never a full KnowledgeEntry with a 768-dim
+    // vector).
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut entry = dedup_candidate_entry(
+        "kn-no-embed-leak",
+        "sess-1",
+        Some("agent-a"),
+        "public",
+        "Title",
+        "Body",
+    );
+    entry.embedding = Some(vec![0.1; 768]);
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-a");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    // DedupCandidate has no `.embedding` field at all -- if this compiles
+    // and returns id/title/body, the projection never carried the vector.
+    assert_eq!(candidates[0].id, "kn-no-embed-leak");
+}
