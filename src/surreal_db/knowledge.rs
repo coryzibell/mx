@@ -413,9 +413,9 @@ impl SurrealDatabase {
     /// are caller-controlled input).
     ///
     /// Traverses the same `->tagged_with->tag` graph edge already used to
-    /// project the `tags` field (see `knowledge_select_fields` callers), so
-    /// this reuses a verified traversal direction rather than inventing a new
-    /// one.
+    /// project the `tags` field (see the `SELECT VALUE out.name FROM
+    /// tagged_with` subquery at :1317), so this reuses a verified traversal
+    /// direction rather than inventing a new one.
     pub(super) fn build_exclude_tags_filter(
         exclude_prefixes: &[String],
     ) -> (String, Vec<(String, String)>) {
@@ -1142,7 +1142,23 @@ impl SurrealDatabase {
 
             let have_enough = scored_entries.len() >= limit;
             let exhausted = returned_count < chunk_fetch; // fewer rows than asked => table has no more
-            if have_enough || exhausted || chunk_fetch >= max_chunk_fetch {
+            let capped = chunk_fetch >= max_chunk_fetch;
+            if capped && !have_enough && !exhausted {
+                // The scan budget ran out before the candidate set filled to
+                // `limit` — distinct from `exhausted` (table genuinely has no
+                // more rows). This is the excluded-tag-dominance case: enough
+                // chunk candidates outrank the eligible ones that `limit*50`
+                // over-fetch iterations never surface `limit` non-excluded
+                // entries. Callers relying on a full page need to know the
+                // result is short.
+                eprintln!(
+                    "Warning: semantic search hit chunk scan cap ({max_chunk_fetch} candidates) \
+                     with only {} of {limit} requested results — likely excluded-tag dominance \
+                     in the candidate set",
+                    scored_entries.len()
+                );
+            }
+            if have_enough || exhausted || capped {
                 break;
             }
             chunk_fetch = chunk_fetch.saturating_mul(2).min(max_chunk_fetch);

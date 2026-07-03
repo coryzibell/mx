@@ -501,9 +501,15 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // clause (src/surreal_db/knowledge.rs) rather than relied on
                 // via the over-fetch guard below, so tier/archived (a default
                 // exclusion designed to GROW) never silently thins results
-                // below the requested limit. The keyword path (`db.search`)
-                // ignores this field — it has no DB-level LIMIT, so the
-                // post-filter in `apply_entry_filters` is already exact.
+                // below the requested limit. The keyword path (`db.search` ->
+                // `search_knowledge_async`) deliberately leaves this field
+                // unread — exclusion there runs only in `apply_entry_filters`,
+                // which is exact *because* `search_knowledge_async` issues no
+                // DB-level LIMIT (see landmine test:
+                // `keyword_search_exclude_survives_past_hypothetical_limit`).
+                // If a LIMIT is ever added to that query for a growing store,
+                // this field must be wired into its WHERE clause too, or
+                // exclusion silently thins results below the requested count.
                 exclude_tag_prefixes: exclude_prefixes,
             };
 
