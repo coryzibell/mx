@@ -1247,6 +1247,33 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     effective_resonance: None,
                 };
 
+                // Write-boundary dedup gate (W447). This single-add `--type`
+                // fact-routing path is a THIRD new-entry write funnel the
+                // round-1/round-2 census missed: it never touches add_one and
+                // never consulted the shared DedupIndex before this fix. Mirror
+                // the batch fact-type gate (below, near :2587) exactly: bind
+                // `entry.owner.as_deref()` (= `agent:{agent_id}`), never the
+                // bare `agent_id`, or the candidate query's owner predicate
+                // returns empty and dedup silently no-ops. Bind `session`
+                // RAW, never the `kn-`-prefixed `session_ref` built below for
+                // the EXTRACTED_FROM edge.
+                if !allow_duplicate {
+                    let mut dedup = DedupIndex::default();
+                    dedup.ensure_group(db.as_ref(), session.as_deref(), entry.owner.as_deref())?;
+                    if let DedupDecision::Duplicate { existing_id } = dedup.check(
+                        session.as_deref(),
+                        entry.owner.as_deref(),
+                        &entry.title,
+                        entry.body.as_deref().unwrap_or(""),
+                    ) {
+                        println!(
+                            "Already saved: {} ({}) — identical this session, no action",
+                            existing_id, entry.title
+                        );
+                        return Ok(());
+                    }
+                }
+
                 // Insert the fact
                 db.upsert_knowledge(&entry)?;
 

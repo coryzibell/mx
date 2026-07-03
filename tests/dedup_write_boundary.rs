@@ -108,6 +108,17 @@ fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).to_string()
 }
 
+/// Parse `mx memory list --json` stdout (a bare JSON array of entries) into
+/// its elements, so a test can assert on the actual row count in the store
+/// rather than trusting only the CLI's human-readable summary line.
+fn extract_json_array(text: &str) -> Vec<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(text.trim())
+        .unwrap_or_else(|e| panic!("failed to parse JSON array ({e}): {text:?}"))
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a JSON array: {text:?}"))
+        .clone()
+}
+
 // =========================================================================
 // Standard path (add_one), single add
 // =========================================================================
@@ -416,4 +427,123 @@ fn standard_batch_path_also_dedups_via_add_one() {
         "expected exactly one skip: {text}"
     );
     assert!(text.contains("0 failed"), "expected zero failures: {text}");
+}
+
+// =========================================================================
+// Fact-type single-add path (`mx memory add --type <fact_type>`) -- a THIRD
+// new-entry write funnel the round-1/round-2 census never enumerated. It
+// builds a KnowledgeEntry inline and calls `db.upsert_knowledge` directly,
+// never touching `add_one` and never (until this fix) consulting the shared
+// DedupIndex. Requires `--session`: `ensure_group`/`check` both bypass on a
+// `None` session by design (W447 rulings #6), so this suite must always pass
+// `--session` or it would green-pass without ever exercising the gate.
+// =========================================================================
+
+#[test]
+fn single_add_fact_type_path_recased_duplicate_is_skipped_exactly_one_entry() {
+    let env = setup();
+
+    let first = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--type",
+            "insight",
+            "--content",
+            "Ship it, and move on.",
+            "--session",
+            "sess-1",
+            "--no-embed",
+        ],
+    );
+    assert!(first.status.success());
+    assert!(
+        stdout(&first).contains("Added fact:"),
+        "first add must write through: {}",
+        stdout(&first)
+    );
+
+    // Recased/repunctuated re-add of the same content, same session -> must
+    // be skipped, not written as a second entry.
+    let second = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--type",
+            "insight",
+            "--content",
+            "ship it and move on",
+            "--session",
+            "sess-1",
+            "--no-embed",
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "a duplicate-skip must exit 0: {}",
+        stderr(&second)
+    );
+    let second_out = stdout(&second);
+    assert!(
+        second_out.contains("Already saved:"),
+        "recased duplicate must be reported as an affirmative skip, not a second write: {second_out}"
+    );
+    assert!(
+        !second_out.contains("Added fact:"),
+        "recased duplicate must NOT write a second entry: {second_out}"
+    );
+
+    // Confirm exactly one entry actually landed in the store: list the
+    // session's facts and count.
+    let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
+    assert!(list.status.success(), "list failed: {}", stderr(&list));
+    let entries = extract_json_array(&stdout(&list));
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one entry should exist after a recased re-add via the single-add fact-type path: {:?}",
+        entries
+    );
+}
+
+#[test]
+fn single_add_fact_type_path_allow_duplicate_forces_the_write_through() {
+    let env = setup();
+
+    // Note: same body -> same `fact_title` -> same `generate_id` output for
+    // this fact-routing path, so a same-content re-add overwrites to one row
+    // via `generate_id` regardless of the dedup gate (documented W447 caveat,
+    // mirrors `allow_duplicate_forces_the_second_write_through` above for the
+    // standard path) -- this test asserts `--allow-duplicate` bypasses the
+    // skip (both writes go through, neither says "Already saved"), not a
+    // phantom second row.
+    for _ in 0..2 {
+        let out = mx(
+            &env,
+            &[
+                "memory",
+                "add",
+                "--type",
+                "insight",
+                "--content",
+                "Ship it, and move on.",
+                "--session",
+                "sess-1",
+                "--no-embed",
+                "--allow-duplicate",
+            ],
+        );
+        assert!(out.status.success());
+        let text = stdout(&out);
+        assert!(
+            text.contains("Added fact:"),
+            "--allow-duplicate must force every write through: {text}"
+        );
+        assert!(
+            !text.contains("Already saved:"),
+            "--allow-duplicate must bypass the dedup skip entirely: {text}"
+        );
+    }
 }
