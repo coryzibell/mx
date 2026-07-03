@@ -4,7 +4,7 @@
 //! regenerated/recased duplicates (same meaning, different case/punctuation)
 //! landed as separate rows. These tests drive the REAL `mx` binary against an
 //! isolated, real SurrealDB (`MX_HOME` per test), covering the two write
-//! funnels the round-1/round-2 panels flagged: `add_one` (single add +
+//! funnels flagged in review: `add_one` (single add +
 //! batch-standard) and the add-batch fact-type inline path -- proving BOTH
 //! are gated, not just the one that's easy to test.
 //!
@@ -42,9 +42,9 @@ fn setup() -> Env {
 
 /// Isolate the child from any ambient `MX_SURREAL_*` network config in the
 /// invoking shell (this dev sandbox exports `MX_SURREAL_MODE=network` +
-/// live-DB credentials for the Soren hearth) -- force embedded/file-backed
-/// mode under the per-test `MX_HOME` so these tests never touch a shared
-/// live database.
+/// ambient live-DB credentials from the development environment) -- force
+/// embedded/file-backed mode under the per-test `MX_HOME` so these tests
+/// never touch a shared live database.
 fn isolate(cmd: &mut Command, home: &std::path::Path) {
     cmd.env("MX_HOME", home)
         .env("MX_CURRENT_AGENT", "test-agent")
@@ -191,6 +191,24 @@ fn standard_path_recased_duplicate_is_skipped_exactly_one_entry() {
         "skip --json stdout must be pure JSON, got: {:?}",
         stdout(&second)
     );
+
+    // Test-authority fix (fix-round review, finding 3): the CLI's
+    // self-reported `"skipped": true` is not proof nothing was written --
+    // ask the store directly. mystery-meat proved this gap live: a patched
+    // `add_one` that still fell through to a second `upsert_knowledge` after
+    // a detected duplicate kept every `dedup_gate_tests` unit test green and
+    // still printed a clean `"skipped": true`, while `mx memory list` showed
+    // two persisted rows. This assertion is the one thing in the suite that
+    // would have caught that.
+    let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
+    assert!(list.status.success(), "list failed: {}", stderr(&list));
+    let entries = extract_json_array(&stdout(&list));
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one entry should exist after a recased re-add via the standard path: {:?}",
+        entries
+    );
 }
 
 #[test]
@@ -331,11 +349,108 @@ fn session_id_none_writes_through_with_no_dedup() {
             serde_json::json!("bypassed_no_session"),
             "json payload must surface the bypass signal"
         );
+        // Fix-round review, json-mode double-signal nuance: pre-fix, the
+        // plain-mode stderr note fired UNCONDITIONALLY, so --json mode got
+        // both the stderr note and the json field, contradicting the docs'
+        // mode-exclusive phrasing ("a bypass signal ... in --json mode, and
+        // a stderr note in plain mode"). In --json mode only the json field
+        // should appear.
+        assert!(
+            !stderr(&out).contains("dedup bypassed"),
+            "--json mode must not ALSO print the plain-mode stderr bypass note: {}",
+            stderr(&out)
+        );
     }
 }
 
+#[test]
+fn session_id_none_plain_mode_prints_bypass_note_on_stderr() {
+    let env = setup();
+
+    let out = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--category",
+            "insight",
+            "--title",
+            "No Session Note Plain",
+            "--content",
+            "Written without a session id, plain mode.",
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("dedup bypassed"),
+        "plain mode must still print the stderr bypass note: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn skip_json_payload_carries_the_duplicate_id_under_the_id_key() {
+    // Fix-round review, minor finding: every success payload has an `id`
+    // key; the skip payload had none, so `jq -r .id` silently read null on a
+    // skip. The skip payload's `id` must equal `duplicate_of`.
+    let env = setup();
+
+    let first = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--category",
+            "insight",
+            "--title",
+            "Has An Id",
+            "--content",
+            "Content for the id-key regression test.",
+            "--session-id",
+            "sess-1",
+            "--json",
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(first.status.success());
+    let first_id = extract_json(&stdout(&first))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let second = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--category",
+            "insight",
+            "--title",
+            "has an id",
+            "--content",
+            "content for the id-key regression test",
+            "--session-id",
+            "sess-1",
+            "--json",
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(second.status.success());
+    let second_json: serde_json::Value = serde_json::from_str(&stdout(&second)).unwrap();
+    assert_eq!(
+        second_json["id"],
+        serde_json::json!(first_id),
+        "skip payload's 'id' key must carry the duplicate's id, not be absent: {second_json:?}"
+    );
+    assert_eq!(second_json["duplicate_of"], serde_json::json!(first_id));
+}
+
 // =========================================================================
-// Fact-type add-batch inline path (the funnel round-1 missed entirely --
+// Fact-type add-batch inline path (the funnel earlier review missed entirely --
 // never touches add_one)
 // =========================================================================
 
@@ -354,13 +469,24 @@ fn fact_type_batch_path_idempotent_across_reruns() {
         stderr(&first)
     );
     let first_out = stdout(&first);
+    // Anchored to the full summary line, not a bare `contains("1 added")`
+    // (fix-round review, hygiene finding: that substring also matches "21
+    // added" at larger magnitudes -- harmless today, fragile if this suite
+    // is ever reused at scale).
     assert!(
-        first_out.contains("1 added"),
-        "first run must add exactly one entry: {first_out}"
+        first_out
+            .contains("Batch complete: 1 added, 1 already saved (no action needed), 0 failed."),
+        "first run must add exactly one entry and skip exactly one: {first_out}"
     );
-    assert!(
-        first_out.contains("1 already saved"),
-        "first run must report exactly one skip: {first_out}"
+
+    // Test-authority fix (fix-round review, finding 3): confirm the actual
+    // row count, not just the self-reported summary line.
+    let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
+    assert!(list.status.success(), "list failed: {}", stderr(&list));
+    assert_eq!(
+        extract_json_array(&stdout(&list)).len(),
+        1,
+        "exactly one entry should exist after the first batch run"
     );
 
     // Re-running the SAME batch: both lines now dedup against the DB ->
@@ -370,12 +496,18 @@ fn fact_type_batch_path_idempotent_across_reruns() {
     assert!(second.status.success());
     let second_out = stdout(&second);
     assert!(
-        second_out.contains("0 added"),
-        "re-running the identical batch must add zero new entries: {second_out}"
+        second_out
+            .contains("Batch complete: 0 added, 2 already saved (no action needed), 0 failed."),
+        "re-running the identical batch must add zero new entries and skip both lines: {second_out}"
     );
-    assert!(
-        second_out.contains("2 already saved"),
-        "re-running the identical batch must skip both lines: {second_out}"
+
+    let list_again = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
+    assert!(list_again.status.success());
+    assert_eq!(
+        extract_json_array(&stdout(&list_again)).len(),
+        1,
+        "row count must still be exactly one after the identical batch is re-run: {:?}",
+        stdout(&list_again)
     );
 }
 
@@ -421,17 +553,27 @@ fn standard_batch_path_also_dedups_via_add_one() {
     let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], batch);
     assert!(out.status.success());
     let text = stdout(&out);
-    assert!(text.contains("1 added"), "expected exactly one add: {text}");
+    // Anchored to the full summary line (fix-round review, hygiene finding),
+    // not loose `contains("1 added")` substrings.
     assert!(
-        text.contains("1 already saved"),
-        "expected exactly one skip: {text}"
+        text.contains("Batch complete: 1 added, 1 already saved (no action needed), 0 failed."),
+        "expected exactly one add and one skip: {text}"
     );
-    assert!(text.contains("0 failed"), "expected zero failures: {text}");
+
+    // Test-authority fix (fix-round review, finding 3): confirm the actual
+    // row count via the store, not just the self-reported summary line.
+    let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
+    assert!(list.status.success(), "list failed: {}", stderr(&list));
+    assert_eq!(
+        extract_json_array(&stdout(&list)).len(),
+        1,
+        "exactly one entry should exist after a recased duplicate via the standard batch path"
+    );
 }
 
 // =========================================================================
 // Fact-type single-add path (`mx memory add --type <fact_type>`) -- a THIRD
-// new-entry write funnel the round-1/round-2 census never enumerated. It
+// new-entry write funnel earlier review passes never enumerated. It
 // builds a KnowledgeEntry inline and calls `db.upsert_knowledge` directly,
 // never touching `add_one` and never (until this fix) consulting the shared
 // DedupIndex. Requires `--session`: `ensure_group`/`check` both bypass on a
@@ -546,4 +688,125 @@ fn single_add_fact_type_path_allow_duplicate_forces_the_write_through() {
             "--allow-duplicate must bypass the dedup skip entirely: {text}"
         );
     }
+}
+
+// =========================================================================
+// Bypass-signal consistency across all four write funnels (fix-round review,
+// tail finding: "bypass is never silent" held on only the standard `add_one`
+// caller path before this fix -- the other three emitted nothing on a
+// session-less write, contrary to the documented guarantee).
+// =========================================================================
+
+#[test]
+fn single_add_fact_type_path_no_session_emits_bypass_note_on_stderr() {
+    let env = setup();
+
+    let out = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--type",
+            "insight",
+            "--content",
+            "No session here.",
+            "--no-embed",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("dedup bypassed"),
+        "the single-add fact-type path must surface the bypass note when --session is omitted: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn batch_fact_type_path_no_session_emits_bypass_note_on_stderr() {
+    let env = setup();
+
+    let batch = "{\"type\": \"insight\", \"content\": \"No session on this line.\"}\n";
+    let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], batch);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("dedup bypassed"),
+        "the batch fact-type path must surface the bypass note when 'session' is absent: {}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn standard_batch_path_no_session_id_emits_bypass_note_on_stderr() {
+    let env = setup();
+
+    let batch = "{\"category\": \"insight\", \"title\": \"No Session\", \"content\": \"No session_id on this line.\"}\n";
+    let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], batch);
+    assert!(out.status.success());
+    assert!(
+        stderr(&out).contains("dedup bypassed"),
+        "the standard batch path must surface the bypass note when 'session_id' is absent: {}",
+        stderr(&out)
+    );
+}
+
+// =========================================================================
+// Claimed-owner existence oracle (fix-round review, minor finding,
+// author-disclosed and accepted): a `duplicate_of` hit confirms content
+// exists under a CLAIMED owner, before any authz that would reject a forged
+// write. This is accepted behavior, not a bug -- this test PINS it so a
+// future change can't silently alter it without a test failure forcing the
+// question back into view. Extended per the review to the batch per-line
+// owner vector, the sharper form (one batch call can probe many
+// owner+content combinations).
+// =========================================================================
+
+#[test]
+fn batch_per_line_owner_claim_confirms_existence_of_matching_private_content() {
+    let env = setup();
+
+    // "victim" writes a private entry. The schema's `owner` field carries no
+    // PERMISSIONS clause (confirmed: `schema/surrealdb-schema.surql` defines
+    // it as a plain `option<string>`), so this write is not itself gated on
+    // the acting agent matching the claimed owner -- the same is true of the
+    // probe below, which is the point of the disclosure.
+    let victim_write = mx(
+        &env,
+        &[
+            "memory",
+            "add",
+            "--category",
+            "insight",
+            "--title",
+            "Victim Secret",
+            "--content",
+            "Victim's private content.",
+            "--owner",
+            "victim",
+            "--private",
+            "--session-id",
+            "sess-1",
+            "--json",
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(victim_write.status.success());
+    let victim_id = extract_json(&stdout(&victim_write))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // "attacker" (a different source_agent) probes the same owner+content
+    // via a single add-batch line -- never having written anything as
+    // "victim" themselves.
+    let probe = "{\"category\": \"insight\", \"title\": \"Victim Secret\", \"content\": \"Victim's private content.\", \"private\": true, \"owner\": \"victim\", \"session_id\": \"sess-1\", \"source_agent\": \"attacker\"}\n";
+    let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], probe);
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(
+        text.contains(&format!("Already saved: {}", victim_id)),
+        "a batch line claiming owner=victim with matching content confirms the private \
+         entry's existence via the skip -- accepted per PR #402's Honest Disclosures, \
+         extended to the batch per-line owner vector: {text}"
+    );
 }

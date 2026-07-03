@@ -3156,7 +3156,7 @@ fn test_get_applicability_for_entry_returns_written_targets() {
 //
 // Real-store tests (open_in_memory, never a mock) proving the query's
 // field-scoping, hard owner isolation, and None-owner semantics -- the exact
-// seams the W447 round-1/round-2 panels flagged as false-confidence traps.
+// seams flagged in review as false-confidence traps.
 // =========================================================================
 
 /// Build an entry for dedup-candidate tests: same shape as `make_test_entry`
