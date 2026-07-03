@@ -3306,7 +3306,7 @@ fn off_dim_row_does_not_abort_cosine_scan() {
 //
 // Real-store tests (open_in_memory, never a mock) proving the query's
 // field-scoping, hard owner isolation, and None-owner semantics -- the exact
-// seams the W447 round-1/round-2 panels flagged as false-confidence traps.
+// seams flagged in review as false-confidence traps.
 // =========================================================================
 
 /// Build an entry for dedup-candidate tests: same shape as `make_test_entry`

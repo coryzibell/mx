@@ -158,10 +158,24 @@ where
     out
 }
 
+/// Common LLM-regenerated Unicode punctuation glyphs that stand in for their
+/// ASCII counterparts: smart quotes, en/em dash, and horizontal ellipsis
+/// (fix-round review, minor finding: `is_ascii_punctuation` alone leaves
+/// these untouched, so "don't" vs "don't" -- straight vs smart apostrophe --
+/// fails to dedup even though it's the exact recase/repunctuate class this
+/// gate targets). A false negative here only means a real duplicate slips
+/// through uncaught, never a false-positive merge of distinct content, so
+/// extending this list is one-directional safe.
+const DEDUP_UNICODE_PUNCTUATION: [char; 7] = [
+    '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2013}', '\u{2014}', '\u{2026}',
+];
+
 /// Normalize content for write-boundary DEDUPLICATION (W447). Lowercases,
-/// strips ASCII punctuation, and collapses whitespace, so a
-/// recased/repunctuated regenerated duplicate ("The plan!" vs "the plan")
-/// normalizes identically to its original.
+/// strips ASCII punctuation plus the common Unicode punctuation glyphs LLM
+/// regeneration substitutes for them (see [`DEDUP_UNICODE_PUNCTUATION`]), and
+/// collapses whitespace, so a recased/repunctuated regenerated duplicate
+/// ("The plan!" vs "the plan", or "don't" vs "don't") normalizes identically
+/// to its original.
 ///
 /// Distinct from [`KnowledgeEntry::normalize_content`], which stops at
 /// case/whitespace folding and is depended on by thread-matching -- that
@@ -170,7 +184,7 @@ where
 pub fn normalize_for_dedup(content: &str) -> String {
     let no_punct: String = content
         .chars()
-        .filter(|c| !c.is_ascii_punctuation())
+        .filter(|c| !c.is_ascii_punctuation() && !DEDUP_UNICODE_PUNCTUATION.contains(c))
         .collect();
     no_punct
         .trim()
@@ -190,11 +204,46 @@ pub fn normalize_for_dedup(content: &str) -> String {
 /// ([`KnowledgeEntry::compute_hash`], import-time change detection, computed
 /// but never enforced) -- that field is untouched by this. `dedup_hash` keys
 /// on title+body and is the write-boundary gate's identity key.
+///
+/// Hashes title and body as a length-prefixed PAIR, never a joined string
+/// (fix-round review, finding 1): `normalize_for_dedup` collapses ALL
+/// whitespace -- including any separator character we might pick, since
+/// separators are themselves whitespace or get stripped as punctuation -- so
+/// `dedup_hash("Ship it", "now.")` and `dedup_hash("Ship it now", "")`
+/// previously collapsed to the identical normalized string "ship it now" and
+/// hashed equal. That's exactly the variance an LLM regenerating the same
+/// fact produces (folding a sentence into the title one turn, splitting it
+/// title+body the next) -- a false-positive skip that silently drops the
+/// second write. The length prefix on the normalized title makes the byte
+/// stream fed to blake3 unambiguous: given the prefix, the title/body
+/// boundary can always be recovered, so two different splits of the same
+/// concatenated text can only hash equal if the title itself is
+/// byte-identical too.
+///
+/// LANDMINE FOR THE NEXT EDITOR: this scheme is sound for exactly the two
+/// fields hashed here -- the first field's length prefix pins the one
+/// boundary that exists between two fields. If a third content field ever
+/// gets folded into this hash (e.g. a summary or a tags string), it needs
+/// its OWN length prefix too -- one prefix only disambiguates one boundary,
+/// and an unprefixed third field reopens the exact ambiguity class this fix
+/// closed (two different three-way splits of the same concatenated bytes
+/// hashing equal).
+///
+/// `dedup_hash` is never persisted (recomputed from candidate rows on every
+/// `ensure_group` call and from the incoming entry on every `check`), so
+/// changing this algorithm has no migration concern -- there is no stored
+/// value anywhere that this invalidates.
 pub fn dedup_hash(title: &str, body: &str) -> String {
+    let norm_title = normalize_for_dedup(title);
+    let norm_body = normalize_for_dedup(body);
+    let mut buf = Vec::with_capacity(norm_title.len() + norm_body.len() + 8);
+    buf.extend_from_slice(&(norm_title.len() as u64).to_le_bytes());
+    buf.extend_from_slice(norm_title.as_bytes());
+    buf.extend_from_slice(norm_body.as_bytes());
     // `blake3_hex` has no `pub` but is visible here: Rust privacy is
     // module-scoped, and this free function lives in the same module
     // (knowledge.rs) as `impl KnowledgeEntry`.
-    KnowledgeEntry::blake3_hex(normalize_for_dedup(&format!("{title}\n{body}")).as_bytes())
+    KnowledgeEntry::blake3_hex(&buf)
 }
 
 fn default_format() -> String {
@@ -402,6 +451,29 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_for_dedup_strips_common_unicode_punctuation() {
+        // Fix-round review, minor finding: smart quotes / em-dash / ellipsis
+        // are the exact glyphs LLM regeneration swaps in for their ASCII
+        // counterparts -- must fold to the same normalized form.
+        assert_eq!(
+            normalize_for_dedup("don't"),
+            normalize_for_dedup("don\u{2019}t")
+        );
+        assert_eq!(
+            normalize_for_dedup("\u{201C}quoted\u{201D}"),
+            normalize_for_dedup("\"quoted\"")
+        );
+        assert_eq!(
+            normalize_for_dedup("wait\u{2014}really"),
+            normalize_for_dedup("wait-really")
+        );
+        assert_eq!(
+            normalize_for_dedup("hold on\u{2026}"),
+            normalize_for_dedup("hold on...")
+        );
+    }
+
+    #[test]
     fn test_normalize_content_not_mutated_by_dedup_work() {
         // normalize_content must still lowercase/collapse WITHOUT stripping
         // punctuation -- thread-matching (helpers.rs) depends on the exact
@@ -426,6 +498,23 @@ mod tests {
         let a = dedup_hash("The External Plan", "Ship it and move on.");
         let b = dedup_hash("The External Plan", "Ship it and hold off.");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_dedup_hash_does_not_collapse_title_body_boundary() {
+        // Fix-round review, finding 1: pre-fix, both sides normalized to the
+        // identical string "ship it now" (the `\n` joiner is whitespace, so
+        // `normalize_for_dedup`'s split_whitespace/join collapses it exactly
+        // like any other space) and hashed equal -- a false-positive skip
+        // that silently drops a distinct entry. They must now differ.
+        assert_ne!(dedup_hash("Ship it", "now."), dedup_hash("Ship it now", ""));
+
+        // A second instance of the same class: the split point moves by one
+        // word, and the total token stream still matches.
+        assert_ne!(
+            dedup_hash("Ship it now", "and move on"),
+            dedup_hash("Ship it", "now and move on")
+        );
     }
 
     #[test]
