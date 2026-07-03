@@ -718,6 +718,78 @@ impl SurrealDatabase {
         Ok(Some(record.into_knowledge_entry(tags, applicability)))
     }
 
+    /// Write-boundary dedup candidates (W447). See
+    /// `KnowledgeStore::get_entries_for_session` for the full contract.
+    ///
+    /// Queries the indexed `session` record-link FIELD directly (matches on
+    /// the `knowledge_session` index, NOT the `EXTRACTED_FROM` edge --
+    /// deliberately NOT modeled on `get_facts_for_session` in
+    /// relationships.rs, which is edge-scoped and frequently under-fetches).
+    /// `owner` is a hard AND-conjoined predicate (`knowledge_owner` index):
+    /// `Some(o)` binds `owner = $owner`; `None` matches `owner IS NONE`
+    /// (unowned public rows) -- never "any owner". `build_visibility_filter`
+    /// is appended only as a redundant backstop, never the primary scope.
+    pub fn get_entries_for_session(
+        &self,
+        session_id: &str,
+        owner: Option<&str>,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<crate::store::DedupCandidate>> {
+        Self::runtime().block_on(self.get_entries_for_session_async(session_id, owner, ctx))
+    }
+
+    async fn get_entries_for_session_async(
+        &self,
+        session_id: &str,
+        owner: Option<&str>,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<crate::store::DedupCandidate>> {
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+        let owner_clause = if owner.is_some() {
+            "AND owner = $owner"
+        } else {
+            "AND owner IS NONE"
+        };
+
+        // `body ?? ''` coalesces a NULL body (option<string>, schema:95) so a
+        // None body and an empty-string body hash identically on both sides
+        // of the dedup check (dedup_hash also treats a missing body as "").
+        let sql = format!(
+            "SELECT meta::id(id) AS id, title, (body ?? '') AS body
+             FROM knowledge
+             WHERE session = type::thing('session', $session_id) {} {}",
+            owner_clause, visibility_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut q = db.query(&sql).bind(("session_id", session_id.to_string()));
+            if let Some(o) = owner {
+                q = q.bind(("owner", o.to_string()));
+            }
+            if let Some(agent) = current_agent {
+                q = q.bind(("current_agent", agent));
+            }
+            q.await.context("Failed to query dedup candidates")
+        })?;
+
+        #[derive(Deserialize)]
+        struct DedupRow {
+            id: String,
+            title: String,
+            body: String,
+        }
+        let rows: Vec<DedupRow> = response.take(0)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::store::DedupCandidate {
+                id: format!("kn-{}", r.id),
+                title: r.title,
+                body: r.body,
+            })
+            .collect())
+    }
+
     /// Delete a knowledge entry (edges cascade automatically).
     /// Respects visibility: agents can only delete entries they can see.
     /// Returns Ok(false) for entries that don't exist OR that the agent can't see

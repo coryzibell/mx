@@ -158,6 +158,45 @@ where
     out
 }
 
+/// Normalize content for write-boundary DEDUPLICATION (W447). Lowercases,
+/// strips ASCII punctuation, and collapses whitespace, so a
+/// recased/repunctuated regenerated duplicate ("The plan!" vs "the plan")
+/// normalizes identically to its original.
+///
+/// Distinct from [`KnowledgeEntry::normalize_content`], which stops at
+/// case/whitespace folding and is depended on by thread-matching -- that
+/// function is deliberately left unchanged. This is a separate, stricter
+/// normalization used only by [`dedup_hash`].
+pub fn normalize_for_dedup(content: &str) -> String {
+    let no_punct: String = content
+        .chars()
+        .filter(|c| !c.is_ascii_punctuation())
+        .collect();
+    no_punct
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Compute the write-boundary dedup hash for an entry's title+body (W447).
+/// Two entries whose title+body normalize identically -- same text modulo
+/// case, punctuation, and whitespace -- hash equal, so a
+/// regenerated/recased near-duplicate is caught at the write boundary before
+/// it lands as a second row.
+///
+/// Distinct from the legacy title-only `content_hash`
+/// ([`KnowledgeEntry::compute_hash`], import-time change detection, computed
+/// but never enforced) -- that field is untouched by this. `dedup_hash` keys
+/// on title+body and is the write-boundary gate's identity key.
+pub fn dedup_hash(title: &str, body: &str) -> String {
+    // `blake3_hex` has no `pub` but is visible here: Rust privacy is
+    // module-scoped, and this free function lives in the same module
+    // (knowledge.rs) as `impl KnowledgeEntry`.
+    KnowledgeEntry::blake3_hex(normalize_for_dedup(&format!("{title}\n{body}")).as_bytes())
+}
+
 fn default_format() -> String {
     "markdown".to_string()
 }
@@ -207,8 +246,12 @@ impl KnowledgeEntry {
 
     /// Normalize content for comparison (thread matching, etc.)
     ///
-    /// Strips whitespace, lowercases, and removes punctuation variations
-    /// to enable fuzzy content matching.
+    /// Trims, lowercases, and collapses internal whitespace runs to a single
+    /// space. Does NOT strip punctuation -- "hello, world!" stays
+    /// "hello, world!" (lowercased/collapsed). Thread-matching (helpers.rs)
+    /// depends on this exact behavior, so this function is intentionally
+    /// left unchanged; see `normalize_for_dedup` below for the punctuation-
+    /// stripping variant used by write-boundary dedup (W447).
     pub fn normalize_content(content: &str) -> String {
         content
             .trim()
@@ -344,6 +387,45 @@ mod tests {
                 "glucose".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn test_normalize_for_dedup_strips_punctuation_case_and_whitespace() {
+        assert_eq!(
+            normalize_for_dedup("The EXTERNAL, numberless plan."),
+            normalize_for_dedup("the external numberless plan")
+        );
+        assert_eq!(
+            normalize_for_dedup("The EXTERNAL, numberless plan."),
+            "the external numberless plan"
+        );
+    }
+
+    #[test]
+    fn test_normalize_content_not_mutated_by_dedup_work() {
+        // normalize_content must still lowercase/collapse WITHOUT stripping
+        // punctuation -- thread-matching (helpers.rs) depends on the exact
+        // pre-W447 behavior.
+        assert_eq!(
+            KnowledgeEntry::normalize_content("hello, world!"),
+            "hello, world!"
+        );
+    }
+
+    #[test]
+    fn test_dedup_hash_recased_repunctuated_pair_equal() {
+        // W447 evidence class: regenerated duplicates differ only by case,
+        // punctuation, or whitespace -- dedup_hash must collapse them.
+        let a = dedup_hash("The External Plan", "Ship it, and move on.");
+        let b = dedup_hash("the external plan", "ship it and move on");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_dedup_hash_different_bodies_unequal() {
+        let a = dedup_hash("The External Plan", "Ship it and move on.");
+        let b = dedup_hash("The External Plan", "Ship it and hold off.");
+        assert_ne!(a, b);
     }
 
     #[test]
