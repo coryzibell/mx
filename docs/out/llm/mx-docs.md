@@ -1330,7 +1330,7 @@ Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
   **Flag**                     **Type**   **Description**
-  ---------------------------- ---------- -------------------------------------------------------------------------------------------------------------------------------------
+  ---------------------------- ---------- -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `-c, --category`             `string`   Filter by category (comma-separated).
   `--json`                     `flag`     Output as JSON.
   `--mine`                     `flag`     Show only your private entries.
@@ -1345,6 +1345,7 @@ flags. These are documented once here and referenced below.
   `--missing-resonance-type`   `flag`     Filter to entries WITHOUT a resonance type.
   `--limit`                    `int`      Limit number of results.
   `--tags`                     `string`   Filter by tags (comma-separated, matches any).
+  `--exclude-tags`             `string`   Comma-separated list of tag prefixes. Drops any entry that carries at least one tag prefix-matching at least one of these values -- useful for excluding whole tag namespaces (e.g. `tier/` removes every entry tagged `tier/<anything>`). Empty segments from trailing commas are ignored. Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
 
 ::: {.admonition .note}
 **NOTE:** **Visibility default:** `list` and `search` run
@@ -1424,6 +1425,11 @@ mx memory list -c discovery,decree --min-resonance 5
 mx memory list --missing-wake-phrase --limit 20
 ```
 
+``` bash
+# Exclude a whole tag namespace
+mx memory list --category person --exclude-tags 'tier/'
+```
+
 ::: {.admonition .note}
 **NOTE:** `list` accepts all shared filter flags documented above,
 including the public-only visibility default and the hidden-private
@@ -1461,11 +1467,28 @@ mx memory search "agent bootstrap" -c recipe,method --limit 5
 mx memory search "retry pattern" --activate
 ```
 
+``` bash
+# Exclude a whole tag namespace from keyword search
+mx memory search "onboarding" --exclude-tags 'tier/'
+```
+
+``` bash
+# Exclude a whole tag namespace from semantic search
+mx memory search "onboarding" --semantic --exclude-tags 'tier/'
+```
+
 ::: {.admonition .note}
 **NOTE:** `search` accepts all shared filter flags, including the
 public-only visibility default and the hidden-private stderr hint (the
 hint is suppressed under `--semantic`). Semantic search requires entries
 to have embeddings generated via `mx memory embed`.
+:::
+
+::: {.admonition .note}
+**NOTE:** With `--semantic`, `--exclude-tags` is applied inside the
+candidate-set query itself, not as a post-filter -- excluded entries
+never occupy a ranked slot, so `--limit` still returns a full page even
+when top-ranked neighbors carry an excluded tag.
 :::
 
 ::: {.admonition .tip}

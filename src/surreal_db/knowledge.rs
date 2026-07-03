@@ -400,6 +400,44 @@ impl SurrealDatabase {
         }
     }
 
+    /// Build a WHERE-clause fragment (candidate-set level, applied BEFORE any
+    /// `LIMIT`) that excludes any `knowledge` row carrying a tag whose name
+    /// prefix-matches one of `exclude_prefixes`.
+    ///
+    /// Returns `("", vec![])` (no exclusion) when `exclude_prefixes` is empty.
+    /// Otherwise returns the SQL fragment plus the `(param_name, value)` pairs
+    /// the caller MUST bind — one bound parameter per prefix (`exclude_prefix_0`,
+    /// `exclude_prefix_1`, ...). Only parameter NAMES are interpolated into the
+    /// SQL text; prefix VALUES are always bound, never string-interpolated
+    /// (Panel Fix #1 — this is the archive-tier exclusion filter and prefixes
+    /// are caller-controlled input).
+    ///
+    /// Traverses the same `->tagged_with->tag` graph edge already used to
+    /// project the `tags` field (see `knowledge_select_fields` callers), so
+    /// this reuses a verified traversal direction rather than inventing a new
+    /// one.
+    pub(super) fn build_exclude_tags_filter(
+        exclude_prefixes: &[String],
+    ) -> (String, Vec<(String, String)>) {
+        if exclude_prefixes.is_empty() {
+            return (String::new(), Vec::new());
+        }
+
+        let mut bindings = Vec::with_capacity(exclude_prefixes.len());
+        let mut conditions = Vec::with_capacity(exclude_prefixes.len());
+        for (i, prefix) in exclude_prefixes.iter().enumerate() {
+            let param = format!("exclude_prefix_{i}");
+            conditions.push(format!("string::starts_with(name, ${param})"));
+            bindings.push((param, prefix.clone()));
+        }
+
+        let clause = format!(
+            "AND array::len(->tagged_with->tag[WHERE {}]) = 0",
+            conditions.join(" OR ")
+        );
+        (clause, bindings)
+    }
+
     // =========================================================================
     // KNOWLEDGE CRUD OPERATIONS
     // =========================================================================
@@ -902,6 +940,12 @@ impl SurrealDatabase {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
         let category_clause = Self::build_category_filter(filter);
+        // Panel Fix #1: exclude archived (or any prefix-matched) tags at the
+        // candidate-set level, BEFORE the unchunked query's own `LIMIT`, so a
+        // ranked-but-excluded neighbor never displaces a non-excluded one out
+        // of the top `limit` rows the DB returns.
+        let (exclude_clause, exclude_bindings) =
+            Self::build_exclude_tags_filter(&filter.exclude_tag_prefixes);
 
         // Dimension guard ($dim, bound below): SurrealDB's
         // vector::similarity::cosine ABORTS THE ENTIRE SCAN when it hits any
@@ -913,115 +957,195 @@ impl SurrealDatabase {
         // only mismatched rows are filtered out instead of aborting the scan.
         let query_dim = query_embedding.len();
 
-        // Phase 1a: Search unchunked entries (chunk_count <= 0 or absent)
+        // Phase 1a: Search unchunked entries (chunk_count <= 0 or absent).
+        // Exclusion is pushed into this query's own WHERE (bound params, see
+        // build_exclude_tags_filter), so an excluded row never occupies a
+        // slot in the DB's own LIMIT.
         let unchunked_sql = format!(
             "SELECT {}, vector::similarity::cosine(embedding, $query_vec) AS score
             FROM knowledge
-            WHERE embedding IS NOT NONE AND array::len(embedding) = $dim AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {}
+            WHERE embedding IS NOT NONE AND array::len(embedding) = $dim AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {} {}
             ORDER BY score DESC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause,
             resonance_clause,
-            category_clause
+            category_clause,
+            exclude_clause
         );
 
-        // Phase 1b: Search chunks (no visibility filter — applied after dedup).
-        // Same dimension guard so an off-dim chunk embedding can't abort the scan.
-        let chunk_sql =
-            "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
-            FROM embedding_chunk
-            WHERE array::len(embedding) = $dim
-            ORDER BY score DESC
-            LIMIT $chunk_limit";
-
-        let chunk_limit = limit * 3; // over-fetch for dedup
-
-        let mut response = with_db!(self, db, {
+        let mut unchunked_response = with_db!(self, db, {
             let mut query_builder = db
                 .query(&unchunked_sql)
-                .query(chunk_sql)
                 .bind(("query_vec", query_embedding.to_vec()))
                 .bind(("dim", query_dim))
-                .bind(("limit", limit))
-                .bind(("chunk_limit", chunk_limit));
+                .bind(("limit", limit));
             if let Some(agent) = current_agent.clone() {
                 query_builder = query_builder.bind(("current_agent", agent));
+            }
+            for (param, value) in exclude_bindings.clone() {
+                query_builder = query_builder.bind((param, value));
             }
             query_builder
                 .await
                 .context("Failed to execute semantic search query")
         })?;
 
-        // Parse unchunked results (statement 0)
-        let unchunked_results: Vec<serde_json::Value> = response
+        let unchunked_results: Vec<serde_json::Value> = unchunked_response
             .take(0)
             .context("Failed to parse unchunked search results")?;
 
-        // Parse chunk results (statement 1)
-        let chunk_results: Vec<serde_json::Value> = response
-            .take(1)
-            .context("Failed to parse chunk search results")?;
-
-        // Phase 2: Merge results
-        // Collect unchunked entries with their scores
+        // Phase 2a: Collect unchunked entries with their scores.
         let mut scored_entries: std::collections::HashMap<String, (f32, Option<KnowledgeEntry>)> =
             std::collections::HashMap::new();
-
         for obj in unchunked_results {
             let entry = self.value_to_knowledge_entry(obj.clone()).await?;
             let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
             scored_entries.insert(entry.id.clone(), (score, Some(entry)));
         }
 
-        // Deduplicate chunks: keep max score per entry_id
-        let mut chunk_scores: std::collections::HashMap<String, f32> =
-            std::collections::HashMap::new();
-        for obj in &chunk_results {
-            let entry_id = obj["entry_id"].as_str().unwrap_or_default().to_string();
-            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
-            let current = chunk_scores.entry(entry_id).or_insert(0.0f32);
-            if score > *current {
-                *current = score;
-            }
-        }
+        // Phase 1b/2b: Search chunks (no visibility filter — applied after
+        // hydration below) and merge into `scored_entries`.
+        //
+        // `embedding_chunk` has no direct tag link (it's keyed on a plain
+        // `entry_id` string, not a graph edge to `knowledge`), so exclusion
+        // can't be pushed into this query's own WHERE the way it is for the
+        // unchunked phase above. A single fixed-size over-fetch (`limit * N`)
+        // is a fixed-ratio post-filter: it silently returns fewer than
+        // `limit` non-excluded results once the excluded (e.g. archived)
+        // share of chunk candidates exceeds that ratio — and the archive
+        // tier is a default exclusion designed to GROW without bound (per
+        // work order), so a static ratio isn't safe long-term.
+        //
+        // Instead, over-fetch iteratively: start at `limit * 3`, hydrate and
+        // filter each newly-seen candidate, and if the merged non-excluded
+        // count is still short of `limit` AND the table had more chunk rows
+        // to give (`returned_count == chunk_fetch`, i.e. we weren't already
+        // at the end of the table), double the fetch window and try again —
+        // up to a hard cap so a pathological query can't force an unbounded
+        // scan.
+        let mut chunk_fetch = limit.saturating_mul(3).max(1);
+        let max_chunk_fetch = limit.saturating_mul(50).max(1000);
+        // Cache of every embedding_chunk entry_id already resolved (kept,
+        // with its score, or dropped by a filter) so growing the over-fetch
+        // window never re-hydrates or re-filters the same entry twice.
+        let mut resolved_chunk_entries: std::collections::HashMap<
+            String,
+            Option<(f32, KnowledgeEntry)>,
+        > = std::collections::HashMap::new();
 
-        // For each unique chunk entry_id, fetch the full entry (with visibility/filter check)
-        for (entry_id, score) in &chunk_scores {
-            if scored_entries.contains_key(entry_id) {
-                // Entry already in results from unchunked path — take max score
-                if let Some((existing_score, _)) = scored_entries.get_mut(entry_id)
-                    && *score > *existing_score
-                {
-                    *existing_score = *score;
+        loop {
+            // Same dimension guard as the unchunked phase so an off-dim
+            // chunk embedding can't abort the scan.
+            let chunk_sql =
+                "SELECT entry_id, vector::similarity::cosine(embedding, $query_vec) AS score
+                FROM embedding_chunk
+                WHERE array::len(embedding) = $dim
+                ORDER BY score DESC
+                LIMIT $chunk_limit";
+
+            let mut chunk_response = with_db!(self, db, {
+                db.query(chunk_sql)
+                    .bind(("query_vec", query_embedding.to_vec()))
+                    .bind(("dim", query_dim))
+                    .bind(("chunk_limit", chunk_fetch))
+                    .await
+                    .context("Failed to execute chunk semantic search query")
+            })?;
+
+            let chunk_results: Vec<serde_json::Value> = chunk_response
+                .take(0)
+                .context("Failed to parse chunk search results")?;
+            let returned_count = chunk_results.len();
+
+            // Deduplicate chunks: keep max score per entry_id, over this
+            // fetch window.
+            let mut chunk_scores: std::collections::HashMap<String, f32> =
+                std::collections::HashMap::new();
+            for obj in &chunk_results {
+                let entry_id = obj["entry_id"].as_str().unwrap_or_default().to_string();
+                let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+                let current = chunk_scores.entry(entry_id).or_insert(0.0f32);
+                if score > *current {
+                    *current = score;
                 }
-                continue;
             }
 
-            // Fetch full entry with visibility/category/resonance filtering
-            if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
-                // Apply decay-adjusted resonance filter (matching the SQL in effective_resonance_expr)
-                let effective = Self::compute_effective_resonance(&entry);
-                if let Some(min) = filter.min_resonance
-                    && effective < min as f64
-                {
+            // For each unique chunk entry_id not yet accounted for, fetch
+            // the full entry (with visibility/category/resonance/exclude
+            // filtering), exactly once per entry_id across all iterations.
+            for (entry_id, score) in &chunk_scores {
+                if scored_entries.contains_key(entry_id) {
+                    // Entry already in results from unchunked path — take max score
+                    if let Some((existing_score, _)) = scored_entries.get_mut(entry_id)
+                        && *score > *existing_score
+                    {
+                        *existing_score = *score;
+                    }
                     continue;
                 }
-                if let Some(max) = filter.max_resonance
-                    && effective > max as f64
-                {
+                if resolved_chunk_entries.contains_key(entry_id) {
+                    // Already hydrated and filtered in a prior (smaller)
+                    // fetch window — the verdict doesn't change, skip.
                     continue;
                 }
-                // Apply category filter
-                if let Some(cats) = &filter.categories
-                    && !cats.is_empty()
-                    && !cats.contains(&entry.category_id)
-                {
-                    continue;
-                }
-                scored_entries.insert(entry_id.clone(), (*score, Some(entry)));
+
+                let resolved = if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
+                    // Apply decay-adjusted resonance filter (matching the SQL in effective_resonance_expr)
+                    let effective = Self::compute_effective_resonance(&entry);
+                    let passes_resonance = filter
+                        .min_resonance
+                        .is_none_or(|min| effective >= min as f64)
+                        && filter
+                            .max_resonance
+                            .is_none_or(|max| effective <= max as f64);
+                    // Apply category filter
+                    let passes_category = filter
+                        .categories
+                        .as_ref()
+                        .is_none_or(|cats| cats.is_empty() || cats.contains(&entry.category_id));
+                    // Panel Fix #1, embedding_chunk phase: filter here, before
+                    // this candidate enters `scored_entries`, using the
+                    // now-hydrated entry's tags. This keeps exclusion at
+                    // candidate-set-construction time, before the final
+                    // sort+truncate(limit) below, matching the
+                    // resonance/category filters above.
+                    let passes_exclude = crate::helpers::keep_after_exclude(
+                        &entry.tags,
+                        &filter.exclude_tag_prefixes,
+                    );
+                    if passes_resonance && passes_category && passes_exclude {
+                        Some((*score, entry))
+                    } else {
+                        None
+                    }
+                } else {
+                    // Entry not found or not visible.
+                    None
+                };
+                resolved_chunk_entries.insert(entry_id.clone(), resolved);
             }
-            // If entry not found or not visible, skip silently
+
+            // Merge every kept, resolved chunk entry into `scored_entries`.
+            for (entry_id, resolved) in &resolved_chunk_entries {
+                if let Some((score, entry)) = resolved {
+                    scored_entries
+                        .entry(entry_id.clone())
+                        .and_modify(|(existing_score, _)| {
+                            if *score > *existing_score {
+                                *existing_score = *score;
+                            }
+                        })
+                        .or_insert_with(|| (*score, Some(entry.clone())));
+                }
+            }
+
+            let have_enough = scored_entries.len() >= limit;
+            let exhausted = returned_count < chunk_fetch; // fewer rows than asked => table has no more
+            if have_enough || exhausted || chunk_fetch >= max_chunk_fetch {
+                break;
+            }
+            chunk_fetch = chunk_fetch.saturating_mul(2).min(max_chunk_fetch);
         }
 
         // Sort by score DESC and take limit

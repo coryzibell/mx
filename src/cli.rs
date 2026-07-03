@@ -347,7 +347,7 @@ pub enum SyncCommands {
 }
 
 /// Shared filter flags for search/list commands (extracted from duplicated definitions)
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, Default, clap::Args)]
 pub struct EntryFilter {
     /// Filter by category (comma-separated, see 'mx memory categories list' for valid names)
     #[arg(short, long, value_delimiter = ',')]
@@ -411,6 +411,14 @@ pub struct EntryFilter {
     /// Filter by tags (can specify multiple: focus,rust) (matches any)
     #[arg(long, value_delimiter = ',')]
     pub tags: Option<Vec<String>>,
+
+    /// Exclude entries whose tags prefix-match any of these comma-separated values.
+    /// E.g. --exclude-tags 'tier/' drops every entry tagged tier/<anything>.
+    /// Deliberately mirrors wake-fetch's `--exclude-tags` (Option<String>, not
+    /// Vec<String> like the neighboring `tags` field) for exact parse parity —
+    /// both flow through the same `parse_exclude_prefixes` trim/empty-drop logic.
+    #[arg(long, value_name = "PREFIXES")]
+    pub exclude_tags: Option<String>,
 }
 
 /// Sort order for `memory recent` results.
