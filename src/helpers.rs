@@ -68,6 +68,10 @@ pub(crate) fn apply_entry_filters(
         // Exclusion runs before the limit truncate so a caller always gets up to
         // `limit` non-excluded entries on the keyword/list paths (neither issues a
         // DB-level LIMIT, so filter-then-truncate here is exact, not a heuristic).
+        // This is the sole enforcement point for keyword/list. The semantic
+        // search path already excludes at the DB/hydration layer, so running
+        // this filter again there is a harmless no-op safety net, not a
+        // second independent gate.
         .filter(|e| keep_after_exclude(&e.tags, &exclude_prefixes))
         .collect();
 

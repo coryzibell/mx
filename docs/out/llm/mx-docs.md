@@ -1330,7 +1330,7 @@ Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
   **Flag**                     **Type**   **Description**
-  ---------------------------- ---------- -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  ---------------------------- ---------- --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `-c, --category`             `string`   Filter by category (comma-separated).
   `--json`                     `flag`     Output as JSON.
   `--mine`                     `flag`     Show only your private entries.
@@ -1345,7 +1345,7 @@ flags. These are documented once here and referenced below.
   `--missing-resonance-type`   `flag`     Filter to entries WITHOUT a resonance type.
   `--limit`                    `int`      Limit number of results.
   `--tags`                     `string`   Filter by tags (comma-separated, matches any).
-  `--exclude-tags`             `string`   Comma-separated list of tag prefixes. Drops any entry that carries at least one tag prefix-matching at least one of these values -- useful for excluding whole tag namespaces (e.g. `tier/` removes every entry tagged `tier/<anything>`). Empty segments from trailing commas are ignored. Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
+  `--exclude-tags`             `string`   Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
 
 ::: {.admonition .note}
 **NOTE:** **Visibility default:** `list` and `search` run
@@ -1383,6 +1383,13 @@ therefore admit an entry under `wake` but exclude it under
 `transformative` resonance types are decay-exempt, so they filter
 identically under both. This divergence is intentional for now; an
 explicit `--resonance-basis raw|decayed` flag is tracked in #404.
+:::
+
+::: {.admonition .note}
+**NOTE:** `--exclude-tags` takes a comma-separated list of tag prefixes.
+Any entry carrying at least one tag that prefix-matches at least one
+supplied value is dropped -- useful for excluding whole tag namespaces.
+Empty segments from trailing commas are ignored.
 :::
 
 ## `mx memory show`
@@ -1485,10 +1492,17 @@ to have embeddings generated via `mx memory embed`.
 :::
 
 ::: {.admonition .note}
-**NOTE:** With `--semantic`, `--exclude-tags` is applied inside the
-candidate-set query itself, not as a post-filter -- excluded entries
-never occupy a ranked slot, so `--limit` still returns a full page even
-when top-ranked neighbors carry an excluded tag.
+**NOTE:** With `--semantic`, `--exclude-tags` exclusion happens in two
+phases: unchunked entries are excluded inside the candidate-set query
+itself (SQL `WHERE`), while chunked entries are filtered on the Rust
+side after hydration, since `embedding_chunk` has no direct tag edge to
+filter on in SQL. Either way, excluded entries are dropped before the
+final sort and truncate, so `--limit` returns a full page as long as the
+search stays within its scan budget (`limit * 50`, minimum 1000 chunk
+candidates). If that budget is exhausted before enough non-excluded
+results are found -- which can happen when excluded tags dominate the
+ranked candidates -- the result set may come back short, and a warning
+is logged when that happens.
 :::
 
 ::: {.admonition .tip}
