@@ -3408,7 +3408,7 @@ fn off_dim_row_does_not_abort_cosine_scan() {
 
 // =========================================================================
 // W447 retrieval-exclusion rider — `--exclude-tags` on semantic search
-// (Panel Fix #1).
+// (review fix).
 //
 // The archive tier (`tier/archived`) is a DEFAULT exclusion designed to
 // GROW, unlike an ordinary `--tags` inclusion filter. If exclusion only ran

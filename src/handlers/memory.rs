@@ -497,7 +497,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 min_resonance: filter.min_resonance,
                 max_resonance: filter.max_resonance,
                 categories: filter.category.clone(),
-                // Panel Fix #1: pushed into the semantic candidate-set WHERE
+                // Review fix: pushed into the semantic candidate-set WHERE
                 // clause (src/surreal_db/knowledge.rs) rather than relied on
                 // via the over-fetch guard below, so tier/archived (a default
                 // exclusion designed to GROW) never silently thins results
@@ -531,7 +531,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // Unlike --tags (an inclusion filter still applied in Rust via
                 // apply_entry_filters), exclusion is filtered at the SQL
                 // candidate-set level BEFORE the DB applies its own LIMIT
-                // (Panel Fix #1), so it never thins an already-limited result
+                // (review fix), so it never thins an already-limited result
                 // set and needs no over-fetch multiplier of its own.
                 let requested_limit = filter.limit.unwrap_or(20);
                 let db_limit = if filter.tags.is_some() {

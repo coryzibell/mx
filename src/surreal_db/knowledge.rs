@@ -409,7 +409,7 @@ impl SurrealDatabase {
     /// the caller MUST bind — one bound parameter per prefix (`exclude_prefix_0`,
     /// `exclude_prefix_1`, ...). Only parameter NAMES are interpolated into the
     /// SQL text; prefix VALUES are always bound, never string-interpolated
-    /// (Panel Fix #1 — this is the archive-tier exclusion filter and prefixes
+    /// (review fix — this is the archive-tier exclusion filter and prefixes
     /// are caller-controlled input).
     ///
     /// Traverses the same `->tagged_with->tag` graph edge already used to
@@ -940,7 +940,7 @@ impl SurrealDatabase {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
         let category_clause = Self::build_category_filter(filter);
-        // Panel Fix #1: exclude archived (or any prefix-matched) tags at the
+        // Review fix: exclude archived (or any prefix-matched) tags at the
         // candidate-set level, BEFORE the unchunked query's own `LIMIT`, so a
         // ranked-but-excluded neighbor never displaces a non-excluded one out
         // of the top `limit` rows the DB returns.
@@ -1104,7 +1104,7 @@ impl SurrealDatabase {
                         .categories
                         .as_ref()
                         .is_none_or(|cats| cats.is_empty() || cats.contains(&entry.category_id));
-                    // Panel Fix #1, embedding_chunk phase: filter here, before
+                    // Review fix, embedding_chunk phase: filter here, before
                     // this candidate enters `scored_entries`, using the
                     // now-hydrated entry's tags. This keeps exclusion at
                     // candidate-set-construction time, before the final
