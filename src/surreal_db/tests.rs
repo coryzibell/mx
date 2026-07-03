@@ -2399,6 +2399,53 @@ fn test_search_select_activates_results() {
 }
 
 #[test]
+fn test_search_exclude_tags_drops_archived_keyword_match() {
+    // W447 rider, keyword-search path: `mx memory search <q> --exclude-tags
+    // 'tier/'` must omit a tier/-tagged entry that otherwise matches the
+    // full-text query, while an untagged match with the same query survives.
+    // Keyword search issues no DB-level LIMIT, so exclusion lives entirely in
+    // apply_entry_filters (the same merge point `list` uses) — this test
+    // exercises that real merge point end-to-end, not just the pure helper.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut archived = make_test_entry("kn-search-archived", 5, 0.0);
+    archived.title = "widget gadget archived".to_string();
+    archived.body = Some("unique widget content, archived tier".to_string());
+    archived.tags = vec!["tier/archived".to_string()];
+    db.upsert_knowledge(&archived).unwrap();
+
+    let mut live = make_test_entry("kn-search-live", 5, 0.0);
+    live.title = "widget gadget live".to_string();
+    live.body = Some("unique widget content, still live".to_string());
+    db.upsert_knowledge(&live).unwrap();
+
+    let db_filter = crate::store::KnowledgeFilter::default();
+    let raw_results = db.search("widget", &ctx, &db_filter).unwrap();
+    let raw_ids: Vec<&str> = raw_results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        raw_ids.contains(&"kn-search-archived") && raw_ids.contains(&"kn-search-live"),
+        "fixture sanity check failed: both entries should match 'widget' \
+         before exclusion is applied, got {raw_ids:?}"
+    );
+
+    let entry_filter = crate::cli::EntryFilter {
+        exclude_tags: Some("tier/".to_string()),
+        ..Default::default()
+    };
+    let filtered = crate::helpers::apply_entry_filters(raw_results, &entry_filter);
+    let filtered_ids: Vec<&str> = filtered.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        !filtered_ids.contains(&"kn-search-archived"),
+        "tier/archived entry must be dropped from keyword search results; got {filtered_ids:?}"
+    );
+    assert!(
+        filtered_ids.contains(&"kn-search-live"),
+        "the untagged match must survive exclusion; got {filtered_ids:?}"
+    );
+}
+
+#[test]
 fn test_search_select_no_results_is_noop() {
     // --select with no results should not error or attempt any activations.
     let db = SurrealDatabase::open_in_memory().unwrap();
@@ -3352,5 +3399,279 @@ fn test_search_knowledge_returns_applicability() {
         found.applicability,
         vec!["backend".to_string()],
         "search results must carry the written applies_to edge"
+    );
+}
+
+// =========================================================================
+// W447 retrieval-exclusion rider — `--exclude-tags` on semantic search
+// (Panel Fix #1).
+//
+// The archive tier (`tier/archived`) is a DEFAULT exclusion designed to
+// GROW, unlike an ordinary `--tags` inclusion filter. If exclusion only ran
+// as a post-filter after the DB's own `ORDER BY score DESC LIMIT $limit`,
+// a query whose top-ranked neighbors are all archived would have the DB
+// truncate to `limit` BEFORE the archived rows are ever dropped — silently
+// returning fewer than `limit` non-archived results, with no signal. This
+// test seeds archived entries that rank ABOVE the non-archived ones and
+// asserts the full requested limit still comes back non-archived, proving
+// exclusion is applied at the SQL candidate-set level (before LIMIT), not
+// as a post-filter.
+// =========================================================================
+
+/// Build a knowledge entry with a synthetic embedding and explicit tags —
+/// mirrors `entry_with_dim_embedding` but also sets `tags` so archived-tier
+/// exclusion fixtures can be built without a real embedding model.
+fn entry_with_embedding_and_tags(
+    id: &str,
+    embedding: Vec<f32>,
+    tags: &[&str],
+) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 5, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.embedding = Some(embedding);
+    e.embedding_model = Some("test-model".to_string());
+    e.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    e.tags = tags.iter().map(|s| s.to_string()).collect();
+    e
+}
+
+#[test]
+fn semantic_search_excludes_top_ranked_archived_neighbors_returns_full_limit() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+
+    // Query vector aligned with axis 0.
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    // Two archived entries, PERFECTLY aligned with the query (score == 1.0) —
+    // these must rank above every non-archived entry.
+    for id in ["kn-archived-1", "kn-archived-2"] {
+        db.upsert_knowledge(&entry_with_embedding_and_tags(
+            id,
+            query.clone(),
+            &["tier/archived"],
+        ))
+        .unwrap();
+    }
+
+    // Three non-archived entries, still well-aligned (positive but imperfect
+    // score) so they rank below the archived pair on an unfiltered scan, but
+    // must fill the result set once archived rows are excluded.
+    let mut good_vecs = Vec::new();
+    for i in 0..3usize {
+        let mut v = vec![0.0f32; N];
+        v[0] = 0.9;
+        v[1 + i] = (1.0f32 - 0.81f32).sqrt(); // unit-length, cos with query = 0.9
+        good_vecs.push(v);
+    }
+    for (i, v) in good_vecs.into_iter().enumerate() {
+        db.upsert_knowledge(&entry_with_embedding_and_tags(
+            &format!("kn-good-{i}"),
+            v,
+            &[],
+        ))
+        .unwrap();
+    }
+
+    let ctx = AgentContext::public_only();
+
+    // Sanity check: WITHOUT exclusion, the archived pair ranks in the top 2
+    // (score 1.0 beats the good entries' 0.9), proving the fixture actually
+    // exercises the "excluded neighbors rank highest" scenario.
+    let unfiltered_filter = KnowledgeFilter::default();
+    let unfiltered = db
+        .semantic_search(&query, &ctx, &unfiltered_filter, 2)
+        .unwrap();
+    let unfiltered_ids: Vec<&str> = unfiltered.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        unfiltered_ids.contains(&"kn-archived-1") && unfiltered_ids.contains(&"kn-archived-2"),
+        "fixture sanity check failed: archived entries should rank in the \
+         unfiltered top 2, got {unfiltered_ids:?}"
+    );
+
+    // With --exclude-tags 'tier/' and limit 2: if exclusion were a post-filter
+    // after the DB's own LIMIT, the DB would already have truncated to the
+    // two archived rows and both would be dropped, returning 0 results. The
+    // fix must return the full requested limit (2), both non-archived.
+    let exclude_filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db
+        .semantic_search(&query, &ctx, &exclude_filter, 2)
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "full requested limit must survive exclusion even when the top-ranked \
+         neighbors are all archived; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    for entry in &results {
+        assert!(
+            !entry.tags.iter().any(|t| t.starts_with("tier/")),
+            "an archived entry leaked into exclusion-filtered results: {}",
+            entry.id
+        );
+    }
+}
+
+/// Seed a CHUNKED knowledge entry (`chunk_count > 0`, no entry-level
+/// `embedding`) with a single synthetic `embedding_chunk` row, so semantic
+/// search can only find it via the `embedding_chunk` phase (Phase 1b) — the
+/// unchunked phase's WHERE requires `chunk_count IS NONE OR chunk_count <= 0`
+/// and `embedding IS NOT NONE`, both of which this fixture fails on purpose.
+fn seed_chunked_entry_with_tags(
+    db: &SurrealDatabase,
+    id: &str,
+    chunk_embedding: Vec<f32>,
+    tags: &[&str],
+) {
+    let mut e = make_test_entry(id, 5, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.tags = tags.iter().map(|s| s.to_string()).collect();
+    e.chunk_count = 1;
+    db.upsert_knowledge(&e).unwrap();
+    db.insert_embedding_chunk(id, 0, "chunk text", 0, 10, &chunk_embedding, "test-model")
+        .unwrap();
+}
+
+#[test]
+fn semantic_search_excludes_top_ranked_archived_chunk_neighbors_returns_full_limit() {
+    // Criterion 1 named BOTH the unchunked and the embedding_chunk phase.
+    // `semantic_search_excludes_top_ranked_archived_neighbors_returns_full_limit`
+    // above only seeds unchunked entries, so it never exercises the
+    // embedding_chunk phase's exclusion (the Rust post-filter behind an
+    // iterative over-fetch loop, replacing a fixed `limit * 3` window that
+    // silently thinned results once excluded candidates outnumbered it).
+    //
+    // This fixture seeds enough archived, CHUNKED entries ranking above the
+    // non-archived chunked ones that a fixed `limit * 3` fetch window would
+    // have returned ONLY archived candidates on its first (and only) pass —
+    // proving this test attaches to the chunk-phase contract specifically.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    const LIMIT: usize = 2;
+
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    // 8 archived, chunked entries perfectly aligned with the query
+    // (score == 1.0). With LIMIT=2, a fixed `limit * 3` = 6 over-fetch
+    // window would return only these 8 (top 6 of the table are all
+    // archived), never reaching the 2 good entries ranked below them.
+    for i in 0..8 {
+        seed_chunked_entry_with_tags(
+            &db,
+            &format!("kn-chunk-archived-{i}"),
+            query.clone(),
+            &["tier/archived"],
+        );
+    }
+
+    // 2 non-archived, chunked entries, well- but imperfectly-aligned, so
+    // they rank below the archived pack on an unfiltered scan.
+    for i in 0..LIMIT {
+        let mut v = vec![0.0f32; N];
+        v[0] = 0.9;
+        v[1 + i] = (1.0f32 - 0.81f32).sqrt(); // unit-length, cos with query = 0.9
+        seed_chunked_entry_with_tags(&db, &format!("kn-chunk-good-{i}"), v, &[]);
+    }
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap();
+
+    assert_eq!(
+        results.len(),
+        LIMIT,
+        "full requested limit must survive exclusion in the embedding_chunk \
+         phase even when a fixed over-fetch window would have been entirely \
+         consumed by archived candidates; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    for entry in &results {
+        assert!(
+            !entry.tags.iter().any(|t| t.starts_with("tier/")),
+            "an archived chunked entry leaked into exclusion-filtered results: {}",
+            entry.id
+        );
+    }
+}
+
+#[test]
+fn semantic_search_exclude_tags_prefix_match_drops_tier_archived_only() {
+    // Criterion: 'tier/' drops 'tier/archived' specifically (prefix match),
+    // and leaves an entry tagged something else untouched.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-archived",
+        query.clone(),
+        &["tier/archived"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-project",
+        query.clone(),
+        &["project/x"],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, 10).unwrap();
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        !ids.contains(&"kn-archived"),
+        "tier/archived must be dropped by --exclude-tags 'tier/'; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"kn-project"),
+        "an entry tagged project/x must survive a 'tier/' exclusion; got {ids:?}"
+    );
+}
+
+#[test]
+fn semantic_search_no_exclude_tags_behavior_unchanged() {
+    // Criterion: default (no --exclude-tags) behavior is byte-identical to
+    // before this rider — an archived-tagged entry is still returned.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-archived",
+        query.clone(),
+        &["tier/archived"],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let results = db.semantic_search(&query, &ctx, &filter, 10).unwrap();
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&"kn-archived"),
+        "with no --exclude-tags, an archived entry must still be returned; got {ids:?}"
     );
 }

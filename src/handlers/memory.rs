@@ -274,35 +274,6 @@ fn handle_trigger_check(
     Ok(())
 }
 
-/// Parse a `--exclude-tags` CSV value into a list of prefix strings.
-///
-/// Segments are trimmed; empty segments (from trailing commas, repeated commas,
-/// or whitespace-only input) are dropped. A `None` input yields an empty list.
-fn parse_exclude_prefixes(exclude_tags: Option<&str>) -> Vec<String> {
-    exclude_tags
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(String::from)
-        .collect()
-}
-
-/// Whether a wake-fetch entry should be KEPT given the active exclude prefixes.
-///
-/// Returns `false` (exclude) when ANY of the entry's tags prefix-matches ANY of
-/// the requested exclude prefixes. An empty prefix list keeps every entry.
-fn keep_after_exclude(tags: &[String], exclude_prefixes: &[String]) -> bool {
-    if exclude_prefixes.is_empty() {
-        return true;
-    }
-    !tags.iter().any(|tag| {
-        exclude_prefixes
-            .iter()
-            .any(|prefix| tag.starts_with(prefix.as_str()))
-    })
-}
-
 /// Resolve the display `fact_type` label for a wake-fetch entry.
 ///
 /// Older entries carry `fact_type` inside their `summary` JSON; newer entries
@@ -520,11 +491,20 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Note: Search doesn't activate facts by default - discovery != engagement
             // Use --activate to explicitly mark results as intentionally consumed.
-            // Build filter for database query (resonance and category)
+            // Build filter for database query (resonance, category, and exclusion).
+            let exclude_prefixes = parse_exclude_prefixes(filter.exclude_tags.as_deref());
             let db_filter = store::KnowledgeFilter {
                 min_resonance: filter.min_resonance,
                 max_resonance: filter.max_resonance,
                 categories: filter.category.clone(),
+                // Panel Fix #1: pushed into the semantic candidate-set WHERE
+                // clause (src/surreal_db/knowledge.rs) rather than relied on
+                // via the over-fetch guard below, so tier/archived (a default
+                // exclusion designed to GROW) never silently thins results
+                // below the requested limit. The keyword path (`db.search`)
+                // ignores this field — it has no DB-level LIMIT, so the
+                // post-filter in `apply_entry_filters` is already exact.
+                exclude_tag_prefixes: exclude_prefixes,
             };
 
             // Get results from database with resonance filtering
@@ -540,6 +520,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // Tradeoff: 5x multiplier works well at typical limits (10-50) but does
                 // not scale for very large limits. The cap (limit + 200) prevents runaway
                 // fetches when the caller requests hundreds of entries.
+                //
+                // NOTE: --exclude-tags deliberately does NOT extend this trigger.
+                // Unlike --tags (an inclusion filter still applied in Rust via
+                // apply_entry_filters), exclusion is filtered at the SQL
+                // candidate-set level BEFORE the DB applies its own LIMIT
+                // (Panel Fix #1), so it never thins an already-limited result
+                // set and needs no over-fetch multiplier of its own.
                 let requested_limit = filter.limit.unwrap_or(20);
                 let db_limit = if filter.tags.is_some() {
                     (requested_limit * 5).min(requested_limit + 200)
@@ -602,11 +589,15 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
             }
 
-            // Build filter for database query (resonance only - category handled below)
+            // Build filter for database query (resonance only - category handled below).
+            // Exclusion is applied Rust-side in apply_entry_filters (list_by_category
+            // issues no DB-level LIMIT, so post-filter is already exact) — no
+            // exclude_tag_prefixes needed here.
             let db_filter = store::KnowledgeFilter {
                 min_resonance: filter.min_resonance,
                 max_resonance: filter.max_resonance,
                 categories: None,
+                exclude_tag_prefixes: Vec::new(),
             };
 
             // Get results from database with resonance filtering
@@ -3686,69 +3677,11 @@ mod show_divert_tests {
 mod wake_fetch_filter_tests {
     use super::*;
 
-    // ---- parse_exclude_prefixes / keep_after_exclude (pure) ----
-
-    fn prefixes(raw: &str) -> Vec<String> {
-        parse_exclude_prefixes(Some(raw))
-    }
-
-    fn tags(t: &[&str]) -> Vec<String> {
-        t.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn single_prefix_drops_matching_tag_keeps_others() {
-        let ex = prefixes("project/");
-        // An entry tagged project/x is excluded.
-        assert!(!keep_after_exclude(&tags(&["project/x"]), &ex));
-        // An untagged entry survives.
-        assert!(keep_after_exclude(&[], &ex));
-        // An entry whose tags don't match the prefix survives.
-        assert!(keep_after_exclude(&tags(&["scratch/y", "notes"]), &ex));
-        // Mixed: one matching tag is enough to exclude the whole entry.
-        assert!(!keep_after_exclude(&tags(&["notes", "project/deep"]), &ex));
-    }
-
-    #[test]
-    fn multiple_prefixes_exclude_any_match() {
-        let ex = prefixes("project/,scratch/");
-        assert!(!keep_after_exclude(&tags(&["project/a"]), &ex));
-        assert!(!keep_after_exclude(&tags(&["scratch/b"]), &ex));
-        assert!(keep_after_exclude(&tags(&["docs/c"]), &ex));
-    }
-
-    #[test]
-    fn empty_whitespace_and_trailing_comma_input_yields_no_prefixes() {
-        // Each of these parses to an empty prefix list -> nothing is excluded.
-        for raw in ["", "   ", ",", ",,", "project/,", " , project/ "] {
-            let ex = parse_exclude_prefixes(Some(raw));
-            // Trailing/empty segments are dropped; only real prefixes remain.
-            let expected_excludes = raw.contains("project/");
-            // A project/ tag is excluded only when a real prefix survived parsing.
-            assert_eq!(
-                !keep_after_exclude(&tags(&["project/x"]), &ex),
-                expected_excludes,
-                "raw input {raw:?} produced prefixes {ex:?}"
-            );
-        }
-        // Pure empty/whitespace cases produce zero prefixes.
-        assert!(parse_exclude_prefixes(Some("")).is_empty());
-        assert!(parse_exclude_prefixes(Some("   ")).is_empty());
-        assert!(parse_exclude_prefixes(Some(",,")).is_empty());
-        // Trailing comma drops the empty segment but keeps the real one.
-        assert_eq!(parse_exclude_prefixes(Some("project/,")), vec!["project/"]);
-    }
-
-    #[test]
-    fn none_input_is_empty_prefix_list_and_keeps_everything() {
-        let ex = parse_exclude_prefixes(None);
-        assert!(ex.is_empty());
-        // Empty prefix list keeps every entry, even ones with tags.
-        assert!(keep_after_exclude(&tags(&["project/x", "anything"]), &ex));
-        assert!(keep_after_exclude(&[], &ex));
-    }
-
     // ---- resolve_fact_type fallback (pure) ----
+    //
+    // parse_exclude_prefixes/keep_after_exclude tests moved to
+    // src/helpers.rs (entry_exclude_tests) alongside their relocated
+    // definitions — single definition, tests live with it.
 
     #[test]
     fn fact_type_falls_back_to_category_when_summary_is_none() {

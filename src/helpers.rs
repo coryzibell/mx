@@ -6,11 +6,47 @@ use crate::knowledge;
 use crate::store;
 use crate::surreal_db::SurrealDatabase;
 
+/// Parse a `--exclude-tags` CSV value into a list of prefix strings.
+///
+/// Segments are trimmed; empty segments (from trailing commas, repeated commas,
+/// or whitespace-only input) are dropped. A `None` input yields an empty list.
+///
+/// Single definition shared by wake-fetch, `memory search`, and `memory list` —
+/// do not duplicate this in a handler.
+pub(crate) fn parse_exclude_prefixes(exclude_tags: Option<&str>) -> Vec<String> {
+    exclude_tags
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether an entry should be KEPT given the active exclude prefixes.
+///
+/// Returns `false` (exclude) when ANY of the entry's tags prefix-matches ANY of
+/// the requested exclude prefixes. An empty prefix list keeps every entry.
+///
+/// Single definition shared by wake-fetch, `memory search`, and `memory list`.
+pub(crate) fn keep_after_exclude(tags: &[String], exclude_prefixes: &[String]) -> bool {
+    if exclude_prefixes.is_empty() {
+        return true;
+    }
+    !tags.iter().any(|tag| {
+        exclude_prefixes
+            .iter()
+            .any(|prefix| tag.starts_with(prefix.as_str()))
+    })
+}
+
 /// Apply in-memory field presence filters to a list of entries
 pub(crate) fn apply_entry_filters(
     entries: Vec<knowledge::KnowledgeEntry>,
     filter: &EntryFilter,
 ) -> Vec<knowledge::KnowledgeEntry> {
+    let exclude_prefixes = parse_exclude_prefixes(filter.exclude_tags.as_deref());
+
     let mut entries: Vec<_> = entries
         .into_iter()
         .filter(|e| !filter.has_wake_phrase || e.has_any_wake_phrase())
@@ -29,6 +65,10 @@ pub(crate) fn apply_entry_filters(
                 .as_ref()
                 .is_none_or(|filter_tags| filter_tags.iter().any(|t| e.tags.contains(t)))
         })
+        // Exclusion runs before the limit truncate so a caller always gets up to
+        // `limit` non-excluded entries on the keyword/list paths (neither issues a
+        // DB-level LIMIT, so filter-then-truncate here is exact, not a heuristic).
+        .filter(|e| keep_after_exclude(&e.tags, &exclude_prefixes))
         .collect();
 
     // Apply limit if specified
@@ -1948,5 +1988,196 @@ mod hidden_private_hint_tests {
                 "no MX_CURRENT_AGENT -> agent_id None -> hint suppressed"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod entry_exclude_tests {
+    //! Tests for `parse_exclude_prefixes` / `keep_after_exclude` (relocated from
+    //! `src/handlers/memory.rs`'s wake-fetch tests — this is the single shared
+    //! definition consumed by wake-fetch, `memory search`, and `memory list`)
+    //! and for their wiring into `apply_entry_filters`.
+
+    use super::*;
+    use crate::knowledge::KnowledgeEntry;
+
+    fn prefixes(raw: &str) -> Vec<String> {
+        parse_exclude_prefixes(Some(raw))
+    }
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ---- parse_exclude_prefixes / keep_after_exclude (pure) ----
+
+    #[test]
+    fn single_prefix_drops_matching_tag_keeps_others() {
+        let ex = prefixes("project/");
+        // An entry tagged project/x is excluded.
+        assert!(!keep_after_exclude(&tags(&["project/x"]), &ex));
+        // An untagged entry survives.
+        assert!(keep_after_exclude(&[], &ex));
+        // An entry whose tags don't match the prefix survives.
+        assert!(keep_after_exclude(&tags(&["scratch/y", "notes"]), &ex));
+        // Mixed: one matching tag is enough to exclude the whole entry.
+        assert!(!keep_after_exclude(&tags(&["notes", "project/deep"]), &ex));
+    }
+
+    #[test]
+    fn multiple_prefixes_exclude_any_match() {
+        let ex = prefixes("project/,scratch/");
+        assert!(!keep_after_exclude(&tags(&["project/a"]), &ex));
+        assert!(!keep_after_exclude(&tags(&["scratch/b"]), &ex));
+        assert!(keep_after_exclude(&tags(&["docs/c"]), &ex));
+    }
+
+    #[test]
+    fn empty_whitespace_and_trailing_comma_input_yields_no_prefixes() {
+        // Each of these parses to an empty prefix list -> nothing is excluded.
+        for raw in ["", "   ", ",", ",,", "project/,", " , project/ "] {
+            let ex = parse_exclude_prefixes(Some(raw));
+            // Trailing/empty segments are dropped; only real prefixes remain.
+            let expected_excludes = raw.contains("project/");
+            // A project/ tag is excluded only when a real prefix survived parsing.
+            assert_eq!(
+                !keep_after_exclude(&tags(&["project/x"]), &ex),
+                expected_excludes,
+                "raw input {raw:?} produced prefixes {ex:?}"
+            );
+        }
+        // Pure empty/whitespace cases produce zero prefixes.
+        assert!(parse_exclude_prefixes(Some("")).is_empty());
+        assert!(parse_exclude_prefixes(Some("   ")).is_empty());
+        assert!(parse_exclude_prefixes(Some(",,")).is_empty());
+        // Trailing comma drops the empty segment but keeps the real one.
+        assert_eq!(parse_exclude_prefixes(Some("project/,")), vec!["project/"]);
+    }
+
+    #[test]
+    fn none_input_is_empty_prefix_list_and_keeps_everything() {
+        let ex = parse_exclude_prefixes(None);
+        assert!(ex.is_empty());
+        // Empty prefix list keeps every entry, even ones with tags.
+        assert!(keep_after_exclude(&tags(&["project/x", "anything"]), &ex));
+        assert!(keep_after_exclude(&[], &ex));
+    }
+
+    // ---- apply_entry_filters wiring (list + keyword-search merge point) ----
+
+    /// Minimal fixture entry carrying only an id and tags — every other field
+    /// takes an inert default, since apply_entry_filters's exclusion step reads
+    /// only `tags`.
+    fn entry(id: &str, tags: &[&str]) -> KnowledgeEntry {
+        let now = chrono::Utc::now().to_rfc3339();
+        KnowledgeEntry {
+            id: id.to_string(),
+            category_id: "test".to_string(),
+            title: format!("Entry {id}"),
+            body: Some("body".to_string()),
+            summary: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            content_hash: Some(format!("hash-{id}")),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
+            content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
+            resonance: 5,
+            resonance_type: None,
+            last_activated: Some(now),
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            triggers: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+            chunk_count: 0,
+            format: "markdown".to_string(),
+            effective_resonance: None,
+        }
+    }
+
+    #[test]
+    fn list_path_excludes_prefix_tagged_entries_keeps_untagged() {
+        // Criterion: `mx memory list --exclude-tags 'tier/'` omits every entry
+        // tagged tier/archived and includes an untagged entry.
+        let entries = vec![
+            entry("kn-1", &["tier/archived"]),
+            entry("kn-2", &[]),
+            entry("kn-3", &["project/x"]),
+        ];
+        let filter = EntryFilter {
+            exclude_tags: Some("tier/".to_string()),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        let ids: Vec<_> = kept.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["kn-2", "kn-3"]);
+    }
+
+    #[test]
+    fn no_flag_behavior_is_unchanged() {
+        // A None exclude_tags (the pre-existing default) must not drop anything
+        // that the prior filter set wouldn't already have dropped.
+        let entries = vec![entry("kn-1", &["tier/archived"]), entry("kn-2", &[])];
+        let filter = EntryFilter::default();
+        let kept = apply_entry_filters(entries, &filter);
+        assert_eq!(kept.len(), 2, "no --exclude-tags means nothing is excluded");
+    }
+
+    #[test]
+    fn exclusion_wins_over_overlapping_include_tag() {
+        // An entry tagged both project/x (matches --tags) AND tier/archived
+        // (matches --exclude-tags) must be excluded: exclusion wins over
+        // inclusion when both filters are active.
+        let entries = vec![
+            entry("kn-1", &["project/x", "tier/archived"]),
+            entry("kn-2", &["project/x"]),
+        ];
+        let filter = EntryFilter {
+            tags: Some(vec!["project/x".to_string()]),
+            exclude_tags: Some("tier/".to_string()),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        let ids: Vec<_> = kept.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["kn-2"],
+            "an entry matching both --tags and --exclude-tags must be excluded"
+        );
+    }
+
+    #[test]
+    fn exclusion_runs_before_limit_truncate() {
+        // If exclusion ran AFTER the limit truncate instead of before, a
+        // --limit 1 request whose first candidate is excluded would return
+        // zero results instead of the next non-excluded entry.
+        let entries = vec![
+            entry("kn-1", &["tier/archived"]),
+            entry("kn-2", &[]),
+            entry("kn-3", &[]),
+        ];
+        let filter = EntryFilter {
+            exclude_tags: Some("tier/".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "kn-2");
     }
 }
