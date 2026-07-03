@@ -3462,7 +3462,7 @@ fn test_search_knowledge_returns_applicability() {
 
 // =========================================================================
 // W447 retrieval-exclusion rider — `--exclude-tags` on semantic search
-// (Panel Fix #1).
+// (review fix).
 //
 // The archive tier (`tier/archived`) is a DEFAULT exclusion designed to
 // GROW, unlike an ordinary `--tags` inclusion filter. If exclusion only ran

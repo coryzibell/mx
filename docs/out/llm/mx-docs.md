@@ -1319,7 +1319,8 @@ include all per-entry fields (`category`, `title`, `content`,
 `source_agent`, `tags`, `private`, `resonance`, `type`, etc.) on each
 line. There are no batch-wide field overrides except `--no-embed`. This
 design supports heterogeneous batches (facts, person nodes, summaries,
-blooms) in a single invocation --- which is the primary pocket use-case.
+blooms) in a single invocation --- which is the primary batch-write
+use-case.
 :::
 
 ## Reading entries {#reading}
