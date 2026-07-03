@@ -54,7 +54,7 @@ pub struct KnowledgeFilter {
     /// (`Option<String>`, kept as a raw CSV string for exact wake-fetch parse
     /// parity), this DB-layer filter takes the already-parsed prefix list
     /// directly, since the SQL builder has no reason to re-parse it. Pushed
-    /// into the semantic search candidate-set WHERE clause (Panel Fix #1) so
+    /// into the semantic search candidate-set WHERE clause (review fix) so
     /// exclusion happens BEFORE the DB-side `LIMIT`, instead of thinning an
     /// already-limited result set after the fact. Empty = no exclusion.
     pub exclude_tag_prefixes: Vec<String>,
