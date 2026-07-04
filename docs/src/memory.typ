@@ -152,7 +152,7 @@ flags. These are documented once here and referenced below.
   [`--missing-resonance-type`], [`flag`], [Filter to entries WITHOUT a resonance type.],
   [`--limit`],         [`int`],    [Limit number of results.],
   [`--tags`],          [`string`], [Filter by tags (comma-separated, matches any).],
-  [`--exclude-tags`],  [`string`], [Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.],
+  [`--exclude-tags`],  [`string`], [Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Specify once; comma-separate multiple prefixes -- repeating the flag is a parse error. Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.],
 )
 
 #note[*Visibility default:* `list` and `search` run *public-only* by default.
@@ -189,7 +189,8 @@ flag is tracked in \#404.]
 #note[`--exclude-tags` takes a comma-separated list of tag prefixes. Any entry
 carrying at least one tag that prefix-matches at least one supplied value is
 dropped -- useful for excluding whole tag namespaces. Empty segments from
-trailing commas are ignored.]
+trailing commas are ignored. Pass the flag once; repeating it (e.g.
+`--exclude-tags a --exclude-tags b`) is a parse error, not a silent override.]
 
 #command(
   "mx memory show",
