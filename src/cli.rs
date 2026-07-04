@@ -412,7 +412,7 @@ pub struct EntryFilter {
     #[arg(long, value_delimiter = ',')]
     pub tags: Option<Vec<String>>,
 
-    /// Exclude entries whose tags prefix-match any of these comma-separated values (e.g. 'tier/' drops every entry tagged tier/<anything>).
+    /// Exclude entries whose tags prefix-match any of these comma-separated values (e.g. 'tier/' drops every entry tagged tier/<anything>). Specify once; comma-separate multiple prefixes -- repeating the flag is a parse error.
     // Option<String>, not Vec<String> like the neighboring `tags` field: this
     // deliberately mirrors wake-fetch's `--exclude-tags` for exact parse
     // parity, since both flow through the same `parse_exclude_prefixes`
@@ -1238,7 +1238,8 @@ pub enum MemoryCommands {
 
         /// Exclude entries whose tags prefix-match any of these comma-separated values.
         /// E.g. --exclude-tags 'project/' drops every entry tagged project/<anything>.
-        /// Multiple prefixes: --exclude-tags 'project/,foo/'
+        /// Specify once; comma-separate multiple prefixes: --exclude-tags 'project/,foo/'.
+        /// Repeating the flag is a parse error.
         #[arg(long, value_name = "PREFIXES")]
         exclude_tags: Option<String>,
     },
