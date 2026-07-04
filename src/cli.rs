@@ -416,7 +416,9 @@ pub struct EntryFilter {
     // Option<String>, not Vec<String> like the neighboring `tags` field: this
     // deliberately mirrors wake-fetch's `--exclude-tags` for exact parse
     // parity, since both flow through the same `parse_exclude_prefixes`
-    // trim/empty-drop logic.
+    // trim/empty-drop logic. Repeating this flag (`--exclude-tags a
+    // --exclude-tags b`) is a clap parse error (ArgumentConflict), not a
+    // silent override -- pinned in the test module below.
     #[arg(long, value_name = "PREFIXES")]
     pub exclude_tags: Option<String>,
 }
@@ -2412,5 +2414,74 @@ mod tests {
             let (_, auto) = merge_flags(&["mx", "pr", "merge", "375", mode, "--auto"]);
             assert!(auto, "--auto with {mode} should parse and set auto");
         }
+    }
+
+    fn search_exclude_tags(args: &[&str]) -> Option<String> {
+        match Cli::try_parse_from(args) {
+            Ok(Cli {
+                command:
+                    Commands::Memory {
+                        command: MemoryCommands::Search { filter, .. },
+                    },
+                ..
+            }) => filter.exclude_tags,
+            Ok(_) => panic!("expected memory search subcommand"),
+            Err(e) => panic!("parse should succeed for {args:?}: {e}"),
+        }
+    }
+
+    // `--exclude-tags` is `Option<String>` (comma-separated), not
+    // `Option<Vec<String>>` like the neighboring `--tags` -- deliberate,
+    // for exact parse parity with wake-fetch (see field doc comment above).
+    // Pinning the repeated-flag behavior: an `Option<String>` field with no
+    // explicit `action(...)` gets clap's default `Set` action, and *unlike*
+    // the (incorrect, pre-test) assumption that Set silently keeps the last
+    // occurrence, clap 4's `Set` action actually rejects a second occurrence
+    // outright with `ErrorKind::ArgumentConflict` ("cannot be used multiple
+    // times"). So repeating `--exclude-tags` fails loud, not silent -- the
+    // opposite failure mode from the one that needed guarding against. This
+    // test exists so that never regresses to a silent override without a
+    // test failing (e.g. if someone later adds `.action(ArgAction::Set)`
+    // explicitly, or an `overrides_with`, to "fix" what isn't broken).
+    #[test]
+    fn search_exclude_tags_repeated_flag_errors_instead_of_silently_overriding() {
+        let err = parse_err(&[
+            "mx",
+            "memory",
+            "search",
+            "query",
+            "--exclude-tags",
+            "tier/",
+            "--exclude-tags",
+            "project/",
+        ]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn wake_fetch_exclude_tags_repeated_flag_errors_instead_of_silently_overriding() {
+        let err = parse_err(&[
+            "mx",
+            "memory",
+            "wake-fetch",
+            "--exclude-tags",
+            "tier/",
+            "--exclude-tags",
+            "project/",
+        ]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn search_exclude_tags_single_flag_carries_comma_separated_prefixes() {
+        let value = search_exclude_tags(&[
+            "mx",
+            "memory",
+            "search",
+            "query",
+            "--exclude-tags",
+            "tier/,project/",
+        ]);
+        assert_eq!(value.as_deref(), Some("tier/,project/"));
     }
 }
