@@ -35,11 +35,25 @@ fn setup() -> Env {
     }
 }
 
+/// Isolate the child from any ambient `MX_SURREAL_*` network config in the
+/// invoking shell (this dev sandbox exports `MX_SURREAL_MODE=network` +
+/// ambient live-DB credentials from the development environment) -- force
+/// embedded/file-backed mode under the per-test `MX_HOME` so these tests
+/// never touch a shared live database. Same pre-existing leak as
+/// `trigger_check.rs`; mirrors the isolation pattern in
+/// `dedup_write_boundary.rs`.
 fn mx(env: &Env, args: &[&str]) -> std::process::Output {
     Command::new(MX)
         .args(args)
         .env("MX_HOME", env.dir.path())
         .env("MX_CURRENT_AGENT", "test")
+        .env("MX_SURREAL_MODE", "embedded")
+        .env("MX_SURREAL_ROOT", env.dir.path().join("surreal"))
+        .env_remove("MX_SURREAL_URL")
+        .env_remove("MX_SURREAL_NS")
+        .env_remove("MX_SURREAL_DB")
+        .env_remove("MX_SURREAL_USER")
+        .env_remove("MX_SURREAL_AUTH_LEVEL")
         .output()
         .expect("failed to run mx")
 }
