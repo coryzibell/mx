@@ -360,10 +360,29 @@ enum DedupDecision {
 /// entry -- resolving the tension flagged in review between "exactly one
 /// query" and correct per-line owner/session scoping.
 ///
-/// Keyed by `(session_id, owner, dedup_hash)`: owner is part of the key so a
-/// hash collision under one owner never shadows a distinct write by another
-/// owner (W447 rulings #2); session is part of the key so the same hash in a
-/// DIFFERENT session is never treated as a duplicate.
+/// Keyed by `(session_id, owner, category, dedup_hash)`: owner is part of
+/// the key so a hash collision under one owner never shadows a distinct
+/// write by another owner (W447 rulings #2); session is part of the key so
+/// the same hash in a DIFFERENT session is never treated as a duplicate;
+/// `category` is part of the key (PR #402 finding 1) so the same hash filed
+/// under a DIFFERENT category is never treated as a duplicate either --
+/// identical title+body re-filed under a new category is a distinct fact,
+/// not a re-add of the same one. `category` must live in this key even
+/// though the candidate query is ALSO scoped by category: the query scoping
+/// keeps a wrong-category row out of `seen` in the first place, and the key
+/// keeps a `check()` for one category from ever reading a `seen` entry
+/// populated by a different category's `ensure_group` call -- either one
+/// alone would still let a cross-category collision through the other path.
+///
+/// `tags` are deliberately NOT part of this key, anywhere. Tags are
+/// edge-modeled (a relationship table), not a scalar field on the
+/// `knowledge` row, so scoping the candidate query by tags (or folding them
+/// into `dedup_hash`) would cost an extra query per candidate to fetch
+/// them. Identical title+body filed with different tags is treated as the
+/// same fact re-tagged, and dedupes -- an accepted, documented
+/// false-negative (see `dedup_hash`'s IDENTITY CONTRACT doc-comment in
+/// `knowledge.rs`, and `identical_content_different_tags_still_dedups`
+/// below, which pins this behavior).
 ///
 /// TOCTOU: read-then-write, per-process, with no DB-level unique constraint
 /// backing it. Two concurrent `mx` invocations can still both write the same
@@ -379,26 +398,34 @@ enum DedupDecision {
 /// canonical row.
 #[derive(Default)]
 struct DedupIndex {
-    seen: std::collections::HashMap<(String, Option<String>, String), String>,
-    fetched_groups: std::collections::HashSet<(String, Option<String>)>,
+    seen: std::collections::HashMap<(String, Option<String>, String, String), String>,
+    fetched_groups: std::collections::HashSet<(String, Option<String>, String)>,
 }
 
 impl DedupIndex {
-    /// Ensure the `(session_id, owner)` group's DB candidates are loaded.
-    /// No query at all when `session_id` is `None` -- dedup is bypassed
-    /// entirely for session-less writes (settled, W447 rulings #6) -- and no
-    /// REPEAT query when the group was already fetched by an earlier line in
-    /// this run.
+    /// Ensure the `(session_id, owner, category)` group's DB candidates are
+    /// loaded. No query at all when `session_id` is `None` -- dedup is
+    /// bypassed entirely for session-less writes (settled, W447 rulings
+    /// #6) -- and no REPEAT query when the group was already fetched by an
+    /// earlier line in this run. A write under a NEW category in an
+    /// already-fetched `(session, owner)` pair still triggers its own query
+    /// (PR #402 finding 1): category is part of the group key, so it is a
+    /// distinct group, not a cache hit against the wrong category's rows.
     fn ensure_group(
         &mut self,
         db: &dyn store::KnowledgeStore,
         session_id: Option<&str>,
         owner: Option<&str>,
+        category: &str,
     ) -> Result<()> {
         let Some(sid) = session_id else {
             return Ok(());
         };
-        let group = (sid.to_string(), owner.map(String::from));
+        let group = (
+            sid.to_string(),
+            owner.map(String::from),
+            category.to_string(),
+        );
         if self.fetched_groups.contains(&group) {
             return Ok(());
         }
@@ -423,23 +450,31 @@ impl DedupIndex {
             Some(o) => store::AgentContext::for_agent(o.to_string()),
             None => store::AgentContext::public_only(),
         };
-        let candidates = db.get_entries_for_session(sid, owner, &ctx)?;
+        let candidates = db.get_entries_for_session(sid, owner, category, &ctx)?;
         for c in candidates {
             let hash = knowledge::dedup_hash(&c.title, &c.body);
-            self.seen
-                .insert((sid.to_string(), owner.map(String::from), hash), c.id);
+            self.seen.insert(
+                (
+                    sid.to_string(),
+                    owner.map(String::from),
+                    category.to_string(),
+                    hash,
+                ),
+                c.id,
+            );
         }
         self.fetched_groups.insert(group);
         Ok(())
     }
 
-    /// Check whether `(session_id, owner)` already has an entry whose
-    /// title+body normalizes to the same hash. Always `Fresh` when
+    /// Check whether `(session_id, owner, category)` already has an entry
+    /// whose title+body normalizes to the same hash. Always `Fresh` when
     /// `session_id` is `None` (dedup bypassed by design).
     fn check(
         &self,
         session_id: Option<&str>,
         owner: Option<&str>,
+        category: &str,
         title: &str,
         body: &str,
     ) -> DedupDecision {
@@ -447,7 +482,12 @@ impl DedupIndex {
             return DedupDecision::Fresh;
         };
         let hash = knowledge::dedup_hash(title, body);
-        let key = (sid.to_string(), owner.map(String::from), hash);
+        let key = (
+            sid.to_string(),
+            owner.map(String::from),
+            category.to_string(),
+            hash,
+        );
         match self.seen.get(&key) {
             Some(existing_id) => DedupDecision::Duplicate {
                 existing_id: existing_id.clone(),
@@ -465,14 +505,22 @@ impl DedupIndex {
         &mut self,
         session_id: Option<&str>,
         owner: Option<&str>,
+        category: &str,
         title: &str,
         body: &str,
         id: String,
     ) {
         if let Some(sid) = session_id {
             let hash = knowledge::dedup_hash(title, body);
-            self.seen
-                .insert((sid.to_string(), owner.map(String::from), hash), id);
+            self.seen.insert(
+                (
+                    sid.to_string(),
+                    owner.map(String::from),
+                    category.to_string(),
+                    hash,
+                ),
+                id,
+            );
         }
     }
 }
@@ -508,22 +556,30 @@ enum DedupGate {
     Skip { duplicate_of: String },
 }
 
-/// Run the write-boundary dedup gate: ensure the `(session, owner)`
-/// candidate group is loaded, then check title+body against it. This is the
-/// ONE place all three new-entry write funnels -- `add_one`'s standard path,
-/// the single-add `--type` fact path, and the batch inline fact path --
-/// make the dedup decision (fix-round review, structural finding: the gate
-/// was hand-rolled at three call sites with drifting bypass-signal and
-/// fail-open/fail-closed behavior between them). A fourth funnel now has to
-/// edit this function to diverge, not just forget to copy a change.
+/// Run the write-boundary dedup gate: ensure the `(session, owner,
+/// category)` candidate group is loaded, then check title+body against it.
+/// This is the ONE place all three new-entry write funnels -- `add_one`'s
+/// standard path, the single-add `--type` fact path, and the batch inline
+/// fact path -- make the dedup decision (fix-round review, structural
+/// finding: the gate was hand-rolled at three call sites with drifting
+/// bypass-signal and fail-open/fail-closed behavior between them). A fourth
+/// funnel now has to edit this function to diverge, not just forget to
+/// copy a change.
+///
+/// `category` scopes the candidate group (PR #402 finding 1): identical
+/// title+body filed under a different category is a distinct fact, never a
+/// dedup candidate. See `DedupIndex`'s doc-comment for why category is a
+/// query-scope decision rather than a hash field.
 ///
 /// Fails OPEN on a lookup error (finding 2): logs a warning to stderr and
 /// returns `Proceed`, never aborts the write via `?`.
+#[allow(clippy::too_many_arguments)] // one gate, one signature -- see doc-comment above.
 fn dedup_gate(
     dedup: &mut DedupIndex,
     db: &dyn store::KnowledgeStore,
     session_id: Option<&str>,
     owner: Option<&str>,
+    category: &str,
     title: &str,
     body: &str,
     allow_duplicate: bool,
@@ -534,14 +590,14 @@ fn dedup_gate(
     if session_id.is_none() {
         return DedupGate::Proceed(DedupProceedReason::NoSession);
     }
-    if let Err(e) = dedup.ensure_group(db, session_id, owner) {
+    if let Err(e) = dedup.ensure_group(db, session_id, owner, category) {
         let msg = e.to_string();
         eprintln!(
             "Warning: dedup candidate lookup failed ({msg}) -- proceeding with the write (fail-open)"
         );
         return DedupGate::Proceed(DedupProceedReason::LookupFailed { msg });
     }
-    match dedup.check(session_id, owner, title, body) {
+    match dedup.check(session_id, owner, category, title, body) {
         DedupDecision::Duplicate { existing_id } => DedupGate::Skip {
             duplicate_of: existing_id,
         },
@@ -668,6 +724,7 @@ fn add_one(
         db,
         args.session_id.as_deref(),
         args.entry_owner.as_deref(),
+        &args.category,
         &args.title,
         &args.body,
         allow_duplicate,
@@ -734,6 +791,7 @@ fn add_one(
         dedup.record(
             args.session_id.as_deref(),
             args.entry_owner.as_deref(),
+            &args.category,
             &args.title,
             &args.body,
             id.clone(),
@@ -1355,6 +1413,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     db.as_ref(),
                     session.as_deref(),
                     entry.owner.as_deref(),
+                    &entry.category_id,
                     &entry.title,
                     entry.body.as_deref().unwrap_or(""),
                     allow_duplicate,
@@ -2763,6 +2822,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         db.as_ref(),
                         session.as_deref(),
                         entry.owner.as_deref(),
+                        &entry.category_id,
                         &entry.title,
                         entry.body.as_deref().unwrap_or(""),
                         allow_duplicate,
@@ -2820,6 +2880,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         dedup.record(
                             session.as_deref(),
                             entry.owner.as_deref(),
+                            &entry.category_id,
                             &entry.title,
                             entry.body.as_deref().unwrap_or(""),
                             id.clone(),
@@ -4639,10 +4700,12 @@ mod dedup_gate_tests {
             &self,
             session_id: &str,
             owner: Option<&str>,
+            category: &str,
             ctx: &AgentContext,
         ) -> Result<Vec<DedupCandidate>> {
             self.calls.set(self.calls.get() + 1);
-            self.inner.get_entries_for_session(session_id, owner, ctx)
+            self.inner
+                .get_entries_for_session(session_id, owner, category, ctx)
         }
         fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
             self.inner.get_session_for_fact(fact_id)
@@ -4974,6 +5037,7 @@ mod dedup_gate_tests {
             &self,
             _session_id: &str,
             _owner: Option<&str>,
+            _category: &str,
             _ctx: &AgentContext,
         ) -> Result<Vec<DedupCandidate>> {
             anyhow::bail!("simulated transient read blip")
@@ -5417,5 +5481,133 @@ mod dedup_gate_tests {
                 panic!("a lookup failure must proceed with the write, never skip it")
             }
         }
+    }
+
+    #[test]
+    fn identical_content_different_category_does_not_dedup() {
+        // PR #402 finding 1 (BLOCKER): identical title+body re-filed under a
+        // DIFFERENT category in the same session+owner must land as a
+        // distinct entry, never be skipped as "already saved" under the
+        // other category's row. Pre-fix, `dedup_hash` alone (title+body,
+        // no category) meant this exact case silently dropped the second
+        // write.
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        let recipe = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "recipe",
+                "Shared Title",
+                "Shared body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(recipe, WriteOutcome::Written(..)));
+
+        let discovery = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "discovery", // different category, byte-identical title+body
+                "Shared Title",
+                "Shared body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(discovery, WriteOutcome::Written(..)),
+            "identical title+body under a different category must land as a distinct \
+             entry, not be skipped against the other category's row"
+        );
+
+        // The different-category write is a NEW group -- its own query, not
+        // a cache hit reusing the "recipe" group's candidates.
+        assert_eq!(
+            db.calls.get(),
+            2,
+            "a different category in the same (session, owner) must trigger its own \
+             candidate query, not reuse the other category's cached group"
+        );
+
+        // A true recased re-add WITHIN the same category is still caught.
+        let recipe_dup = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "recipe",
+                "shared title", // recased, same category as the first write
+                "shared body",
+                Some("sess-1"),
+            ),
+            &db,
+            false,
+            true,
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+        assert!(
+            matches!(recipe_dup, WriteOutcome::Skipped { .. }),
+            "within the SAME category, a recased duplicate must still be caught -- the \
+             category fix must not weaken same-category dedup"
+        );
+    }
+
+    #[test]
+    fn identical_content_different_tags_still_dedups() {
+        // Documented, accepted gap (PR #402 finding 1 follow-up decision,
+        // see `DedupIndex`'s doc-comment and `dedup_hash`'s IDENTITY
+        // CONTRACT note in knowledge.rs): tags are edge-modeled, not a
+        // scalar field on the row, and are deliberately NOT part of the
+        // dedup identity. Identical title+body filed with different tags is
+        // treated as the same fact re-tagged, and the second write is
+        // skipped -- this test PINS that behavior so a future change can't
+        // silently start folding tags into the identity (or stop dedupeing
+        // across tags) without this test forcing the decision to be visible.
+        let db = CountingStore::new();
+        let mut dedup = DedupIndex::default();
+
+        let mut first_args = one_line_args(
+            "agent-a",
+            None,
+            "test",
+            "Shared Title",
+            "Shared body",
+            Some("sess-1"),
+        );
+        first_args.tag_list = vec!["alpha".to_string()];
+        let first = add_one(first_args, &db, false, true, &mut dedup, false).unwrap();
+        assert!(matches!(first, WriteOutcome::Written(..)));
+
+        let mut second_args = one_line_args(
+            "agent-a",
+            None,
+            "test",
+            "Shared Title",
+            "Shared body",
+            Some("sess-1"),
+        );
+        second_args.tag_list = vec!["beta".to_string(), "gamma".to_string()];
+        let second = add_one(second_args, &db, false, true, &mut dedup, false).unwrap();
+
+        assert!(
+            matches!(second, WriteOutcome::Skipped { .. }),
+            "identical title+body with DIFFERENT tags must still dedup -- tags are \
+             excluded from the identity by design, not a bug this test regresses"
+        );
     }
 }

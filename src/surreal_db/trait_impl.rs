@@ -266,9 +266,10 @@ impl KnowledgeStore for SurrealDatabase {
         &self,
         session_id: &str,
         owner: Option<&str>,
+        category: &str,
         ctx: &crate::store::AgentContext,
     ) -> Result<Vec<crate::store::DedupCandidate>> {
-        self.get_entries_for_session(session_id, owner, ctx)
+        self.get_entries_for_session(session_id, owner, category, ctx)
     }
 
     fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {

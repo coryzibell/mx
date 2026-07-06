@@ -140,7 +140,11 @@ add --type` (fact-routing), and both lines of `mx memory add-batch`
 (standard and `--type`) -- check a normalized `dedup_hash` of `title+body`
 (lowercase, ASCII punctuation and common Unicode punctuation stripped --
 smart quotes, en/em dash, horizontal ellipsis -- whitespace collapsed)
-against the writing agent's OWN entries in the SAME session before writing.
+against the writing agent's OWN entries in the SAME session AND SAME
+CATEGORY before writing. Category is enforced by scoping the candidate
+query, not by folding it into `dedup_hash` itself -- identical title+body
+re-filed under a different category is a distinct fact (a different shelf),
+never a dedup candidate, so it always lands as its own entry.
 A regenerated duplicate that differs only by case, punctuation, or
 whitespace -- the common shape when an LLM re-derives the same fact across
 turns -- is detected and the write is SKIPPED rather than landing as a
@@ -184,25 +188,32 @@ durably saved, and there is nothing further to do.
   -- the write always wins.
 
 #note[*Coverage boundary, read this before assuming full coverage:* the gate
-catches recased/repunctuated re-adds within the SAME session and SAME owner.
-It does NOT catch: cross-session regenerations (a fact re-derived in a later
-wake under a different `session_id` -- *open question, not yet confirmed:*
-the ~20 double-write pairs (W342–W445) that motivated this feature have not
-been checked against this scope; if most of them are cross-session rather
-than same-session, this fix closes only a minority of the motivating class,
-and owner-scoped matching with a bounded time window would be the sharper
-mechanism -- flagged for follow-up, not resolved here), reworded duplicates
-(different words, same meaning -- e.g. "shipped" vs "published"), a
-public+owned entry vs. a later public+unowned entry with identical content
-(owner is a hard AND-conjoined predicate, so these two visible-to-everyone
-rows never dedup against each other even though both are public), or writes
-with no `session_id` at all (dedup is bypassed entirely when `session_id` is
-absent -- a bypass signal is emitted on EVERY funnel: `"dedup":
-"bypassed_no_session"` in `--json` mode on the standard single-add path
-(mutually exclusive with the stderr note -- json mode never prints both), a
-stderr note on all four funnels in every other mode, so the bypass is never
-silent). Keep marking back captured entries; this is a store-boundary
-backstop, not a substitute for careful write discipline.]
+catches recased/repunctuated re-adds within the SAME session, SAME owner,
+and SAME category. It does NOT catch: cross-session regenerations (a fact
+re-derived in a later wake under a different `session_id` -- *open question,
+not yet confirmed:* the ~20 double-write pairs (W342–W445) that motivated
+this feature have not been checked against this scope; if most of them are
+cross-session rather than same-session, this fix closes only a minority of
+the motivating class, and owner-scoped matching with a bounded time window
+would be the sharper mechanism -- flagged for follow-up, not resolved
+here), reworded duplicates (different words, same meaning -- e.g. "shipped"
+vs "published"), a public+owned entry vs. a later public+unowned entry with
+identical content (owner is a hard AND-conjoined predicate, so these two
+visible-to-everyone rows never dedup against each other even though both
+are public), identical title+body filed under a DIFFERENT category
+(category is a hard AND-conjoined predicate too -- a re-file under a new
+category is treated as a distinct fact, deliberately, never a duplicate),
+identical title+body with DIFFERENT tags (tags are edge-modeled, not a
+scalar field on the row, and are deliberately excluded from the dedup
+identity entirely -- a tag-only-differing re-add still dedupes, same as any
+other identical-content re-add), or writes with no `session_id` at all
+(dedup is bypassed entirely when `session_id` is absent -- a bypass signal
+is emitted on EVERY funnel: `"dedup": "bypassed_no_session"` in `--json`
+mode on the standard single-add path (mutually exclusive with the stderr
+note -- json mode never prints both), a stderr note on all four funnels in
+every other mode, so the bypass is never silent). Keep marking back
+captured entries; this is a store-boundary backstop, not a substitute for
+careful write discipline.]
 
 #note[*In-process, best-effort -- not a database-level uniqueness guarantee.*
 The dedup index is read-then-write within a single `mx` process invocation
@@ -213,11 +224,14 @@ normalized content). It is NOT wired to the legacy `content_hash` field
 `dedup_hash` plus a compound unique index would close the TOCTOU gap and
 make the "store-boundary" framing literally true, at the cost of mapping a
 constraint violation to a skip; this is a design option for a future PR, not
-implemented here. The candidate query has no result limit, so a very
+implemented here -- and, per finding 1, that unique index must key on
+`(session, owner, category, dedup_hash)`, not just `(session, owner,
+dedup_hash)`, to match the same category scope this fix adds to the
+in-process gate. The candidate query has no result limit, so a very
 long-lived session pays an O(n) rehash of every row ever written to its
-`(session, owner)` group on every future write in that group -- bounded in
-practice (memory sessions aren't usually thousands of rows), a follow-up if
-it ever isn't.]
+`(session, owner, category)` group on every future write in that group --
+bounded in practice (memory sessions aren't usually thousands of rows), a
+follow-up if it ever isn't.]
 
 #note[*The write boundary confirms content existence under a claimed
 owner.* A `duplicate_of` hit tells the caller "an entry with this exact

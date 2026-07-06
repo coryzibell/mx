@@ -3305,12 +3305,14 @@ fn off_dim_row_does_not_abort_cosine_scan() {
 // get_entries_for_session -- write-boundary dedup candidate fetch (W447)
 //
 // Real-store tests (open_in_memory, never a mock) proving the query's
-// field-scoping, hard owner isolation, and None-owner semantics -- the exact
-// seams flagged in review as false-confidence traps.
+// field-scoping, hard owner isolation, category isolation, and None-owner
+// semantics -- the exact seams flagged in review as false-confidence traps.
 // =========================================================================
 
 /// Build an entry for dedup-candidate tests: same shape as `make_test_entry`
 /// but with session/owner/visibility/title/body under test control.
+/// `category_id` defaults to `make_test_entry`'s `"test"` -- use
+/// `dedup_candidate_entry_with_category` when the test needs a different one.
 fn dedup_candidate_entry(
     id: &str,
     session_id: &str,
@@ -3326,6 +3328,23 @@ fn dedup_candidate_entry(
         title: title.to_string(),
         body: Some(body.to_string()),
         ..make_test_entry(id, 3, 0.0)
+    }
+}
+
+/// Same as `dedup_candidate_entry`, with an explicit `category_id` (PR #402
+/// finding 1 category-scoping tests).
+fn dedup_candidate_entry_with_category(
+    id: &str,
+    session_id: &str,
+    owner: Option<&str>,
+    category_id: &str,
+    visibility: &str,
+    title: &str,
+    body: &str,
+) -> crate::knowledge::KnowledgeEntry {
+    crate::knowledge::KnowledgeEntry {
+        category_id: category_id.to_string(),
+        ..dedup_candidate_entry(id, session_id, owner, visibility, title, body)
     }
 }
 
@@ -3347,7 +3366,7 @@ fn test_get_entries_for_session_field_scoped_not_edge_scoped() {
 
     let ctx = crate::store::AgentContext::for_agent("soren");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("soren"), &ctx)
+        .get_entries_for_session("sess-1", Some("soren"), "test", &ctx)
         .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, "kn-field-scoped");
@@ -3373,7 +3392,7 @@ fn test_get_entries_for_session_owner_scope_excludes_other_owners_public_entry()
 
     let ctx = crate::store::AgentContext::for_agent("agent-a");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .get_entries_for_session("sess-1", Some("agent-a"), "test", &ctx)
         .unwrap();
     assert!(
         candidates.is_empty(),
@@ -3398,7 +3417,7 @@ fn test_get_entries_for_session_same_owner_private_entry_is_included() {
 
     let ctx = crate::store::AgentContext::for_agent("agent-a");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .get_entries_for_session("sess-1", Some("agent-a"), "test", &ctx)
         .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, "kn-owner-a-private");
@@ -3429,7 +3448,9 @@ fn test_get_entries_for_session_none_owner_matches_only_unowned_rows() {
     db.upsert_knowledge(&owned).unwrap();
 
     let ctx = crate::store::AgentContext::public_only();
-    let candidates = db.get_entries_for_session("sess-1", None, &ctx).unwrap();
+    let candidates = db
+        .get_entries_for_session("sess-1", None, "test", &ctx)
+        .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, "kn-unowned");
 }
@@ -3450,9 +3471,47 @@ fn test_get_entries_for_session_scoped_to_session_field_only() {
 
     let ctx = crate::store::AgentContext::for_agent("agent-a");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .get_entries_for_session("sess-1", Some("agent-a"), "test", &ctx)
         .unwrap();
     assert!(candidates.is_empty());
+}
+
+#[test]
+fn test_get_entries_for_session_category_scope_excludes_other_categories() {
+    // PR #402 finding 1 (BLOCKER): a same-session, same-owner entry filed
+    // under a DIFFERENT category must never be a dedup candidate. Before
+    // this fix, `get_entries_for_session` scoped only by session+owner, so
+    // identical title+body re-filed under a new category silently
+    // collided -- the second write was skipped as "already saved" under the
+    // WRONG category's row.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let other_category = dedup_candidate_entry_with_category(
+        "kn-other-category",
+        "sess-1",
+        Some("agent-a"),
+        "discovery",
+        "public",
+        "Shared Title",
+        "Shared body",
+    );
+    db.upsert_knowledge(&other_category).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-a");
+    let candidates = db
+        .get_entries_for_session("sess-1", Some("agent-a"), "recipe", &ctx)
+        .unwrap();
+    assert!(
+        candidates.is_empty(),
+        "a 'recipe'-category query must never surface a 'discovery'-category row \
+         with identical title+body; got {candidates:?}"
+    );
+
+    // The SAME category must still find it.
+    let same_category = db
+        .get_entries_for_session("sess-1", Some("agent-a"), "discovery", &ctx)
+        .unwrap();
+    assert_eq!(same_category.len(), 1);
+    assert_eq!(same_category[0].id, "kn-other-category");
 }
 
 #[test]
@@ -3475,7 +3534,7 @@ fn test_get_entries_for_session_projection_has_no_embedding_field() {
 
     let ctx = crate::store::AgentContext::for_agent("agent-a");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("agent-a"), &ctx)
+        .get_entries_for_session("sess-1", Some("agent-a"), "test", &ctx)
         .unwrap();
     assert_eq!(candidates.len(), 1);
     // DedupCandidate has no `.embedding` field at all -- if this compiles

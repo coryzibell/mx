@@ -493,8 +493,9 @@ pub trait KnowledgeStore {
 
     /// Write-boundary dedup candidates (W447): entries whose `session`
     /// record-link FIELD equals `session_id` (indexed: `knowledge_session`),
-    /// scoped by `owner` (indexed: `knowledge_owner`). Field-scoped, NOT the
-    /// `EXTRACTED_FROM` edge that [`get_facts_for_session`](Self::get_facts_for_session)
+    /// scoped by `owner` (indexed: `knowledge_owner`) AND by `category`
+    /// (review PR #402 finding 1). Field-scoped, NOT the `EXTRACTED_FROM`
+    /// edge that [`get_facts_for_session`](Self::get_facts_for_session)
     /// uses -- that edge is frequently absent (session-not-found is a
     /// warn-and-skip elsewhere in the write path), which would under-fetch
     /// exactly the entries most prone to duplication.
@@ -506,12 +507,30 @@ pub trait KnowledgeStore {
     /// backstop to do the scoping (it admits every owner's public rows and
     /// provides no owner isolation on its own).
     ///
+    /// `category` is likewise a hard AND-conjoined predicate, never "any
+    /// category": identical title+body re-filed under a different category
+    /// in the same session is a distinct fact (a different shelf, not a
+    /// duplicate), so it must never surface as a dedup candidate. This is
+    /// the fix for PR #402 finding 1 (dedup identity previously excluded
+    /// category, so a same-session/same-owner write under a new category
+    /// was silently skipped as "already saved" under someone else's
+    /// category). Scoping the candidate query -- rather than folding
+    /// `category` into `dedup_hash` itself -- was the chosen fix: it avoids
+    /// adding a third length-prefixed field to the hash (see the LANDMINE
+    /// doc-comment on `dedup_hash` in `knowledge.rs`) and keeps the hash's
+    /// contract exactly "same title+body", with "same category" enforced
+    /// at the query boundary instead. Tags are deliberately NOT part of
+    /// this scope (see `DedupIndex` doc-comment in `handlers/memory.rs`):
+    /// they are edge-modeled, not a scalar field on the row, and folding
+    /// them in would require an extra query per candidate.
+    ///
     /// Projects only `id, title, body` -- never the full `KnowledgeEntry`
     /// with its 768-dim embedding.
     fn get_entries_for_session(
         &self,
         session_id: &str,
         owner: Option<&str>,
+        category: &str,
         ctx: &AgentContext,
     ) -> Result<Vec<DedupCandidate>>;
 

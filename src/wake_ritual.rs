@@ -1568,6 +1568,7 @@ mod tests {
                 &self,
                 _id: &str,
                 _owner: Option<&str>,
+                _category: &str,
                 _ctx: &AgentContext,
             ) -> Result<Vec<crate::store::DedupCandidate>> {
                 unreachable!()
