@@ -756,6 +756,77 @@ impl SurrealDatabase {
         Ok(Some(record.into_knowledge_entry(tags, applicability)))
     }
 
+    /// Batch-fetch knowledge entries by ID in a single round trip (plus one
+    /// batched round trip each for tags and applicability), keyed by full
+    /// `kn-` id.
+    ///
+    /// Review fix: the embedding_chunk semantic-search fill loop was calling
+    /// `get_knowledge_async` once per unique chunk entry_id to decide
+    /// keep/drop, which is a sequential single-row round trip per candidate
+    /// (up to `limit * 50` of them in the excluded-tag-dominance case). This
+    /// hydrates a whole window of candidates with one query instead.
+    /// Entries that don't exist, or aren't visible under `ctx`, are simply
+    /// absent from the returned map.
+    pub(super) async fn get_knowledge_batch_async(
+        &self,
+        ids: &[String],
+        ctx: &crate::store::AgentContext,
+    ) -> Result<std::collections::HashMap<String, KnowledgeEntry>> {
+        let mut out = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+
+        let things: Vec<Thing> = ids
+            .iter()
+            .map(|id| {
+                let id_part = id.strip_prefix("kn-").unwrap_or(id);
+                Thing::from(("knowledge", id_part))
+            })
+            .collect();
+
+        let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE id IN $ids {}",
+            Self::knowledge_select_fields(),
+            visibility_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut query = db.query(&sql).bind(("ids", things));
+            if let Some(agent) = current_agent {
+                query = query.bind(("current_agent", agent));
+            }
+            query
+                .await
+                .context("Failed to batch-query knowledge records")
+        })?;
+
+        let records: Vec<SurrealKnowledgeRecord> = response.take(0)?;
+        if records.is_empty() {
+            return Ok(out);
+        }
+
+        let record_ids: Vec<String> = records.iter().map(|r| format!("kn-{}", r.id)).collect();
+        let mut tags_by_id = self.get_tags_for_entries_async(&record_ids).await?;
+        let mut applicability_by_id = self.get_applicability_for_entries_async(&record_ids).await?;
+
+        for record in records {
+            let full_id = format!("kn-{}", record.id);
+            let tags = tags_by_id.remove(&full_id).unwrap_or_default();
+            let applicability = applicability_by_id.remove(&full_id).unwrap_or_default();
+            out.insert(
+                full_id.clone(),
+                record.into_knowledge_entry(tags, applicability),
+            );
+        }
+
+        Ok(out)
+    }
+
     /// Delete a knowledge entry (edges cascade automatically).
     /// Respects visibility: agents can only delete entries they can see.
     /// Returns Ok(false) for entries that don't exist OR that the agent can't see
@@ -1071,9 +1142,10 @@ impl SurrealDatabase {
                 }
             }
 
-            // For each unique chunk entry_id not yet accounted for, fetch
-            // the full entry (with visibility/category/resonance/exclude
-            // filtering), exactly once per entry_id across all iterations.
+            // Split this window's unique chunk entry_ids into "already
+            // accounted for" (just needs a max-score bump, no DB work) and
+            // "needs hydration" (unseen so far).
+            let mut ids_to_hydrate: Vec<String> = Vec::new();
             for (entry_id, score) in &chunk_scores {
                 if scored_entries.contains_key(entry_id) {
                     // Entry already in results from unchunked path — take max score
@@ -1089,41 +1161,53 @@ impl SurrealDatabase {
                     // fetch window — the verdict doesn't change, skip.
                     continue;
                 }
+                ids_to_hydrate.push(entry_id.clone());
+            }
 
-                let resolved = if let Some(entry) = self.get_knowledge_async(entry_id, ctx).await? {
-                    // Apply decay-adjusted resonance filter (matching the SQL in effective_resonance_expr)
-                    let effective = Self::compute_effective_resonance(&entry);
-                    let passes_resonance = filter
-                        .min_resonance
-                        .is_none_or(|min| effective >= min as f64)
-                        && filter
-                            .max_resonance
-                            .is_none_or(|max| effective <= max as f64);
-                    // Apply category filter
-                    let passes_category = filter
-                        .categories
-                        .as_ref()
-                        .is_none_or(|cats| cats.is_empty() || cats.contains(&entry.category_id));
-                    // Review fix, embedding_chunk phase: filter here, before
-                    // this candidate enters `scored_entries`, using the
-                    // now-hydrated entry's tags. This keeps exclusion at
-                    // candidate-set-construction time, before the final
-                    // sort+truncate(limit) below, matching the
-                    // resonance/category filters above.
-                    let passes_exclude = crate::helpers::keep_after_exclude(
-                        &entry.tags,
-                        &filter.exclude_tag_prefixes,
-                    );
-                    if passes_resonance && passes_category && passes_exclude {
-                        Some((*score, entry))
+            // Review fix: batch-hydrate the whole window in one query
+            // instead of one `get_knowledge_async` round trip per entry_id.
+            // The excluded-tag-dominance case can push `ids_to_hydrate` into
+            // the hundreds or thousands per fill, and most of those get
+            // discarded by `keep_after_exclude` below — no reason to pay a
+            // sequential round trip for each one just to read its tags.
+            if !ids_to_hydrate.is_empty() {
+                let hydrated = self.get_knowledge_batch_async(&ids_to_hydrate, ctx).await?;
+                for entry_id in &ids_to_hydrate {
+                    let score = chunk_scores[entry_id];
+                    let resolved = if let Some(entry) = hydrated.get(entry_id) {
+                        // Apply decay-adjusted resonance filter (matching the SQL in effective_resonance_expr)
+                        let effective = Self::compute_effective_resonance(entry);
+                        let passes_resonance = filter
+                            .min_resonance
+                            .is_none_or(|min| effective >= min as f64)
+                            && filter
+                                .max_resonance
+                                .is_none_or(|max| effective <= max as f64);
+                        // Apply category filter
+                        let passes_category = filter.categories.as_ref().is_none_or(|cats| {
+                            cats.is_empty() || cats.contains(&entry.category_id)
+                        });
+                        // Review fix, embedding_chunk phase: filter here, before
+                        // this candidate enters `scored_entries`, using the
+                        // now-hydrated entry's tags. This keeps exclusion at
+                        // candidate-set-construction time, before the final
+                        // sort+truncate(limit) below, matching the
+                        // resonance/category filters above.
+                        let passes_exclude = crate::helpers::keep_after_exclude(
+                            &entry.tags,
+                            &filter.exclude_tag_prefixes,
+                        );
+                        if passes_resonance && passes_category && passes_exclude {
+                            Some((score, entry.clone()))
+                        } else {
+                            None
+                        }
                     } else {
+                        // Entry not found or not visible.
                         None
-                    }
-                } else {
-                    // Entry not found or not visible.
-                    None
-                };
-                resolved_chunk_entries.insert(entry_id.clone(), resolved);
+                    };
+                    resolved_chunk_entries.insert(entry_id.clone(), resolved);
+                }
             }
 
             // Merge every kept, resolved chunk entry into `scored_entries`.
