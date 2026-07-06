@@ -812,7 +812,9 @@ impl SurrealDatabase {
 
         let record_ids: Vec<String> = records.iter().map(|r| format!("kn-{}", r.id)).collect();
         let mut tags_by_id = self.get_tags_for_entries_async(&record_ids).await?;
-        let mut applicability_by_id = self.get_applicability_for_entries_async(&record_ids).await?;
+        let mut applicability_by_id = self
+            .get_applicability_for_entries_async(&record_ids)
+            .await?;
 
         for record in records {
             let full_id = format!("kn-{}", record.id);
