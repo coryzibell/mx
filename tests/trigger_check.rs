@@ -22,12 +22,25 @@ use tempfile::TempDir;
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 /// Run `mx` with isolated surreal root + fired-state path. `stdin` is optional.
+///
+/// Isolate the child from any ambient `MX_SURREAL_*` network config in the
+/// invoking shell (this dev sandbox exports `MX_SURREAL_MODE=network` +
+/// ambient live-DB credentials from the development environment) -- force
+/// embedded/file-backed mode under the per-test `MX_SURREAL_ROOT` so these
+/// tests never touch a shared live database. Mirrors the isolation pattern
+/// in `dedup_write_boundary.rs`.
 fn mx(dir: &TempDir, args: &[&str], stdin: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(MX);
     cmd.args(args)
         .env("MX_CURRENT_AGENT", "test-agent")
+        .env("MX_SURREAL_MODE", "embedded")
         .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
         .env("MX_TRIGGER_FIRED_PATH", dir.path().join("fired.json"))
+        .env_remove("MX_SURREAL_URL")
+        .env_remove("MX_SURREAL_NS")
+        .env_remove("MX_SURREAL_DB")
+        .env_remove("MX_SURREAL_USER")
+        .env_remove("MX_SURREAL_AUTH_LEVEL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
