@@ -261,6 +261,58 @@ impl SurrealDatabase {
         Ok(())
     }
 
+    /// Batch-fetch tags for many entries in a single round trip.
+    ///
+    /// Review fix (N+1 hydration in embedding_chunk search, see knowledge.rs
+    /// semantic_search): hydrating chunk candidates one at a time via
+    /// `get_tags_for_entry_async` per entry means one DB round trip per
+    /// unique chunk entry_id, which can run to the thousands under the
+    /// archive-tier exclusion case. This collects tags for a whole window of
+    /// entry_ids with one query instead.
+    pub(super) async fn get_tags_for_entries_async(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if entry_ids.is_empty() {
+            return Ok(out);
+        }
+
+        let things: Vec<Thing> = entry_ids
+            .iter()
+            .map(|id| {
+                let id_part = id.strip_prefix("kn-").unwrap_or(id);
+                Thing::from(("knowledge", id_part))
+            })
+            .collect();
+
+        #[derive(Deserialize)]
+        struct TagRow {
+            entry_id: String,
+            tag: String,
+        }
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(in) AS entry_id, out.name AS tag \
+                 FROM tagged_with WHERE in IN $knowledge",
+            )
+            .bind(("knowledge", things))
+            .await
+            .context("Failed to batch-query tags")
+        })?;
+
+        let rows: Vec<TagRow> = response.take(0).unwrap_or_default();
+        for row in rows {
+            out.entry(format!("kn-{}", row.entry_id))
+                .or_default()
+                .push(row.tag);
+        }
+
+        Ok(out)
+    }
+
     /// Get applicability for an entry
     pub fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         Self::runtime().block_on(self.get_applicability_for_entry_async(entry_id))
@@ -293,5 +345,51 @@ impl SurrealDatabase {
     pub fn set_applicability_for_entry(&self, _entry_id: &str, _ids: &[String]) -> Result<()> {
         // Applicability is managed via upsert_knowledge, this is a no-op for compatibility
         Ok(())
+    }
+
+    /// Batch-fetch applicability for many entries in a single round trip.
+    /// See `get_tags_for_entries_async` for why this exists.
+    pub(super) async fn get_applicability_for_entries_async(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if entry_ids.is_empty() {
+            return Ok(out);
+        }
+
+        let things: Vec<Thing> = entry_ids
+            .iter()
+            .map(|id| {
+                let id_part = id.strip_prefix("kn-").unwrap_or(id);
+                Thing::from(("knowledge", id_part))
+            })
+            .collect();
+
+        #[derive(Deserialize)]
+        struct ApplicabilityRow {
+            entry_id: String,
+            applies_id: String,
+        }
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT meta::id(in) AS entry_id, meta::id(out) AS applies_id \
+                 FROM applies_to WHERE in IN $knowledge",
+            )
+            .bind(("knowledge", things))
+            .await
+            .context("Failed to batch-query applicability")
+        })?;
+
+        let rows: Vec<ApplicabilityRow> = response.take(0).unwrap_or_default();
+        for row in rows {
+            out.entry(format!("kn-{}", row.entry_id))
+                .or_default()
+                .push(row.applies_id);
+        }
+
+        Ok(out)
     }
 }
