@@ -727,21 +727,27 @@ impl SurrealDatabase {
     /// relationships.rs, which is edge-scoped and frequently under-fetches).
     /// `owner` is a hard AND-conjoined predicate (`knowledge_owner` index):
     /// `Some(o)` binds `owner = $owner`; `None` matches `owner IS NONE`
-    /// (unowned public rows) -- never "any owner". `build_visibility_filter`
-    /// is appended only as a redundant backstop, never the primary scope.
+    /// (unowned public rows) -- never "any owner". `category` is likewise a
+    /// hard AND-conjoined predicate (PR #402 finding 1): bound as a query
+    /// parameter, same as `session_id`/`owner`, so no string interpolation
+    /// / injection surface. `build_visibility_filter` is appended only as a
+    /// redundant backstop, never the primary scope.
     pub fn get_entries_for_session(
         &self,
         session_id: &str,
         owner: Option<&str>,
+        category: &str,
         ctx: &crate::store::AgentContext,
     ) -> Result<Vec<crate::store::DedupCandidate>> {
-        Self::runtime().block_on(self.get_entries_for_session_async(session_id, owner, ctx))
+        Self::runtime()
+            .block_on(self.get_entries_for_session_async(session_id, owner, category, ctx))
     }
 
     async fn get_entries_for_session_async(
         &self,
         session_id: &str,
         owner: Option<&str>,
+        category: &str,
         ctx: &crate::store::AgentContext,
     ) -> Result<Vec<crate::store::DedupCandidate>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
@@ -757,12 +763,16 @@ impl SurrealDatabase {
         let sql = format!(
             "SELECT meta::id(id) AS id, title, (body ?? '') AS body
              FROM knowledge
-             WHERE session = type::thing('session', $session_id) {} {}",
+             WHERE session = type::thing('session', $session_id)
+               AND category = type::thing('category', $category) {} {}",
             owner_clause, visibility_clause
         );
 
         let mut response = with_db!(self, db, {
-            let mut q = db.query(&sql).bind(("session_id", session_id.to_string()));
+            let mut q = db
+                .query(&sql)
+                .bind(("session_id", session_id.to_string()))
+                .bind(("category", category.to_string()));
             if let Some(o) = owner {
                 q = q.bind(("owner", o.to_string()));
             }

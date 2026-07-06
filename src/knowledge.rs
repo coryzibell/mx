@@ -233,6 +233,24 @@ pub fn normalize_for_dedup(content: &str) -> String {
 /// `ensure_group` call and from the incoming entry on every `check`), so
 /// changing this algorithm has no migration concern -- there is no stored
 /// value anywhere that this invalidates.
+///
+/// IDENTITY CONTRACT (PR #402 finding 1): this hash keys on title+body ONLY.
+/// "Same identity" for dedup purposes is enforced by two things working
+/// together, not this function alone:
+///   - `category` is scoped at the CANDIDATE QUERY, not the hash (see
+///     `get_entries_for_session` / `DedupIndex` in `handlers/memory.rs`).
+///     Identical title+body filed under a different category is a distinct
+///     fact, never a candidate, so it can never collide here.
+///   - `tags` are deliberately EXCLUDED from the identity entirely, not
+///     scoped anywhere. Tags are edge-modeled (a relationship table), not a
+///     scalar field on the row, so folding them in would cost an extra
+///     query per candidate; identical title+body with different tags is
+///     treated as the same fact filed with more/fewer labels, and dedupes.
+///     This is a documented, accepted false-negative surface (a
+///     tag-only-differing duplicate is skipped, same as the intended
+///     behavior) -- pinned by
+///     `identical_content_different_tags_still_dedups` in
+///     `handlers/memory.rs`.
 pub fn dedup_hash(title: &str, body: &str) -> String {
     let norm_title = normalize_for_dedup(title);
     let norm_body = normalize_for_dedup(body);
