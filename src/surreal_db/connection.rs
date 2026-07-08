@@ -188,16 +188,22 @@ fn is_retryable_conflict(err: &surrealdb::Error) -> bool {
 }
 
 /// Backoff before the next schema-application retry. Capped exponential growth
-/// (`~20ms · 2^(attempt-1)`, ceilinged at 320ms) plus wall-clock jitter, so that
-/// processes retrying in lockstep desynchronize instead of colliding again on
-/// the same tick. Only ever runs on a contended init, never on the happy path.
+/// (`~20ms · 2^(attempt-1)`, ceilinged at 320ms) plus jitter, so that processes
+/// retrying in lockstep desynchronize instead of colliding again on the same
+/// tick. Only ever runs on a contended init, never on the happy path.
+///
+/// The jitter seed folds in `process::id()` alongside the wall clock: on a
+/// coarse-resolution clock, lockstep peers on the same attempt would otherwise
+/// read a near-identical `subsec_nanos` and draw the same jitter, re-colliding.
+/// Per-process entropy breaks that tie even when the clock does not.
 fn schema_retry_backoff(attempt: u32) -> std::time::Duration {
     let base_ms = 20u64.saturating_mul(1u64 << attempt.min(5).saturating_sub(1));
     let base_ms = base_ms.min(320);
-    let jitter_ms = std::time::SystemTime::now()
+    let clock_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| (d.subsec_nanos() as u64) % 40)
+        .map(|d| d.subsec_nanos() as u64)
         .unwrap_or(0);
+    let jitter_ms = (clock_nanos ^ u64::from(std::process::id())) % 40;
     std::time::Duration::from_millis(base_ms + jitter_ms)
 }
 
