@@ -1319,8 +1319,7 @@ include all per-entry fields (`category`, `title`, `content`,
 `source_agent`, `tags`, `private`, `resonance`, `type`, etc.) on each
 line. There are no batch-wide field overrides except `--no-embed`. This
 design supports heterogeneous batches (facts, person nodes, summaries,
-blooms) in a single invocation --- which is the primary pocket
-use-case.
+blooms) in a single invocation --- which is the primary pocket use-case.
 :::
 
 ## Reading entries {#reading}
@@ -1331,7 +1330,7 @@ Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
   **Flag**                     **Type**   **Description**
-  ---------------------------- ---------- --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  ---------------------------- ---------- -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `-c, --category`             `string`   Filter by category (comma-separated).
   `--json`                     `flag`     Output as JSON.
   `--mine`                     `flag`     Show only your private entries.
@@ -1346,7 +1345,7 @@ flags. These are documented once here and referenced below.
   `--missing-resonance-type`   `flag`     Filter to entries WITHOUT a resonance type.
   `--limit`                    `int`      Limit number of results.
   `--tags`                     `string`   Filter by tags (comma-separated, matches any).
-  `--exclude-tags`             `string`   Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
+  `--exclude-tags`             `string`   Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Specify once; comma-separate multiple prefixes -- repeating the flag is a parse error. Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
 
 ::: {.admonition .note}
 **NOTE:** **Visibility default:** `list` and `search` run
@@ -1390,7 +1389,9 @@ explicit `--resonance-basis raw|decayed` flag is tracked in #404.
 **NOTE:** `--exclude-tags` takes a comma-separated list of tag prefixes.
 Any entry carrying at least one tag that prefix-matches at least one
 supplied value is dropped -- useful for excluding whole tag namespaces.
-Empty segments from trailing commas are ignored.
+Empty segments from trailing commas are ignored. Pass the flag once;
+repeating it (e.g. `--exclude-tags a --exclude-tags b`) is a parse
+error, not a silent override.
 :::
 
 ## `mx memory show`

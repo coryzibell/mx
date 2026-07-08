@@ -277,6 +277,11 @@ pub(crate) fn hidden_private_hint(
         min_resonance: filter.min_resonance,
         max_resonance: filter.max_resonance,
         categories: filter.category.clone(),
+        // Not pushed down here: this is the candidate-fetch query, and the
+        // in-memory `apply_entry_filters` call below (which DOES honor
+        // `exclude_tags`) runs over every candidate before the count is
+        // taken, so exclusion is still applied before the hint fires.
+        exclude_tag_prefixes: Vec::new(),
     };
 
     // Best-effort: on ANY error, stay silent. The hint must never turn a
@@ -1689,6 +1694,7 @@ mod hidden_private_hint_tests {
             missing_resonance_type: false,
             limit: None,
             tags: None,
+            exclude_tags: None,
         }
     }
 
@@ -1905,6 +1911,42 @@ mod hidden_private_hint_tests {
         assert!(
             hidden_private_hint(&db, &ctx, &f2, None, false).is_some(),
             "a matching tag filter must still surface the hidden owned-private entry"
+        );
+    }
+
+    #[test]
+    fn hint_respects_exclude_tags_filter() {
+        // The hint's count runs the SAME `apply_entry_filters` chokepoint the
+        // main query uses (see `filter_no_limit` above), so `--exclude-tags`
+        // must drop an owned-private candidate from the hint count exactly as
+        // it would from a visible (public) result set.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "note",
+            "b",
+            vec!["tier/archived".to_string()],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+
+        // The only owned-private match carries an excluded prefix -> no hint,
+        // even though it would otherwise be hidden-and-countable.
+        let mut f = base_filter();
+        f.exclude_tags = Some("tier/".to_string());
+        assert!(
+            hidden_private_hint(&db, &ctx, &f, None, false).is_none(),
+            "an owned-private match excluded by --exclude-tags must not count toward the hint"
+        );
+
+        // A non-matching exclude prefix leaves the entry countable -> hint fires.
+        let mut f2 = base_filter();
+        f2.exclude_tags = Some("project/".to_string());
+        assert!(
+            hidden_private_hint(&db, &ctx, &f2, None, false).is_some(),
+            "--exclude-tags that doesn't match the entry's tags must not suppress the hint"
         );
     }
 
