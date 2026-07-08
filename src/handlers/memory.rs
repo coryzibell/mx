@@ -610,8 +610,29 @@ fn dedup_gate(
 /// write. `Skipped` is an `Ok` variant, never `Err` -- an `Err` would abort
 /// the whole batch via `?` for what is, by design, a successful no-op.
 enum WriteOutcome {
-    Written(Box<knowledge::KnowledgeEntry>, DedupProceedReason),
-    Skipped { duplicate_of: String },
+    Written(
+        Box<knowledge::KnowledgeEntry>,
+        DedupProceedReason,
+        WriteSideEffects,
+    ),
+    Skipped {
+        duplicate_of: String,
+    },
+}
+
+/// Outcome of the post-write embed/anchor side-effect steps in [`add_one`]
+/// (Cory's B1, PR #399 re-review). Both steps are non-fatal by design: a
+/// transient failure there must not abort the write or flip the exit code
+/// (the entry is already durable and read-back verified by the time either
+/// runs) -- but it also must not vanish into a stderr-only warning with zero
+/// signal in `--json` output. `None` means the step either succeeded or was
+/// never attempted (skipped via --no-embed / --no-auto-anchor, a deliberate
+/// no-op, not a failure -- those are surfaced separately by the existing
+/// "(embed skipped)" / "(auto-anchor skipped)" notices).
+#[derive(Default)]
+struct WriteSideEffects {
+    embed_deferred: Option<String>,
+    anchor_deferred: Option<String>,
 }
 
 /// Resolved arguments for a single standard-mode `memory add` write.
@@ -776,19 +797,28 @@ fn add_one(
     // Non-fatal: the entry is already durable (upserted + read-back verified
     // above), so a transient embed failure here must not surface as a
     // process exit failure -- that would make callers retry and duplicate
-    // an entry that already landed.
+    // an entry that already landed. The failure is still captured (not just
+    // eprintln'd) so callers building a `--json` payload can surface the
+    // degraded state instead of it vanishing into stderr (B1, PR #399
+    // re-review).
+    let mut side_effects = WriteSideEffects::default();
     if embed {
-        let _ = auto_embed(&id, db)
-            .map_err(|e| eprintln!("Warning: post-write embed failed (entry durable): {e}"));
+        if let Err(e) = auto_embed(&id, db) {
+            eprintln!("Warning: post-write embed failed (entry durable): {e}");
+            side_effects.embed_deferred = Some(e.to_string());
+        }
     } else {
         println!("  (embed skipped)");
     }
 
     // Auto-generate anchors. Gated by --no-auto-anchor / MX_SKIP_WRITE_ANCHOR.
-    // Non-fatal for the same reason as the embed step above.
+    // Non-fatal for the same reason as the embed step above; failure capture
+    // mirrors it too.
     if write_anchor_enabled(no_auto_anchor) {
-        let _ = auto_anchor(&id, db, None)
-            .map_err(|e| eprintln!("Warning: post-write anchor failed (entry durable): {e}"));
+        if let Err(e) = auto_anchor(&id, db, None) {
+            eprintln!("Warning: post-write anchor failed (entry durable): {e}");
+            side_effects.anchor_deferred = Some(e.to_string());
+        }
     } else {
         println!("  (auto-anchor skipped)");
     }
@@ -806,7 +836,11 @@ fn add_one(
         );
     }
 
-    Ok(WriteOutcome::Written(Box::new(entry), proceed_reason))
+    Ok(WriteOutcome::Written(
+        Box::new(entry),
+        proceed_reason,
+        side_effects,
+    ))
 }
 
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
@@ -1639,8 +1673,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Skip = success, not failure: an identical entry already exists
             // this session, so there is nothing to write and nothing wrong.
-            let (entry, dedup_reason) = match outcome {
-                WriteOutcome::Written(e, reason) => (e, reason),
+            let (entry, dedup_reason, side_effects) = match outcome {
+                WriteOutcome::Written(e, reason, side_effects) => (e, reason, side_effects),
                 WriteOutcome::Skipped { duplicate_of } => {
                     if json {
                         println!(
@@ -1710,6 +1744,19 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
                 if let DedupProceedReason::LookupFailed { msg } = &dedup_reason {
                     payload["dedup_lookup_warning"] = serde_json::json!(msg);
+                }
+                // B1 (PR #399 re-review): fold post-write embed/anchor
+                // side-effect failures into the same payload shape as the
+                // dedup fields above -- present only when the step actually
+                // failed, absent on success or on a deliberate --no-embed /
+                // --no-auto-anchor skip. This is the entry's only signal
+                // surface in --json mode; the stderr warning above still
+                // fires unconditionally for plain-mode callers.
+                if let Some(msg) = &side_effects.embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &side_effects.anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
                 }
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
@@ -3157,7 +3204,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     );
 
                     match entry_result {
-                        Ok(WriteOutcome::Written(entry, reason)) => {
+                        // Batch always passes embed=false / no_auto_anchor=true
+                        // (embedding is hoisted below, anchoring deferred to the
+                        // nightly run), so `side_effects` is always empty here --
+                        // ignored, not dropped by accident.
+                        Ok(WriteOutcome::Written(entry, reason, _side_effects)) => {
                             println!("  [{}] Added entry: {} ({})", line_idx + 1, entry.id, title);
                             // Batch has no --json mode -- stderr is the only
                             // signal surface here. Mirrors the standard
@@ -5236,7 +5287,7 @@ mod dedup_gate_tests {
         )
         .unwrap();
         let first_id = match first {
-            WriteOutcome::Written(e, _) => e.id,
+            WriteOutcome::Written(e, _, _) => e.id,
             WriteOutcome::Skipped { .. } => panic!("first write must not be a duplicate"),
         };
 
@@ -5551,7 +5602,7 @@ mod dedup_gate_tests {
         .expect("a dedup lookup failure must fail OPEN, not abort the write with Err");
 
         match outcome {
-            WriteOutcome::Written(entry, reason) => {
+            WriteOutcome::Written(entry, reason, _side_effects) => {
                 assert!(
                     matches!(reason, DedupProceedReason::LookupFailed { .. }),
                     "the proceed reason must record that the gate failed open on a lookup error"
