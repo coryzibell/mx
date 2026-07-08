@@ -30,10 +30,16 @@ use tempfile::TempDir;
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 /// Run `mx` as `agent-a` against an isolated surreal root in `dir`.
+///
+/// `MX_SURREAL_MODE=embedded` is forced so an ambient `MX_SURREAL_MODE=network`
+/// in the developer's shell cannot silently redirect the binary at a shared
+/// network DB — that masking is exactly what let a bogus (non-seeded) category
+/// pass locally while CI, running embedded against the isolated root, went red.
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
     let mut cmd = Command::new(MX);
     cmd.args(args)
         .env("MX_CURRENT_AGENT", "agent-a")
+        .env("MX_SURREAL_MODE", "embedded")
         .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -59,16 +65,20 @@ const HINT_FLAG: &str = "--include-private";
 fn hint_reaches_stderr_only_and_never_stdout() {
     let dir = TempDir::new().unwrap();
 
-    // `discovery` is one of the default categories seeded on schema application,
-    // so no `categories add` is needed (it would fail "already exists"). Seed a
-    // single OWNED-PRIVATE entry for agent-a that the public-only default hides.
+    // `insight` is one of the categories seeded on schema application
+    // (schema/surrealdb-schema.surql: bloom, decision, gotcha, insight, pattern,
+    // reference, session, technique — validated at handlers/memory.rs). No
+    // `categories add` is needed. NOTE: do NOT use the Wonka CLAUDE.md taxonomy
+    // (discovery, recipe, method, ...) here — those are NOT mx categories and the
+    // add would exit non-zero against a genuinely isolated store. Seed a single
+    // OWNED-PRIVATE entry for agent-a that the public-only default hides.
     let add = mx(
         &dir,
         &[
             "memory",
             "add",
             "--category",
-            "discovery",
+            "insight",
             "--title",
             "unique searchable widget",
             "--content",
