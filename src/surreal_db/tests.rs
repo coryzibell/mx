@@ -1053,9 +1053,7 @@ fn test_owned_private_matching_honors_effective_resonance() {
     faded.owner = Some("agent-a".to_string());
     faded.resonance_type = Some("ephemeral".to_string());
     // Activated ~1 year ago: with base 0.90 on resonance<=3, effective ~= 0.
-    faded.last_activated = Some(
-        (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339(),
-    );
+    faded.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339());
     faded.created_at = faded.last_activated.clone();
     db.upsert_knowledge(&faded).unwrap();
 

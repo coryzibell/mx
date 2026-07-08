@@ -1679,14 +1679,8 @@ mod hidden_private_hint_tests {
     #[test]
     fn hint_appears_for_list_when_owned_private_hidden() {
         let db = SurrealDatabase::open_in_memory().unwrap();
-        db.upsert_knowledge(&priv_entry(
-            "kn-a",
-            "agent-a",
-            "my note",
-            "body",
-            vec![],
-        ))
-        .unwrap();
+        db.upsert_knowledge(&priv_entry("kn-a", "agent-a", "my note", "body", vec![]))
+            .unwrap();
 
         // Default view for a known agent: public-only ctx, agent_id set.
         let ctx = AgentContext::public_for_agent("agent-a");
