@@ -83,6 +83,15 @@ impl KnowledgeStore for SurrealDatabase {
         self.count_by_category(category, ctx, filter)
     }
 
+    fn owned_private_matching(
+        &self,
+        agent: &str,
+        query: Option<&str>,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.owned_private_matching(agent, query, filter)
+    }
+
     fn list_all(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
         self.list_all(ctx)
     }

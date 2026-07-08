@@ -178,6 +178,35 @@ pub enum SurrealConnection {
 /// Embedded SurrealDB schema - applied on database open
 const SCHEMA: &str = include_str!("../../schema/surrealdb-schema.surql");
 
+/// True when a per-statement SurrealDB error is a transient, retryable
+/// transaction conflict (SurrealDB's optimistic-concurrency "read or write
+/// conflict … can be retried"). Matched on the message text because these
+/// arrive as opaque `Api(Query(..))` errors with no dedicated variant.
+fn is_retryable_conflict(err: &surrealdb::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("read or write conflict") || msg.contains("can be retried")
+}
+
+/// Backoff before the next schema-application retry. Capped exponential growth
+/// (`~20ms · 2^(attempt-1)`, ceilinged at 320ms) plus jitter, so that processes
+/// retrying in lockstep desynchronize instead of colliding again on the same
+/// tick. Only ever runs on a contended init, never on the happy path.
+///
+/// The jitter seed folds in `process::id()` alongside the wall clock: on a
+/// coarse-resolution clock, lockstep peers on the same attempt would otherwise
+/// read a near-identical `subsec_nanos` and draw the same jitter, re-colliding.
+/// Per-process entropy breaks that tie even when the clock does not.
+fn schema_retry_backoff(attempt: u32) -> std::time::Duration {
+    let base_ms = 20u64.saturating_mul(1u64 << attempt.min(5).saturating_sub(1));
+    let base_ms = base_ms.min(320);
+    let clock_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let jitter_ms = (clock_nanos ^ u64::from(std::process::id())) % 40;
+    std::time::Duration::from_millis(base_ms + jitter_ms)
+}
+
 /// Normalize datetime string to RFC3339 format for SurrealDB
 pub(super) fn normalize_datetime(s: &str) -> String {
     // If already looks like RFC3339 (has T and timezone), return as-is
@@ -628,18 +657,45 @@ impl SurrealDatabase {
             eprintln!("[mx] Applying database schema");
         }
 
-        let mut response = with_db!(self, db, {
-            db.query(SCHEMA)
-                .await
-                .context("Failed to apply database schema")?
-        });
+        // Under concurrent embedded-DB initialization (e.g. several `mx`
+        // processes each opening a fresh store at once — the integration-test
+        // hot path), SurrealDB's optimistic concurrency can reject a schema
+        // statement with a transient "read or write conflict … can be retried"
+        // error. Because every SCHEMA statement is `IF NOT EXISTS` (idempotent),
+        // re-running the whole batch is safe, so we retry a bounded number of
+        // times on a purely-retryable failure with jittered backoff before
+        // surfacing the error. A conflict that never clears — or any
+        // non-retryable error — still fails fast.
+        const MAX_SCHEMA_ATTEMPTS: u32 = 12;
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
 
-        let errors = response.take_errors();
-        if !errors.is_empty() {
+            let mut response = with_db!(self, db, {
+                db.query(SCHEMA)
+                    .await
+                    .context("Failed to apply database schema")?
+            });
+
+            let errors = response.take_errors();
+            if errors.is_empty() {
+                return Ok(());
+            }
+
+            let all_retryable = errors.values().all(is_retryable_conflict);
+            if all_retryable && attempt < MAX_SCHEMA_ATTEMPTS {
+                if verbose {
+                    eprintln!(
+                        "[mx] Schema application hit a retryable conflict \
+                         (attempt {attempt}/{MAX_SCHEMA_ATTEMPTS}); retrying"
+                    );
+                }
+                tokio::time::sleep(schema_retry_backoff(attempt)).await;
+                continue;
+            }
+
             return Err(anyhow::anyhow!("Schema application failed: {:?}", errors));
         }
-
-        Ok(())
     }
 
     /// Explicitly apply the database schema, ignoring `MX_SKIP_SCHEMA`.

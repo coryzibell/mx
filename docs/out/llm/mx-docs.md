@@ -377,29 +377,16 @@ Key environment variables recognized by mx. All boolean opt-outs follow
 the same convention: `"1"` or `"true"` (case-insensitive) to disable;
 any other value leaves the default behavior on.
 
+SurrealDB connection variables (`MX_SURREAL_MODE`, `MX_SURREAL_URL`,
+`MX_SURREAL_NS`, `MX_SURREAL_DB`, etc.) are documented in full with
+their defaults in filesystem layout → SurrealDB connection.
+
 +------------------------+-----------------+-----------------+-------------------------+
 | **Variable**           | **Type**        | **Default**     | **Description**         |
 +------------------------+-----------------+-----------------+-------------------------+
 | `MX_HOME`              | path            | `~/.mx/`        | Root directory for all  |
 |                        |                 |                 | mx data. Override to    |
 |                        |                 |                 | move the whole tree.    |
-+------------------------+-----------------+-----------------+-------------------------+
-| `MX_SURREAL_MODE`      | string          | `embedded`      | `embedded` (local       |
-|                        |                 |                 | SurrealKV file) or      |
-|                        |                 |                 | `network` (remote       |
-|                        |                 |                 | WebSocket). Embedding   |
-|                        |                 |                 | model calls only work   |
-|                        |                 |                 | in network mode.        |
-+------------------------+-----------------+-----------------+-------------------------+
-| `MX_SURREAL_URL`       | string          | ---             | WebSocket URL for       |
-|                        |                 |                 | network mode (e.g.      |
-|                        |                 |                 | `ws://localhost:8000`). |
-+------------------------+-----------------+-----------------+-------------------------+
-| `MX_SURREAL_NS`        | string          | ---             | SurrealDB namespace for |
-|                        |                 |                 | network mode.           |
-+------------------------+-----------------+-----------------+-------------------------+
-| `MX_SURREAL_DB`        | string          | ---             | SurrealDB database name |
-|                        |                 |                 | for network mode.       |
 +------------------------+-----------------+-----------------+-------------------------+
 | `MX_CURRENT_AGENT`     | string          | ---             | Active agent            |
 |                        |                 |                 | identifier. Used as     |
@@ -1343,13 +1330,13 @@ Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
   **Flag**                     **Type**   **Description**
-  ---------------------------- ---------- ----------------------------------------------------
+  ---------------------------- ---------- -------------------------------------------------------------------------------------------------------------------------------------
   `-c, --category`             `string`   Filter by category (comma-separated).
   `--json`                     `flag`     Output as JSON.
   `--mine`                     `flag`     Show only your private entries.
   `--include-private`          `flag`     Include private entries (requires matching owner).
-  `--min-resonance`            `int`      Minimum resonance level.
-  `--max-resonance`            `int`      Maximum resonance level.
+  `--min-resonance`            `int`      Minimum resonance level. Filtered on the time-decayed **effective** resonance (see note below on the basis divergence with `wake`).
+  `--max-resonance`            `int`      Maximum resonance level. Filtered on the time-decayed **effective** resonance.
   `--has-wake-phrase`          `flag`     Filter to entries WITH a wake phrase.
   `--missing-wake-phrase`      `flag`     Filter to entries WITHOUT a wake phrase.
   `--has-anchors`              `flag`     Filter to entries WITH anchors.
@@ -1358,6 +1345,44 @@ flags. These are documented once here and referenced below.
   `--missing-resonance-type`   `flag`     Filter to entries WITHOUT a resonance type.
   `--limit`                    `int`      Limit number of results.
   `--tags`                     `string`   Filter by tags (comma-separated, matches any).
+
+::: {.admonition .note}
+**NOTE:** **Visibility default:** `list` and `search` run
+**public-only** by default. Your own private entries are omitted unless
+you pass `--include-private` (or `--mine`, which shows only your private
+entries). When a public-only query matches private entries you own but
+hides them, `mx` prints a best-effort **stderr** nudge --- see the note
+below on the hidden-private hint. (`wake`, by contrast, includes
+owned-private blooms in its cascade.)
+:::
+
+::: {.admonition .note}
+**NOTE:** **Hidden-private hint:** When `MX_CURRENT_AGENT` is set and a
+public-only `list`/`search` query matches private entries you own, `mx`
+writes a hint to **stderr** pointing at `--include-private`, e.g.:
+:::
+
+    note: 3 private entries of yours matched but are hidden; use --include-private to see them
+
+The hint is **stderr only** --- it never touches `stdout`, `--json`
+output, or the exit code, and any error computing it is swallowed
+silently. It fires only in the public-only case: passing
+`--include-private` or `--mine` silences it (they already show your
+private entries), and it is **suppressed under `search
+--semantic`** because the underlying count uses the keyword (BM25)
+predicate, which does not agree with vector similarity.
+
+::: {.admonition .note}
+**NOTE:** **Resonance basis divergence (Issue #404):**
+`list`/`search --min-resonance` and `--max-resonance` filter on the
+time-decayed **effective** resonance, whereas `wake --min-resonance`
+filters on the **raw** stored value. The same numeric threshold can
+therefore admit an entry under `wake` but exclude it under
+`list`/`search` once decay is applied. `foundational` and
+`transformative` resonance types are decay-exempt, so they filter
+identically under both. This divergence is intentional for now; an
+explicit `--resonance-basis raw|decayed` flag is tracked in #404.
+:::
 
 ## `mx memory show`
 
@@ -1400,7 +1425,9 @@ mx memory list --missing-wake-phrase --limit 20
 ```
 
 ::: {.admonition .note}
-**NOTE:** `list` accepts all shared filter flags documented above.
+**NOTE:** `list` accepts all shared filter flags documented above,
+including the public-only visibility default and the hidden-private
+stderr hint.
 :::
 
 ## `mx memory search`
@@ -1435,8 +1462,10 @@ mx memory search "retry pattern" --activate
 ```
 
 ::: {.admonition .note}
-**NOTE:** `search` accepts all shared filter flags. Semantic search
-requires entries to have embeddings generated via `mx memory embed`.
+**NOTE:** `search` accepts all shared filter flags, including the
+public-only visibility default and the hidden-private stderr hint (the
+hint is suppressed under `--semantic`). Semantic search requires entries
+to have embeddings generated via `mx memory embed`.
 :::
 
 ::: {.admonition .tip}
@@ -1679,9 +1708,9 @@ and presents them in the requested format.
 ### Flags
 
   **Flag**            **Type**   **Description**
-  ------------------- ---------- -------------------------------------------------------------------------------------
+  ------------------- ---------- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `-l, --limit`       `int`      Number of blooms to return. Default: `20`.
-  `--min-resonance`   `int`      Minimum resonance threshold -- get ALL blooms \>= this value (overrides `--limit`).
+  `--min-resonance`   `int`      Minimum resonance threshold -- get ALL blooms \>= this value (overrides `--limit`). Filtered on the **raw** stored resonance, unlike `list`/`search`, which use the decayed **effective** value (Issue #404).
   `-d, --days`        `int`      Include memories activated in last N days. Default: `7`.
   `--no-activate`     `flag`     Do not update activation counts.
   `--begin`           `flag`     Start token-based wake ritual. Returns first bloom and session token.
@@ -7535,6 +7564,17 @@ schema setup is required.
 The `apply_schema` method on `SurrealDatabase` uses the `with_db!` macro
 so the same code path runs against both the embedded and network
 backends.
+
+::: {.admonition .note}
+**NOTE:** **Contended init:** when several `mx` processes bootstrap a
+fresh store concurrently, embedded SurrealDB can return a transient
+*"read or write conflict ... can be retried"* error during schema
+application. `apply_schema` retries these with bounded, jittered backoff
+(up to 12 attempts, with per-process-entropy jitter to de-correlate
+racing writers). Because every schema statement is `IF NOT EXISTS` /
+`UPSERT`, retries are idempotent. The happy, uncontended path is
+untouched -- retries run only when a conflict is actually observed.
+:::
 
 #### `MX_SKIP_SCHEMA`
 

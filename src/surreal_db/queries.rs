@@ -1528,6 +1528,83 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
+    /// Fetch the caller's OWN private entries matching the same category /
+    /// resonance / (optional) full-text filters as list/search (Issue #400).
+    /// See the trait doc on `KnowledgeStore::owned_private_matching`.
+    pub fn owned_private_matching(
+        &self,
+        agent: &str,
+        query: Option<&str>,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.owned_private_matching_async(agent, query, filter))
+    }
+
+    async fn owned_private_matching_async(
+        &self,
+        agent: &str,
+        query: Option<&str>,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        // Reuse the SAME clause builders the main list/search queries use so the
+        // hint count stays consistent with what those commands would display
+        // (kn-e8d7eff2): effective/decayed resonance via build_resonance_filter,
+        // category matching via build_category_filter.
+        let resonance_clause = Self::build_resonance_filter(filter);
+        let category_clause = Self::build_category_filter(filter);
+
+        // Visibility is FIXED to the caller's own private rows. We deliberately
+        // do NOT call build_visibility_filter here: that helper also admits
+        // public rows, but this query must count ONLY owned-private matches (the
+        // rows the public-only default hides) and must NEVER touch another
+        // agent's private entries (visibility-bypass pipe-dream kn-a5f8a209).
+        // $current_agent is a bound parameter, never interpolated.
+        let search_clause = if query.is_some() {
+            "AND (title @@ $query OR body @@ $query OR summary @@ $query)"
+        } else {
+            ""
+        };
+
+        // S1 — accepted cost: this SELECTs and hydrates FULL `KnowledgeEntry`
+        // rows (body + per-row tag/applicability follow-ups in
+        // `value_to_knowledge_entry`), not a bare COUNT, and it runs on every
+        // default `list`/`search` when a calling agent is set. Full hydration is
+        // REQUIRED, not incidental: the hint count must match the main query
+        // exactly, and the caller re-applies `apply_entry_filters` (tags + field
+        // presence — e.g. has_anchors, has_wake_phrase) to these rows. Those
+        // predicates read fields a COUNT could not project, so a COUNT here would
+        // over-count relative to what the main query actually displays. The rows
+        // are the caller's own private entries only (bounded, single query), so
+        // the cost is bounded and deemed acceptable versus correctness.
+        let sql = format!(
+            "SELECT {}
+            FROM knowledge
+            WHERE visibility = 'private' AND owner = $current_agent {} {} {}
+            ORDER BY id",
+            Self::knowledge_select_fields(),
+            search_clause,
+            resonance_clause,
+            category_clause
+        );
+
+        let mut response = with_db!(self, db, {
+            let mut q = db.query(&sql).bind(("current_agent", agent.to_string()));
+            if let Some(query_str) = query {
+                q = q.bind(("query", query_str.to_string()));
+            }
+            q.await
+                .context("Failed to query owned private matches (Issue #400 hint)")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let mut entries = Vec::new();
+        for obj in results {
+            entries.push(self.value_to_knowledge_entry(obj).await?);
+        }
+
+        Ok(entries)
+    }
+
     // =========================================================================
     // WAKE SESSION OPERATIONS
     // =========================================================================

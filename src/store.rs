@@ -176,6 +176,33 @@ pub trait KnowledgeStore {
         filter: &KnowledgeFilter,
     ) -> Result<usize>;
 
+    /// Fetch the caller's OWN private entries (`visibility = 'private' AND
+    /// owner = agent`) that match the same category / resonance / (optional)
+    /// full-text search filters as a `list`/`search` query, using the SAME
+    /// decayed effective-resonance semantics as those commands (Issue #400).
+    ///
+    /// Strictly scoped to the caller's own private rows — it must NEVER return
+    /// another agent's private entries (see the visibility-bypass pipe-dream
+    /// kn-a5f8a209). It exists solely to power the "N private entries of yours
+    /// matched but are hidden" stderr hint that `list`/`search` emit when the
+    /// public-only default would otherwise silently drop the caller's matches.
+    ///
+    /// Callers apply the remaining in-memory filters (tags, field presence) to
+    /// the returned entries — via the same `apply_entry_filters` the main query
+    /// uses — so the resulting count matches the main query exactly.
+    ///
+    /// `query`: `Some(terms)` runs the same BM25 `@@` full-text match that
+    /// `search`'s TEXT (non-`--semantic`) branch uses; `None` (for `list`) omits
+    /// the text predicate. This method is intentionally text-only: it does NOT
+    /// model vector similarity, so the hint it powers is suppressed under
+    /// `--semantic` (see `hidden_private_hint`) rather than counted here.
+    fn owned_private_matching(
+        &self,
+        agent: &str,
+        query: Option<&str>,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
+
     /// List all entries
     fn list_all(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>>;
 

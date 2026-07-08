@@ -365,11 +365,18 @@ pub struct EntryFilter {
     #[arg(long)]
     pub include_private: bool,
 
-    /// Minimum resonance level
+    /// Minimum resonance level (filtered on time-decayed EFFECTIVE resonance)
+    ///
+    /// NOTE (#404): `list`/`search` filter on the decay-adjusted *effective*
+    /// resonance, whereas `wake --min-resonance` filters on the *raw* stored
+    /// value. The same numeric threshold can therefore include an entry under
+    /// `wake` but exclude it here once decay is applied. This divergence is
+    /// intentional for now and will be made explicit via a
+    /// `--resonance-basis raw|decayed` flag in #404.
     #[arg(long)]
     pub min_resonance: Option<i32>,
 
-    /// Maximum resonance level
+    /// Maximum resonance level (filtered on time-decayed EFFECTIVE resonance)
     #[arg(long)]
     pub max_resonance: Option<i32>,
 
@@ -1137,6 +1144,13 @@ pub enum MemoryCommands {
         limit: usize,
 
         /// Minimum resonance threshold - get ALL blooms >= this value (overrides --limit)
+        ///
+        /// NOTE (#404): `wake` filters on the *raw* stored resonance value,
+        /// whereas `list`/`search --min-resonance` filter on the time-decayed
+        /// *effective* resonance. The same threshold can thus admit an entry
+        /// here that `list`/`search` would exclude after decay. Intentional for
+        /// now; a `--resonance-basis raw|decayed` flag in #404 will make the
+        /// basis explicit.
         #[arg(long)]
         min_resonance: Option<i32>,
 
