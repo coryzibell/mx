@@ -566,6 +566,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
             }
 
+            // Issue #400: nudge (stderr only) if the caller's OWN private
+            // entries matched but were hidden by the public-only default.
+            warn_hidden_private(db.as_ref(), &ctx, &filter, Some(&query));
+
             // --activate: activate returned results (mark as intentionally consumed)
             if activate && !entries.is_empty() {
                 let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
@@ -633,6 +637,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     print_entry_summary(&entry);
                 }
             }
+
+            // Issue #400: nudge (stderr only) if the caller's OWN private
+            // entries matched but were hidden by the public-only default.
+            warn_hidden_private(db.as_ref(), &ctx, &filter, None);
         }
 
         MemoryCommands::Show {

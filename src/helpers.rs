@@ -168,6 +168,96 @@ pub(crate) fn resolve_agent_context(mine: bool, include_private: bool) -> store:
     }
 }
 
+/// Compute the "hidden private entries" hint for a `list`/`search` query, or
+/// `None` when no hint should be shown (Issue #400).
+///
+/// The public-only default of `list`/`search` silently omits the caller's OWN
+/// private entries (an ~85% undercount was observed), while `wake` includes
+/// them. This surfaces that gap as a best-effort, stderr-only nudge — it never
+/// touches stdout, `--json` output, or the exit code. This function is PURE
+/// w.r.t. output: it returns the message string and lets the caller
+/// (`warn_hidden_private`) do the `eprintln!`, which keeps it unit-testable.
+///
+/// Returns `None` (no hint) when ANY of the following hold:
+///   - the context already includes private entries (`ctx.include_private`),
+///     i.e. `--include-private` or `--mine` was given — those already show them;
+///   - there is no calling agent (`MX_CURRENT_AGENT` unset ⇒ `agent_id` is
+///     `None`), so there are no owned-private entries to hide;
+///   - the count query errors — the hint is best-effort and must NEVER fail the
+///     command over a diagnostic;
+///   - zero owned-private entries survive the SAME in-memory filters
+///     (`apply_entry_filters`, minus the display limit) the main query applies.
+///
+/// `query` is `Some(terms)` for `search` (matched with the same `@@` full-text
+/// predicate) and `None` for `list`.
+pub(crate) fn hidden_private_hint(
+    db: &dyn store::KnowledgeStore,
+    ctx: &store::AgentContext,
+    filter: &EntryFilter,
+    query: Option<&str>,
+) -> Option<String> {
+    // Trigger only in the default (public-only) view AND when there is a
+    // calling agent whose private entries could exist. `--include-private` and
+    // `--mine` both resolve to `include_private = true`, so they no-op here;
+    // an anonymous/no-agent context has `agent_id == None` and also no-ops.
+    if ctx.include_private {
+        return None;
+    }
+    let agent = ctx.agent_id.as_deref()?;
+
+    // Same category + resonance filter the main query builds. Category is
+    // sourced from the flag (list handles categories in the handler; here we
+    // fold them into the DB filter so build_category_filter matches all of
+    // them at once — equivalent to the union of the per-category queries).
+    let db_filter = store::KnowledgeFilter {
+        min_resonance: filter.min_resonance,
+        max_resonance: filter.max_resonance,
+        categories: filter.category.clone(),
+    };
+
+    // Best-effort: on ANY error, stay silent. The hint must never turn a
+    // successful list/search into a failure (kn-97344000: don't trade one
+    // silent-data defect for a louder one).
+    let candidates = db.owned_private_matching(agent, query, &db_filter).ok()?;
+
+    // Apply the SAME in-memory filters the main query uses (tags + field
+    // presence), but with the display `limit` stripped: the hint reports how
+    // many owned-private matches are hidden in total, not just the first page.
+    let mut filter_no_limit = filter.clone();
+    filter_no_limit.limit = None;
+    let count = apply_entry_filters(candidates, &filter_no_limit).len();
+
+    if count == 0 {
+        return None;
+    }
+
+    let (noun, verb) = if count == 1 {
+        ("entry", "is")
+    } else {
+        ("entries", "are")
+    };
+    Some(format!(
+        "note: {count} private {noun} of yours matched but {verb} hidden; \
+         use --include-private to see them"
+    ))
+}
+
+/// Print the [`hidden_private_hint`] to STDERR when one applies (Issue #400).
+///
+/// Side-effect wrapper: STDERR only, so it can never alter stdout, `--json`
+/// output, or the exit code. No-ops entirely when `hidden_private_hint`
+/// returns `None`.
+pub(crate) fn warn_hidden_private(
+    db: &dyn store::KnowledgeStore,
+    ctx: &store::AgentContext,
+    filter: &EntryFilter,
+    query: Option<&str>,
+) {
+    if let Some(msg) = hidden_private_hint(db, ctx, filter, query) {
+        eprintln!("{msg}");
+    }
+}
+
 /// Similarity threshold above which two entries are considered near-duplicates
 /// and should NOT be anchored together. Used in both the batch `AutoAnchor`
 /// handler and the per-entry `auto_anchor` helper.
@@ -1494,5 +1584,328 @@ mod auto_anchor_tests {
             !embed_gate_with_env(Some("0"), true),
             "--no-embed must skip embedding even when env flag would allow it"
         );
+    }
+}
+
+#[cfg(test)]
+mod hidden_private_hint_tests {
+    //! Issue #400: the stderr hint that surfaces the caller's OWN private
+    //! entries when list/search hide them behind the public-only default.
+    //!
+    //! `hidden_private_hint` is pure w.r.t. output (returns the message or
+    //! `None`), so these tests assert the trigger matrix and message text
+    //! directly. STDOUT/JSON invariance is structural: the hint value only ever
+    //! reaches the terminal via `warn_hidden_private`'s `eprintln!` (STDERR),
+    //! and the handlers call it AFTER all stdout/JSON printing — no code path
+    //! lets it touch stdout.
+
+    use super::*;
+    use crate::cli::EntryFilter;
+    use crate::knowledge::KnowledgeEntry;
+    use crate::store::{AgentContext, KnowledgeStore};
+    use crate::surreal_db::SurrealDatabase;
+    use serial_test::serial;
+
+    /// A baseline `EntryFilter` with every flag off / unset. Tests tweak the
+    /// one field under test.
+    fn base_filter() -> EntryFilter {
+        EntryFilter {
+            category: None,
+            json: false,
+            mine: false,
+            include_private: false,
+            min_resonance: None,
+            max_resonance: None,
+            has_wake_phrase: false,
+            missing_wake_phrase: false,
+            has_anchors: false,
+            missing_anchors: false,
+            has_resonance_type: false,
+            missing_resonance_type: false,
+            limit: None,
+            tags: None,
+        }
+    }
+
+    /// An owned-private entry for `owner`, with the given id/title/body/tags.
+    fn priv_entry(
+        id: &str,
+        owner: &str,
+        title: &str,
+        body: &str,
+        tags: Vec<String>,
+    ) -> KnowledgeEntry {
+        let now = chrono::Utc::now().to_rfc3339();
+        KnowledgeEntry {
+            id: id.to_string(),
+            category_id: "test".to_string(),
+            title: title.to_string(),
+            body: Some(body.to_string()),
+            summary: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            tags,
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            content_hash: Some(format!("hash-{id}")),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
+            content_type_id: Some("text".to_string()),
+            owner: Some(owner.to_string()),
+            visibility: "private".to_string(),
+            resonance: 5,
+            resonance_type: Some("ephemeral".to_string()),
+            last_activated: Some(now),
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            triggers: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+            chunk_count: 0,
+            format: "markdown".to_string(),
+            effective_resonance: None,
+        }
+    }
+
+    #[test]
+    fn hint_appears_for_list_when_owned_private_hidden() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "my note",
+            "body",
+            vec![],
+        ))
+        .unwrap();
+
+        // Default view for a known agent: public-only ctx, agent_id set.
+        let ctx = AgentContext::public_for_agent("agent-a");
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None)
+            .expect("hint should fire for a hidden owned-private match");
+
+        assert!(msg.contains("1 private entry of yours"), "msg: {msg}");
+        assert!(msg.contains("is hidden"), "msg: {msg}");
+        assert!(msg.contains("--include-private"), "msg: {msg}");
+    }
+
+    #[test]
+    fn hint_pluralizes_for_multiple_matches() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry("kn-a", "agent-a", "one", "b", vec![]))
+            .unwrap();
+        db.upsert_knowledge(&priv_entry("kn-b", "agent-a", "two", "b", vec![]))
+            .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None).unwrap();
+
+        assert!(msg.contains("2 private entries of yours"), "msg: {msg}");
+        assert!(msg.contains("are hidden"), "msg: {msg}");
+    }
+
+    #[test]
+    fn hint_appears_for_search_matching_query() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "unique searchable widget",
+            "unique searchable widget content",
+            vec![],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), Some("widget"))
+            .expect("search hint should fire when an owned-private entry matches the query");
+        assert!(msg.contains("1 private entry of yours"), "msg: {msg}");
+    }
+
+    #[test]
+    fn hint_absent_for_search_when_query_does_not_match() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "unrelated sprocket",
+            "unrelated sprocket content",
+            vec![],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        assert!(
+            hidden_private_hint(&db, &ctx, &base_filter(), Some("widget")).is_none(),
+            "no hint when the owned-private entry doesn't match the search terms"
+        );
+    }
+
+    #[test]
+    fn hint_absent_with_include_private_context() {
+        // `--include-private` resolves to a for_agent ctx (include_private=true).
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry("kn-a", "agent-a", "note", "b", vec![]))
+            .unwrap();
+
+        let ctx = AgentContext::for_agent("agent-a");
+        assert!(
+            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            "--include-private already shows private entries -> no hint"
+        );
+    }
+
+    #[test]
+    fn hint_absent_with_no_calling_agent() {
+        // No MX_CURRENT_AGENT -> public_only ctx (agent_id = None).
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry("kn-a", "agent-a", "note", "b", vec![]))
+            .unwrap();
+
+        let ctx = AgentContext::public_only();
+        assert!(
+            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            "no calling agent -> nothing owned to hide -> no hint"
+        );
+    }
+
+    #[test]
+    fn hint_absent_when_no_owned_private_matches() {
+        // Only ANOTHER agent's private entry exists; caller has none.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry("kn-b", "agent-b", "theirs", "b", vec![]))
+            .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        assert!(
+            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            "caller has no owned-private matches (and must never count agent-b's) -> no hint"
+        );
+    }
+
+    #[test]
+    fn hint_respects_tag_filter() {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "note",
+            "b",
+            vec!["focus".to_string()],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+
+        // Tag that the entry does NOT have -> filtered out in-memory -> no hint.
+        let mut f = base_filter();
+        f.tags = Some(vec!["nonmatch".to_string()]);
+        assert!(
+            hidden_private_hint(&db, &ctx, &f, None).is_none(),
+            "tag filter must apply to the hint count exactly as to the main query"
+        );
+
+        // Matching tag -> hint fires.
+        let mut f2 = base_filter();
+        f2.tags = Some(vec!["focus".to_string()]);
+        assert!(
+            hidden_private_hint(&db, &ctx, &f2, None).is_some(),
+            "a matching tag filter must still surface the hidden owned-private entry"
+        );
+    }
+
+    #[test]
+    fn hint_count_ignores_display_limit() {
+        // The display `--limit` truncates the visible list but must NOT cap the
+        // hint count: the hint reports the TOTAL owned-private matches hidden.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        for i in 0..3 {
+            db.upsert_knowledge(&priv_entry(
+                &format!("kn-{i}"),
+                "agent-a",
+                "note",
+                "b",
+                vec![],
+            ))
+            .unwrap();
+        }
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        let mut f = base_filter();
+        f.limit = Some(1);
+        let msg = hidden_private_hint(&db, &ctx, &f, None).unwrap();
+        assert!(
+            msg.contains("3 private entries of yours"),
+            "hint counts all hidden matches regardless of --limit; msg: {msg}"
+        );
+    }
+
+    // --- resolve_agent_context flag -> ctx mapping (the hint's trigger seam) ---
+    // These pin the mapping the hint relies on: only the DEFAULT branch (no
+    // --mine, no --include-private) yields include_private=false, which is the
+    // sole case that can fire the hint. --mine and --include-private both flip
+    // include_private=true and thus suppress it.
+
+    fn with_agent_env<T>(agent: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let prev = std::env::var("MX_CURRENT_AGENT").ok();
+        unsafe {
+            match agent {
+                Some(a) => std::env::set_var("MX_CURRENT_AGENT", a),
+                None => std::env::remove_var("MX_CURRENT_AGENT"),
+            }
+        }
+        let out = f();
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MX_CURRENT_AGENT", v),
+                None => std::env::remove_var("MX_CURRENT_AGENT"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_context_default_branch_is_the_only_hint_trigger() {
+        with_agent_env(Some("agent-a"), || {
+            let default_ctx = resolve_agent_context(false, false);
+            assert!(
+                !default_ctx.include_private && default_ctx.agent_id.is_some(),
+                "default branch: public-only view with a known agent -> CAN trigger hint"
+            );
+
+            let mine_ctx = resolve_agent_context(true, false);
+            assert!(
+                mine_ctx.include_private,
+                "--mine flips include_private=true -> hint suppressed"
+            );
+
+            let incl_ctx = resolve_agent_context(false, true);
+            assert!(
+                incl_ctx.include_private,
+                "--include-private flips include_private=true -> hint suppressed"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn resolve_context_no_agent_never_triggers_hint() {
+        with_agent_env(None, || {
+            let ctx = resolve_agent_context(false, false);
+            assert!(
+                ctx.agent_id.is_none(),
+                "no MX_CURRENT_AGENT -> agent_id None -> hint suppressed"
+            );
+        });
     }
 }

@@ -1393,6 +1393,14 @@ mod tests {
             ) -> Result<usize> {
                 unreachable!()
             }
+            fn owned_private_matching(
+                &self,
+                _agent: &str,
+                _query: Option<&str>,
+                _filter: &KnowledgeFilter,
+            ) -> Result<Vec<KnowledgeEntry>> {
+                unreachable!()
+            }
             fn list_all(&self, _ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {
                 unreachable!()
             }

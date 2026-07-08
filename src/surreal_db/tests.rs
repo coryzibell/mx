@@ -920,6 +920,157 @@ fn test_update_summary_cross_agent_visibility_blocked() {
         "Summary should be unchanged after failed cross-agent update"
     );
 }
+// =========================================================================
+// OWNED-PRIVATE MATCHING (Issue #400)
+//
+// `owned_private_matching` powers the "N private entries of yours are hidden"
+// stderr hint on list/search. It must return ONLY the caller's own private
+// rows (never public, never another agent's private) while honoring the same
+// category / effective-resonance / full-text filters the main query uses.
+// =========================================================================
+
+#[test]
+fn test_owned_private_matching_scopes_to_caller_only() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Caller's own private entry -> must be returned.
+    let mut mine = make_test_entry("kn-mine-priv", 5, 0.0);
+    mine.visibility = "private".to_string();
+    mine.owner = Some("agent-a".to_string());
+    db.upsert_knowledge(&mine).unwrap();
+
+    // Another agent's private entry -> must NEVER be returned (kn-a5f8a209).
+    let mut theirs = make_test_entry("kn-their-priv", 5, 0.0);
+    theirs.visibility = "private".to_string();
+    theirs.owner = Some("agent-b".to_string());
+    db.upsert_knowledge(&theirs).unwrap();
+
+    // A public entry -> not owned-private, must not be returned.
+    let public = make_test_entry("kn-pub", 5, 0.0);
+    db.upsert_knowledge(&public).unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let got = db.owned_private_matching("agent-a", None, &filter).unwrap();
+
+    let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["kn-mine-priv"],
+        "must return only the caller's OWN private entries — never public, \
+         never another agent's private rows"
+    );
+}
+
+#[test]
+fn test_owned_private_matching_empty_when_none_private() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Only public entries exist for this agent.
+    let public = make_test_entry("kn-only-pub", 5, 0.0);
+    db.upsert_knowledge(&public).unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let got = db.owned_private_matching("agent-a", None, &filter).unwrap();
+    assert!(
+        got.is_empty(),
+        "no owned-private entries -> empty result (hint will be suppressed)"
+    );
+}
+
+#[test]
+fn test_owned_private_matching_honors_category_filter() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Two owned-private entries in different categories.
+    let mut in_cat = make_test_entry("kn-priv-decision", 5, 0.0);
+    in_cat.visibility = "private".to_string();
+    in_cat.owner = Some("agent-a".to_string());
+    in_cat.category_id = "decision".to_string();
+    db.upsert_knowledge(&in_cat).unwrap();
+
+    let mut other_cat = make_test_entry("kn-priv-test", 5, 0.0);
+    other_cat.visibility = "private".to_string();
+    other_cat.owner = Some("agent-a".to_string());
+    other_cat.category_id = "test".to_string();
+    db.upsert_knowledge(&other_cat).unwrap();
+
+    let filter = crate::store::KnowledgeFilter {
+        categories: Some(vec!["decision".to_string()]),
+        ..Default::default()
+    };
+    let got = db.owned_private_matching("agent-a", None, &filter).unwrap();
+    let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["kn-priv-decision"],
+        "category filter must match the main query's category scoping"
+    );
+}
+
+#[test]
+fn test_owned_private_matching_honors_search_terms() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // Matching owned-private entry.
+    let mut hit = make_test_entry("kn-priv-widget", 5, 0.0);
+    hit.visibility = "private".to_string();
+    hit.owner = Some("agent-a".to_string());
+    hit.title = "unique searchable widget".to_string();
+    hit.body = Some("unique searchable widget content".to_string());
+    db.upsert_knowledge(&hit).unwrap();
+
+    // Non-matching owned-private entry (different terms).
+    let mut miss = make_test_entry("kn-priv-sprocket", 5, 0.0);
+    miss.visibility = "private".to_string();
+    miss.owner = Some("agent-a".to_string());
+    miss.title = "unrelated sprocket".to_string();
+    miss.body = Some("unrelated sprocket content".to_string());
+    db.upsert_knowledge(&miss).unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let got = db
+        .owned_private_matching("agent-a", Some("widget"), &filter)
+        .unwrap();
+    let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["kn-priv-widget"],
+        "search-term (@@) filter must exclude owned-private entries that don't \
+         match the query"
+    );
+}
+
+#[test]
+fn test_owned_private_matching_honors_effective_resonance() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    // An owned-private entry with LOW raw resonance and an old activation so
+    // its effective (decayed) resonance is well below the threshold. Uses the
+    // SAME effective_resonance_expr as list/search, so a min_resonance filter
+    // must exclude it — matching what the main query would display.
+    let mut faded = make_test_entry("kn-priv-faded", 2, 0.0);
+    faded.visibility = "private".to_string();
+    faded.owner = Some("agent-a".to_string());
+    faded.resonance_type = Some("ephemeral".to_string());
+    // Activated ~1 year ago: with base 0.90 on resonance<=3, effective ~= 0.
+    faded.last_activated = Some(
+        (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339(),
+    );
+    faded.created_at = faded.last_activated.clone();
+    db.upsert_knowledge(&faded).unwrap();
+
+    let filter = crate::store::KnowledgeFilter {
+        min_resonance: Some(3),
+        ..Default::default()
+    };
+    let got = db.owned_private_matching("agent-a", None, &filter).unwrap();
+    assert!(
+        got.is_empty(),
+        "an owned-private entry whose EFFECTIVE (decayed) resonance is below \
+         min_resonance must be excluded, like list/search"
+    );
+}
+
 #[test]
 fn test_reinforce_basic() {
     // Test basic reinforcement functionality
