@@ -191,8 +191,11 @@ pub trait KnowledgeStore {
     /// the returned entries — via the same `apply_entry_filters` the main query
     /// uses — so the resulting count matches the main query exactly.
     ///
-    /// `query`: `Some(terms)` runs the same BM25 `@@` full-text match `search`
-    /// uses; `None` (for `list`) omits the text predicate.
+    /// `query`: `Some(terms)` runs the same BM25 `@@` full-text match that
+    /// `search`'s TEXT (non-`--semantic`) branch uses; `None` (for `list`) omits
+    /// the text predicate. This method is intentionally text-only: it does NOT
+    /// model vector similarity, so the hint it powers is suppressed under
+    /// `--semantic` (see `hidden_private_hint`) rather than counted here.
     fn owned_private_matching(
         &self,
         agent: &str,

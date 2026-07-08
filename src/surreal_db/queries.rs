@@ -1565,6 +1565,17 @@ impl SurrealDatabase {
             ""
         };
 
+        // S1 — accepted cost: this SELECTs and hydrates FULL `KnowledgeEntry`
+        // rows (body + per-row tag/applicability follow-ups in
+        // `value_to_knowledge_entry`), not a bare COUNT, and it runs on every
+        // default `list`/`search` when a calling agent is set. Full hydration is
+        // REQUIRED, not incidental: the hint count must match the main query
+        // exactly, and the caller re-applies `apply_entry_filters` (tags + field
+        // presence — e.g. has_anchors, has_wake_phrase) to these rows. Those
+        // predicates read fields a COUNT could not project, so a COUNT here would
+        // over-count relative to what the main query actually displays. The rows
+        // are the caller's own private entries only (bounded, single query), so
+        // the cost is bounded and deemed acceptable versus correctness.
         let sql = format!(
             "SELECT {}
             FROM knowledge

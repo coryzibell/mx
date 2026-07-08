@@ -1399,6 +1399,10 @@ mod tests {
                 _query: Option<&str>,
                 _filter: &KnowledgeFilter,
             ) -> Result<Vec<KnowledgeEntry>> {
+                // N2: unreachable here by design — this hint query (Issue #400) is
+                // only ever invoked from the List/Search handlers, never from the
+                // wake ritual this MockStore exercises. The hint-count behavior is
+                // covered by the SurrealDatabase-backed tests in helpers.rs.
                 unreachable!()
             }
             fn list_all(&self, _ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {

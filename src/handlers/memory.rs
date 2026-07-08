@@ -568,7 +568,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Issue #400: nudge (stderr only) if the caller's OWN private
             // entries matched but were hidden by the public-only default.
-            warn_hidden_private(db.as_ref(), &ctx, &filter, Some(&query));
+            // Suppressed under `--semantic` (W1): the hint counts with the BM25
+            // `@@` predicate, which does not agree with vector similarity.
+            warn_hidden_private(db.as_ref(), &ctx, &filter, Some(&query), semantic);
 
             // --activate: activate returned results (mark as intentionally consumed)
             if activate && !entries.is_empty() {
@@ -640,7 +642,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Issue #400: nudge (stderr only) if the caller's OWN private
             // entries matched but were hidden by the public-only default.
-            warn_hidden_private(db.as_ref(), &ctx, &filter, None);
+            // `list` has no semantic mode, so `semantic = false` always.
+            warn_hidden_private(db.as_ref(), &ctx, &filter, None, false);
         }
 
         MemoryCommands::Show {

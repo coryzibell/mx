@@ -179,6 +179,14 @@ pub(crate) fn resolve_agent_context(mine: bool, include_private: bool) -> store:
 /// (`warn_hidden_private`) do the `eprintln!`, which keeps it unit-testable.
 ///
 /// Returns `None` (no hint) when ANY of the following hold:
+///   - the search ran in `--semantic` mode (`semantic == true`): the count
+///     query below matches with the BM25 `@@` text predicate, which does NOT
+///     mirror vector similarity. Counting under semantic mode would produce both
+///     false negatives (a semantic match with no literal term overlap goes
+///     uncounted — the very #400 undercount this exists to fix) and false
+///     positives (a literal `@@` match that isn't in the top-N vector results,
+///     or isn't embedded at all, would promise an entry `--include-private
+///     --semantic` never shows). So the hint is gated off entirely there;
 ///   - the context already includes private entries (`ctx.include_private`),
 ///     i.e. `--include-private` or `--mine` was given — those already show them;
 ///   - there is no calling agent (`MX_CURRENT_AGENT` unset ⇒ `agent_id` is
@@ -188,14 +196,26 @@ pub(crate) fn resolve_agent_context(mine: bool, include_private: bool) -> store:
 ///   - zero owned-private entries survive the SAME in-memory filters
 ///     (`apply_entry_filters`, minus the display limit) the main query applies.
 ///
-/// `query` is `Some(terms)` for `search` (matched with the same `@@` full-text
-/// predicate) and `None` for `list`.
+/// `query` is `Some(terms)` for `search` (matched with the same BM25 `@@`
+/// full-text predicate the non-semantic `search` branch uses) and `None` for
+/// `list`. `semantic` is the `search --semantic` flag (always `false` for
+/// `list`); when set, the hint is suppressed per the first bullet above.
 pub(crate) fn hidden_private_hint(
     db: &dyn store::KnowledgeStore,
     ctx: &store::AgentContext,
     filter: &EntryFilter,
     query: Option<&str>,
+    semantic: bool,
 ) -> Option<String> {
+    // Semantic search matches by vector similarity, but the count query below
+    // uses the BM25 `@@` text predicate — the two do not agree. Rather than emit
+    // a hint that could over- or under-count relative to what `--include-private
+    // --semantic` would actually show, gate it off. (Counting with the semantic
+    // predicate would also be heavier and top-N-dependent.)
+    if semantic {
+        return None;
+    }
+
     // Trigger only in the default (public-only) view AND when there is a
     // calling agent whose private entries could exist. `--include-private` and
     // `--mine` both resolve to `include_private = true`, so they no-op here;
@@ -252,8 +272,9 @@ pub(crate) fn warn_hidden_private(
     ctx: &store::AgentContext,
     filter: &EntryFilter,
     query: Option<&str>,
+    semantic: bool,
 ) {
-    if let Some(msg) = hidden_private_hint(db, ctx, filter, query) {
+    if let Some(msg) = hidden_private_hint(db, ctx, filter, query, semantic) {
         eprintln!("{msg}");
     }
 }
@@ -1684,7 +1705,7 @@ mod hidden_private_hint_tests {
 
         // Default view for a known agent: public-only ctx, agent_id set.
         let ctx = AgentContext::public_for_agent("agent-a");
-        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None)
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None, false)
             .expect("hint should fire for a hidden owned-private match");
 
         assert!(msg.contains("1 private entry of yours"), "msg: {msg}");
@@ -1701,7 +1722,7 @@ mod hidden_private_hint_tests {
             .unwrap();
 
         let ctx = AgentContext::public_for_agent("agent-a");
-        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None).unwrap();
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), None, false).unwrap();
 
         assert!(msg.contains("2 private entries of yours"), "msg: {msg}");
         assert!(msg.contains("are hidden"), "msg: {msg}");
@@ -1720,9 +1741,35 @@ mod hidden_private_hint_tests {
         .unwrap();
 
         let ctx = AgentContext::public_for_agent("agent-a");
-        let msg = hidden_private_hint(&db, &ctx, &base_filter(), Some("widget"))
+        let msg = hidden_private_hint(&db, &ctx, &base_filter(), Some("widget"), false)
             .expect("search hint should fire when an owned-private entry matches the query");
         assert!(msg.contains("1 private entry of yours"), "msg: {msg}");
+    }
+
+    #[test]
+    fn hint_absent_under_semantic_mode() {
+        // W1: `search --semantic` matches by vector similarity, but the hint's
+        // count query uses the BM25 `@@` predicate. The two do not agree, so the
+        // hint must be gated OFF under semantic mode — even when a literal `@@`
+        // match exists (as it does here: same fixture as the firing text-search
+        // case above), the semantic flag suppresses the hint entirely.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "unique searchable widget",
+            "unique searchable widget content",
+            vec![],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+        // Same query that fires the hint in non-semantic mode; only `semantic`
+        // differs. Proves the suppression is driven by the flag, not the data.
+        assert!(
+            hidden_private_hint(&db, &ctx, &base_filter(), Some("widget"), true).is_none(),
+            "the hint must not fire under --semantic: BM25 count != vector match"
+        );
     }
 
     #[test]
@@ -1739,7 +1786,7 @@ mod hidden_private_hint_tests {
 
         let ctx = AgentContext::public_for_agent("agent-a");
         assert!(
-            hidden_private_hint(&db, &ctx, &base_filter(), Some("widget")).is_none(),
+            hidden_private_hint(&db, &ctx, &base_filter(), Some("widget"), false).is_none(),
             "no hint when the owned-private entry doesn't match the search terms"
         );
     }
@@ -1753,7 +1800,7 @@ mod hidden_private_hint_tests {
 
         let ctx = AgentContext::for_agent("agent-a");
         assert!(
-            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            hidden_private_hint(&db, &ctx, &base_filter(), None, false).is_none(),
             "--include-private already shows private entries -> no hint"
         );
     }
@@ -1767,7 +1814,7 @@ mod hidden_private_hint_tests {
 
         let ctx = AgentContext::public_only();
         assert!(
-            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            hidden_private_hint(&db, &ctx, &base_filter(), None, false).is_none(),
             "no calling agent -> nothing owned to hide -> no hint"
         );
     }
@@ -1781,7 +1828,7 @@ mod hidden_private_hint_tests {
 
         let ctx = AgentContext::public_for_agent("agent-a");
         assert!(
-            hidden_private_hint(&db, &ctx, &base_filter(), None).is_none(),
+            hidden_private_hint(&db, &ctx, &base_filter(), None, false).is_none(),
             "caller has no owned-private matches (and must never count agent-b's) -> no hint"
         );
     }
@@ -1804,7 +1851,7 @@ mod hidden_private_hint_tests {
         let mut f = base_filter();
         f.tags = Some(vec!["nonmatch".to_string()]);
         assert!(
-            hidden_private_hint(&db, &ctx, &f, None).is_none(),
+            hidden_private_hint(&db, &ctx, &f, None, false).is_none(),
             "tag filter must apply to the hint count exactly as to the main query"
         );
 
@@ -1812,7 +1859,7 @@ mod hidden_private_hint_tests {
         let mut f2 = base_filter();
         f2.tags = Some(vec!["focus".to_string()]);
         assert!(
-            hidden_private_hint(&db, &ctx, &f2, None).is_some(),
+            hidden_private_hint(&db, &ctx, &f2, None, false).is_some(),
             "a matching tag filter must still surface the hidden owned-private entry"
         );
     }
@@ -1836,7 +1883,7 @@ mod hidden_private_hint_tests {
         let ctx = AgentContext::public_for_agent("agent-a");
         let mut f = base_filter();
         f.limit = Some(1);
-        let msg = hidden_private_hint(&db, &ctx, &f, None).unwrap();
+        let msg = hidden_private_hint(&db, &ctx, &f, None, false).unwrap();
         assert!(
             msg.contains("3 private entries of yours"),
             "hint counts all hidden matches regardless of --limit; msg: {msg}"
