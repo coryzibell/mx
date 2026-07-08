@@ -4500,6 +4500,14 @@ mod dedup_gate_tests {
         ) -> Result<usize> {
             self.inner.count_by_category(category, ctx, filter)
         }
+        fn owned_private_matching(
+            &self,
+            agent: &str,
+            query: Option<&str>,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.owned_private_matching(agent, query, filter)
+        }
         fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_all(ctx)
         }
@@ -4836,6 +4844,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<usize> {
             self.inner.count_by_category(category, ctx, filter)
+        }
+        fn owned_private_matching(
+            &self,
+            agent: &str,
+            query: Option<&str>,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.owned_private_matching(agent, query, filter)
         }
         fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_all(ctx)
