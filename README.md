@@ -119,6 +119,8 @@ mx memory stats
 
 Default categories: `pattern`, `technique`, `insight`, `gotcha`, `reference`, `decision`, `bloom`, `session`. Categories are customizable per-deployment -- run `mx memory categories list` to see available categories.
 
+`mx memory list` and `mx memory search` are **public-only by default** -- your own private entries are omitted unless you pass `--include-private` (or `--mine`). When a public-only query matches private entries you own but hides them, `mx` prints a best-effort hint on **stderr** pointing at `--include-private` (stdout, `--json`, and exit codes are unaffected). See the [memory docs](https://coryzibell.github.io/mx/memory.html) for the full visibility and resonance-basis details.
+
 ### KV Store
 
 Fast local key-value state per agent. Counters, strings, lists, timestamped history, and structured state fields -- all backed by a TOML schema file and a JSON data file. No networking, no database.

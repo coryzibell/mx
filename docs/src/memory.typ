@@ -142,8 +142,8 @@ flags. These are documented once here and referenced below.
   [`--json`],          [`flag`],   [Output as JSON.],
   [`--mine`],          [`flag`],   [Show only your private entries.],
   [`--include-private`], [`flag`], [Include private entries (requires matching owner).],
-  [`--min-resonance`], [`int`],    [Minimum resonance level.],
-  [`--max-resonance`], [`int`],    [Maximum resonance level.],
+  [`--min-resonance`], [`int`],    [Minimum resonance level. Filtered on the time-decayed *effective* resonance (see note below on the basis divergence with `wake`).],
+  [`--max-resonance`], [`int`],    [Maximum resonance level. Filtered on the time-decayed *effective* resonance.],
   [`--has-wake-phrase`], [`flag`],  [Filter to entries WITH a wake phrase.],
   [`--missing-wake-phrase`], [`flag`], [Filter to entries WITHOUT a wake phrase.],
   [`--has-anchors`],   [`flag`],   [Filter to entries WITH anchors.],
@@ -153,6 +153,37 @@ flags. These are documented once here and referenced below.
   [`--limit`],         [`int`],    [Limit number of results.],
   [`--tags`],          [`string`], [Filter by tags (comma-separated, matches any).],
 )
+
+#note[*Visibility default:* `list` and `search` run *public-only* by default.
+Your own private entries are omitted unless you pass `--include-private` (or
+`--mine`, which shows only your private entries). When a public-only query
+matches private entries you own but hides them, `mx` prints a best-effort
+*stderr* nudge --- see the note below on the hidden-private hint. (`wake`, by
+contrast, includes owned-private blooms in its cascade.)]
+
+#note[*Hidden-private hint:* When `MX_CURRENT_AGENT` is set and a public-only
+`list`/`search` query matches private entries you own, `mx` writes a hint to
+*stderr* pointing at `--include-private`, e.g.:
+
+```
+note: 3 private entries of yours matched but are hidden; use --include-private to see them
+```
+
+The hint is *stderr only* --- it never touches `stdout`, `--json` output, or the
+exit code, and any error computing it is swallowed silently. It fires only in
+the public-only case: passing `--include-private` or `--mine` silences it (they
+already show your private entries), and it is *suppressed under `search
+--semantic`* because the underlying count uses the keyword (BM25) predicate,
+which does not agree with vector similarity.]
+
+#note[*Resonance basis divergence (Issue \#404):* `list`/`search --min-resonance`
+and `--max-resonance` filter on the time-decayed *effective* resonance, whereas
+`wake --min-resonance` filters on the *raw* stored value. The same numeric
+threshold can therefore admit an entry under `wake` but exclude it under
+`list`/`search` once decay is applied. `foundational` and `transformative`
+resonance types are decay-exempt, so they filter identically under both. This
+divergence is intentional for now; an explicit `--resonance-basis raw|decayed`
+flag is tracked in \#404.]
 
 #command(
   "mx memory show",
@@ -179,7 +210,8 @@ flags. These are documented once here and referenced below.
   ),
 )
 
-#note[`list` accepts all shared filter flags documented above.]
+#note[`list` accepts all shared filter flags documented above, including the
+public-only visibility default and the hidden-private stderr hint.]
 
 #command(
   "mx memory search",
@@ -197,8 +229,10 @@ flags. These are documented once here and referenced below.
   ),
 )
 
-#note[`search` accepts all shared filter flags. Semantic search requires entries
-to have embeddings generated via `mx memory embed`.]
+#note[`search` accepts all shared filter flags, including the public-only
+visibility default and the hidden-private stderr hint (the hint is suppressed
+under `--semantic`). Semantic search requires entries to have embeddings
+generated via `mx memory embed`.]
 
 #tip[By default, search does not activate results -- browsing is not the same as
 engagement. Use `--activate` when you are intentionally consuming the results
@@ -386,7 +420,7 @@ cascade; a token-based ritual flow is available for programmatic use.
   and presents them in the requested format.],
   flags: (
     ([`-l, --limit`],   [`int`],    [Number of blooms to return. Default: `20`.]),
-    ([`--min-resonance`], [`int`],   [Minimum resonance threshold -- get ALL blooms >= this value (overrides `--limit`).]),
+    ([`--min-resonance`], [`int`],   [Minimum resonance threshold -- get ALL blooms >= this value (overrides `--limit`). Filtered on the *raw* stored resonance, unlike `list`/`search`, which use the decayed *effective* value (Issue \#404).]),
     ([`-d, --days`],    [`int`],    [Include memories activated in last N days. Default: `7`.]),
     ([`--no-activate`], [`flag`],   [Do not update activation counts.]),
     ([`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.]),

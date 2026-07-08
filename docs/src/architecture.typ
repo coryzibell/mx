@@ -334,6 +334,15 @@ first connection -- no manual schema setup is required.
 The `apply_schema` method on `SurrealDatabase` uses the `with_db!` macro so the
 same code path runs against both the embedded and network backends.
 
+#note[*Contended init:* when several `mx` processes bootstrap a fresh store
+concurrently, embedded SurrealDB can return a transient _"read or write
+conflict ... can be retried"_ error during schema application. `apply_schema`
+retries these with bounded, jittered backoff (up to 12 attempts, with
+per-process-entropy jitter to de-correlate racing writers). Because every schema
+statement is `IF NOT EXISTS` / `UPSERT`, retries are idempotent. The happy,
+uncontended path is untouched -- retries run only when a conflict is actually
+observed.]
+
 ==== `MX_SKIP_SCHEMA`
 
 Set `MX_SKIP_SCHEMA=1` (or `true`) to skip schema application at connection
