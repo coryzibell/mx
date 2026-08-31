@@ -20,6 +20,18 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   over-report relative to what `--include-private --semantic` actually shows.
 
 ### Fixed
+- `mx commit` now verifies that the encoded body decodes back to the original
+  message before committing, and re-rolls the codec pair when it does not.
+  `validate_encoded_output` only ever checked that the output was *safe* (no
+  NUL, no control characters), never that it was *readable* — so dictionaries
+  whose base-d codec does not round-trip passed validation and committed
+  permanently unreadable messages. Measured at ~6% of encodes (29/500), which
+  matches the ~20% of unreadable commits observed in `~/.crewu` history. The
+  check is deliberately generic rather than a blacklist of known-bad
+  dictionaries, so a newly-broken codec is caught without first being
+  identified by hand. Costs one decode per commit. Failures report as
+  `roundtrip ...` on the existing retry line, alongside the NUL/control
+  reasons.
 - Embedded schema application now retries transient SurrealDB
   "read or write conflict … can be retried" errors with jittered backoff
   (bounded, `IF NOT EXISTS`-idempotent). Fixes flaky failures when several `mx`
@@ -28,6 +40,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   run on a contended init.
 
 ### Changed
+- `mx log` and `mx show` no longer silently print the raw encoded blob when a
+  commit body fails to decode. Every decode error — unknown dictionary, decode
+  failure, failed decompression, bad UTF-8 — previously collapsed into
+  `Err(_) => passthrough` with no reason and no marker, which is why the codec
+  round-trip bug above went unnoticed for months. The reason is now captured
+  and rendered as a `[decode failed: <reason>]` marker on the affected line.
+  Passthrough behavior is otherwise unchanged: the raw text is still shown and
+  `mx log` remains usable across ranges that contain broken commits. Exit codes
+  are unchanged.
 - Documented the `--min-resonance` basis divergence (Issue #404): `wake`
   filters on **raw** stored resonance, while `list`/`search` filter on
   time-decayed **effective** resonance. Behavior is unchanged; the flag help

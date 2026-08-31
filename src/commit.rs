@@ -355,6 +355,24 @@ fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verify that an encoded body decodes back to exactly the text that was
+/// encoded.
+///
+/// `validate_encoded_output` checks that output is *safe*; this checks that
+/// it is *readable*, which is the property we actually want. Some codec
+/// pairs (as of base-d 3.0.34: `base64url`, `bioctal`, `uuencode`) emit
+/// output that is perfectly safe and does not decode back -- those sailed
+/// through validation and committed unrecoverable messages. Deliberately
+/// generic rather than a blacklist, so the next broken dictionary is caught
+/// without anyone having to find it first.
+fn validate_roundtrip(encoded: &str, footer_tag: &str, original: &str) -> Result<()> {
+    match decode_body(encoded, footer_tag) {
+        Ok(decoded) if decoded == original => Ok(()),
+        Ok(_) => bail!("roundtrip mismatch in body"),
+        Err(e) => bail!("roundtrip decode failed in body: {}", e),
+    }
+}
+
 /// Format the footer tag: `[hash_algo:title_dict|compress_algo:body_dict]`
 fn format_footer_tag(
     hash_algo: &str,
@@ -371,7 +389,8 @@ fn format_footer_tag(
 /// Encode title and body into commit parts with automatic retry on unsafe output.
 ///
 /// Loads the dictionary registry once and retries up to MAX_ENCODE_ATTEMPTS times
-/// if the encoded output contains NUL bytes or control characters. Each retry
+/// if the encoded output contains NUL bytes or control characters, or if the
+/// encoded body does not decode back to the original message. Each retry
 /// re-rolls the random dictionary selection. Failed attempts are logged to stderr
 /// with the dictionary/codec combo that produced unsafe output.
 pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit> {
@@ -403,12 +422,14 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
             }
         );
 
-        // Validate all parts for unsafe characters
-        let title_check = validate_encoded_output(&title, "title");
-        let body_check = validate_encoded_output(&body, "body");
-        let footer_check = validate_encoded_output(&footer, "footer");
+        // Validate all parts for unsafe characters, then confirm the body
+        // survives a round trip through the codec pair we just rolled.
+        let checks = validate_encoded_output(&title, "title")
+            .and(validate_encoded_output(&body, "body"))
+            .and(validate_encoded_output(&footer, "footer"))
+            .and_then(|()| validate_roundtrip(&body, &footer_tag, body_text));
 
-        if let Err(e) = title_check.and(body_check).and(footer_check) {
+        if let Err(e) = checks {
             if attempt < MAX_ENCODE_ATTEMPTS {
                 eprintln!("Tried {}: {}, retrying...", footer_tag, e);
             } else {

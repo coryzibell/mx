@@ -737,13 +737,11 @@ fn display_subject(commit: &ParsedCommit) -> String {
     } else {
         // For non-decoded commits, the decoded.subject holds the passthrough
         // text which may be multi-line. Take only the first line as subject.
-        commit
-            .decoded
-            .subject
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_string()
+        let raw = commit.decoded.subject.lines().next().unwrap_or("");
+        match commit.decoded.decode_error.as_deref() {
+            Some(reason) => format!("\x1b[31m[decode failed: {}]\x1b[0m {}", reason, raw),
+            None => raw.to_string(),
+        }
     }
 }
 
@@ -1241,7 +1239,12 @@ pub(crate) fn handle_show(args: Vec<String>) -> Result<()> {
             }
         } else {
             // Not encoded -- show the original subject line from git,
-            // then the body below it (matching git show's default).
+            // then the body below it (matching git show's default). An
+            // encoded commit that failed to decode lands here too, so say
+            // why rather than passing the blob off as the message.
+            if let Some(reason) = result.decode_error.as_deref() {
+                writeln!(out, "    \x1b[31m[decode failed: {}]\x1b[0m", reason)?;
+            }
             writeln!(out, "    {}", raw_subject)?;
             let body_trimmed = body.trim();
             if !body_trimmed.is_empty() {
@@ -1325,6 +1328,11 @@ pub(crate) struct DecodedCommit {
     pub(crate) trailing: Option<String>,
     /// True iff a footer was located and decoding succeeded.
     pub(crate) was_decoded: bool,
+    /// Why decoding failed, when a footer WAS located but `decode_body`
+    /// errored. `None` both for successful decodes and for messages that
+    /// were never encoded at all. Renderers surface this so a blob is
+    /// visibly a failure rather than silently mistaken for the message.
+    pub(crate) decode_error: Option<String>,
 }
 
 impl DecodedCommit {
@@ -1336,6 +1344,18 @@ impl DecodedCommit {
             subject: original.trim().to_string(),
             trailing: None,
             was_decoded: false,
+            decode_error: None,
+        }
+    }
+
+    /// Build a `DecodedCommit` for a commit that IS encoded but whose body
+    /// would not decode. Behaves like `passthrough` -- the raw text is still
+    /// rendered so `mx log` stays usable across a range containing broken
+    /// commits -- but carries the reason so it is not silent.
+    fn decode_failed(original: &str, reason: String) -> Self {
+        Self {
+            decode_error: Some(reason),
+            ..Self::passthrough(original)
         }
     }
 }
@@ -1437,8 +1457,9 @@ pub(crate) fn try_decode_commit_body(body: &str) -> DecodedCommit {
             subject: decoded,
             trailing,
             was_decoded: true,
+            decode_error: None,
         },
-        Err(_) => DecodedCommit::passthrough(trimmed),
+        Err(e) => DecodedCommit::decode_failed(trimmed, e.to_string()),
     }
 }
 
