@@ -65,20 +65,73 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
+/// Maximum times to redraw a dictionary that is structurally unfit for a
+/// commit message. Unfit dictionaries are a small minority of the pool, so
+/// this bound is never approached in practice; it exists so a pathological
+/// registry cannot spin forever.
+const MAX_DICTIONARY_DRAWS: usize = 32;
+
+/// True if the named dictionary's alphabet contains a whitespace character.
+///
+/// Such a dictionary cannot survive a git commit message: `git commit -m`
+/// runs `--cleanup=whitespace` and strips trailing whitespace from every
+/// line, and mx trims independently on both the encode and decode paths. A
+/// symbol that IS a space is therefore silently deleted in transit and the
+/// payload is unrecoverable -- the same class of loss as a truncated
+/// encoder, not a decode bug that a future fix can undo.
+///
+/// This is a categorical property check, not a list of known-bad names, so a
+/// whitespace-bearing dictionary added later is excluded automatically.
+/// ByteRange dictionaries report an empty alphabet here and are unaffected;
+/// base-d already screens those via `is_safe_byte_range`.
+fn alphabet_has_whitespace(registry: &DictionaryRegistry, name: &str) -> bool {
+    registry
+        .get_dictionary(name)
+        .and_then(|config| config.effective_chars().ok())
+        .is_some_and(|chars| chars.chars().any(char::is_whitespace))
+}
+
+/// Draw an encoding, rejecting any that lands on a dictionary unfit for a
+/// commit message.
+///
+/// base-d draws the dictionary internally (`registry.random()`), and neither
+/// `hash_encode_with` nor `compress_encode_with` accepts an explicit one, so
+/// the exclusion is applied by rejection here rather than by reimplementing
+/// base-d's selection policy. Rejections happen at the draw, not in
+/// `encode_commit`'s validation loop, so an unfit draw does not consume one
+/// of the bounded encode attempts.
+fn draw_fit_dictionary(
+    registry: &DictionaryRegistry,
+    draw: impl Fn() -> Result<(String, String, String)>,
+) -> Result<(String, String, String)> {
+    for _ in 0..MAX_DICTIONARY_DRAWS {
+        let drawn = draw()?;
+        if !alphabet_has_whitespace(registry, &drawn.2) {
+            return Ok(drawn);
+        }
+    }
+    bail!(
+        "no whitespace-free dictionary drawn in {} attempts",
+        MAX_DICTIONARY_DRAWS
+    )
+}
+
 /// Encode text using base-d with hash and random dictionary
 /// Returns (encoded_text, hash_algorithm, dictionary_name)
 fn encode_hash_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
-    let result = hash_encode(text.as_bytes(), registry)
-        .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
+    draw_fit_dictionary(registry, || {
+        let result = hash_encode(text.as_bytes(), registry)
+            .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
 
-    Ok((
-        result.encoded,
-        result.hash_algo.as_str().to_string(),
-        result.dictionary_name,
-    ))
+        Ok((
+            result.encoded,
+            result.hash_algo.as_str().to_string(),
+            result.dictionary_name,
+        ))
+    })
 }
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo, dictionary_name)
@@ -86,14 +139,16 @@ fn encode_compress_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
-    let result = compress_encode(text.as_bytes(), registry)
-        .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
+    draw_fit_dictionary(registry, || {
+        let result = compress_encode(text.as_bytes(), registry)
+            .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
 
-    Ok((
-        result.encoded,
-        result.compress_algo.as_str().to_string(),
-        result.dictionary_name,
-    ))
+        Ok((
+            result.encoded,
+            result.compress_algo.as_str().to_string(),
+            result.dictionary_name,
+        ))
+    })
 }
 
 /// Map a compression-algorithm name (as it appears in the footer) to the

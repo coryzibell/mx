@@ -32,6 +32,17 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   identified by hand. Costs one decode per commit. Failures report as
   `roundtrip ...` on the existing retry line, alongside the NUL/control
   reasons.
+- `mx commit` no longer draws dictionaries whose alphabet contains a
+  whitespace character (`base45`, `uuencode`). Such an encoding cannot survive
+  a commit message: `git commit -m` runs `--cleanup=whitespace` and strips
+  trailing whitespace from every line, and mx trims independently on both the
+  encode and decode paths, so a symbol that IS a space is deleted in transit
+  and the payload becomes unrecoverable — a write-time loss the round-trip
+  check above can detect but never repair. Implemented as a categorical
+  property test on the alphabet, not a list of names, so a whitespace-bearing
+  dictionary added later is excluded automatically. Rejection happens at the
+  draw rather than in the validation loop, so it does not consume one of the
+  bounded encode attempts.
 - Embedded schema application now retries transient SurrealDB
   "read or write conflict … can be retried" errors with jittered backoff
   (bounded, `IF NOT EXISTS`-idempotent). Fixes flaky failures when several `mx`
