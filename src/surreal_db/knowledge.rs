@@ -680,14 +680,33 @@ impl SurrealDatabase {
     ) -> Result<Option<KnowledgeEntry>> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
+        // type::thing('knowledge', '') errors ("not a valid id") rather than
+        // returning no rows. Guard here to preserve the existing Ok(None)
+        // contract for an empty id byte-for-byte.
+        if id_part.is_empty() {
+            return Ok(None);
+        }
+
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
+
+        // visibility_clause always starts with "AND " (see build_visibility_filter);
+        // strip_prefix is anchored and total, unlike a bare `replacen("AND", "WHERE", 1)`
+        // which would also match the "AND" inside e.g. 'STANDARD' at offset 2.
+        let where_clause = match visibility_clause.strip_prefix("AND ") {
+            Some(rest) => format!("WHERE {}", rest),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "visibility_clause did not start with 'AND ' as expected: {:?}",
+                    visibility_clause
+                ));
+            }
+        };
 
         let sql = format!(
             "SELECT {}
-            FROM knowledge
-            WHERE meta::id(id) = $id {}",
+            FROM type::thing('knowledge', $id) {}",
             Self::knowledge_select_fields(),
-            visibility_clause
+            where_clause
         );
 
         let mut response = with_db!(self, db, {

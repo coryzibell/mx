@@ -281,11 +281,24 @@ fn test_id_normalization_empty_suffix() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let ctx = crate::store::AgentContext::public_only();
 
+    // Seed a real row first. With an empty table, `.is_none()` would pass
+    // trivially whether the empty-id guard fires or not -- there is nothing
+    // to match either way. Seeding makes the assertion actually discriminate
+    // "the guard correctly returns None" from "the table happens to be empty".
+    let entry = make_test_entry("kn-empty-suffix-control", 5, 0.5);
+    db.upsert_knowledge(&entry).unwrap();
+
     // Try to get an entry with empty suffix
     let result = db.get("kn-", &ctx);
 
-    // Should handle gracefully (likely return None, not panic)
+    // Pinned contract (readpath perf change): `type::thing('knowledge', '')`
+    // errors rather than matching zero rows, so get_knowledge_async guards
+    // the empty id explicitly and returns Ok(None) -- same as it always has.
     assert!(result.is_ok(), "Empty suffix should not panic");
+    assert!(
+        result.unwrap().is_none(),
+        "Empty suffix must resolve to Ok(None), not an error or a match"
+    );
 }
 
 #[test]
