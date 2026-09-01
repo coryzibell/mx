@@ -437,6 +437,42 @@ impl SurrealDatabase {
             .map(|id| id.strip_prefix("kn-").unwrap_or(id).to_string())
             .collect();
 
+        // Single-id fast path: direct-record form avoids the full-table
+        // pass that `WHERE id IN $ids` costs to update one row (precedent:
+        // update_wake_session_async's `UPDATE type::thing(...)`).
+        //
+        // type::thing('knowledge', '') errors ("not a valid id") rather than
+        // matching zero rows -- same hazard as get_knowledge_async's guard.
+        // An empty single id (e.g. ids == [""], or ["kn-"] after the strip
+        // above) must not reach type::thing; preserve the old no-op Ok(())
+        // contract instead.
+        if let [single_id] = clean_ids.as_slice() {
+            if single_id.is_empty() {
+                return Ok(());
+            }
+
+            let mut response = with_db!(self, db, {
+                db.query(
+                    "UPDATE type::thing('knowledge', $id) SET
+                    activation_count += 1,
+                    last_activated = time::now()",
+                )
+                .bind(("id", single_id.clone()))
+                .await
+                .context("Failed to update activations")
+            })?;
+
+            let errors = response.take_errors();
+            if !errors.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "Failed to update activations: {:?}",
+                    errors
+                ));
+            }
+
+            return Ok(());
+        }
+
         // Build array of Thing references
         let things: Vec<Thing> = clean_ids
             .iter()

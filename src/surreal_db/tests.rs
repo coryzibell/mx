@@ -2435,6 +2435,27 @@ fn test_search_select_no_results_is_noop() {
     );
 }
 
+#[test]
+fn test_update_activations_single_empty_id_is_noop() {
+    // The single-id fast path uses `type::thing('knowledge', $id)`, which
+    // errors on an empty id part rather than matching zero rows -- same
+    // hazard as get_knowledge_async's empty-id guard (see
+    // test_id_normalization_empty_suffix). A one-element slice of "" (or
+    // "kn-", which strips to "") must not reach that query; it must stay a
+    // no-op returning Ok(()), matching the multi-id branch's pre-existing
+    // behavior for an id that matches no row.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let result = db.update_activations(&["".to_string()]);
+    assert!(result.is_ok(), "single empty id must not error: {result:?}");
+
+    let result = db.update_activations(&["kn-".to_string()]);
+    assert!(
+        result.is_ok(),
+        "single 'kn-' id (strips to empty) must not error: {result:?}"
+    );
+}
+
 // =========================================================================
 // CHUNKED EMBEDDING SEARCH TEST (PR #348)
 // =========================================================================
