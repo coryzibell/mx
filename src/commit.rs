@@ -84,6 +84,13 @@ const MAX_DICTIONARY_DRAWS: usize = 32;
 /// whitespace-bearing dictionary added later is excluded automatically.
 /// ByteRange dictionaries report an empty alphabet here and are unaffected;
 /// base-d already screens those via `is_safe_byte_range`.
+///
+/// Word dictionaries also report an empty alphabet, and several of them
+/// declare `delimiter = ' '` -- so this check does NOT protect against them.
+/// It does not need to: `registry.random()` filters on
+/// `dictionary_type != Char`, keeping word dictionaries out of the draw pool
+/// entirely. Widening that pool without also handling delimiters here would
+/// silently reintroduce this whole failure class.
 fn alphabet_has_whitespace(registry: &DictionaryRegistry, name: &str) -> bool {
     registry
         .get_dictionary(name)
@@ -509,9 +516,13 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
         });
     }
 
-    // All attempts failed
+    // All attempts failed. Two distinct classes land here -- unsafe output
+    // (NUL, control characters) and a body that did not survive its own
+    // round trip -- and this is the only message printed on the one path
+    // where mx refuses to commit, so it must not name just one of them. The
+    // per-attempt cause was already reported above by the retry loop.
     bail!(
-        "All {} encoding attempts produced unsafe output. Failed dictionaries: {}",
+        "All {} encoding attempts failed validation (unsafe output or round-trip mismatch). Failed dictionaries: {}",
         MAX_ENCODE_ATTEMPTS,
         failed_footers.join(", ")
     )

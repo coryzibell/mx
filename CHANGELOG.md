@@ -59,7 +59,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   and rendered as a `[decode failed: <reason>]` marker on the affected line.
   Passthrough behavior is otherwise unchanged: the raw text is still shown and
   `mx log` remains usable across ranges that contain broken commits. Exit codes
-  are unchanged.
+  are unchanged. The marker is surfaced by **all three** renderers —
+  `mx log` (oneline/compact), **`mx log --full`**, and `mx show`. `--full` is
+  the case that matters most and was the easiest to miss: what it prints for an
+  undecodable commit is the one-way *title hash*, not a message, so without the
+  marker a permanently unreadable commit renders as an entirely normal one.
+  Reasons are de-duplicated and length-capped so they annotate the line rather
+  than consume it.
 - Documented the `--min-resonance` basis divergence (Issue #404): `wake`
   filters on **raw** stored resonance, while `list`/`search` filter on
   time-decayed **effective** resonance. Behavior is unchanged; the flag help
