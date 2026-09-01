@@ -65,20 +65,80 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
+/// Maximum times to redraw a dictionary that is structurally unfit for a
+/// commit message. Unfit dictionaries are a small minority of the pool, so
+/// this bound is never approached in practice; it exists so a pathological
+/// registry cannot spin forever.
+const MAX_DICTIONARY_DRAWS: usize = 32;
+
+/// True if the named dictionary's alphabet contains a whitespace character.
+///
+/// Such a dictionary cannot survive a git commit message: `git commit -m`
+/// runs `--cleanup=whitespace` and strips trailing whitespace from every
+/// line, and mx trims independently on both the encode and decode paths. A
+/// symbol that IS a space is therefore silently deleted in transit and the
+/// payload is unrecoverable -- the same class of loss as a truncated
+/// encoder, not a decode bug that a future fix can undo.
+///
+/// This is a categorical property check, not a list of known-bad names, so a
+/// whitespace-bearing dictionary added later is excluded automatically.
+/// ByteRange dictionaries report an empty alphabet here and are unaffected;
+/// base-d already screens those via `is_safe_byte_range`.
+///
+/// Word dictionaries also report an empty alphabet, and several of them
+/// declare `delimiter = ' '` -- so this check does NOT protect against them.
+/// It does not need to: `registry.random()` filters on
+/// `dictionary_type != Char`, keeping word dictionaries out of the draw pool
+/// entirely. Widening that pool without also handling delimiters here would
+/// silently reintroduce this whole failure class.
+fn alphabet_has_whitespace(registry: &DictionaryRegistry, name: &str) -> bool {
+    registry
+        .get_dictionary(name)
+        .and_then(|config| config.effective_chars().ok())
+        .is_some_and(|chars| chars.chars().any(char::is_whitespace))
+}
+
+/// Draw an encoding, rejecting any that lands on a dictionary unfit for a
+/// commit message.
+///
+/// base-d draws the dictionary internally (`registry.random()`), and neither
+/// `hash_encode_with` nor `compress_encode_with` accepts an explicit one, so
+/// the exclusion is applied by rejection here rather than by reimplementing
+/// base-d's selection policy. Rejections happen at the draw, not in
+/// `encode_commit`'s validation loop, so an unfit draw does not consume one
+/// of the bounded encode attempts.
+fn draw_fit_dictionary(
+    registry: &DictionaryRegistry,
+    draw: impl Fn() -> Result<(String, String, String)>,
+) -> Result<(String, String, String)> {
+    for _ in 0..MAX_DICTIONARY_DRAWS {
+        let drawn = draw()?;
+        if !alphabet_has_whitespace(registry, &drawn.2) {
+            return Ok(drawn);
+        }
+    }
+    bail!(
+        "no whitespace-free dictionary drawn in {} attempts",
+        MAX_DICTIONARY_DRAWS
+    )
+}
+
 /// Encode text using base-d with hash and random dictionary
 /// Returns (encoded_text, hash_algorithm, dictionary_name)
 fn encode_hash_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
-    let result = hash_encode(text.as_bytes(), registry)
-        .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
+    draw_fit_dictionary(registry, || {
+        let result = hash_encode(text.as_bytes(), registry)
+            .map_err(|e| anyhow::anyhow!("Hash encode failed: {}", e))?;
 
-    Ok((
-        result.encoded,
-        result.hash_algo.as_str().to_string(),
-        result.dictionary_name,
-    ))
+        Ok((
+            result.encoded,
+            result.hash_algo.as_str().to_string(),
+            result.dictionary_name,
+        ))
+    })
 }
 
 /// Compress and encode text using base-d, returns (encoded, compress_algo, dictionary_name)
@@ -86,14 +146,16 @@ fn encode_compress_with_registry(
     text: &str,
     registry: &DictionaryRegistry,
 ) -> Result<(String, String, String)> {
-    let result = compress_encode(text.as_bytes(), registry)
-        .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
+    draw_fit_dictionary(registry, || {
+        let result = compress_encode(text.as_bytes(), registry)
+            .map_err(|e| anyhow::anyhow!("Compress encode failed: {}", e))?;
 
-    Ok((
-        result.encoded,
-        result.compress_algo.as_str().to_string(),
-        result.dictionary_name,
-    ))
+        Ok((
+            result.encoded,
+            result.compress_algo.as_str().to_string(),
+            result.dictionary_name,
+        ))
+    })
 }
 
 /// Map a compression-algorithm name (as it appears in the footer) to the
@@ -355,6 +417,24 @@ fn validate_encoded_output(encoded: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
+/// Verify that an encoded body decodes back to exactly the text that was
+/// encoded.
+///
+/// `validate_encoded_output` checks that output is *safe*; this checks that
+/// it is *readable*, which is the property we actually want. Some codec
+/// pairs (as of base-d 3.0.34: `base64url`, `bioctal`, `uuencode`) emit
+/// output that is perfectly safe and does not decode back -- those sailed
+/// through validation and committed unrecoverable messages. Deliberately
+/// generic rather than a blacklist, so the next broken dictionary is caught
+/// without anyone having to find it first.
+fn validate_roundtrip(encoded: &str, footer_tag: &str, original: &str) -> Result<()> {
+    match decode_body(encoded, footer_tag) {
+        Ok(decoded) if decoded == original => Ok(()),
+        Ok(_) => bail!("roundtrip mismatch in body"),
+        Err(e) => bail!("roundtrip decode failed in body: {}", e),
+    }
+}
+
 /// Format the footer tag: `[hash_algo:title_dict|compress_algo:body_dict]`
 fn format_footer_tag(
     hash_algo: &str,
@@ -371,7 +451,8 @@ fn format_footer_tag(
 /// Encode title and body into commit parts with automatic retry on unsafe output.
 ///
 /// Loads the dictionary registry once and retries up to MAX_ENCODE_ATTEMPTS times
-/// if the encoded output contains NUL bytes or control characters. Each retry
+/// if the encoded output contains NUL bytes or control characters, or if the
+/// encoded body does not decode back to the original message. Each retry
 /// re-rolls the random dictionary selection. Failed attempts are logged to stderr
 /// with the dictionary/codec combo that produced unsafe output.
 pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit> {
@@ -403,12 +484,14 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
             }
         );
 
-        // Validate all parts for unsafe characters
-        let title_check = validate_encoded_output(&title, "title");
-        let body_check = validate_encoded_output(&body, "body");
-        let footer_check = validate_encoded_output(&footer, "footer");
+        // Validate all parts for unsafe characters, then confirm the body
+        // survives a round trip through the codec pair we just rolled.
+        let checks = validate_encoded_output(&title, "title")
+            .and(validate_encoded_output(&body, "body"))
+            .and(validate_encoded_output(&footer, "footer"))
+            .and_then(|()| validate_roundtrip(&body, &footer_tag, body_text));
 
-        if let Err(e) = title_check.and(body_check).and(footer_check) {
+        if let Err(e) = checks {
             if attempt < MAX_ENCODE_ATTEMPTS {
                 eprintln!("Tried {}: {}, retrying...", footer_tag, e);
             } else {
@@ -433,9 +516,13 @@ pub fn encode_commit(title_text: &str, body_text: &str) -> Result<EncodedCommit>
         });
     }
 
-    // All attempts failed
+    // All attempts failed. Two distinct classes land here -- unsafe output
+    // (NUL, control characters) and a body that did not survive its own
+    // round trip -- and this is the only message printed on the one path
+    // where mx refuses to commit, so it must not name just one of them. The
+    // per-attempt cause was already reported above by the retry loop.
     bail!(
-        "All {} encoding attempts produced unsafe output. Failed dictionaries: {}",
+        "All {} encoding attempts failed validation (unsafe output or round-trip mismatch). Failed dictionaries: {}",
         MAX_ENCODE_ATTEMPTS,
         failed_footers.join(", ")
     )
