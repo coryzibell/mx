@@ -692,6 +692,12 @@ impl SurrealDatabase {
         // visibility_clause always starts with "AND " (see build_visibility_filter);
         // strip_prefix is anchored and total, unlike a bare `replacen("AND", "WHERE", 1)`
         // which would also match the "AND" inside e.g. 'STANDARD' at offset 2.
+        //
+        // `None` is unreachable by construction: all three build_visibility_filter
+        // branches return `&'static str` literals starting `AND `. Four other call
+        // sites in this file depend on that same prefix invariant; this arm is the
+        // only place it's recorded -- the alternative is a panic or a silently
+        // dropped visibility filter via `unwrap_or_default()`.
         let where_clause = match visibility_clause.strip_prefix("AND ") {
             Some(rest) => format!("WHERE {}", rest),
             None => {

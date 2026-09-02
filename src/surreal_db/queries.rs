@@ -524,10 +524,12 @@ impl SurrealDatabase {
         // Delegate to the builder's targeted-update path (Issue #134). This is the
         // primary place per-id knowledge `UPDATE ... SET` statements are built.
         // Three tracked exceptions hand-write their own `UPDATE knowledge SET ...`
-        // because their shapes can't ride a per-id builder spec: the bulk multi-id
-        // activation writers `update_activations_async` and
-        // `increment_activation_count_async` (`WHERE id IN $ids`), and
-        // `reinforce_async` (read-compute-write returning a ReinforcementResult).
+        // because their shapes can't ride a per-id builder spec:
+        // `update_activations_async` (a single-id `type::thing(...)` fast path,
+        // falling back to bulk multi-id `WHERE id IN $ids` for more than one id),
+        // `increment_activation_count_async` (bulk multi-id `WHERE id IN $ids`
+        // only), and `reinforce_async` (read-compute-write returning a
+        // ReinforcementResult).
         let spec = crate::store_update::UpdateSpec {
             fields: vec![crate::store_update::FieldUpdate {
                 assignment: "summary = $set_summary".to_string(),
