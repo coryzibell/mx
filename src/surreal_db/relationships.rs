@@ -261,6 +261,69 @@ impl SurrealDatabase {
         Ok(())
     }
 
+    /// Batch-fetch tags for many entries in a single round trip.
+    ///
+    /// Review fix (N+1 hydration in embedding_chunk search, see knowledge.rs
+    /// semantic_search): hydrating chunk candidates one at a time via
+    /// `get_tags_for_entry_async` per entry means one DB round trip per
+    /// unique chunk entry_id, which can run to the thousands under the
+    /// archive-tier exclusion case. This collects tags for a whole window of
+    /// entry_ids with one query instead.
+    pub(super) async fn get_tags_for_entries_async(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if entry_ids.is_empty() {
+            return Ok(out);
+        }
+
+        let things: Vec<Thing> = entry_ids
+            .iter()
+            .map(|id| {
+                let id_part = id.strip_prefix("kn-").unwrap_or(id);
+                Thing::from(("knowledge", id_part))
+            })
+            .collect();
+
+        #[derive(Deserialize)]
+        struct TagRow {
+            entry_id: String,
+            #[serde(default)]
+            tags: Vec<String>,
+        }
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                // Both `tagged_with` and `applies_to` carry a UNIQUE composite
+                // index on (in, out). A `union` lookup over the `in` prefix of
+                // that index (what `in IN $knowledge` plans as) returns nothing,
+                // even though the bind is correct and matches the right field --
+                // `in = $one` on the same prefix works. Traversing from the
+                // record ids directly sidesteps the index question: SurrealDB
+                // resolves each entry by its key and walks the graph edge, so
+                // the batch never touches that lookup path at all.
+                "SELECT meta::id(id) AS entry_id, ->tagged_with->tag.name AS tags \
+                 FROM $knowledge",
+            )
+            .bind(("knowledge", things))
+            .await
+            .context("Failed to batch-query tags")
+        })?;
+
+        let rows: Vec<TagRow> = response
+            .take(0)
+            .context("Failed to deserialize batch tag rows")?;
+        for row in rows {
+            out.entry(format!("kn-{}", row.entry_id))
+                .or_default()
+                .extend(row.tags);
+        }
+
+        Ok(out)
+    }
+
     /// Get applicability for an entry
     pub fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
         Self::runtime().block_on(self.get_applicability_for_entry_async(entry_id))
@@ -291,5 +354,61 @@ impl SurrealDatabase {
     pub fn set_applicability_for_entry(&self, _entry_id: &str, _ids: &[String]) -> Result<()> {
         // Applicability is managed via upsert_knowledge, this is a no-op for compatibility
         Ok(())
+    }
+
+    /// Batch-fetch applicability for many entries in a single round trip.
+    /// See `get_tags_for_entries_async` for why this exists.
+    pub(super) async fn get_applicability_for_entries_async(
+        &self,
+        entry_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        if entry_ids.is_empty() {
+            return Ok(out);
+        }
+
+        let things: Vec<Thing> = entry_ids
+            .iter()
+            .map(|id| {
+                let id_part = id.strip_prefix("kn-").unwrap_or(id);
+                Thing::from(("knowledge", id_part))
+            })
+            .collect();
+
+        #[derive(Deserialize)]
+        struct ApplicabilityRow {
+            entry_id: String,
+            #[serde(default)]
+            applies_ids: Vec<String>,
+        }
+
+        let mut response = with_db!(self, db, {
+            db.query(
+                // Same index shape as the tag query above; see the comment
+                // there. `applicability_type` has no `name` field -- its
+                // record id *is* its identity -- so the traversal target is
+                // `.id`, and `meta::id()` needs to run per array element
+                // rather than on the array as a whole (it does not
+                // vectorize), hence the explicit `array::map`.
+                "SELECT meta::id(id) AS entry_id, \
+                        array::map(->applies_to->applicability_type.id, |$v| meta::id($v)) AS applies_ids \
+                 FROM $knowledge",
+            )
+            .bind(("knowledge", things))
+            .await
+            .context("Failed to batch-query applicability")
+        })?;
+
+        let rows: Vec<ApplicabilityRow> = response
+            .take(0)
+            .context("Failed to deserialize batch applicability rows")?;
+        for row in rows {
+            out.entry(format!("kn-{}", row.entry_id))
+                .or_default()
+                .extend(row.applies_ids);
+        }
+
+        Ok(out)
     }
 }
