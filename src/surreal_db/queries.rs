@@ -445,7 +445,13 @@ impl SurrealDatabase {
         // matching zero rows -- same hazard as get_knowledge_async's guard.
         // An empty single id (e.g. ids == [""], or ["kn-"] after the strip
         // above) must not reach type::thing; preserve the old no-op Ok(())
-        // contract instead.
+        // contract instead -- pinned by
+        // test_update_activations_single_empty_id_is_noop in tests.rs.
+        // Separately, a real (non-empty) id with no matching row is itself a
+        // no-op under this path: `UPDATE type::thing(...)` against a miss
+        // does not error and does not create a phantom row, with or without
+        // schema applied -- covered by the miss-case assertion in
+        // test_update_activations_all_digit_id_single_and_multi_path.
         if let [single_id] = clean_ids.as_slice() {
             if single_id.is_empty() {
                 return Ok(());

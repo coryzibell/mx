@@ -694,10 +694,11 @@ impl SurrealDatabase {
         // which would also match the "AND" inside e.g. 'STANDARD' at offset 2.
         //
         // `None` is unreachable by construction: all three build_visibility_filter
-        // branches return `&'static str` literals starting `AND `. Four other call
-        // sites in this file depend on that same prefix invariant; this arm is the
-        // only place it's recorded -- the alternative is a panic or a silently
-        // dropped visibility filter via `unwrap_or_default()`.
+        // branches build a `String` starting `AND `. Four other call sites in
+        // this file -- and ten more in queries.rs (fifteen repo-wide) -- depend
+        // on that same prefix invariant; this arm is the only place it's
+        // recorded -- the alternative is a panic or a silently dropped
+        // visibility filter via `unwrap_or_default()`.
         let where_clause = match visibility_clause.strip_prefix("AND ") {
             Some(rest) => format!("WHERE {}", rest),
             None => {

@@ -281,15 +281,19 @@ fn test_id_normalization_empty_suffix() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let ctx = crate::store::AgentContext::public_only();
 
-    // Seed a real row. This does NOT make the assertion discriminate "guard
-    // returned None" from "table happens to be empty" -- no empty id can ever
-    // match "kn-empty-suffix-control" under either implementation, seeded or
-    // not, so the seed carries no discriminating weight. What actually
-    // carries this test is `result.is_ok()` together with `is_none()` below:
-    // `type::thing('knowledge', '')` errors rather than returning a row, so a
-    // panic-free `Ok` already proves the empty-id guard fired before that
-    // query ran; `is_none()` then rules out an accidental match. The seed
-    // just keeps the store non-trivial.
+    // Seed a real row. The seed does not discriminate "guard returned None"
+    // from "table happens to be empty" for THIS assertion specifically -- no
+    // empty id can ever match "kn-empty-suffix-control" under either
+    // implementation, seeded or not, so an empty table would pass this exact
+    // case just as cleanly. What carries that discrimination is
+    // `result.is_ok()` together with `is_none()` below: `type::thing('knowledge',
+    // '')` errors rather than returning a row, so a panic-free `Ok` already
+    // proves the empty-id guard fired before that query ran; `is_none()` then
+    // rules out an accidental match. The seed earns its place on a different
+    // axis: it guards against a match-everything degenerate. If `get` ever
+    // stopped filtering by id and returned an arbitrary row instead, an empty
+    // table would still yield `None` and hide that bug entirely -- a seeded
+    // row is what would turn it into a visible false match.
     let entry = make_test_entry("kn-empty-suffix-control", 5, 0.5);
     db.upsert_knowledge(&entry).unwrap();
 
@@ -3041,13 +3045,32 @@ fn test_cold_upgrade_apply_schema_heals_stranded_legacy_rows() {
     // test was originally written against -- so a second call with a
     // two-element slice is needed to keep the multi-id path's only #360
     // regression coverage alive.
+    // `Ok(())` alone doesn't discriminate a real write from a silent
+    // zero-match no-op (`UPDATE ... WHERE id IN $ids` against no matching
+    // rows also returns `Ok(())`), so assert the count each call actually
+    // moved, not just that neither call errored.
     db.update_activations(&["kn-legacy360".to_string()])
         .expect("ordinary write to a healed legacy row must succeed (Issue #360)");
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "activation_count"),
+        serde_json::json!(1),
+        "single-id fast path must have actually activated the row, not just returned Ok"
+    );
     db.update_activations(&["kn-legacy360".to_string(), "kn-legacy360b".to_string()])
         .expect(
             "ordinary multi-id write (WHERE id IN $ids) to healed legacy rows \
              must succeed (Issue #360)",
         );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "activation_count"),
+        serde_json::json!(2),
+        "multi-id path must have activated legacy360 again, not just returned Ok"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360b", "activation_count"),
+        serde_json::json!(1),
+        "multi-id path must have activated legacy360b, not just returned Ok"
+    );
 }
 
 #[test]

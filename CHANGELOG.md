@@ -49,6 +49,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   processes initialize a fresh store concurrently (surfaced by the integration
   test suite under parallel load). No change on the happy path — retries only
   run on a contended init.
+- Single-id knowledge lookups now resolve their target as a direct
+  `type::thing('knowledge', $id)` record reference in the `FROM`/`UPDATE`
+  position, instead of a table scan filtered by `WHERE meta::id(id) = $id`
+  (record lookup, backing `mx memory show`) or a one-element `WHERE id IN
+  $ids` (the activation-count bump that accompanies it). Contracts are
+  unchanged: an empty id still resolves to `Ok(None)`/`Ok(())` rather than
+  erroring, and an id with no matching row is still a no-op. Part of #415 --
+  this is the record-lookup half only. `list`'s separate per-row hydration
+  cost (two additional queries per hydrated row, scaling with table size
+  regardless of `--limit`) is a known, still-open cost this PR does not fix.
 
 ### Changed
 - `mx log` and `mx show` no longer silently print the raw encoded blob when a

@@ -41,12 +41,12 @@
 //!
 //! ISOLATION
 //! ---------
-//! `MX_SURREAL_MODE=embedded` is forced alongside `MX_SURREAL_ROOT`. Setting the
-//! root alone is NOT isolation: with an ambient `MX_SURREAL_MODE=network` the
-//! root is ignored entirely and the binary talks to `MX_SURREAL_URL`. That is the
-//! PR #401 "phantom broken main" failure, and it is still live in
-//! `tests/trigger_check.rs`, which sets `MX_SURREAL_ROOT` without the mode and
-//! documents itself as isolated.
+//! `MX_SURREAL_MODE=embedded` is forced alongside `MX_SURREAL_ROOT`, via
+//! `tests/common::isolate` (see `mx_inner` below). Setting the root alone is
+//! NOT isolation: with an ambient `MX_SURREAL_MODE=network` the root is
+//! ignored entirely and the binary talks to `MX_SURREAL_URL`. That is the
+//! PR #401 "phantom broken main" failure; `common::isolate` is this repo's
+//! shared fix for it, now used by this file and five others.
 //!
 //! WHY THERE IS NO `show` BENCH HERE
 //! ----------------------------------
@@ -66,7 +66,7 @@
 //! contaminates a raw N->2N ratio on ANY command, not only `list`. Measured
 //! directly: `mx memory stats` -- which never calls `value_to_knowledge_entry`
 //! and carries none of the 2N+1 defect -- still shows its own raw ratio
-//! consistently above 1.0 (roughly 1.4-1.8 across N=300..2000 in repeated
+//! consistently above 1.0 (roughly 1.3-1.8 across N=300..4000 in repeated
 //! runs here), so a raw `< 1.5` bound on `list` fails on store-open scaling
 //! alone, on a broken AND a correctly-fixed `list` alike. Raising N does not
 //! fix this -- it was measured making the raw signal worse, not better,
@@ -80,22 +80,47 @@
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
-/// Rows to seed. Small by default so the test is runnable; the reference graph
-/// this was calibrated against holds 8130. Raise with `MX_BENCH_ROWS`.
+/// The N this file's assertion is calibrated against. The corrected ratio
+/// decays monotonically toward 1.0 as N rises (see BASELINE CORRECTION
+/// above), so a larger N makes the bound easier to pass on an UNFIXED
+/// `list`, not harder -- raising N moves toward a false green, not a
+/// stronger check. 300 was chosen because the margin between the
+/// defect-state ratio and the assertion bound clears the measured
+/// between-environment noise floor by 2-3x at this N; it shrinks to roughly
+/// 1x (a coin flip) by N=2000 and inverts (false green) by N=4000. Do not
+/// raise this to chase a "more realistic" table size; a bigger store makes
+/// the instrument worse, not better.
+const CALIBRATED_N: usize = 300;
+
+/// Rows to seed. Defaults to `CALIBRATED_N`. `MX_BENCH_ROWS` overrides it for
+/// exploration, but the assertion below only fires at `CALIBRATED_N` -- see
+/// `bounded_read_cost_does_not_scale_with_table_size`.
 fn bench_rows() -> usize {
-    std::env::var("MX_BENCH_ROWS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2000)
+    match std::env::var("MX_BENCH_ROWS") {
+        Err(_) => CALIBRATED_N,
+        Ok(v) => v.parse().unwrap_or_else(|e| {
+            panic!(
+                "MX_BENCH_ROWS={v:?} is not a valid usize ({e}); a silent \
+                 fallback to the default here would hide a typo'd row count \
+                 behind a bench that quietly ran the wrong N"
+            )
+        }),
+    }
 }
 
 /// Spawn `mx` against a store that is provably local.
 ///
-/// Both `MX_SURREAL_MODE` and `MX_SURREAL_ROOT` are required. `MX_SKIP_SCHEMA`
-/// is deliberately NOT set: schema application is part of what a real invocation
-/// pays, and suppressing it here would hide it.
+/// Isolation is delegated to `common::isolate`: it forces embedded mode with
+/// an explicit `MX_SURREAL_ROOT`/`MX_HOME`, and -- unlike this file's old
+/// hand-rolled version -- strips every ambient `MX_SURREAL_*` plus
+/// `MX_MEMORY_PATH`/`MX_MEMORY_BACKEND` that could otherwise redirect the
+/// child at a shared or production store. `MX_SKIP_SCHEMA` is deliberately
+/// NOT set here: schema application is part of what a real invocation pays,
+/// and suppressing it here would hide it.
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
     mx_inner(dir, args, false)
 }
@@ -115,14 +140,11 @@ fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
 /// what varies with table size.
 fn mx_inner(dir: &TempDir, args: &[&str], skip_schema: bool) -> std::process::Output {
     let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
     cmd.args(args)
         .env("MX_CURRENT_AGENT", "bench")
-        .env("MX_SURREAL_MODE", "embedded")
-        .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
-        .env("MX_HOME", dir.path())
-        // Isolation is about MX_SKIP_SCHEMA specifically, not the store
-        // (embedded + MX_SURREAL_ROOT/MX_HOME already make the store
-        // authoritative regardless of ambient env). Without this, an
+        // Isolation of the STORE is common::isolate's job (above). This is
+        // about MX_SKIP_SCHEMA specifically: without stripping it, an
         // ambient MX_SKIP_SCHEMA=1 in the invoking shell would silently
         // defeat the untimed/timed distinction skip_schema exists to draw.
         .env_remove("MX_SKIP_SCHEMA")
@@ -209,7 +231,9 @@ fn median_ms(
 fn seed(dir: &TempDir, jsonl: &str, label: &str) {
     let path = dir.path().join(format!("{label}.jsonl"));
     std::fs::write(&path, jsonl).unwrap();
-    let out = Command::new(MX)
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
+    let out = cmd
         .args([
             "memory",
             "add-batch",
@@ -218,9 +242,6 @@ fn seed(dir: &TempDir, jsonl: &str, label: &str) {
             "--no-embed",
         ])
         .env("MX_CURRENT_AGENT", "bench")
-        .env("MX_SURREAL_MODE", "embedded")
-        .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
-        .env("MX_HOME", dir.path())
         // Not under measurement: keeps the seed off the auto-anchor path and off
         // the ONNX model load.
         .env("MX_SKIP_WRITE_ANCHOR", "1")
@@ -264,8 +285,8 @@ fn assert_row_count(dir: &TempDir, want: usize) {
 /// of `list --limit 1` is contaminated: embedded-mode store-open replay (see
 /// ISOLATION / WHY THERE IS NO `show` BENCH above) itself scales with table
 /// size, so it inflates -- or on a different machine could deflate -- the raw
-/// ratio independent of anything the query layer does. A hydration-free
-/// control makes this concrete: `mx memory stats` never calls
+/// ratio independent of anything the query layer does. A control without
+/// per-row hydration makes this concrete: `mx memory stats` never calls
 /// `value_to_knowledge_entry` and carries none of the 2N+1 defect, yet its own
 /// raw N->2N ratio was measured coming in above 1.5 at this file's default
 /// N -- a perfectly-fixed `list` would fail a raw `< 1.5` bound on store-open
@@ -275,41 +296,44 @@ fn assert_row_count(dir: &TempDir, want: usize) {
 /// So this test measures BOTH `list --limit 1` and the `stats` control at the
 /// same N and 2N, and asserts on `list_ratio / baseline_ratio`: dividing out
 /// the store-open cost that both commands pay leaves only what varies with
-/// hydration. Measured directly (this PR, embedded mode, N in 300..2000, 9
-/// trials/point, multiple replicates per N): the corrected ratio holds in a
-/// tight ~1.08-1.27 band today -- NOT the ~2.0 a naive read of the raw ratio
-/// alone would suggest. `stats` is not perfectly hydration-free either (it
-/// runs `count()` plus one count-by-category query per category, its own
-/// real per-row scan cost), so dividing by it removes more than pure
-/// store-open cost -- correctly so: the residual band is closer to the TRUE
-/// isolated cost of the 2N+1 defect once everything both commands share is
-/// divided out. `--limit` is applied by `apply_entry_filters` in
-/// `src/helpers.rs`, as `entries.truncate(n)` AFTER every row in the table has
-/// been hydrated through `value_to_knowledge_entry`'s two per-row edge
-/// queries. This PR does not touch that path -- fixing it needs batch
-/// hydration, which needs PR #401's primitive, which isn't on `main` yet.
-/// Known-remaining defect, not a regression this PR introduced. Once batch
-/// hydration lands, the corrected ratio should converge on ~1.0 (list's cost
-/// profile then matches `stats`'s: store-open plus a small bounded query) and
-/// this assertion should PASS -- that is the point of correcting the metric:
-/// an instrument that can never go green on a correct fix isn't an
-/// instrument.
+/// hydration. Measured directly (this PR, embedded mode, N=300 -- this file's
+/// calibrated default -- 9 trials/point, multiple replicates): the corrected
+/// ratio holds in a ~1.17-1.38 band today across two environments -- NOT the
+/// ~2.0 a naive read of the raw ratio alone would suggest, and thinner than it
+/// looks: `stats` is not hydration-free (it runs `count()` plus one
+/// count-by-category query per category -- ~9 O(N) scans of its own, real
+/// per-row cost), so dividing by it removes more than pure store-open cost --
+/// correctly so: the residual band is closer to the TRUE isolated cost of the
+/// 2N+1 defect once everything both commands share is divided out. `--limit`
+/// is applied by `apply_entry_filters` in `src/helpers.rs`, as
+/// `entries.truncate(n)` AFTER every row in the table has been hydrated
+/// through `value_to_knowledge_entry`'s two per-row edge queries. This PR does
+/// not touch that path -- fixing it needs batch hydration, which needs PR
+/// #401's primitive, which isn't on `main` yet. Known-remaining defect, not a
+/// regression this PR introduced. Once batch hydration lands, the corrected
+/// ratio should converge on ~1.0 (list's cost profile then matches `stats`'s:
+/// store-open plus a small bounded query) and this assertion should PASS --
+/// that is the point of correcting the metric: an instrument that can never
+/// go green on a correct fix isn't an instrument.
 ///
-/// The margin this leaves is real but genuinely thin (~1.08 defect-state vs
-/// ~1.0 fixed-state at this file's default N=2000), not the generous ~2x gap
-/// the raw ratio implied, and it is measured on a machine sharing CPU with
-/// other concurrent builds -- treat this bench as informational, not a hard
-/// CI gate (it is `#[ignore]`d for exactly that reason).
+/// The margin this leaves is real but genuinely thin (~1.17-1.38 defect-state
+/// vs ~1.0 fixed-state at this file's calibrated N=300), not the generous ~2x
+/// gap the raw ratio implied -- treat this bench as informational, not a hard
+/// CI gate. It is `#[ignore]`d because it is an opt-in wall-clock benchmark,
+/// never part of a normal `cargo test` run (see the file header) -- a
+/// separate reason from this margin, not the same one.
 ///
 /// A ratio is the right shape here: it is dimensionless, so it does not encode
 /// this machine's speed. The bound is deliberately loose -- this catches "we
 /// went back to O(table)", not a 15% drift.
 #[test]
 #[ignore = "benchmark: opt in with --ignored. Asserts a CORRECTED ratio \
-            (list_ratio / hydration-free-baseline_ratio); measured directly \
-            it holds ~1.08-1.27 today from the known-remaining 2N+1 hydration \
-            defect (needs PR #401's batch-hydration primitive -- not a bug in \
-            this PR, do not file one), and should converge on ~1.0, and PASS, \
+            (list_ratio / baseline_ratio, where baseline is `mx memory \
+            stats` -- no per-row hydration, but not hydration-free either); \
+            measured directly at this file's calibrated N=300 it holds \
+            ~1.17-1.38 today from the known-remaining 2N+1 hydration defect \
+            (needs PR #401's batch-hydration primitive -- not a bug in this \
+            PR, do not file one), and should converge on ~1.0, and PASS, \
             once that lands."]
 fn bounded_read_cost_does_not_scale_with_table_size() {
     let dir = TempDir::new().unwrap();
@@ -326,23 +350,59 @@ fn bounded_read_cost_does_not_scale_with_table_size() {
     let at_2n = median_ms(&dir, trials, &["memory", "list", "--limit", "1"], timed_run);
     let baseline_at_2n = median_ms(&dir, trials, &["memory", "stats"], timed_run);
 
-    let raw_ratio = at_2n as f64 / at_n.max(1) as f64;
-    let baseline_ratio = baseline_at_2n as f64 / baseline_at_n.max(1) as f64;
-    let corrected_ratio = raw_ratio / baseline_ratio.max(f64::MIN_POSITIVE);
+    // A zero-millisecond measurement means the bench measured nothing, not
+    // that the operation was free. Left unguarded, a zero numerator collapses
+    // `raw_ratio` (and therefore `corrected_ratio`) to 0.0, which trivially
+    // clears the `< 1.05` bound below -- a bench that measured nothing would
+    // report success. Fail loudly instead of computing a ratio from it.
+    for (label, ms) in [
+        ("at_n", at_n),
+        ("baseline_at_n", baseline_at_n),
+        ("at_2n", at_2n),
+        ("baseline_at_2n", baseline_at_2n),
+    ] {
+        assert!(
+            ms > 0,
+            "{label} measured 0ms -- this bench measured nothing, not that the \
+             operation is instant; investigate before trusting any ratio \
+             computed from this run"
+        );
+    }
+
+    let raw_ratio = at_2n as f64 / at_n as f64;
+    let baseline_ratio = baseline_at_2n as f64 / baseline_at_n as f64;
+    let corrected_ratio = raw_ratio / baseline_ratio;
 
     // Reported unconditionally: a benchmark that only speaks when it fails is a
     // benchmark nobody can read the trend out of. Raw AND corrected numbers,
     // pass or fail, every run.
     println!(
         "list --limit 1: {n} rows -> {at_n} ms; {} rows -> {at_2n} ms; raw ratio {:.3}\n\
-         baseline (`memory stats`, hydration-free): {n} rows -> {baseline_at_n} ms; \
-         {} rows -> {baseline_at_2n} ms; baseline ratio {:.3}\n\
+         baseline (`memory stats` -- no per-row hydration, but ~9 O(N) scans of \
+         its own): {n} rows -> {baseline_at_n} ms; {} rows -> {baseline_at_2n} ms; \
+         baseline ratio {:.3}\n\
          corrected ratio (raw / baseline): {corrected_ratio:.3}",
         2 * n,
         raw_ratio,
         2 * n,
         baseline_ratio,
     );
+
+    // Gated on the calibrated N. The corrected ratio decays monotonically
+    // toward 1.0 as N rises (see CALIBRATED_N and BASELINE CORRECTION above),
+    // so asserting this bound at an arbitrary N would go GREEN on a genuinely
+    // unfixed `list` simply by raising N far enough -- the exact false green
+    // this test exists to prevent, reintroduced through the N knob instead of
+    // the metric. Only the calibrated N gets a real assertion; any other N
+    // prints its numbers for exploration and is skipped.
+    if n != CALIBRATED_N {
+        println!(
+            "MX_BENCH_ROWS={n} is not the calibrated N ({CALIBRATED_N}); skipping \
+             the bound assertion. A pass or fail at this N is not signal -- rerun \
+             with MX_BENCH_ROWS unset (or ={CALIBRATED_N}) for the real check."
+        );
+        return;
+    }
 
     assert!(
         corrected_ratio < 1.05,
