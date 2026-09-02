@@ -280,11 +280,9 @@ impl SurrealDatabase {
                 .context("Failed to query applicability")
         })?;
 
-        let applicability_raw: Vec<Thing> = app_response.take(0).unwrap_or_default();
-        let applicability: Vec<String> = applicability_raw
-            .into_iter()
-            .map(|t| t.id.to_string())
-            .collect();
+        let applicability: Vec<String> = app_response
+            .take(0)
+            .context("Failed to deserialize applicability")?;
 
         Ok(applicability)
     }

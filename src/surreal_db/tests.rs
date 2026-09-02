@@ -3300,3 +3300,57 @@ fn off_dim_row_does_not_abort_cosine_scan() {
         "entry-level scored search must skip the off-dim row; got {scored_ids:?}"
     );
 }
+
+#[test]
+fn test_get_applicability_for_entry_returns_written_targets() {
+    // Regression: the single-entry read ran `SELECT VALUE meta::id(out)` (a STRING)
+    // but deserialized into Vec<Thing>, and `.unwrap_or_default()` swallowed the
+    // resulting "expected an object-like struct named ...Thing, found \"backend\""
+    // error, so every entry reported empty applicability.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-applies-read", 5, 0.01);
+    entry.applicability = vec!["backend".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let applicability = db
+        .get_applicability_for_entry("kn-applies-read")
+        .expect("applicability read must not fail");
+
+    assert_eq!(
+        applicability,
+        vec!["backend".to_string()],
+        "written applies_to edge must be read back"
+    );
+}
+
+#[test]
+fn test_search_knowledge_returns_applicability() {
+    // Regression (twin of the single-entry read): `value_to_knowledge_entry`, which
+    // every list/search path funnels through, ran the same `SELECT VALUE meta::id(out)`
+    // string query into a Vec<Thing> and swallowed the deserialization error, so
+    // entries came back from list/search with empty applicability.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-applies-search", 5, 0.01);
+    entry.title = "Applicability Search Target".to_string();
+    entry.applicability = vec!["backend".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
+    let results = db
+        .search_knowledge("Applicability Search Target", &ctx, &filter)
+        .expect("search must not fail");
+
+    let found = results
+        .iter()
+        .find(|e| e.id == "kn-applies-search")
+        .expect("upserted entry must be found by search");
+
+    assert_eq!(
+        found.applicability,
+        vec!["backend".to_string()],
+        "search results must carry the written applies_to edge"
+    );
+}
