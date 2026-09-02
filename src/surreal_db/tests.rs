@@ -281,11 +281,33 @@ fn test_id_normalization_empty_suffix() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let ctx = crate::store::AgentContext::public_only();
 
+    // Seed a real row. The seed does not discriminate "guard returned None"
+    // from "table happens to be empty" for THIS assertion specifically -- no
+    // empty id can ever match "kn-empty-suffix-control" under either
+    // implementation, seeded or not, so an empty table would pass this exact
+    // case just as cleanly. What carries that discrimination is
+    // `result.is_ok()` together with `is_none()` below: `type::thing('knowledge',
+    // '')` errors rather than returning a row, so a panic-free `Ok` already
+    // proves the empty-id guard fired before that query ran; `is_none()` then
+    // rules out an accidental match. The seed earns its place on a different
+    // axis: it guards against a match-everything degenerate. If `get` ever
+    // stopped filtering by id and returned an arbitrary row instead, an empty
+    // table would still yield `None` and hide that bug entirely -- a seeded
+    // row is what would turn it into a visible false match.
+    let entry = make_test_entry("kn-empty-suffix-control", 5, 0.5);
+    db.upsert_knowledge(&entry).unwrap();
+
     // Try to get an entry with empty suffix
     let result = db.get("kn-", &ctx);
 
-    // Should handle gracefully (likely return None, not panic)
+    // Pinned contract (readpath perf change): `type::thing('knowledge', '')`
+    // errors rather than matching zero rows, so get_knowledge_async guards
+    // the empty id explicitly and returns Ok(None) -- same as it always has.
     assert!(result.is_ok(), "Empty suffix should not panic");
+    assert!(
+        result.unwrap().is_none(),
+        "Empty suffix must resolve to Ok(None), not an error or a match"
+    );
 }
 
 #[test]
@@ -2422,6 +2444,97 @@ fn test_search_select_no_results_is_noop() {
     );
 }
 
+#[test]
+fn test_update_activations_single_empty_id_is_noop() {
+    // The single-id fast path uses `type::thing('knowledge', $id)`, which
+    // errors on an empty id part rather than matching zero rows -- same
+    // hazard as get_knowledge_async's empty-id guard (see
+    // test_id_normalization_empty_suffix). A one-element slice of "" (or
+    // "kn-", which strips to "") must not reach that query; it must stay a
+    // no-op returning Ok(()), matching the multi-id branch's pre-existing
+    // behavior for an id that matches no row.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let result = db.update_activations(&["".to_string()]);
+    assert!(result.is_ok(), "single empty id must not error: {result:?}");
+
+    let result = db.update_activations(&["kn-".to_string()]);
+    assert!(
+        result.is_ok(),
+        "single 'kn-' id (strips to empty) must not error: {result:?}"
+    );
+}
+
+#[test]
+fn test_update_activations_all_digit_id_single_and_multi_path() {
+    // Regression guard on an established invariant, not the resolution of an
+    // open question: it was measured directly (surrealdb 2.6.5) that an
+    // all-digit string bind is NOT coerced to `Id::Number` by either query
+    // form here. The single-id fast path's `type::thing('knowledge', $id)`
+    // and the multi-id path's Rust-side `Thing::from(("knowledge",
+    // id.as_str()))` are both string-typed the same way the OLD
+    // `meta::id(id) = $id` form was, so an all-digit id has never had a
+    // domain difference to divergence on between these forms. This test
+    // pins that non-divergence across both branches so it stays true, not
+    // because either branch was ever observed to disagree.
+    //
+    // All-digit is the one plausible divergence point: `generate_id`
+    // (src/knowledge.rs) hex-encodes a blake3 hash into 8 base16 characters,
+    // each a digit with probability 10/16, so an id that happens to be all
+    // digits (~2.3% of generated ids, 0.625^8) is the only shape a numeric
+    // vs. string `Id` coercion could plausibly show up on.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let entry_a = make_test_entry("kn-12345678", 5, 0.0);
+    db.upsert_knowledge(&entry_a).unwrap();
+    let entry_b = make_test_entry("kn-87654321", 5, 0.0);
+    db.upsert_knowledge(&entry_b).unwrap();
+
+    // Single-element slice: SurrealQL-side `type::thing('knowledge', $id)`.
+    db.update_activations(&["kn-12345678".to_string()])
+        .expect("single all-digit id must not error");
+    let got_a = db
+        .get("kn-12345678", &ctx)
+        .unwrap()
+        .expect("entry must still exist");
+    assert_eq!(
+        got_a.activation_count, 1,
+        "single-id fast path must activate the all-digit id"
+    );
+
+    // Two-element slice: Rust-side `Thing::from(("knowledge", id.as_str()))`,
+    // `WHERE id IN $ids`.
+    db.update_activations(&["kn-12345678".to_string(), "kn-87654321".to_string()])
+        .expect("multi all-digit id must not error");
+    let got_a2 = db
+        .get("kn-12345678", &ctx)
+        .unwrap()
+        .expect("entry must still exist");
+    let got_b = db
+        .get("kn-87654321", &ctx)
+        .unwrap()
+        .expect("entry must still exist");
+    assert_eq!(
+        got_a2.activation_count, 2,
+        "multi-id path must activate both all-digit ids"
+    );
+    assert_eq!(
+        got_b.activation_count, 1,
+        "multi-id path must activate both all-digit ids"
+    );
+
+    // Ok(())-on-miss: a real, all-digit, single id with NO matching row must
+    // not error. This is distinct from test_update_activations_single_empty_id_is_noop
+    // above, which pins the empty-id guard specifically; this pins the
+    // ordinary "one id, zero matching rows" case for the fast path.
+    let result = db.update_activations(&["kn-99999999".to_string()]);
+    assert!(
+        result.is_ok(),
+        "single all-digit id with no matching row must be Ok(()), not an error: {result:?}"
+    );
+}
+
 // =========================================================================
 // CHUNKED EMBEDDING SEARCH TEST (PR #348)
 // =========================================================================
@@ -2848,8 +2961,14 @@ fn test_cold_upgrade_apply_schema_heals_stranded_legacy_rows() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let entry = make_test_entry("kn-legacy360", 5, 0.0);
     db.upsert_knowledge(&entry).unwrap();
+    // A second stranded row so ASSERT (b) below can also exercise
+    // update_activations' multi-id `WHERE id IN $ids` path, not just its
+    // single-id fast path -- see the comment at that assertion.
+    let entry_b = make_test_entry("kn-legacy360b", 5, 0.0);
+    db.upsert_knowledge(&entry_b).unwrap();
 
     strand_cold_upgrade_fields(&db, "knowledge:legacy360");
+    strand_cold_upgrade_fields(&db, "knowledge:legacy360b");
 
     // Precondition: the fields are genuinely NONE on disk (null), exactly the
     // production stranded state.
@@ -2920,8 +3039,38 @@ fn test_cold_upgrade_apply_schema_heals_stranded_legacy_rows() {
     // ASSERT (b): the EXACT production failure mode — an ordinary subsequent
     // write to the (formerly) legacy row must succeed. update_activations does
     // a partial `SET`, which still triggers SCHEMAFULL whole-record validation.
+    //
+    // A single-element slice now drives update_activations' single-id
+    // `type::thing(...)` fast path, not the `WHERE id IN $ids` query this
+    // test was originally written against -- so a second call with a
+    // two-element slice is needed to keep the multi-id path's only #360
+    // regression coverage alive.
+    // `Ok(())` alone doesn't discriminate a real write from a silent
+    // zero-match no-op (`UPDATE ... WHERE id IN $ids` against no matching
+    // rows also returns `Ok(())`), so assert the count each call actually
+    // moved, not just that neither call errored.
     db.update_activations(&["kn-legacy360".to_string()])
         .expect("ordinary write to a healed legacy row must succeed (Issue #360)");
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "activation_count"),
+        serde_json::json!(1),
+        "single-id fast path must have actually activated the row, not just returned Ok"
+    );
+    db.update_activations(&["kn-legacy360".to_string(), "kn-legacy360b".to_string()])
+        .expect(
+            "ordinary multi-id write (WHERE id IN $ids) to healed legacy rows \
+             must succeed (Issue #360)",
+        );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360", "activation_count"),
+        serde_json::json!(2),
+        "multi-id path must have activated legacy360 again, not just returned Ok"
+    );
+    assert_eq!(
+        raw_field(&db, "knowledge:legacy360b", "activation_count"),
+        serde_json::json!(1),
+        "multi-id path must have activated legacy360b, not just returned Ok"
+    );
 }
 
 #[test]
@@ -2967,6 +3116,11 @@ fn test_cold_upgrade_apply_schema_idempotent_on_healthy_graph() {
         raw_field(&db, "knowledge:healthy360", "decay_rate"),
         serde_json::json!(0.0)
     );
+    // A single-element slice drives update_activations' single-id
+    // `type::thing(...)` fast path here, not the `WHERE id IN $ids` query
+    // this test was originally written against. Multi-id coverage for the
+    // #360 case is kept alive by the two-element assertion in
+    // test_cold_upgrade_apply_schema_heals_stranded_legacy_rows above.
     db.update_activations(&["kn-healthy360".to_string()])
         .expect("ordinary write after idempotent re-apply must succeed");
 }
