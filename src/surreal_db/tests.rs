@@ -2399,6 +2399,111 @@ fn test_search_select_activates_results() {
 }
 
 #[test]
+fn test_search_exclude_tags_drops_archived_keyword_match() {
+    // W447 rider, keyword-search path: `mx memory search <q> --exclude-tags
+    // 'tier/'` must omit a tier/-tagged entry that otherwise matches the
+    // full-text query, while an untagged match with the same query survives.
+    // Keyword search issues no DB-level LIMIT, so exclusion lives entirely in
+    // apply_entry_filters (the same merge point `list` uses) — this test
+    // exercises that real merge point end-to-end, not just the pure helper.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut archived = make_test_entry("kn-search-archived", 5, 0.0);
+    archived.title = "widget gadget archived".to_string();
+    archived.body = Some("unique widget content, archived tier".to_string());
+    archived.tags = vec!["tier/archived".to_string()];
+    db.upsert_knowledge(&archived).unwrap();
+
+    let mut live = make_test_entry("kn-search-live", 5, 0.0);
+    live.title = "widget gadget live".to_string();
+    live.body = Some("unique widget content, still live".to_string());
+    db.upsert_knowledge(&live).unwrap();
+
+    let db_filter = crate::store::KnowledgeFilter::default();
+    let raw_results = db.search("widget", &ctx, &db_filter).unwrap();
+    let raw_ids: Vec<&str> = raw_results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        raw_ids.contains(&"kn-search-archived") && raw_ids.contains(&"kn-search-live"),
+        "fixture sanity check failed: both entries should match 'widget' \
+         before exclusion is applied, got {raw_ids:?}"
+    );
+
+    let entry_filter = crate::cli::EntryFilter {
+        exclude_tags: Some("tier/".to_string()),
+        ..Default::default()
+    };
+    let filtered = crate::helpers::apply_entry_filters(raw_results, &entry_filter);
+    let filtered_ids: Vec<&str> = filtered.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        !filtered_ids.contains(&"kn-search-archived"),
+        "tier/archived entry must be dropped from keyword search results; got {filtered_ids:?}"
+    );
+    assert!(
+        filtered_ids.contains(&"kn-search-live"),
+        "the untagged match must survive exclusion; got {filtered_ids:?}"
+    );
+}
+
+#[test]
+fn keyword_search_exclude_survives_past_hypothetical_limit() {
+    // Landmine test (report finding, handlers/memory.rs:495 /
+    // knowledge.rs:846): `search_knowledge_async` currently issues NO
+    // DB-level LIMIT, which is the ONLY reason `exclude_tag_prefixes` can be
+    // left unwired there while `apply_entry_filters` stays exact. If a future
+    // engineer adds a LIMIT to that query (natural for a growing store),
+    // this test catches it two ways: (1) the raw result count must equal
+    // every seeded matching row -- a LIMIT smaller than that count shrinks
+    // this assertion immediately, regardless of row ordering; and (2) the
+    // live entry (seeded last, so it would fall past any hypothetical small
+    // LIMIT window under natural insertion order) must still survive
+    // exclusion + truncation to the final output.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    const N_ARCHIVED: usize = 50;
+    for i in 0..N_ARCHIVED {
+        let mut e = make_test_entry(&format!("kn-landmine-archived-{i:03}"), 5, 0.0);
+        e.title = "widget landmine archived".to_string();
+        e.body = Some("unique widget landmine content, archived tier".to_string());
+        e.tags = vec!["tier/archived".to_string()];
+        db.upsert_knowledge(&e).unwrap();
+    }
+
+    let mut live = make_test_entry("kn-landmine-live", 5, 0.0);
+    live.title = "widget landmine live".to_string();
+    live.body = Some("unique widget landmine content, still live".to_string());
+    db.upsert_knowledge(&live).unwrap();
+
+    let db_filter = crate::store::KnowledgeFilter::default();
+    let raw_results = db.search("widget landmine", &ctx, &db_filter).unwrap();
+    assert_eq!(
+        raw_results.len(),
+        N_ARCHIVED + 1,
+        "search_knowledge_async must return every matching row uncapped -- a \
+         future LIMIT smaller than the seeded set would shrink this count \
+         and silently break the no-DB-LIMIT contract apply_entry_filters \
+         relies on for exact exclusion"
+    );
+
+    // Even with a small requested limit, exclusion must run BEFORE the
+    // truncate -- the live entry must still survive.
+    let entry_filter = crate::cli::EntryFilter {
+        exclude_tags: Some("tier/".to_string()),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let filtered = crate::helpers::apply_entry_filters(raw_results, &entry_filter);
+    let filtered_ids: Vec<&str> = filtered.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        filtered_ids,
+        vec!["kn-landmine-live"],
+        "the live entry must survive exclusion + limit truncation even \
+         though it sorts last among the seeded rows; got {filtered_ids:?}"
+    );
+}
+
+#[test]
 fn test_search_select_no_results_is_noop() {
     // --select with no results should not error or attempt any activations.
     let db = SurrealDatabase::open_in_memory().unwrap();
@@ -3298,5 +3403,766 @@ fn off_dim_row_does_not_abort_cosine_scan() {
     assert!(
         !scored_ids.contains(&"kn-poison-dim4"),
         "entry-level scored search must skip the off-dim row; got {scored_ids:?}"
+    );
+}
+
+// =========================================================================
+// W447 retrieval-exclusion rider — `--exclude-tags` on semantic search
+// (review fix).
+//
+// The archive tier (`tier/archived`) is a DEFAULT exclusion designed to
+// GROW, unlike an ordinary `--tags` inclusion filter. If exclusion only ran
+// as a post-filter after the DB's own `ORDER BY score DESC LIMIT $limit`,
+// a query whose top-ranked neighbors are all archived would have the DB
+// truncate to `limit` BEFORE the archived rows are ever dropped — silently
+// returning fewer than `limit` non-archived results, with no signal. This
+// test seeds archived entries that rank ABOVE the non-archived ones and
+// asserts the full requested limit still comes back non-archived, proving
+// exclusion is applied at the SQL candidate-set level (before LIMIT), not
+// as a post-filter.
+// =========================================================================
+
+/// Build a knowledge entry with a synthetic embedding and explicit tags —
+/// mirrors `entry_with_dim_embedding` but also sets `tags` so archived-tier
+/// exclusion fixtures can be built without a real embedding model.
+fn entry_with_embedding_and_tags(
+    id: &str,
+    embedding: Vec<f32>,
+    tags: &[&str],
+) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 5, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.embedding = Some(embedding);
+    e.embedding_model = Some("test-model".to_string());
+    e.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    e.tags = tags.iter().map(|s| s.to_string()).collect();
+    e
+}
+
+#[test]
+fn semantic_search_excludes_top_ranked_archived_neighbors_returns_full_limit() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+
+    // Query vector aligned with axis 0.
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    // Two archived entries, PERFECTLY aligned with the query (score == 1.0) —
+    // these must rank above every non-archived entry.
+    for id in ["kn-archived-1", "kn-archived-2"] {
+        db.upsert_knowledge(&entry_with_embedding_and_tags(
+            id,
+            query.clone(),
+            &["tier/archived"],
+        ))
+        .unwrap();
+    }
+
+    // Three non-archived entries, still well-aligned (positive but imperfect
+    // score) so they rank below the archived pair on an unfiltered scan, but
+    // must fill the result set once archived rows are excluded.
+    let mut good_vecs = Vec::new();
+    for i in 0..3usize {
+        let mut v = vec![0.0f32; N];
+        v[0] = 0.9;
+        v[1 + i] = (1.0f32 - 0.81f32).sqrt(); // unit-length, cos with query = 0.9
+        good_vecs.push(v);
+    }
+    for (i, v) in good_vecs.into_iter().enumerate() {
+        db.upsert_knowledge(&entry_with_embedding_and_tags(
+            &format!("kn-good-{i}"),
+            v,
+            &[],
+        ))
+        .unwrap();
+    }
+
+    let ctx = AgentContext::public_only();
+
+    // Sanity check: WITHOUT exclusion, the archived pair ranks in the top 2
+    // (score 1.0 beats the good entries' 0.9), proving the fixture actually
+    // exercises the "excluded neighbors rank highest" scenario.
+    let unfiltered_filter = KnowledgeFilter::default();
+    let unfiltered = db
+        .semantic_search(&query, &ctx, &unfiltered_filter, 2)
+        .unwrap();
+    let unfiltered_ids: Vec<&str> = unfiltered.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        unfiltered_ids.contains(&"kn-archived-1") && unfiltered_ids.contains(&"kn-archived-2"),
+        "fixture sanity check failed: archived entries should rank in the \
+         unfiltered top 2, got {unfiltered_ids:?}"
+    );
+
+    // With --exclude-tags 'tier/' and limit 2: if exclusion were a post-filter
+    // after the DB's own LIMIT, the DB would already have truncated to the
+    // two archived rows and both would be dropped, returning 0 results. The
+    // fix must return the full requested limit (2), both non-archived.
+    let exclude_filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db
+        .semantic_search(&query, &ctx, &exclude_filter, 2)
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "full requested limit must survive exclusion even when the top-ranked \
+         neighbors are all archived; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    for entry in &results {
+        assert!(
+            !entry.tags.iter().any(|t| t.starts_with("tier/")),
+            "an archived entry leaked into exclusion-filtered results: {}",
+            entry.id
+        );
+    }
+}
+
+/// Seed a CHUNKED knowledge entry (`chunk_count > 0`, no entry-level
+/// `embedding`) with a single synthetic `embedding_chunk` row, so semantic
+/// search can only find it via the `embedding_chunk` phase (Phase 1b) — the
+/// unchunked phase's WHERE requires `chunk_count IS NONE OR chunk_count <= 0`
+/// and `embedding IS NOT NONE`, both of which this fixture fails on purpose.
+fn seed_chunked_entry_with_tags(
+    db: &SurrealDatabase,
+    id: &str,
+    chunk_embedding: Vec<f32>,
+    tags: &[&str],
+) {
+    let mut e = make_test_entry(id, 5, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.tags = tags.iter().map(|s| s.to_string()).collect();
+    e.chunk_count = 1;
+    db.upsert_knowledge(&e).unwrap();
+    db.insert_embedding_chunk(id, 0, "chunk text", 0, 10, &chunk_embedding, "test-model")
+        .unwrap();
+}
+
+#[test]
+fn semantic_search_excludes_top_ranked_archived_chunk_neighbors_returns_full_limit() {
+    // Criterion 1 named BOTH the unchunked and the embedding_chunk phase.
+    // `semantic_search_excludes_top_ranked_archived_neighbors_returns_full_limit`
+    // above only seeds unchunked entries, so it never exercises the
+    // embedding_chunk phase's exclusion (the Rust post-filter behind an
+    // iterative over-fetch loop, replacing a fixed `limit * 3` window that
+    // silently thinned results once excluded candidates outnumbered it).
+    //
+    // This fixture seeds enough archived, CHUNKED entries ranking above the
+    // non-archived chunked ones that a fixed `limit * 3` fetch window would
+    // have returned ONLY archived candidates on its first (and only) pass —
+    // proving this test attaches to the chunk-phase contract specifically.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    const LIMIT: usize = 2;
+
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    // 8 archived, chunked entries perfectly aligned with the query
+    // (score == 1.0). With LIMIT=2, a fixed `limit * 3` = 6 over-fetch
+    // window would return only these 8 (top 6 of the table are all
+    // archived), never reaching the 2 good entries ranked below them.
+    for i in 0..8 {
+        seed_chunked_entry_with_tags(
+            &db,
+            &format!("kn-chunk-archived-{i}"),
+            query.clone(),
+            &["tier/archived"],
+        );
+    }
+
+    // 2 non-archived, chunked entries, well- but imperfectly-aligned, so
+    // they rank below the archived pack on an unfiltered scan.
+    for i in 0..LIMIT {
+        let mut v = vec![0.0f32; N];
+        v[0] = 0.9;
+        v[1 + i] = (1.0f32 - 0.81f32).sqrt(); // unit-length, cos with query = 0.9
+        seed_chunked_entry_with_tags(&db, &format!("kn-chunk-good-{i}"), v, &[]);
+    }
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap();
+
+    assert_eq!(
+        results.len(),
+        LIMIT,
+        "full requested limit must survive exclusion in the embedding_chunk \
+         phase even when a fixed over-fetch window would have been entirely \
+         consumed by archived candidates; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    for entry in &results {
+        assert!(
+            !entry.tags.iter().any(|t| t.starts_with("tier/")),
+            "an archived chunked entry leaked into exclusion-filtered results: {}",
+            entry.id
+        );
+    }
+}
+
+#[test]
+fn semantic_search_exclude_tags_prefix_match_drops_tier_archived_only() {
+    // Criterion: 'tier/' drops 'tier/archived' specifically (prefix match),
+    // and leaves an entry tagged something else untouched.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-archived",
+        query.clone(),
+        &["tier/archived"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-project",
+        query.clone(),
+        &["project/x"],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, 10).unwrap();
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        !ids.contains(&"kn-archived"),
+        "tier/archived must be dropped by --exclude-tags 'tier/'; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"kn-project"),
+        "an entry tagged project/x must survive a 'tier/' exclusion; got {ids:?}"
+    );
+}
+
+#[test]
+fn semantic_search_multi_prefix_exclusion_drops_both_namespaces_at_db_level() {
+    // Criterion: `build_exclude_tags_filter`'s multi-prefix OR-join (one bound
+    // param per prefix) is only exercised end-to-end here — every other DB
+    // fixture uses a single prefix, so a bug in the OR-join or the per-prefix
+    // bind loop would ship undetected otherwise.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-tier-archived",
+        query.clone(),
+        &["tier/archived"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-scratch-x",
+        query.clone(),
+        &["scratch/x"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-unrelated",
+        query.clone(),
+        &["project/y"],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string(), "scratch/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, 10).unwrap();
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+
+    assert!(
+        !ids.contains(&"kn-tier-archived"),
+        "tier/archived must be dropped by a multi-prefix exclusion including 'tier/'; got {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"kn-scratch-x"),
+        "scratch/x must be dropped by a multi-prefix exclusion including 'scratch/'; got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"kn-unrelated"),
+        "an entry tagged project/y must survive a ['tier/', 'scratch/'] exclusion; got {ids:?}"
+    );
+}
+
+#[test]
+fn semantic_search_no_exclude_tags_behavior_unchanged() {
+    // Criterion: default (no --exclude-tags) behavior is byte-identical to
+    // before this rider — an archived-tagged entry is still returned.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    db.upsert_knowledge(&entry_with_embedding_and_tags(
+        "kn-archived",
+        query.clone(),
+        &["tier/archived"],
+    ))
+    .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let results = db.semantic_search(&query, &ctx, &filter, 10).unwrap();
+    let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
+    assert!(
+        ids.contains(&"kn-archived"),
+        "with no --exclude-tags, an archived entry must still be returned; got {ids:?}"
+    );
+}
+
+#[test]
+fn semantic_search_no_flag_category_thinned_chunk_query_fills_to_limit() {
+    // Criterion (report finding, knowledge.rs:1010): the iterative over-fetch
+    // loop replaced a fixed `limit * 3` window for EVERY semantic search, not
+    // just `--exclude-tags` ones — but the only no-flag test on record
+    // (`semantic_search_no_exclude_tags_behavior_unchanged`, above) just
+    // checks a single archived entry still surfaces. It never exercises the
+    // resonance/category-thinned case the original fixed window was built
+    // for. This test issues NO `--exclude-tags` at all: category filtering
+    // alone must thin the embedding_chunk candidate set enough that a fixed
+    // `limit * 3` window would have starved the fill, while the adaptive
+    // loop still reaches the requested limit.
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    const N: usize = 8;
+    const LIMIT: usize = 2;
+
+    let mut query = vec![0.0f32; N];
+    query[0] = 1.0;
+
+    // 8 "noise"-category chunked entries, perfectly aligned (score == 1.0).
+    // With LIMIT=2, a fixed `limit * 3` = 6 over-fetch window would return
+    // only these 8 (top 6 of the table), never reaching the "good" pair
+    // ranked below them.
+    for i in 0..8 {
+        let mut e = make_test_entry(&format!("kn-noise-{i}"), 5, 0.0);
+        e.content_hash = Some(format!("hash-kn-noise-{i}"));
+        e.category_id = "noise".to_string();
+        e.chunk_count = 1;
+        db.upsert_knowledge(&e).unwrap();
+        db.insert_embedding_chunk(&e.id, 0, "chunk text", 0, 10, &query, "test-model")
+            .unwrap();
+    }
+
+    // 2 "good"-category chunked entries, well- but imperfectly-aligned, so
+    // they rank below the noise pack on an unfiltered scan.
+    for i in 0..LIMIT {
+        let mut v = vec![0.0f32; N];
+        v[0] = 0.9;
+        v[1 + i] = (1.0f32 - 0.81f32).sqrt(); // unit-length, cos with query = 0.9
+        let mut e = make_test_entry(&format!("kn-good-{i}"), 5, 0.0);
+        e.content_hash = Some(format!("hash-kn-good-{i}"));
+        e.category_id = "good".to_string();
+        e.chunk_count = 1;
+        db.upsert_knowledge(&e).unwrap();
+        db.insert_embedding_chunk(&e.id, 0, "chunk text", 0, 10, &v, "test-model")
+            .unwrap();
+    }
+
+    let ctx = AgentContext::public_only();
+    // No `exclude_tag_prefixes` set at all -- this is the no-flag case.
+    let filter = KnowledgeFilter {
+        categories: Some(vec!["good".to_string()]),
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap();
+
+    assert_eq!(
+        results.len(),
+        LIMIT,
+        "full requested limit must be reached via category filtering alone \
+         (no --exclude-tags) even when a fixed over-fetch window would have \
+         been entirely consumed by out-of-category candidates; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    for entry in &results {
+        assert_eq!(
+            entry.category_id, "good",
+            "an out-of-category entry leaked into category-filtered results: {}",
+            entry.id
+        );
+    }
+}
+
+// =============================================================================
+// Chunk-scan cap: short-return warning (#401 follow-up)
+//
+// The semantic chunk fill loop grows its over-fetch window until the page
+// fills, the table runs dry, or a scan budget is spent. When the budget is
+// spent while the page is still short AND the table still had rows to give, it
+// warns -- that is the excluded-candidate-dominance signal, and
+// `docs/src/memory.typ` promises it. #401 shipped the branch with no coverage:
+// the budget floor is 1000 candidates and every other fixture in this file tops
+// out around ten rows, so deleting the warning left the suite green.
+//
+// These fixtures thin the candidate set with the CATEGORY filter rather than
+// `--exclude-tags`. Both filters sit side by side in the same hydrate-and-drop
+// step of the fill loop, so either exercises the budget identically -- but
+// `category_id` is hydrated from the knowledge record itself, while tags come
+// from a `tagged_with` edge lookup. Binding the cap contract to the simpler of
+// the two keeps these tests measuring the loop rather than the hydration path.
+// =============================================================================
+
+/// Run `f` and hand back whatever cap-short-return warnings it emitted.
+///
+/// Serialized against itself because the sink is process-global. Nothing else
+/// in the suite can pollute it: emitting requires a chunk table of at least
+/// `max_chunk_fetch_for(limit)` rows, and only the tests below seed that many.
+fn capture_cap_warnings<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap_or_else(|p| p.into_inner());
+    super::knowledge::CAP_WARNING_LOG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    let out = f();
+    let emitted = super::knowledge::CAP_WARNING_LOG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    (out, emitted)
+}
+
+/// Seed exactly `total_chunk_rows` `embedding_chunk` rows, spread evenly over
+/// `entries` chunked entries, all in the `noise` category and all perfectly
+/// aligned with `query`.
+///
+/// The loop's `exhausted` signal counts chunk ROWS, but hydration and filtering
+/// are memoized per `entry_id` -- so piling many chunks onto a few entries
+/// drives the budget at a fraction of the cost of that many distinct entries.
+/// Every seeded entry is dropped by [`filter_to_good_category`].
+fn seed_noise_chunk_rows(
+    db: &SurrealDatabase,
+    entries: usize,
+    total_chunk_rows: usize,
+    query: &[f32],
+) {
+    let per_entry = total_chunk_rows / entries;
+    assert_eq!(
+        per_entry * entries,
+        total_chunk_rows,
+        "fixture must divide evenly so the seeded row count is exact -- the \
+         cap boundary cases below turn on a single row"
+    );
+    for e_idx in 0..entries {
+        let id = format!("kn-cap-noise-{e_idx}");
+        let mut e = make_test_entry(&id, 5, 0.0);
+        e.content_hash = Some(format!("hash-{id}"));
+        e.category_id = "noise".to_string();
+        e.chunk_count = per_entry as i32;
+        db.upsert_knowledge(&e).unwrap();
+        for c_idx in 0..per_entry {
+            db.insert_embedding_chunk(&id, c_idx, "chunk text", 0, 10, query, "test-model")
+                .unwrap();
+        }
+    }
+}
+
+/// A query vector no seeded entry can match at the entry level: every fixture
+/// here is chunked with no entry-level `embedding`, so Phase 1a returns nothing
+/// and the chunk fill loop is the only path under test.
+fn cap_query_vec() -> Vec<f32> {
+    let mut q = vec![0.0f32; 4];
+    q[0] = 1.0;
+    q
+}
+
+fn filter_to_good_category() -> crate::store::KnowledgeFilter {
+    crate::store::KnowledgeFilter {
+        categories: Some(vec!["good".to_string()]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn cap_short_return_warning_fires_only_when_budget_spent_page_short_and_table_had_more() {
+    use super::knowledge::cap_short_return_warning;
+
+    // (capped, have_enough, exhausted) -- the loop's three terminal signals.
+    // Exactly one of the eight states means the caller silently lost results.
+    assert!(
+        cap_short_return_warning(true, false, false, 1000, 0, 5).is_some(),
+        "budget spent, page short, table still had rows: the one state the docs \
+         promise a warning for"
+    );
+
+    assert!(
+        cap_short_return_warning(true, false, true, 1000, 0, 5).is_none(),
+        "page is short but the table genuinely ran dry -- warning here would \
+         misattribute end-of-table to excluded-candidate dominance"
+    );
+    assert!(
+        cap_short_return_warning(true, true, false, 1000, 5, 5).is_none(),
+        "budget spent but the page filled: nothing was withheld from the caller"
+    );
+    assert!(
+        cap_short_return_warning(true, true, true, 1000, 5, 5).is_none(),
+        "page filled and table dry"
+    );
+    assert!(
+        cap_short_return_warning(false, false, false, 1000, 0, 5).is_none(),
+        "budget not spent -- the loop is still growing its window, not finished"
+    );
+    assert!(
+        cap_short_return_warning(false, false, true, 1000, 0, 5).is_none(),
+        "short page from an exhausted table, well under budget"
+    );
+    assert!(
+        cap_short_return_warning(false, true, false, 1000, 5, 5).is_none(),
+        "page filled under budget -- the common case, and the one that must \
+         never print anything"
+    );
+    assert!(
+        cap_short_return_warning(false, true, true, 1000, 5, 5).is_none(),
+        "page filled, table dry, under budget"
+    );
+}
+
+#[test]
+fn cap_short_return_warning_text_names_budget_shortfall_and_suspected_cause() {
+    use super::knowledge::cap_short_return_warning;
+
+    // Pinned verbatim. This warning is the only channel telling a caller its
+    // page came back short, so a reword is a user-visible contract change and
+    // should have to be made deliberately.
+    assert_eq!(
+        cap_short_return_warning(true, false, false, 1000, 2, 5).unwrap(),
+        "Warning: semantic search hit chunk scan cap (1000 candidates) with \
+         only 2 of 5 requested results — likely excluded-tag dominance in the \
+         candidate set"
+    );
+    assert_eq!(
+        cap_short_return_warning(true, false, false, 5000, 0, 100).unwrap(),
+        "Warning: semantic search hit chunk scan cap (5000 candidates) with \
+         only 0 of 100 requested results — likely excluded-tag dominance in \
+         the candidate set",
+        "the budget and both counts must be interpolated, not hardcoded"
+    );
+}
+
+#[test]
+fn chunk_scan_budget_matches_the_formula_the_docs_promise() {
+    use super::knowledge::max_chunk_fetch_for;
+
+    // `docs/src/memory.typ` states the budget in prose and promises the
+    // warning. Assert against the same source the docs are built from, so a
+    // change to either side that isn't mirrored fails here instead of quietly
+    // making the published docs lie.
+    const DOCS: &str = include_str!("../../docs/src/memory.typ");
+    let flat = DOCS.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flat.contains("within its scan budget (`limit * 50`, minimum 1000 chunk candidates)"),
+        "docs/src/memory.typ no longer states the scan budget as `limit * 50`, \
+         minimum 1000 -- update max_chunk_fetch_for and this test together"
+    );
+    assert!(
+        flat.contains(
+            "the result set may come back short, and a warning is logged when that happens"
+        ),
+        "docs/src/memory.typ no longer promises a warning on a short page -- if \
+         the promise is gone, the emission and these tests should go too"
+    );
+
+    assert_eq!(max_chunk_fetch_for(0), 1000, "floor applies at zero");
+    assert_eq!(
+        max_chunk_fetch_for(1),
+        1000,
+        "floor dominates for small limits"
+    );
+    assert_eq!(
+        max_chunk_fetch_for(20),
+        1000,
+        "limit * 50 meets the floor exactly"
+    );
+    assert_eq!(
+        max_chunk_fetch_for(21),
+        1050,
+        "above the floor, limit * 50 wins"
+    );
+    assert_eq!(max_chunk_fetch_for(100), 5000);
+}
+
+#[test]
+fn semantic_search_chunk_scan_cap_emits_short_return_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Budget floor is 1000 candidates. Seed strictly MORE, so the final pass
+    // asks for 1000 and gets 1000 -- which is what tells the loop the table
+    // still had rows and the shortfall is filtering, not end-of-table.
+    seed_noise_chunk_rows(&db, 5, 1025, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(
+        results.is_empty(),
+        "every seeded entry is in the noise category and must be filtered out; \
+         got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a page short of --limit with the budget spent and rows remaining must \
+         warn exactly once; got {warnings:?}"
+    );
+    assert_eq!(
+        warnings[0],
+        "Warning: semantic search hit chunk scan cap (1000 candidates) with \
+         only 0 of 5 requested results — likely excluded-tag dominance in the \
+         candidate set"
+    );
+}
+
+#[test]
+fn semantic_search_full_page_under_budget_emits_no_warning() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    const LIMIT: usize = 2;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Six eligible chunked entries: the first over-fetch window (limit * 3)
+    // fills the page immediately and the budget is never approached.
+    for i in 0..6 {
+        seed_chunked_entry_with_tags(&db, &format!("kn-cap-live-{i}"), query.clone(), &[]);
+    }
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert_eq!(results.len(), LIMIT, "page should fill from six candidates");
+    assert!(
+        warnings.is_empty(),
+        "an ordinary full page must stay silent; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_short_page_from_small_table_emits_no_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Three filtered-out entries. The page comes back empty, but the table is
+    // tiny and the budget was never in play -- there is nothing to warn about.
+    seed_noise_chunk_rows(&db, 3, 3, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all three entries are out of category");
+    assert!(
+        warnings.is_empty(),
+        "a short page from a genuinely small table is not candidate dominance \
+         and must not warn; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_short_page_with_budget_spent_but_table_dry_emits_no_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // 999 rows: the window grows to the 1000-candidate budget, the query comes
+    // back with 999, and `returned_count < chunk_fetch` correctly reports the
+    // table as exhausted. Budget spent AND page short, yet still benign -- this
+    // is the discrimination the `!exhausted` guard exists to make, and it is
+    // the pass immediately before the boundary case below.
+    seed_noise_chunk_rows(&db, 3, 999, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all seeded entries are out of category");
+    assert!(
+        warnings.is_empty(),
+        "with the table one row short of the budget, end-of-table must not be \
+         misattributed to excluded-candidate dominance; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_chunk_rows_exactly_at_budget_warns_although_table_is_dry() {
+    use crate::store::AgentContext;
+
+    // CHARACTERIZATION TEST -- pins current behavior, which is a false positive.
+    //
+    // With exactly `max_chunk_fetch_for(limit)` chunk rows, the final pass asks
+    // for 1000 and receives 1000. `exhausted` is `returned_count < chunk_fetch`,
+    // so it reads false and the loop concludes the table still had rows to give
+    // -- but it did not. The warning fires and blames excluded-candidate
+    // dominance for what is in fact end-of-table: the exact misattribution the
+    // `!exhausted` guard was written to prevent.
+    //
+    // Mid-loop this off-by-one is self-correcting -- a window that comes back
+    // exactly full just triggers one more doubling, which returns partial. At
+    // the budget there is no next pass, so here the false positive is terminal
+    // and reaches the user.
+    //
+    // The 999-row test above is this same scenario one row down and stays
+    // silent. If the guard is later corrected to treat a window that exactly
+    // meets the budget as exhausted, this assertion should be flipped to
+    // `warnings.is_empty()` -- deliberately, not by accident.
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    seed_noise_chunk_rows(&db, 5, 1000, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all seeded entries are out of category");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "current behavior: a table holding exactly the budget warns even though \
+         it is genuinely exhausted; got {warnings:?}"
     );
 }

@@ -1330,7 +1330,7 @@ Several read commands (`search`, `list`) share a common set of filter
 flags. These are documented once here and referenced below.
 
   **Flag**                     **Type**   **Description**
-  ---------------------------- ---------- -------------------------------------------------------------------------------------------------------------------------------------
+  ---------------------------- ---------- -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `-c, --category`             `string`   Filter by category (comma-separated).
   `--json`                     `flag`     Output as JSON.
   `--mine`                     `flag`     Show only your private entries.
@@ -1345,6 +1345,7 @@ flags. These are documented once here and referenced below.
   `--missing-resonance-type`   `flag`     Filter to entries WITHOUT a resonance type.
   `--limit`                    `int`      Limit number of results.
   `--tags`                     `string`   Filter by tags (comma-separated, matches any).
+  `--exclude-tags`             `string`   Comma-separated tag prefixes to drop (e.g. `tier/` excludes every entry tagged `tier/<anything>`). Specify once; comma-separate multiple prefixes -- repeating the flag is a parse error. Same parsing and prefix-match semantics as `wake-fetch`'s `--exclude-tags`.
 
 ::: {.admonition .note}
 **NOTE:** **Visibility default:** `list` and `search` run
@@ -1382,6 +1383,15 @@ therefore admit an entry under `wake` but exclude it under
 `transformative` resonance types are decay-exempt, so they filter
 identically under both. This divergence is intentional for now; an
 explicit `--resonance-basis raw|decayed` flag is tracked in #404.
+:::
+
+::: {.admonition .note}
+**NOTE:** `--exclude-tags` takes a comma-separated list of tag prefixes.
+Any entry carrying at least one tag that prefix-matches at least one
+supplied value is dropped -- useful for excluding whole tag namespaces.
+Empty segments from trailing commas are ignored. Pass the flag once;
+repeating it (e.g. `--exclude-tags a --exclude-tags b`) is a parse
+error, not a silent override.
 :::
 
 ## `mx memory show`
@@ -1424,6 +1434,11 @@ mx memory list -c discovery,decree --min-resonance 5
 mx memory list --missing-wake-phrase --limit 20
 ```
 
+``` bash
+# Exclude a whole tag namespace
+mx memory list --category person --exclude-tags 'tier/'
+```
+
 ::: {.admonition .note}
 **NOTE:** `list` accepts all shared filter flags documented above,
 including the public-only visibility default and the hidden-private
@@ -1461,11 +1476,35 @@ mx memory search "agent bootstrap" -c recipe,method --limit 5
 mx memory search "retry pattern" --activate
 ```
 
+``` bash
+# Exclude a whole tag namespace from keyword search
+mx memory search "onboarding" --exclude-tags 'tier/'
+```
+
+``` bash
+# Exclude a whole tag namespace from semantic search
+mx memory search "onboarding" --semantic --exclude-tags 'tier/'
+```
+
 ::: {.admonition .note}
 **NOTE:** `search` accepts all shared filter flags, including the
 public-only visibility default and the hidden-private stderr hint (the
 hint is suppressed under `--semantic`). Semantic search requires entries
 to have embeddings generated via `mx memory embed`.
+:::
+
+::: {.admonition .note}
+**NOTE:** With `--semantic`, `--exclude-tags` exclusion happens in two
+phases: unchunked entries are excluded inside the candidate-set query
+itself (SQL `WHERE`), while chunked entries are filtered on the Rust
+side after hydration, since `embedding_chunk` has no direct tag edge to
+filter on in SQL. Either way, excluded entries are dropped before the
+final sort and truncate, so `--limit` returns a full page as long as the
+search stays within its scan budget (`limit * 50`, minimum 1000 chunk
+candidates). If that budget is exhausted before enough non-excluded
+results are found -- which can happen when excluded tags dominate the
+ranked candidates -- the result set may come back short, and a warning
+is logged when that happens.
 :::
 
 ::: {.admonition .tip}
