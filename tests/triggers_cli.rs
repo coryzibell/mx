@@ -9,6 +9,8 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 /// Each test spins up a full SurrealDB + embedding engine under its own temp
@@ -36,9 +38,9 @@ fn setup() -> Env {
 }
 
 fn mx(env: &Env, args: &[&str]) -> std::process::Output {
-    Command::new(MX)
-        .args(args)
-        .env("MX_HOME", env.dir.path())
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, env.dir.path());
+    cmd.args(args)
         .env("MX_CURRENT_AGENT", "test")
         .output()
         .expect("failed to run mx")

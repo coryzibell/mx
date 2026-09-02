@@ -27,20 +27,22 @@ use serial_test::serial;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 /// Run `mx` as `agent-a` against an isolated surreal root in `dir`.
 ///
-/// `MX_SURREAL_MODE=embedded` is forced so an ambient `MX_SURREAL_MODE=network`
-/// in the developer's shell cannot silently redirect the binary at a shared
-/// network DB — that masking is exactly what let a bogus (non-seeded) category
-/// pass locally while CI, running embedded against the isolated root, went red.
+/// `common::isolate` forces embedded mode so an ambient
+/// `MX_SURREAL_MODE=network` in the developer's shell cannot silently redirect
+/// the binary at a shared network DB — that masking is exactly what let a bogus
+/// (non-seeded) category pass locally while CI, running embedded against the
+/// isolated root, went red.
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
     let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
     cmd.args(args)
         .env("MX_CURRENT_AGENT", "agent-a")
-        .env("MX_SURREAL_MODE", "embedded")
-        .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
