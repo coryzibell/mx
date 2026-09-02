@@ -610,8 +610,29 @@ fn dedup_gate(
 /// write. `Skipped` is an `Ok` variant, never `Err` -- an `Err` would abort
 /// the whole batch via `?` for what is, by design, a successful no-op.
 enum WriteOutcome {
-    Written(Box<knowledge::KnowledgeEntry>, DedupProceedReason),
-    Skipped { duplicate_of: String },
+    Written(
+        Box<knowledge::KnowledgeEntry>,
+        DedupProceedReason,
+        WriteSideEffects,
+    ),
+    Skipped {
+        duplicate_of: String,
+    },
+}
+
+/// Outcome of the post-write embed/anchor side-effect steps in [`add_one`]
+/// (Cory's B1, PR #399 re-review). Both steps are non-fatal by design: a
+/// transient failure there must not abort the write or flip the exit code
+/// (the entry is already durable and read-back verified by the time either
+/// runs) -- but it also must not vanish into a stderr-only warning with zero
+/// signal in `--json` output. `None` means the step either succeeded or was
+/// never attempted (skipped via --no-embed / --no-auto-anchor, a deliberate
+/// no-op, not a failure -- those are surfaced separately by the existing
+/// "(embed skipped)" / "(auto-anchor skipped)" notices).
+#[derive(Default)]
+struct WriteSideEffects {
+    embed_deferred: Option<String>,
+    anchor_deferred: Option<String>,
 }
 
 /// Resolved arguments for a single standard-mode `memory add` write.
@@ -772,15 +793,32 @@ fn add_one(
 
     // Auto-generate embedding. Gated by the caller-resolved `embed` flag
     // (which reflects both --no-embed and MX_SKIP_WRITE_EMBED).
+    //
+    // Non-fatal: the entry is already durable (upserted + read-back verified
+    // above), so a transient embed failure here must not surface as a
+    // process exit failure -- that would make callers retry and duplicate
+    // an entry that already landed. The failure is still captured (not just
+    // eprintln'd) so callers building a `--json` payload can surface the
+    // degraded state instead of it vanishing into stderr (B1, PR #399
+    // re-review).
+    let mut side_effects = WriteSideEffects::default();
     if embed {
-        auto_embed(&id, db)?;
+        if let Err(e) = auto_embed(&id, db) {
+            eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+            side_effects.embed_deferred = Some(e.to_string());
+        }
     } else {
         println!("  (embed skipped)");
     }
 
     // Auto-generate anchors. Gated by --no-auto-anchor / MX_SKIP_WRITE_ANCHOR.
+    // Non-fatal for the same reason as the embed step above; failure capture
+    // mirrors it too.
     if write_anchor_enabled(no_auto_anchor) {
-        auto_anchor(&id, db, None)?;
+        if let Err(e) = auto_anchor(&id, db, None) {
+            eprintln!("Warning: post-write anchor failed (entry durable, id={id}): {e}");
+            side_effects.anchor_deferred = Some(e.to_string());
+        }
     } else {
         println!("  (auto-anchor skipped)");
     }
@@ -798,7 +836,11 @@ fn add_one(
         );
     }
 
-    Ok(WriteOutcome::Written(Box::new(entry), proceed_reason))
+    Ok(WriteOutcome::Written(
+        Box::new(entry),
+        proceed_reason,
+        side_effects,
+    ))
 }
 
 pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
@@ -1484,8 +1526,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // write_embed_enabled). The entry is already durable here, so
                 // skipping embedding is safe; the explicit `mx memory embed --all`
                 // command is never gated and still embeds deferred entries.
+                //
+                // Non-fatal: a transient embed failure must not exit non-zero
+                // once the fact has already landed, or callers will retry and
+                // duplicate it.
                 if write_embed_enabled(no_embed) {
-                    auto_embed(&id, db.as_ref())?;
+                    if let Err(e) = auto_embed(&id, db.as_ref()) {
+                        eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                    }
                 } else {
                     println!("  (embed skipped)");
                 }
@@ -1625,8 +1673,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Skip = success, not failure: an identical entry already exists
             // this session, so there is nothing to write and nothing wrong.
-            let (entry, dedup_reason) = match outcome {
-                WriteOutcome::Written(e, reason) => (e, reason),
+            let (entry, dedup_reason, side_effects) = match outcome {
+                WriteOutcome::Written(e, reason, side_effects) => (e, reason, side_effects),
                 WriteOutcome::Skipped { duplicate_of } => {
                     if json {
                         println!(
@@ -1696,6 +1744,19 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
                 if let DedupProceedReason::LookupFailed { msg } = &dedup_reason {
                     payload["dedup_lookup_warning"] = serde_json::json!(msg);
+                }
+                // B1 (PR #399 re-review): fold post-write embed/anchor
+                // side-effect failures into the same payload shape as the
+                // dedup fields above -- present only when the step actually
+                // failed, absent on success or on a deliberate --no-embed /
+                // --no-auto-anchor skip. This is the entry's only signal
+                // surface in --json mode; the stderr warning above still
+                // fires unconditionally for plain-mode callers.
+                if let Some(msg) = &side_effects.embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &side_effects.anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
                 }
                 println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
@@ -2222,8 +2283,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the entry is already durable (upserted above), so a
+            // transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate an update that already landed.
+            // Failure is captured (not just eprintln'd) so a `--json` caller
+            // can see the degraded state instead of reading clean success on
+            // a silently-failed embed (B2, PR #399 re-review).
+            let mut embed_deferred: Option<String> = None;
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                if let Err(e) = auto_embed(&id, db.as_ref()) {
+                    eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                    embed_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (embed skipped)");
             }
@@ -2241,20 +2312,30 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above; failure
+            // capture mirrors it too.
+            let mut anchor_deferred: Option<String> = None;
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), removed)?;
+                if let Err(e) = auto_anchor(&id, db.as_ref(), removed) {
+                    eprintln!("Warning: post-write anchor failed (entry durable, id={id}): {e}");
+                    anchor_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (auto-anchor skipped)");
             }
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "id": id,
-                        "changes": changes,
-                    }))?
-                );
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "changes": changes,
+                });
+                if let Some(msg) = &embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!("Updated entry: {}", id);
                 if changes.is_empty() {
@@ -2300,8 +2381,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the edit already landed via edit_content above, so a
+            // transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate the edit.
+            // Failure is captured (not just eprintln'd) so a `--json` caller
+            // can see the degraded state instead of reading clean success on
+            // a silently-failed embed (B2, PR #399 re-review).
+            let mut embed_deferred: Option<String> = None;
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                if let Err(e) = auto_embed(&id, db.as_ref()) {
+                    eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                    embed_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (embed skipped)");
             }
@@ -2311,20 +2402,30 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above; failure
+            // capture mirrors it too.
+            let mut anchor_deferred: Option<String> = None;
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                if let Err(e) = auto_anchor(&id, db.as_ref(), None) {
+                    eprintln!("Warning: post-write anchor failed (entry durable, id={id}): {e}");
+                    anchor_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (auto-anchor skipped)");
             }
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "id": id,
-                        "replacements": result.replacements,
-                    }))?
-                );
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "replacements": result.replacements,
+                });
+                if let Some(msg) = &embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!("Edited entry: {}", id);
                 println!(
@@ -2386,8 +2487,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the append already landed via append_content above, so
+            // a transient embed failure must not exit non-zero -- that would
+            // make callers retry and duplicate the append.
+            // Failure is captured (not just eprintln'd) so a `--json` caller
+            // can see the degraded state instead of reading clean success on
+            // a silently-failed embed (B2, PR #399 re-review).
+            let mut embed_deferred: Option<String> = None;
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                if let Err(e) = auto_embed(&id, db.as_ref()) {
+                    eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                    embed_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (embed skipped)");
             }
@@ -2397,20 +2508,30 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above; failure
+            // capture mirrors it too.
+            let mut anchor_deferred: Option<String> = None;
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                if let Err(e) = auto_anchor(&id, db.as_ref(), None) {
+                    eprintln!("Warning: post-write anchor failed (entry durable, id={id}): {e}");
+                    anchor_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (auto-anchor skipped)");
             }
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "id": id,
-                        "bytes_added": text.len(),
-                    }))?
-                );
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "bytes_added": text.len(),
+                });
+                if let Some(msg) = &embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!("Appended to entry: {}", id);
                 println!("  {} bytes added", text.len());
@@ -2468,8 +2589,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Auto-generate embedding if in network SurrealDB mode.
             // Gated by --no-embed or MX_SKIP_WRITE_EMBED (see write_embed_enabled).
+            // Non-fatal: the prepend already landed via prepend_content above,
+            // so a transient embed failure must not exit non-zero -- that
+            // would make callers retry and duplicate the prepend.
+            // Failure is captured (not just eprintln'd) so a `--json` caller
+            // can see the degraded state instead of reading clean success on
+            // a silently-failed embed (B2, PR #399 re-review).
+            let mut embed_deferred: Option<String> = None;
             if write_embed_enabled(no_embed) {
-                auto_embed(&id, db.as_ref())?;
+                if let Err(e) = auto_embed(&id, db.as_ref()) {
+                    eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                    embed_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (embed skipped)");
             }
@@ -2479,20 +2610,30 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             // write_anchor_enabled). The entry is already durable here, so
             // skipping anchoring is safe; the explicit `mx memory auto-anchor`
             // command is never gated and still anchors deferred writes.
+            // Non-fatal for the same reason as the embed step above; failure
+            // capture mirrors it too.
+            let mut anchor_deferred: Option<String> = None;
             if write_anchor_enabled(no_auto_anchor) {
-                auto_anchor(&id, db.as_ref(), None)?;
+                if let Err(e) = auto_anchor(&id, db.as_ref(), None) {
+                    eprintln!("Warning: post-write anchor failed (entry durable, id={id}): {e}");
+                    anchor_deferred = Some(e.to_string());
+                }
             } else {
                 println!("  (auto-anchor skipped)");
             }
 
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "id": id,
-                        "bytes_added": text.len(),
-                    }))?
-                );
+                let mut payload = serde_json::json!({
+                    "id": id,
+                    "bytes_added": text.len(),
+                });
+                if let Some(msg) = &embed_deferred {
+                    payload["embed_deferred"] = serde_json::json!(msg);
+                }
+                if let Some(msg) = &anchor_deferred {
+                    payload["anchor_deferred"] = serde_json::json!(msg);
+                }
+                println!("{}", serde_json::to_string_pretty(&payload)?);
             } else {
                 println!("Prepended to entry: {}", id);
                 println!("  {} bytes added", text.len());
@@ -2590,8 +2731,18 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // #3: update embeddings and anchors like all other mutation paths.
                 // Embedding gated by --no-embed or MX_SKIP_WRITE_EMBED (see
                 // write_embed_enabled). The entry is already durable here.
+                // Non-fatal: the restore already landed via upsert_knowledge
+                // above, so a transient embed failure must not exit non-zero
+                // -- that would make callers retry and duplicate the restore.
+                // Failure is captured (not just eprintln'd) so a `--json`
+                // caller can see the degraded state instead of reading clean
+                // success on a silently-failed embed (B2, PR #399 re-review).
+                let mut embed_deferred: Option<String> = None;
                 if write_embed_enabled(no_embed) {
-                    auto_embed(&id, db.as_ref())?;
+                    if let Err(e) = auto_embed(&id, db.as_ref()) {
+                        eprintln!("Warning: post-write embed failed (entry durable, id={id}): {e}");
+                        embed_deferred = Some(e.to_string());
+                    }
                 } else {
                     println!("  (embed skipped)");
                 }
@@ -2600,23 +2751,35 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // skipping anchoring is safe; the explicit `mx memory
                 // auto-anchor` command is never gated and still anchors
                 // deferred writes.
+                // Non-fatal for the same reason as the embed step above;
+                // failure capture mirrors it too.
+                let mut anchor_deferred: Option<String> = None;
                 if write_anchor_enabled(no_auto_anchor) {
-                    auto_anchor(&id, db.as_ref(), None)?;
+                    if let Err(e) = auto_anchor(&id, db.as_ref(), None) {
+                        eprintln!(
+                            "Warning: post-write anchor failed (entry durable, id={id}): {e}"
+                        );
+                        anchor_deferred = Some(e.to_string());
+                    }
                 } else {
                     println!("  (auto-anchor skipped)");
                 }
 
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&serde_json::json!({
-                            "restored": true,
-                            "id": id,
-                            "from_backup": backup.id,
-                            "backup_created": backup.created_at,
-                            "operation": backup.operation,
-                        }))?
-                    );
+                    let mut payload = serde_json::json!({
+                        "restored": true,
+                        "id": id,
+                        "from_backup": backup.id,
+                        "backup_created": backup.created_at,
+                        "operation": backup.operation,
+                    });
+                    if let Some(msg) = &embed_deferred {
+                        payload["embed_deferred"] = serde_json::json!(msg);
+                    }
+                    if let Some(msg) = &anchor_deferred {
+                        payload["anchor_deferred"] = serde_json::json!(msg);
+                    }
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
                 } else {
                     println!("Restored entry: {}", id);
                     println!("  from backup: {}", backup.id);
@@ -3103,7 +3266,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     );
 
                     match entry_result {
-                        Ok(WriteOutcome::Written(entry, reason)) => {
+                        // Batch always passes embed=false / no_auto_anchor=true
+                        // (embedding is hoisted below, anchoring deferred to the
+                        // nightly run), so `side_effects` is always empty here --
+                        // ignored, not dropped by accident.
+                        Ok(WriteOutcome::Written(entry, reason, _side_effects)) => {
                             println!("  [{}] Added entry: {} ({})", line_idx + 1, entry.id, title);
                             // Batch has no --json mode -- stderr is the only
                             // signal surface here. Mirrors the standard
@@ -3157,18 +3324,36 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     added_ids.len(),
                     if added_ids.len() == 1 { "y" } else { "ies" }
                 );
-                let provider = TractProvider::new()?;
-                let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
-                for (i, entry_id) in added_ids.iter().enumerate() {
-                    println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
-                    crate::helpers::auto_embed_with(
-                        entry_id,
-                        db.as_ref(),
-                        &provider,
-                        &chunking_tokenizer,
-                    )?;
+                // All added_ids are already durably written above (add_one committed
+                // each entry before this pass runs). A failure anywhere in here —
+                // model cold-load, tokenizer load, or a single entry's embed — must
+                // NOT propagate to exit 1: the batch already landed and a non-zero
+                // exit here would make the caller re-fire and duplicate the whole
+                // batch. Mirrors the non-fatal post-write side-effect pattern used
+                // for the six single-entry commands (Append/Add/Update/Edit/Prepend/
+                // Restore); unembedded entries are reconciled later by
+                // `mx memory embed --all`.
+                let embed_result: anyhow::Result<()> = (|| {
+                    let provider = TractProvider::new()?;
+                    let chunking_tokenizer = crate::embeddings::load_tokenizer()?;
+                    for (i, entry_id) in added_ids.iter().enumerate() {
+                        println!("  Embedding {}/{}: {}", i + 1, added_ids.len(), entry_id);
+                        crate::helpers::auto_embed_with(
+                            entry_id,
+                            db.as_ref(),
+                            &provider,
+                            &chunking_tokenizer,
+                        )?;
+                    }
+                    Ok(())
+                })();
+                match embed_result {
+                    Ok(()) => println!("Embedding complete."),
+                    Err(e) => eprintln!(
+                        "Warning: post-write batch embed failed ({} entries durable): {e}",
+                        added_ids.len()
+                    ),
                 }
-                println!("Embedding complete.");
             } else if no_embed && !added_ids.is_empty() {
                 println!(
                     "\n(embed skipped for {} entries — run `mx memory embed --all` to embed)",
@@ -4415,6 +4600,7 @@ mod dedup_gate_tests {
     use super::*;
     use crate::store::{AgentContext, DedupCandidate, KnowledgeStore};
     use crate::surreal_db::SurrealDatabase;
+    use serial_test::serial;
     use std::cell::Cell;
 
     /// Wraps a real in-memory SurrealDB store and counts
@@ -5108,6 +5294,358 @@ mod dedup_gate_tests {
         }
     }
 
+    /// Wraps a real in-memory SurrealDB store and forces
+    /// `semantic_search_entries_scored` (the `auto_anchor` candidate fetch)
+    /// to return `Err` -- pins `add_one`'s `anchor_deferred` capture (PR
+    /// #399 fix round 1, item 2) at the handler layer, since the CLI
+    /// integration harness cannot reach this branch: its only fault
+    /// injector breaks the model cache, which only `auto_embed` touches,
+    /// and `auto_anchor` short-circuits before ever calling the store when
+    /// `embedding.is_none()` -- which a broken model cache guarantees.
+    /// Mirrors `helpers::auto_anchor_tests::FailingScoredStore` (same
+    /// shape, same failing method, different call layer: this one goes
+    /// through `add_one` so the capture-and-record fold is what's pinned,
+    /// not just `auto_anchor` returning `Err` in isolation). Every other
+    /// method is a real pass-through, same shape as `CountingStore` /
+    /// `FailingStore` above.
+    struct FailingAnchorStore {
+        inner: Box<dyn KnowledgeStore>,
+    }
+
+    impl FailingAnchorStore {
+        fn new() -> Self {
+            Self {
+                inner: Box::new(SurrealDatabase::open_in_memory().unwrap()),
+            }
+        }
+    }
+
+    impl KnowledgeStore for FailingAnchorStore {
+        fn upsert_knowledge(&self, entry: &knowledge::KnowledgeEntry) -> Result<()> {
+            self.inner.upsert_knowledge(entry)
+        }
+        fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get(id, ctx)
+        }
+        fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.delete(id, ctx)
+        }
+        fn search(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search(query, ctx, filter)
+        }
+        fn semantic_search(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner
+                .semantic_search(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<(knowledge::KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_scored(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_entries_scored(
+            &self,
+            _query_embedding: &[f32],
+            _ctx: &AgentContext,
+            _limit: usize,
+        ) -> Result<Vec<(knowledge::KnowledgeEntry, f32)>> {
+            anyhow::bail!("simulated transient candidate-fetch failure")
+        }
+        fn list_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category(category, ctx, filter)
+        }
+        fn count_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<usize> {
+            self.inner.count_by_category(category, ctx, filter)
+        }
+        fn owned_private_matching(
+            &self,
+            agent: &str,
+            query: Option<&str>,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.owned_private_matching(agent, query, filter)
+        }
+        fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_all(ctx)
+        }
+        fn list_with_triggers(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_with_triggers(ctx)
+        }
+        fn count(&self) -> Result<usize> {
+            self.inner.count()
+        }
+        fn wake_cascade(
+            &self,
+            ctx: &AgentContext,
+            limit: usize,
+            min_resonance: Option<i32>,
+            days: i64,
+        ) -> Result<store::WakeCascade> {
+            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+        }
+        fn update_activations(&self, ids: &[String]) -> Result<()> {
+            self.inner.update_activations(ids)
+        }
+        fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.update_summary(id, summary, ctx)
+        }
+        fn apply_update(
+            &self,
+            id: &str,
+            spec: &crate::store_update::UpdateSpec,
+            ctx: &AgentContext,
+        ) -> Result<crate::store_update::UpdateOutcome> {
+            self.inner.apply_update(id, spec, ctx)
+        }
+        fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+            self.inner.increment_activation_count(ids)
+        }
+        fn query_recent_facts(&self, days: i32) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.query_recent_facts(days)
+        }
+        fn query_recent_facts_all_types(
+            &self,
+            days: i32,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.query_recent_facts_all_types(days)
+        }
+        fn reinforce(
+            &self,
+            id: &str,
+            amount: i32,
+            cap: Option<i32>,
+            ctx: &AgentContext,
+        ) -> Result<Option<store::ReinforcementResult>> {
+            self.inner.reinforce(id, amount, cap, ctx)
+        }
+        fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+            self.inner.delete_embedding_chunks(entry_id)
+        }
+        fn insert_embedding_chunk(
+            &self,
+            entry_id: &str,
+            chunk_index: usize,
+            chunk_text: &str,
+            token_offset: usize,
+            token_count: usize,
+            embedding: &[f32],
+            model_id: &str,
+        ) -> Result<()> {
+            self.inner.insert_embedding_chunk(
+                entry_id,
+                chunk_index,
+                chunk_text,
+                token_offset,
+                token_count,
+                embedding,
+                model_id,
+            )
+        }
+        fn semantic_search_chunks(
+            &self,
+            query_embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<(String, f32)>> {
+            self.inner.semantic_search_chunks(query_embedding, limit)
+        }
+        fn edit_content(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+            old_text: &str,
+            new_text: &str,
+            replace_all: bool,
+            nth: Option<usize>,
+        ) -> Result<store::EditResult> {
+            self.inner
+                .edit_content(id, ctx, old_text, new_text, replace_all, nth)
+        }
+        fn append_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.append_content(id, ctx, content)
+        }
+        fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.prepend_content(id, ctx, content)
+        }
+        fn backup_content(
+            &self,
+            entry: &knowledge::KnowledgeEntry,
+            operation: &str,
+            agent: Option<&str>,
+        ) -> Result<String> {
+            self.inner.backup_content(entry, operation, agent)
+        }
+        fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+            self.inner.list_backups(entry_id)
+        }
+        fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>> {
+            self.inner.latest_backup(entry_id)
+        }
+        fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
+            self.inner.purge_backups(entry_id, keep)
+        }
+        fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_entry(entry_id)
+        }
+        fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_entry(entry_id, tags)
+        }
+        fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+            self.inner.list_all_tags(category)
+        }
+        fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_entry(entry_id)
+        }
+        fn set_applicability_for_entry(&self, entry_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_entry(entry_id, ids)
+        }
+        fn list_applicability_types(&self) -> Result<Vec<crate::types::ApplicabilityType>> {
+            self.inner.list_applicability_types()
+        }
+        fn upsert_applicability_type(&self, atype: &crate::types::ApplicabilityType) -> Result<()> {
+            self.inner.upsert_applicability_type(atype)
+        }
+        fn list_categories(&self) -> Result<Vec<crate::types::Category>> {
+            self.inner.list_categories()
+        }
+        fn get_category(&self, id: &str) -> Result<Option<crate::types::Category>> {
+            self.inner.get_category(id)
+        }
+        fn upsert_category(&self, category: &crate::types::Category) -> Result<()> {
+            self.inner.upsert_category(category)
+        }
+        fn delete_category(&self, id: &str) -> Result<bool> {
+            self.inner.delete_category(id)
+        }
+        fn list_projects(&self, active_only: bool) -> Result<Vec<crate::types::Project>> {
+            self.inner.list_projects(active_only)
+        }
+        fn get_project(&self, id: &str) -> Result<Option<crate::types::Project>> {
+            self.inner.get_project(id)
+        }
+        fn upsert_project(&self, project: &crate::types::Project) -> Result<()> {
+            self.inner.upsert_project(project)
+        }
+        fn get_tags_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_project(project_id)
+        }
+        fn set_tags_for_project(&self, project_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_project(project_id, tags)
+        }
+        fn get_applicability_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_project(project_id)
+        }
+        fn set_applicability_for_project(&self, project_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_project(project_id, ids)
+        }
+        fn list_agents(&self) -> Result<Vec<crate::types::Agent>> {
+            self.inner.list_agents()
+        }
+        fn get_agent(&self, id: &str) -> Result<Option<crate::types::Agent>> {
+            self.inner.get_agent(id)
+        }
+        fn upsert_agent(&self, agent: &crate::types::Agent) -> Result<()> {
+            self.inner.upsert_agent(agent)
+        }
+        fn list_relationships_for_entry(
+            &self,
+            entry_id: &str,
+        ) -> Result<Vec<crate::types::Relationship>> {
+            self.inner.list_relationships_for_entry(entry_id)
+        }
+        fn add_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<String> {
+            self.inner.add_relationship(from, to, rel_type)
+        }
+        fn delete_relationship(&self, id: &str) -> Result<bool> {
+            self.inner.delete_relationship(id)
+        }
+        fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+            self.inner.get_facts_for_session(session_id)
+        }
+        fn get_entries_for_session(
+            &self,
+            session_id: &str,
+            owner: Option<&str>,
+            category: &str,
+            ctx: &AgentContext,
+        ) -> Result<Vec<DedupCandidate>> {
+            self.inner
+                .get_entries_for_session(session_id, owner, category, ctx)
+        }
+        fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+            self.inner.get_session_for_fact(fact_id)
+        }
+        fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<crate::types::Session>> {
+            self.inner.list_sessions(project_id)
+        }
+        fn get_session(&self, id: &str) -> Result<Option<crate::types::Session>> {
+            self.inner.get_session(id)
+        }
+        fn upsert_session(&self, session: &crate::types::Session) -> Result<()> {
+            self.inner.upsert_session(session)
+        }
+        fn list_source_types(&self) -> Result<Vec<crate::types::SourceType>> {
+            self.inner.list_source_types()
+        }
+        fn list_entry_types(&self) -> Result<Vec<crate::types::EntryType>> {
+            self.inner.list_entry_types()
+        }
+        fn list_content_types(&self) -> Result<Vec<crate::types::ContentType>> {
+            self.inner.list_content_types()
+        }
+        fn list_session_types(&self) -> Result<Vec<crate::types::SessionType>> {
+            self.inner.list_session_types()
+        }
+        fn list_relationship_types(&self) -> Result<Vec<crate::types::RelationshipType>> {
+            self.inner.list_relationship_types()
+        }
+        fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String> {
+            self.inner.create_wake_session(session)
+        }
+        fn get_wake_session(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<crate::wake_token::WakeSession>> {
+            self.inner.get_wake_session(session_id)
+        }
+        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
+            self.inner.update_wake_session(session)
+        }
+        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
+            self.inner.delete_wake_session(session_id)
+        }
+        fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
+            self.inner.sweep_ghost_anchors(dry_run)
+        }
+        fn list_tables(&self) -> Result<Vec<String>> {
+            self.inner.list_tables()
+        }
+    }
+
     fn one_line_args(
         agent: &str,
         owner: Option<&str>,
@@ -5164,7 +5702,7 @@ mod dedup_gate_tests {
         )
         .unwrap();
         let first_id = match first {
-            WriteOutcome::Written(e, _) => e.id,
+            WriteOutcome::Written(e, _, _) => e.id,
             WriteOutcome::Skipped { .. } => panic!("first write must not be a duplicate"),
         };
 
@@ -5479,7 +6017,7 @@ mod dedup_gate_tests {
         .expect("a dedup lookup failure must fail OPEN, not abort the write with Err");
 
         match outcome {
-            WriteOutcome::Written(entry, reason) => {
+            WriteOutcome::Written(entry, reason, _side_effects) => {
                 assert!(
                     matches!(reason, DedupProceedReason::LookupFailed { .. }),
                     "the proceed reason must record that the gate failed open on a lookup error"
@@ -5625,5 +6163,53 @@ mod dedup_gate_tests {
             "identical title+body with DIFFERENT tags must still dedup -- tags are \
              excluded from the identity by design, not a bug this test regresses"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn anchor_failure_is_captured_as_anchor_deferred_not_swallowed() {
+        // Pins Add's `anchor_deferred` capture (PR #399 fix round 1, item 2)
+        // at the one path Wren's remedy makes reachable: a handler-level
+        // test with a failing store double, driving `add_one` directly.
+        // The CLI integration suite (`tests/write_side_effect_nonfatal.rs`)
+        // cannot reach this -- see `FailingAnchorStore`'s doc comment above
+        // for why. `embed: true` is required so the entry carries a real
+        // embedding by the time `auto_anchor` runs (its `embedding.is_none()`
+        // guard would otherwise skip the store call this test forces to
+        // fail) -- this is the one add_one call in this module that runs
+        // the real embedding model, mirrors `embeddings::tests` doing the
+        // same with `#[serial]` for the same shared-model-cache reason.
+        let db = FailingAnchorStore::new();
+        let mut dedup = DedupIndex::default();
+
+        let outcome = add_one(
+            one_line_args(
+                "agent-a",
+                None,
+                "test",
+                "Anchor Deferred Capture Test",
+                "This entry needs a real embedding so auto_anchor's \
+                 embedding.is_none() guard doesn't skip past the store call \
+                 this test forces to fail.",
+                None,
+            ),
+            &db,
+            true,  // embed: real network embed, so the entry IS embedded
+            false, // no_auto_anchor: false -- anchoring stays enabled
+            &mut dedup,
+            false,
+        )
+        .unwrap();
+
+        match outcome {
+            WriteOutcome::Written(_, _, side_effects) => {
+                assert!(
+                    side_effects.anchor_deferred.is_some(),
+                    "a candidate-fetch failure during auto_anchor must be captured as \
+                     anchor_deferred, not silently swallowed"
+                );
+            }
+            WriteOutcome::Skipped { .. } => panic!("expected a written outcome, got Skipped"),
+        }
     }
 }
