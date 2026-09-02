@@ -11,8 +11,7 @@ The `--mine` flag scopes queries to the calling agent (`MX_CURRENT_AGENT`).
 
 ## Maintenance Rule
 
-If you change behavior of existing commands, note it in the PR description
-(this repo has no CHANGELOG file -- release notes live in PR bodies) and
+If you change behavior of existing commands, note it in the CHANGELOG and
 verify companion-facing usage in `~/.soren/config/agents/` still holds.
 
 Write-boundary dedup (W447, `mx memory add` / `add-batch`) is documented as
