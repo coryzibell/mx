@@ -3808,3 +3808,361 @@ fn semantic_search_no_flag_category_thinned_chunk_query_fills_to_limit() {
         );
     }
 }
+
+// =============================================================================
+// Chunk-scan cap: short-return warning (#401 follow-up)
+//
+// The semantic chunk fill loop grows its over-fetch window until the page
+// fills, the table runs dry, or a scan budget is spent. When the budget is
+// spent while the page is still short AND the table still had rows to give, it
+// warns -- that is the excluded-candidate-dominance signal, and
+// `docs/src/memory.typ` promises it. #401 shipped the branch with no coverage:
+// the budget floor is 1000 candidates and every other fixture in this file tops
+// out around ten rows, so deleting the warning left the suite green.
+//
+// These fixtures thin the candidate set with the CATEGORY filter rather than
+// `--exclude-tags`. Both filters sit side by side in the same hydrate-and-drop
+// step of the fill loop, so either exercises the budget identically -- but
+// `category_id` is hydrated from the knowledge record itself, while tags come
+// from a `tagged_with` edge lookup. Binding the cap contract to the simpler of
+// the two keeps these tests measuring the loop rather than the hydration path.
+// =============================================================================
+
+/// Run `f` and hand back whatever cap-short-return warnings it emitted.
+///
+/// Serialized against itself because the sink is process-global. Nothing else
+/// in the suite can pollute it: emitting requires a chunk table of at least
+/// `max_chunk_fetch_for(limit)` rows, and only the tests below seed that many.
+fn capture_cap_warnings<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SERIALIZE.lock().unwrap_or_else(|p| p.into_inner());
+    super::knowledge::CAP_WARNING_LOG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clear();
+    let out = f();
+    let emitted = super::knowledge::CAP_WARNING_LOG
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone();
+    (out, emitted)
+}
+
+/// Seed exactly `total_chunk_rows` `embedding_chunk` rows, spread evenly over
+/// `entries` chunked entries, all in the `noise` category and all perfectly
+/// aligned with `query`.
+///
+/// The loop's `exhausted` signal counts chunk ROWS, but hydration and filtering
+/// are memoized per `entry_id` -- so piling many chunks onto a few entries
+/// drives the budget at a fraction of the cost of that many distinct entries.
+/// Every seeded entry is dropped by [`filter_to_good_category`].
+fn seed_noise_chunk_rows(
+    db: &SurrealDatabase,
+    entries: usize,
+    total_chunk_rows: usize,
+    query: &[f32],
+) {
+    let per_entry = total_chunk_rows / entries;
+    assert_eq!(
+        per_entry * entries,
+        total_chunk_rows,
+        "fixture must divide evenly so the seeded row count is exact -- the \
+         cap boundary cases below turn on a single row"
+    );
+    for e_idx in 0..entries {
+        let id = format!("kn-cap-noise-{e_idx}");
+        let mut e = make_test_entry(&id, 5, 0.0);
+        e.content_hash = Some(format!("hash-{id}"));
+        e.category_id = "noise".to_string();
+        e.chunk_count = per_entry as i32;
+        db.upsert_knowledge(&e).unwrap();
+        for c_idx in 0..per_entry {
+            db.insert_embedding_chunk(&id, c_idx, "chunk text", 0, 10, query, "test-model")
+                .unwrap();
+        }
+    }
+}
+
+/// A query vector no seeded entry can match at the entry level: every fixture
+/// here is chunked with no entry-level `embedding`, so Phase 1a returns nothing
+/// and the chunk fill loop is the only path under test.
+fn cap_query_vec() -> Vec<f32> {
+    let mut q = vec![0.0f32; 4];
+    q[0] = 1.0;
+    q
+}
+
+fn filter_to_good_category() -> crate::store::KnowledgeFilter {
+    crate::store::KnowledgeFilter {
+        categories: Some(vec!["good".to_string()]),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn cap_short_return_warning_fires_only_when_budget_spent_page_short_and_table_had_more() {
+    use super::knowledge::cap_short_return_warning;
+
+    // (capped, have_enough, exhausted) -- the loop's three terminal signals.
+    // Exactly one of the eight states means the caller silently lost results.
+    assert!(
+        cap_short_return_warning(true, false, false, 1000, 0, 5).is_some(),
+        "budget spent, page short, table still had rows: the one state the docs \
+         promise a warning for"
+    );
+
+    assert!(
+        cap_short_return_warning(true, false, true, 1000, 0, 5).is_none(),
+        "page is short but the table genuinely ran dry -- warning here would \
+         misattribute end-of-table to excluded-candidate dominance"
+    );
+    assert!(
+        cap_short_return_warning(true, true, false, 1000, 5, 5).is_none(),
+        "budget spent but the page filled: nothing was withheld from the caller"
+    );
+    assert!(
+        cap_short_return_warning(true, true, true, 1000, 5, 5).is_none(),
+        "page filled and table dry"
+    );
+    assert!(
+        cap_short_return_warning(false, false, false, 1000, 0, 5).is_none(),
+        "budget not spent -- the loop is still growing its window, not finished"
+    );
+    assert!(
+        cap_short_return_warning(false, false, true, 1000, 0, 5).is_none(),
+        "short page from an exhausted table, well under budget"
+    );
+    assert!(
+        cap_short_return_warning(false, true, false, 1000, 5, 5).is_none(),
+        "page filled under budget -- the common case, and the one that must \
+         never print anything"
+    );
+    assert!(
+        cap_short_return_warning(false, true, true, 1000, 5, 5).is_none(),
+        "page filled, table dry, under budget"
+    );
+}
+
+#[test]
+fn cap_short_return_warning_text_names_budget_shortfall_and_suspected_cause() {
+    use super::knowledge::cap_short_return_warning;
+
+    // Pinned verbatim. This warning is the only channel telling a caller its
+    // page came back short, so a reword is a user-visible contract change and
+    // should have to be made deliberately.
+    assert_eq!(
+        cap_short_return_warning(true, false, false, 1000, 2, 5).unwrap(),
+        "Warning: semantic search hit chunk scan cap (1000 candidates) with \
+         only 2 of 5 requested results — likely excluded-tag dominance in the \
+         candidate set"
+    );
+    assert_eq!(
+        cap_short_return_warning(true, false, false, 5000, 0, 100).unwrap(),
+        "Warning: semantic search hit chunk scan cap (5000 candidates) with \
+         only 0 of 100 requested results — likely excluded-tag dominance in \
+         the candidate set",
+        "the budget and both counts must be interpolated, not hardcoded"
+    );
+}
+
+#[test]
+fn chunk_scan_budget_matches_the_formula_the_docs_promise() {
+    use super::knowledge::max_chunk_fetch_for;
+
+    // `docs/src/memory.typ` states the budget in prose and promises the
+    // warning. Assert against the same source the docs are built from, so a
+    // change to either side that isn't mirrored fails here instead of quietly
+    // making the published docs lie.
+    const DOCS: &str = include_str!("../../docs/src/memory.typ");
+    let flat = DOCS.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flat.contains("within its scan budget (`limit * 50`, minimum 1000 chunk candidates)"),
+        "docs/src/memory.typ no longer states the scan budget as `limit * 50`, \
+         minimum 1000 -- update max_chunk_fetch_for and this test together"
+    );
+    assert!(
+        flat.contains(
+            "the result set may come back short, and a warning is logged when that happens"
+        ),
+        "docs/src/memory.typ no longer promises a warning on a short page -- if \
+         the promise is gone, the emission and these tests should go too"
+    );
+
+    assert_eq!(max_chunk_fetch_for(0), 1000, "floor applies at zero");
+    assert_eq!(
+        max_chunk_fetch_for(1),
+        1000,
+        "floor dominates for small limits"
+    );
+    assert_eq!(
+        max_chunk_fetch_for(20),
+        1000,
+        "limit * 50 meets the floor exactly"
+    );
+    assert_eq!(
+        max_chunk_fetch_for(21),
+        1050,
+        "above the floor, limit * 50 wins"
+    );
+    assert_eq!(max_chunk_fetch_for(100), 5000);
+}
+
+#[test]
+fn semantic_search_chunk_scan_cap_emits_short_return_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Budget floor is 1000 candidates. Seed strictly MORE, so the final pass
+    // asks for 1000 and gets 1000 -- which is what tells the loop the table
+    // still had rows and the shortfall is filtering, not end-of-table.
+    seed_noise_chunk_rows(&db, 5, 1025, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(
+        results.is_empty(),
+        "every seeded entry is in the noise category and must be filtered out; \
+         got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "a page short of --limit with the budget spent and rows remaining must \
+         warn exactly once; got {warnings:?}"
+    );
+    assert_eq!(
+        warnings[0],
+        "Warning: semantic search hit chunk scan cap (1000 candidates) with \
+         only 0 of 5 requested results — likely excluded-tag dominance in the \
+         candidate set"
+    );
+}
+
+#[test]
+fn semantic_search_full_page_under_budget_emits_no_warning() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    const LIMIT: usize = 2;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Six eligible chunked entries: the first over-fetch window (limit * 3)
+    // fills the page immediately and the budget is never approached.
+    for i in 0..6 {
+        seed_chunked_entry_with_tags(&db, &format!("kn-cap-live-{i}"), query.clone(), &[]);
+    }
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert_eq!(results.len(), LIMIT, "page should fill from six candidates");
+    assert!(
+        warnings.is_empty(),
+        "an ordinary full page must stay silent; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_short_page_from_small_table_emits_no_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // Three filtered-out entries. The page comes back empty, but the table is
+    // tiny and the budget was never in play -- there is nothing to warn about.
+    seed_noise_chunk_rows(&db, 3, 3, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all three entries are out of category");
+    assert!(
+        warnings.is_empty(),
+        "a short page from a genuinely small table is not candidate dominance \
+         and must not warn; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_short_page_with_budget_spent_but_table_dry_emits_no_warning() {
+    use crate::store::AgentContext;
+
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    // 999 rows: the window grows to the 1000-candidate budget, the query comes
+    // back with 999, and `returned_count < chunk_fetch` correctly reports the
+    // table as exhausted. Budget spent AND page short, yet still benign -- this
+    // is the discrimination the `!exhausted` guard exists to make, and it is
+    // the pass immediately before the boundary case below.
+    seed_noise_chunk_rows(&db, 3, 999, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all seeded entries are out of category");
+    assert!(
+        warnings.is_empty(),
+        "with the table one row short of the budget, end-of-table must not be \
+         misattributed to excluded-candidate dominance; got {warnings:?}"
+    );
+}
+
+#[test]
+fn semantic_search_chunk_rows_exactly_at_budget_warns_although_table_is_dry() {
+    use crate::store::AgentContext;
+
+    // CHARACTERIZATION TEST -- pins current behavior, which is a false positive.
+    //
+    // With exactly `max_chunk_fetch_for(limit)` chunk rows, the final pass asks
+    // for 1000 and receives 1000. `exhausted` is `returned_count < chunk_fetch`,
+    // so it reads false and the loop concludes the table still had rows to give
+    // -- but it did not. The warning fires and blames excluded-candidate
+    // dominance for what is in fact end-of-table: the exact misattribution the
+    // `!exhausted` guard was written to prevent.
+    //
+    // Mid-loop this off-by-one is self-correcting -- a window that comes back
+    // exactly full just triggers one more doubling, which returns partial. At
+    // the budget there is no next pass, so here the false positive is terminal
+    // and reaches the user.
+    //
+    // The 999-row test above is this same scenario one row down and stays
+    // silent. If the guard is later corrected to treat a window that exactly
+    // meets the budget as exhausted, this assertion should be flipped to
+    // `warnings.is_empty()` -- deliberately, not by accident.
+    const LIMIT: usize = 5;
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let query = cap_query_vec();
+
+    seed_noise_chunk_rows(&db, 5, 1000, &query);
+
+    let ctx = AgentContext::public_only();
+    let filter = filter_to_good_category();
+    let (results, warnings) =
+        capture_cap_warnings(|| db.semantic_search(&query, &ctx, &filter, LIMIT).unwrap());
+
+    assert!(results.is_empty(), "all seeded entries are out of category");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "current behavior: a table holding exactly the budget warns even though \
+         it is genuinely exhausted; got {warnings:?}"
+    );
+}

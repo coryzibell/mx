@@ -7,6 +7,65 @@ use crate::knowledge::KnowledgeEntry;
 use super::connection::normalize_datetime;
 use super::{RecordId, SurrealConnection, SurrealDatabase};
 
+/// Chunk-scan budget for the semantic fill loop: `limit * 50`, floored at 1000
+/// candidates.
+///
+/// Extracted so the formula documented in `docs/src/memory.typ` ("`limit * 50`,
+/// minimum 1000 chunk candidates") has one definition a test can pin, instead of
+/// a literal buried in the loop that docs can silently drift away from.
+pub(super) fn max_chunk_fetch_for(limit: usize) -> usize {
+    limit.saturating_mul(50).max(1000)
+}
+
+/// Build the short-return warning for a finished chunk-scan pass, or `None` when
+/// the page ended for a benign reason.
+///
+/// `capped` (budget spent), `have_enough` (page filled) and `exhausted` (the
+/// window came back partial, so the table had no more rows) are the loop's three
+/// terminal signals. Only "budget spent, page short, table still had rows"
+/// indicates excluded-tag dominance rather than genuine end-of-table.
+///
+/// Pure so that three-way state is testable without seeding
+/// [`max_chunk_fetch_for`] rows for every case.
+pub(super) fn cap_short_return_warning(
+    capped: bool,
+    have_enough: bool,
+    exhausted: bool,
+    max_chunk_fetch: usize,
+    found: usize,
+    limit: usize,
+) -> Option<String> {
+    if !capped || have_enough || exhausted {
+        return None;
+    }
+    Some(format!(
+        "Warning: semantic search hit chunk scan cap ({max_chunk_fetch} candidates) \
+         with only {found} of {limit} requested results — likely excluded-tag dominance \
+         in the candidate set"
+    ))
+}
+
+/// Test-visible record of what [`emit_cap_short_return_warning`] emitted.
+///
+/// The warning is a bare `eprintln!` in production, matching the other 20-odd
+/// `eprintln!("Warning: ...")` sites in this codebase (there is no `log`/`tracing`
+/// dependency to route it through). libtest gives a test no way to read back its
+/// own captured stderr, so without this sink nothing can assert the warning
+/// actually fired from the real fill loop — only that the predicate would have
+/// returned `Some`.
+#[cfg(test)]
+pub(super) static CAP_WARNING_LOG: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub(super) fn emit_cap_short_return_warning(warning: &str) {
+    eprintln!("{warning}");
+    #[cfg(test)]
+    CAP_WARNING_LOG
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(warning.to_string());
+}
+
 /// DTO for deserializing knowledge records from SurrealDB queries.
 ///
 /// SurrealDB returns record links as `Thing` types, which don't deserialize
@@ -1098,7 +1157,7 @@ impl SurrealDatabase {
         // up to a hard cap so a pathological query can't force an unbounded
         // scan.
         let mut chunk_fetch = limit.saturating_mul(3).max(1);
-        let max_chunk_fetch = limit.saturating_mul(50).max(1000);
+        let max_chunk_fetch = max_chunk_fetch_for(limit);
         // Cache of every embedding_chunk entry_id already resolved (kept,
         // with its score, or dropped by a filter) so growing the over-fetch
         // window never re-hydrates or re-filters the same entry twice.
@@ -1229,20 +1288,22 @@ impl SurrealDatabase {
             let have_enough = scored_entries.len() >= limit;
             let exhausted = returned_count < chunk_fetch; // fewer rows than asked => table has no more
             let capped = chunk_fetch >= max_chunk_fetch;
-            if capped && !have_enough && !exhausted {
-                // The scan budget ran out before the candidate set filled to
-                // `limit` — distinct from `exhausted` (table genuinely has no
-                // more rows). This is the excluded-tag-dominance case: enough
-                // chunk candidates outrank the eligible ones that `limit*50`
-                // over-fetch iterations never surface `limit` non-excluded
-                // entries. Callers relying on a full page need to know the
-                // result is short.
-                eprintln!(
-                    "Warning: semantic search hit chunk scan cap ({max_chunk_fetch} candidates) \
-                     with only {} of {limit} requested results — likely excluded-tag dominance \
-                     in the candidate set",
-                    scored_entries.len()
-                );
+            // The scan budget ran out before the candidate set filled to
+            // `limit` — distinct from `exhausted` (table genuinely has no
+            // more rows). This is the excluded-tag-dominance case: enough
+            // chunk candidates outrank the eligible ones that `limit*50`
+            // over-fetch iterations never surface `limit` non-excluded
+            // entries. Callers relying on a full page need to know the
+            // result is short.
+            if let Some(warning) = cap_short_return_warning(
+                capped,
+                have_enough,
+                exhausted,
+                max_chunk_fetch,
+                scored_entries.len(),
+                limit,
+            ) {
+                emit_cap_short_return_warning(&warning);
             }
             if have_enough || exhausted || capped {
                 break;
