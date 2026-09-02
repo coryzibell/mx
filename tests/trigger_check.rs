@@ -19,14 +19,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 /// Run `mx` with isolated surreal root + fired-state path. `stdin` is optional.
 fn mx(dir: &TempDir, args: &[&str], stdin: Option<&str>) -> std::process::Output {
     let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
     cmd.args(args)
         .env("MX_CURRENT_AGENT", "test-agent")
-        .env("MX_SURREAL_ROOT", dir.path().join("surreal"))
         .env("MX_TRIGGER_FIRED_PATH", dir.path().join("fired.json"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

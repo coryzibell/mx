@@ -7,6 +7,8 @@ use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 // ---------------------------------------------------------------------------
@@ -21,8 +23,9 @@ fn setup(schema_toml: &str) -> TempDir {
 }
 
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
-    Command::new(MX)
-        .args(args)
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
+    cmd.args(args)
         .env("MX_CURRENT_AGENT", "test")
         .env("MX_KV_SCHEMA", dir.path().join("schema.toml"))
         .env("MX_KV_DATA", dir.path().join("data.json"))

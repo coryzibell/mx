@@ -12,6 +12,8 @@
 use std::process::Command;
 use tempfile::TempDir;
 
+mod common;
+
 const MX: &str = env!("CARGO_BIN_EXE_mx");
 
 const SCHEMA: &str = r#"
@@ -36,9 +38,9 @@ fn setup() -> TempDir {
 }
 
 fn mx(dir: &TempDir, args: &[&str]) -> std::process::Output {
-    Command::new(MX)
-        .args(args)
-        .env("MX_HOME", dir.path())
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
+    cmd.args(args)
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
