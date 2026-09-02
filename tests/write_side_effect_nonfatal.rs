@@ -45,13 +45,34 @@ fn setup() -> Env {
     }
 }
 
-fn mx(env: &Env, args: &[&str]) -> std::process::Output {
-    Command::new(MX)
-        .args(args)
-        .env("MX_HOME", env.dir.path())
+/// Isolate the child from any ambient `MX_SURREAL_*` network config in the
+/// invoking shell -- force embedded/file-backed mode under the per-test
+/// `MX_HOME` so these tests never touch a shared live database. Without
+/// this, a shell that exports the network vars runs real `mx memory add` /
+/// `mx memory add-batch` invocations against the live knowledge graph
+/// (Cory, PR #399 re-review, B1). Mirrors `tests/dedup_write_boundary.rs`'s
+/// `isolate` (the house pattern for this repo); kept local to this file
+/// rather than factored into a shared `tests/common/mod.rs` because that
+/// module does not exist at this PR's head -- it lands separately on `main`
+/// via PR #420, and introducing it here would hand the eventual rebase a
+/// same-file conflict nobody needs.
+fn isolate(cmd: &mut Command, home: &std::path::Path) {
+    cmd.env("MX_HOME", home)
         .env("MX_CURRENT_AGENT", "test")
-        .output()
-        .expect("failed to run mx")
+        .env("MX_SURREAL_MODE", "embedded")
+        .env_remove("MX_SURREAL_URL")
+        .env_remove("MX_SURREAL_NS")
+        .env_remove("MX_SURREAL_DB")
+        .env_remove("MX_SURREAL_USER")
+        .env_remove("MX_SURREAL_AUTH_LEVEL")
+        .env_remove("MX_SURREAL_ROOT");
+}
+
+fn mx(env: &Env, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(MX);
+    cmd.args(args);
+    isolate(&mut cmd, env.dir.path());
+    cmd.output().expect("failed to run mx")
 }
 
 /// Runs an `mx` command with the on-write embed step forced to fail.
@@ -70,13 +91,11 @@ fn mx_with_broken_model_cache(env: &Env, args: &[&str]) -> std::process::Output 
     std::fs::create_dir_all(cache_block.parent().unwrap()).unwrap();
     std::fs::write(&cache_block, b"blocking file, not a directory").unwrap();
 
-    Command::new(MX)
-        .args(args)
-        .env("MX_HOME", env.dir.path())
-        .env("MX_CURRENT_AGENT", "test")
-        .env("MX_ISOLATE_MODELS", "1")
-        .output()
-        .expect("failed to run mx")
+    let mut cmd = Command::new(MX);
+    cmd.args(args);
+    isolate(&mut cmd, env.dir.path());
+    cmd.env("MX_ISOLATE_MODELS", "1");
+    cmd.output().expect("failed to run mx")
 }
 
 /// Add an entry with embed/anchor skipped, so entry creation itself never
@@ -184,11 +203,6 @@ fn add_embed_failure_is_non_fatal_and_entry_persists() {
         "add must exit 0 even when the post-write embed fails: stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("post-write embed failed") && stderr.contains("entry durable"),
-        "expected a non-fatal embed warning naming the entry as durable: {stderr}"
-    );
 
     // The entry actually landed despite the embed step failing. `add --json`
     // still reports the id on the (now non-fatal) embed-failure path.
@@ -196,6 +210,28 @@ fn add_embed_failure_is_non_fatal_and_entry_persists() {
         .expect("add --json output should still parse on the non-fatal embed path");
     let id = v["id"].as_str().expect("id present").to_string();
     assert_eq!(show_body(&dir, &id), "brand new entry");
+
+    // The stderr warning must name THIS entry as durable, not just any
+    // entry -- reverting the id in the warning message would otherwise
+    // survive this check silently.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("post-write embed failed")
+            && stderr.contains("entry durable")
+            && stderr.contains(&id),
+        "expected a non-fatal embed warning naming entry {id} as durable: {stderr}"
+    );
+
+    // `embed_deferred` must appear in --json on the failed embed (Cory's B2,
+    // PR #399 re-review): deleting the `payload["embed_deferred"] = ...`
+    // assignment on the Add path must fail this test.
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
+    );
 }
 
 #[test]
@@ -278,6 +314,191 @@ fn append_to_missing_entry_still_exits_nonzero() {
     assert!(
         stderr.to_lowercase().contains("not found"),
         "expected a not-found error, got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `embed_deferred` must appear in `--json` on a failed post-write embed
+// (Cory's B2, PR #399 re-review): a structured caller reading `--json`
+// output has to see the degraded state, not silent clean success.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn append_embed_failure_surfaces_in_json_payload() {
+    let dir = setup();
+    let id = add_plain_no_embed(&dir);
+
+    let out = mx_with_broken_model_cache(
+        &dir,
+        &[
+            "memory",
+            "append",
+            &id,
+            "--content",
+            "appended text",
+            "--json",
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "append must exit 0 even when the post-write embed fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("append --json output should still parse on the non-fatal embed path");
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
+    );
+}
+
+#[test]
+fn update_embed_failure_surfaces_in_json_payload() {
+    let dir = setup();
+    let id = add_plain_no_embed(&dir);
+
+    let out = mx_with_broken_model_cache(
+        &dir,
+        &[
+            "memory",
+            "update",
+            &id,
+            "--content",
+            "updated content",
+            "--json",
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "update must exit 0 even when the post-write embed fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("update --json output should still parse on the non-fatal embed path");
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
+    );
+}
+
+#[test]
+fn edit_embed_failure_surfaces_in_json_payload() {
+    let dir = setup();
+    let id = add_plain_no_embed(&dir);
+
+    let out = mx_with_broken_model_cache(
+        &dir,
+        &[
+            "memory",
+            "edit",
+            &id,
+            "--find",
+            "original",
+            "--replace",
+            "edited",
+            "--json",
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "edit must exit 0 even when the post-write embed fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("edit --json output should still parse on the non-fatal embed path");
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
+    );
+}
+
+#[test]
+fn prepend_embed_failure_surfaces_in_json_payload() {
+    let dir = setup();
+    let id = add_plain_no_embed(&dir);
+
+    let out = mx_with_broken_model_cache(
+        &dir,
+        &[
+            "memory",
+            "prepend",
+            &id,
+            "--content",
+            "prepended text",
+            "--json",
+        ],
+    );
+
+    assert!(
+        out.status.success(),
+        "prepend must exit 0 even when the post-write embed fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("prepend --json output should still parse on the non-fatal embed path");
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
+    );
+}
+
+#[test]
+fn restore_embed_failure_surfaces_in_json_payload() {
+    let dir = setup();
+    let id = add_plain_no_embed(&dir);
+
+    // Create a backup to restore from. Runs with embed/anchor skipped so
+    // this setup step never touches the model cache -- only the restore
+    // call below (under the broken model cache) exercises the embed-failure
+    // path this test is pinning.
+    let setup_out = mx(
+        &dir,
+        &[
+            "memory",
+            "update",
+            &id,
+            "--content",
+            "content before restore",
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(
+        setup_out.status.success(),
+        "setup update (to create a backup) failed: {}",
+        String::from_utf8_lossy(&setup_out.stderr)
+    );
+
+    let out = mx_with_broken_model_cache(&dir, &["memory", "restore", &id, "--json"]);
+
+    assert!(
+        out.status.success(),
+        "restore must exit 0 even when the post-write embed fails: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .expect("restore --json output should still parse on the non-fatal embed path");
+    let deferred = v["embed_deferred"]
+        .as_str()
+        .expect("expected an `embed_deferred` field naming the failure in --json output");
+    assert!(
+        !deferred.is_empty(),
+        "embed_deferred should carry the underlying error, got empty string"
     );
 }
 
