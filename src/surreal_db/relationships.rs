@@ -290,24 +290,35 @@ impl SurrealDatabase {
         #[derive(Deserialize)]
         struct TagRow {
             entry_id: String,
-            tag: String,
+            #[serde(default)]
+            tags: Vec<String>,
         }
 
         let mut response = with_db!(self, db, {
             db.query(
-                "SELECT meta::id(in) AS entry_id, out.name AS tag \
-                 FROM tagged_with WHERE in IN $knowledge",
+                // Both `tagged_with` and `applies_to` carry a UNIQUE composite
+                // index on (in, out). A `union` lookup over the `in` prefix of
+                // that index (what `in IN $knowledge` plans as) returns nothing,
+                // even though the bind is correct and matches the right field --
+                // `in = $one` on the same prefix works. Traversing from the
+                // record ids directly sidesteps the index question: SurrealDB
+                // resolves each entry by its key and walks the graph edge, so
+                // the batch never touches that lookup path at all.
+                "SELECT meta::id(id) AS entry_id, ->tagged_with->tag.name AS tags \
+                 FROM $knowledge",
             )
             .bind(("knowledge", things))
             .await
             .context("Failed to batch-query tags")
         })?;
 
-        let rows: Vec<TagRow> = response.take(0).unwrap_or_default();
+        let rows: Vec<TagRow> = response
+            .take(0)
+            .context("Failed to deserialize batch tag rows")?;
         for row in rows {
             out.entry(format!("kn-{}", row.entry_id))
                 .or_default()
-                .push(row.tag);
+                .extend(row.tags);
         }
 
         Ok(out)
@@ -368,24 +379,34 @@ impl SurrealDatabase {
         #[derive(Deserialize)]
         struct ApplicabilityRow {
             entry_id: String,
-            applies_id: String,
+            #[serde(default)]
+            applies_ids: Vec<String>,
         }
 
         let mut response = with_db!(self, db, {
             db.query(
-                "SELECT meta::id(in) AS entry_id, meta::id(out) AS applies_id \
-                 FROM applies_to WHERE in IN $knowledge",
+                // Same index shape as the tag query above; see the comment
+                // there. `applicability_type` has no `name` field -- its
+                // record id *is* its identity -- so the traversal target is
+                // `.id`, and `meta::id()` needs to run per array element
+                // rather than on the array as a whole (it does not
+                // vectorize), hence the explicit `array::map`.
+                "SELECT meta::id(id) AS entry_id, \
+                        array::map(->applies_to->applicability_type.id, |$v| meta::id($v)) AS applies_ids \
+                 FROM $knowledge",
             )
             .bind(("knowledge", things))
             .await
             .context("Failed to batch-query applicability")
         })?;
 
-        let rows: Vec<ApplicabilityRow> = response.take(0).unwrap_or_default();
+        let rows: Vec<ApplicabilityRow> = response
+            .take(0)
+            .context("Failed to deserialize batch applicability rows")?;
         for row in rows {
             out.entry(format!("kn-{}", row.entry_id))
                 .or_default()
-                .push(row.applies_id);
+                .extend(row.applies_ids);
         }
 
         Ok(out)

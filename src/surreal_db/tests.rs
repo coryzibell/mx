@@ -3862,3 +3862,154 @@ fn semantic_search_no_flag_category_thinned_chunk_query_fills_to_limit() {
         );
     }
 }
+
+// =============================================================================
+// Batch hydration of tags / applicability (#401 regression)
+//
+// #401 replaced the per-entry `get_knowledge_async` hydration in the semantic
+// chunk fill loop with `get_knowledge_batch_async`, which fans out to
+// `get_tags_for_entries_async` and `get_applicability_for_entries_async`. Both
+// of those filter with `WHERE in IN $knowledge`. `in` is a SurrealQL keyword,
+// so that clause does not bind the edge's in-field and matches nothing; both
+// call sites then swallow the empty result with `take(0).unwrap_or_default()`
+// and report "this entry has no tags".
+//
+// Two consequences, both user-visible:
+//   1. `keep_after_exclude(&[], prefixes)` is always true, so `--exclude-tags`
+//      silently drops nothing on the chunked path -- the headline feature of
+//      #401. (Unchunked entries are unaffected; they filter in SQL.)
+//   2. Chunked entries come back from semantic search with their tags and
+//      applicability stripped, with or without any flag.
+//
+// The existing chunk-exclusion tests do not catch either, because they assert
+// `!entry.tags.iter().any(...)` on the same entries whose tags were never
+// hydrated -- an assertion that cannot fail. These tests assert on id sets and
+// on cross-path agreement instead.
+// =============================================================================
+
+#[test]
+fn batch_tag_hydration_agrees_with_the_single_entry_path() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut e = make_test_entry("kn-batch-tags", 5, 0.0);
+    e.content_hash = Some("hash-kn-batch-tags".to_string());
+    e.tags = vec!["tier/archived".to_string(), "project/x".to_string()];
+    db.upsert_knowledge(&e).unwrap();
+
+    let mut single = db.get_tags_for_entry("kn-batch-tags").unwrap();
+    single.sort();
+    assert_eq!(
+        single,
+        vec!["project/x".to_string(), "tier/archived".to_string()],
+        "precondition: the single-entry path must see the tags that were just \
+         written, otherwise this test proves nothing about the batch path"
+    );
+
+    let batched = SurrealDatabase::runtime()
+        .block_on(db.get_tags_for_entries_async(&["kn-batch-tags".to_string()]))
+        .unwrap();
+    let mut batch_tags = batched.get("kn-batch-tags").cloned().unwrap_or_default();
+    batch_tags.sort();
+
+    assert_eq!(
+        batch_tags, single,
+        "the batch tag query must return what the single-entry query returns; \
+         an empty result here means the WHERE clause matched nothing and every \
+         caller will read the entry as untagged"
+    );
+}
+
+#[test]
+fn batch_applicability_hydration_returns_the_edge_that_was_written() {
+    // NOTE: the single-entry path is NOT usable as the oracle here. It runs
+    // `SELECT VALUE meta::id(out)` -- a string -- and deserializes it into
+    // `Vec<Thing>`, which errors and is swallowed by `unwrap_or_default()`, so
+    // it returns an empty vec for every entry. That is a separate, pre-existing
+    // defect in `get_applicability_for_entry_async` and is NOT what this patch
+    // fixes. The `applies_to` edge itself is written correctly; a raw
+    // `SELECT meta::id(in), meta::id(out) FROM applies_to` returns it.
+    //
+    // What this test pins is the batch path, which projects `applies_id` as a
+    // String and types it correctly -- so once its WHERE clause actually
+    // matches, it returns the right value.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut e = make_test_entry("kn-batch-app", 5, 0.0);
+    e.content_hash = Some("hash-kn-batch-app".to_string());
+    e.applicability = vec!["backend".to_string()];
+    db.upsert_knowledge(&e).unwrap();
+
+    let batched = SurrealDatabase::runtime()
+        .block_on(db.get_applicability_for_entries_async(&["kn-batch-app".to_string()]))
+        .unwrap();
+
+    assert_eq!(
+        batched.get("kn-batch-app").cloned().unwrap_or_default(),
+        vec!["backend".to_string()],
+        "the batch applicability query must return the applies_to edge that \
+         upsert_knowledge wrote; it shares the broken WHERE shape with the tag \
+         query and returns nothing for every entry"
+    );
+}
+
+#[test]
+fn semantic_search_exclude_tags_drops_a_chunked_entry_with_no_eligible_neighbors() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    // The narrowest possible statement of the feature: one archived, chunked
+    // entry, excluded by prefix, must not come back. No eligible entries are
+    // seeded, so the result set is either empty or wrong -- there is nothing
+    // for a vacuous tag assertion to hide behind.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut query = vec![0.0f32; 8];
+    query[0] = 1.0;
+
+    seed_chunked_entry_with_tags(&db, "kn-only-archived", query.clone(), &["tier/archived"]);
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter {
+        exclude_tag_prefixes: vec!["tier/".to_string()],
+        ..Default::default()
+    };
+    let results = db.semantic_search(&query, &ctx, &filter, 5).unwrap();
+
+    assert!(
+        results.is_empty(),
+        "--exclude-tags 'tier/' must drop a chunked entry tagged tier/archived; \
+         got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn semantic_search_returns_chunked_entries_with_their_tags_hydrated() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    // Independent of any filter: an entry reached through the embedding_chunk
+    // phase must carry its tags out. This is what makes the neighbouring
+    // exclusion tests meaningful -- an assertion of the form
+    // `!entry.tags.iter().any(...)` is worthless if tags always arrive empty.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut query = vec![0.0f32; 8];
+    query[0] = 1.0;
+
+    seed_chunked_entry_with_tags(&db, "kn-tagged-chunk", query.clone(), &["project/x"]);
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let results = db.semantic_search(&query, &ctx, &filter, 5).unwrap();
+
+    assert_eq!(
+        results.len(),
+        1,
+        "precondition: the chunked entry must be found at all; got {:?}",
+        results.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        results[0].tags,
+        vec!["project/x".to_string()],
+        "a chunked entry must come back with its tags; empty tags here mean the \
+         batch hydration dropped them and every tag assertion downstream is \
+         vacuous"
+    );
+}

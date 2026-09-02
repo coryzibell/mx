@@ -20,6 +20,26 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   over-report relative to what `--include-private --semantic` actually shows.
 
 ### Fixed
+- `mx memory search --semantic` and `mx memory list` now return tags and
+  applicability on chunked entries, and `--exclude-tags` now filters them.
+  Batch hydration filtered with `WHERE in IN $knowledge`, which plans as a
+  `union` lookup over the `in` prefix of the composite UNIQUE index on
+  `(in, out)` and matches nothing. The bind itself is correct and `in = $one`
+  on that same prefix works, so this was not a keyword collision — it is the
+  `union` operator over a composite prefix. Both call sites then swallowed the
+  empty result with `take(0).unwrap_or_default()` and reported it as "this
+  entry has no tags", so chunked entries came back with tags and applicability
+  stripped, and `keep_after_exclude(&[], prefixes)` was unconditionally true —
+  `--exclude-tags` silently dropped nothing on the chunked path. Unchunked
+  entries were unaffected; they filter in SQL and never read hydrated tags.
+  Both queries now traverse from the record ids
+  (`SELECT meta::id(id) AS entry_id, ->tagged_with->tag.name AS tags FROM
+  $knowledge`), which resolves each entry by key and never reaches that index
+  lookup, and both `take(0)` calls propagate instead of defaulting. Measured at
+  40k edges / 1000 bound ids: 92ms for tags, 132ms for applicability, flat in
+  table size. The narrower alternative `WHERE $knowledge CONTAINS in` returns
+  correct rows but plans as `Iterate Table` — 18.9–24.4s at that size, growing
+  as O(table rows × bound array length).
 - `mx commit` now verifies that the encoded body decodes back to the original
   message before committing, and re-rolls the codec pair when it does not.
   `validate_encoded_output` only ever checked that the output was *safe* (no
