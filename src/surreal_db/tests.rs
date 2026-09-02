@@ -3300,3 +3300,26 @@ fn off_dim_row_does_not_abort_cosine_scan() {
         "entry-level scored search must skip the off-dim row; got {scored_ids:?}"
     );
 }
+
+#[test]
+fn test_get_applicability_for_entry_returns_written_targets() {
+    // Regression: the single-entry read ran `SELECT VALUE meta::id(out)` (a STRING)
+    // but deserialized into Vec<Thing>, and `.unwrap_or_default()` swallowed the
+    // resulting "expected an object-like struct named ...Thing, found \"backend\""
+    // error, so every entry reported empty applicability.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-applies-read", 5, 0.01);
+    entry.applicability = vec!["backend".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let applicability = db
+        .get_applicability_for_entry("kn-applies-read")
+        .expect("applicability read must not fail");
+
+    assert_eq!(
+        applicability,
+        vec!["backend".to_string()],
+        "written applies_to edge must be read back"
+    );
+}
