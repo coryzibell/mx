@@ -694,6 +694,21 @@ pub enum MemoryCommands {
         /// Skip synchronous embedding generation on write
         #[arg(long)]
         no_embed: bool,
+
+        /// Write through even if an identical (same session, same owner)
+        /// entry already exists this session. Without this flag, a
+        /// recased/repunctuated near-duplicate is skipped (exit 0) rather
+        /// than written -- this is a deliberate override for an intentional
+        /// re-add, not "permission" for an accidental one.
+        ///
+        /// Caveat: entry ids are derived from path/title (`generate_id`), so
+        /// a byte-identical re-add with this flag set overwrites the SAME
+        /// row in place (new `updated_at`, same id) rather than creating a
+        /// second entry -- this only produces a genuinely distinct row for a
+        /// recased/reworded near-duplicate, not an exact repeat. Vary the
+        /// title if you need a second row for identical content.
+        #[arg(long)]
+        allow_duplicate: bool,
     },
 
     /// Update an existing entry in the database

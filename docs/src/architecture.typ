@@ -943,6 +943,16 @@ passed to `gh pr merge --subject ... --body ...`.
 `base_d::hash` and `base_d::encode`), producing the `content_hash` field used
 for change detection during seed/import operations.
 
+#note[This is distinct from the runtime write-boundary `dedup_hash`
+(`knowledge::dedup_hash`, W447): `content_hash` is *title-only*, computed at
+import/seed time, and never enforced (no write-time check reads it back).
+`dedup_hash` is *title+body*, computed on every `mx memory add` /
+`add-batch` write, checked against the writer's own same-session entries
+BEFORE the write lands, and normalizes case/punctuation/whitespace so
+regenerated near-duplicates collapse to the same hash. See "Write-boundary
+deduplication" in the #link("memory.html")[Memory] reference. The two hashes
+are unrelated and neither replaces the other.]
+
 
 // =========================================================================
 // TESTING PATTERNS

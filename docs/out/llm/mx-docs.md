@@ -1175,6 +1175,8 @@ schema (it ignores `MX_SKIP_SCHEMA`).
 
 - Adding entries
 
+- Write-boundary deduplication
+
 - Reading entries
 
 - Updating entries
@@ -1210,7 +1212,7 @@ the category and generates a title from content).
 ### Flags
 
   **Flag**                **Type**   **Description**
-  ----------------------- ---------- ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  ----------------------- ---------- ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
   `--category`            `string`   Category name (run `mx memory categories list` for valid names). Required unless `--type` is provided.
   `-t, --title`           `string`   Entry title. Required unless `--type` is provided.
   `--content`             `string`   Inline content. Conflicts with `--file`.
@@ -1239,6 +1241,7 @@ the category and generates a title from content).
   `--thread-id`           `string`   Thread ID for `thread_closed` operations. Requires `--type`.
   `--no-auto-anchor`      `flag`     Skip automatic anchor generation.
   `--no-embed`            `flag`     Skip synchronous embedding generation on write.
+  `--allow-duplicate`     `flag`     Write through even if an identical (same session, same owner) entry already exists this session. Without this flag, a recased/repunctuated near-duplicate is skipped (exit 0) rather than written -- see Write-boundary deduplication below.
   `--json`                `flag`     Output as JSON.
 
 ### Examples
@@ -1281,8 +1284,11 @@ Each line is a JSON object whose fields match `mx memory add` arguments
 The store is opened once and the  435 MB embedding model is loaded once
 for the whole batch, so a 30-entry bulk caller pays one cold-load
 instead of thirty. Malformed lines are skipped and reported at the end;
-one bad entry does not abort the rest (partial-success semantics). Exits
-non-zero when any entry failed.
+one bad entry does not abort the rest (partial-success semantics). A
+duplicate-skip (write-boundary dedup) is NOT a malformed-line failure --
+it counts toward "already saved," not "failed." Exits non-zero only when
+a line was malformed or the write itself errored; exits 0 when every
+line either wrote or was a legitimate duplicate-skip.
 
 **Recommended delivery:** pass a JSONL file via `--file` when calling
 through a `sudo` wrapper (e.g. the hearth `_secret-exec` proxy) --- a
@@ -1319,7 +1325,127 @@ include all per-entry fields (`category`, `title`, `content`,
 `source_agent`, `tags`, `private`, `resonance`, `type`, etc.) on each
 line. There are no batch-wide field overrides except `--no-embed`. This
 design supports heterogeneous batches (facts, person nodes, summaries,
-blooms) in a single invocation --- which is the primary pocket use-case.
+blooms) in a single invocation --- which is the primary batch-write
+use-case. Per line, `allow_duplicate: true` mirrors `--allow-duplicate`
+on the single-add path -- see below.
+:::
+
+### Write-boundary deduplication {#dedup}
+
+All four new-entry write funnels -- `mx memory add` (standard),
+`mx memory
+add --type` (fact-routing), and both lines of `mx memory add-batch`
+(standard and `--type`) -- check a normalized `dedup_hash` of
+`title+body` (lowercase, ASCII punctuation and common Unicode
+punctuation stripped -- smart quotes, en/em dash, horizontal ellipsis --
+whitespace collapsed) against the writing agent's OWN entries in the
+SAME session before writing. A regenerated duplicate that differs only
+by case, punctuation, or whitespace -- the common shape when an LLM
+re-derives the same fact across turns -- is detected and the write is
+SKIPPED rather than landing as a second row. Title and body are hashed
+as a length-prefixed pair, so a duplicate that shifts the split point
+(e.g. a sentence folded into the title one turn, split title+body the
+next) is still caught.
+
+A skip is treated as **success, not failure**: it means the content is
+already durably saved, and there is nothing further to do.
+
+- **Plain mode:**
+  `Already saved as kn-XXXX (identical entry this session — nothing to do).`
+  Deliberately distinct from the success line (`Added entry: kn-XXXX`)
+  -- a caller regexing on `Added entry: (kn-\S+)` should switch to
+  `--json` rather than assume this line matches that pattern.
+
+- `--json` **mode:**
+  `{"id": "kn-XXXX", "skipped": true, "duplicate_of": "kn-XXXX", "status": "already_persisted", "note": "..."}`,
+  with clean JSON on stdout (no other text) and exit code `0`. `id`
+  mirrors every success payload's `id` key so a caller reading `.id`
+  unconditionally never gets a silent `null` on a skip.
+
+- **`add-batch` per-entry line:**
+  `[N] Already saved: kn-XXXX (title) — identical this session, no action`
+  -- never the bare words "skipped" or "duplicate" -- and the batch
+  summary carries its own `K already saved (no action needed)` category,
+  separate from `added` and `failed`. `add-batch` has no `--json` mode,
+  so this is stdout text only.
+
+- Pass `--allow-duplicate` (single add) or `allow_duplicate: true` (per
+  JSONL line) to force the write through when a re-add is deliberate.
+  **Caveat:** on the fact-routing paths (and on the standard path when
+  `title` is byte-identical to an existing entry's), the write's id is
+  derived from `path_hint:title` (`generate_id`), so a byte-identical
+  forced re-add overwrites the SAME row in place (new `updated_at`, same
+  id) instead of creating a second entry -- `--allow-duplicate` only
+  produces a genuinely distinct row for a recased/reworded
+  near-duplicate, not an exact repeat. This is accepted, not fixed:
+  perturbing the id on a forced write was considered and rejected (it
+  would make `--allow-duplicate` non-idempotent in a different, more
+  surprising way). If you need a second row for byte-identical content,
+  vary the title.
+
+- On a candidate-lookup failure (a transient DB read blip), the gate
+  FAILS OPEN: it warns to stderr (`--json` mode also gets a
+  `"dedup_lookup_warning"` field) and proceeds with the write rather
+  than aborting it. A dedup mechanism that already tolerates a
+  check-then-write race between two concurrent writers tolerates a
+  lookup blip the same way -- the write always wins.
+
+::: {.admonition .note}
+**NOTE:** **Coverage boundary, read this before assuming full
+coverage:** the gate catches recased/repunctuated re-adds within the
+SAME session and SAME owner. It does NOT catch: cross-session
+regenerations (a fact re-derived in a later wake under a different
+`session_id` -- **open question, not yet confirmed:** the  20
+double-write pairs (W342--W445) that motivated this feature have not
+been checked against this scope; if most of them are cross-session
+rather than same-session, this fix closes only a minority of the
+motivating class, and owner-scoped matching with a bounded time window
+would be the sharper mechanism -- flagged for follow-up, not resolved
+here), reworded duplicates (different words, same meaning -- e.g.
+"shipped" vs "published"), a public+owned entry vs. a later
+public+unowned entry with identical content (owner is a hard
+AND-conjoined predicate, so these two visible-to-everyone rows never
+dedup against each other even though both are public), or writes with no
+`session_id` at all (dedup is bypassed entirely when `session_id` is
+absent -- a bypass signal is emitted on EVERY funnel: `"dedup":
+"bypassed_no_session"` in `--json` mode on the standard single-add path
+(mutually exclusive with the stderr note -- json mode never prints
+both), a stderr note on all four funnels in every other mode, so the
+bypass is never silent). Keep marking back captured entries; this is a
+store-boundary backstop, not a substitute for careful write discipline.
+:::
+
+::: {.admonition .note}
+**NOTE:** **In-process, best-effort -- not a database-level uniqueness
+guarantee.** The dedup index is read-then-write within a single `mx`
+process invocation (TOCTOU: two concurrent `mx` invocations can still
+both write the same normalized content). It is NOT wired to the legacy
+`content_hash` field (title-only, import-time change detection,
+unenforced) and there is no `DEFINE INDEX ... UNIQUE` backing it at the
+schema level -- a persisted `dedup_hash` plus a compound unique index
+would close the TOCTOU gap and make the "store-boundary" framing
+literally true, at the cost of mapping a constraint violation to a skip;
+this is a design option for a future PR, not implemented here. The
+candidate query has no result limit, so a very long-lived session pays
+an O(n) rehash of every row ever written to its `(session, owner)` group
+on every future write in that group -- bounded in practice (memory
+sessions aren't usually thousands of rows), a follow-up if it ever
+isn't.
+:::
+
+::: {.admonition .note}
+**NOTE:** **The write boundary confirms content existence under a
+claimed owner.** A `duplicate_of` hit tells the caller "an entry with
+this exact normalized content already exists under this owner" --
+bounded to the pre-existing owner-claim authz (a caller can already
+assert their own owner scope; this exposes no more than that), but it is
+a new confirmation surface worth naming, and it is sharper on
+`add-batch`: each JSONL line supplies its own `source_agent`/`owner`, so
+one batch invocation can probe many owner+content combinations at once.
+When more than one pre-existing entry under a group already shares a
+hash (only possible from data written before this gate existed),
+`duplicate_of` reports whichever one iteration order happens to surface
+last -- not the earliest or a canonical row.
 :::
 
 ## Reading entries {#reading}
@@ -8279,6 +8405,18 @@ message is passed to `gh pr merge --subject ... --body ...`.
 `KnowledgeEntry` uses base-d's hash encoding for content hashing (via
 `base_d::hash` and `base_d::encode`), producing the `content_hash` field
 used for change detection during seed/import operations.
+
+::: {.admonition .note}
+**NOTE:** This is distinct from the runtime write-boundary `dedup_hash`
+(`knowledge::dedup_hash`, W447): `content_hash` is **title-only**,
+computed at import/seed time, and never enforced (no write-time check
+reads it back). `dedup_hash` is **title+body**, computed on every
+`mx memory add` / `add-batch` write, checked against the writer's own
+same-session entries BEFORE the write lands, and normalizes
+case/punctuation/whitespace so regenerated near-duplicates collapse to
+the same hash. See "Write-boundary deduplication" in the Memory
+reference. The two hashes are unrelated and neither replaces the other.
+:::
 
 ## Testing patterns
 

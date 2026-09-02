@@ -1564,6 +1564,15 @@ mod tests {
             fn get_facts_for_session(&self, _id: &str) -> Result<Vec<String>> {
                 unreachable!()
             }
+            fn get_entries_for_session(
+                &self,
+                _id: &str,
+                _owner: Option<&str>,
+                _category: &str,
+                _ctx: &AgentContext,
+            ) -> Result<Vec<crate::store::DedupCandidate>> {
+                unreachable!()
+            }
             fn get_session_for_fact(&self, _id: &str) -> Result<Option<String>> {
                 unreachable!()
             }
