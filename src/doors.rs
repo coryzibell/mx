@@ -98,20 +98,30 @@ pub fn strip_channel_tags(prompt: &str) -> String {
         {
             let mut j = i + 8;
             let mut in_quote = false;
+            let mut closed = false;
             while j < prompt.len() {
                 match bytes[j] {
                     b'"' => in_quote = !in_quote,
                     b'>' if !in_quote => {
                         j += 1;
+                        closed = true;
                         break;
                     }
                     _ => {}
                 }
                 j += 1;
             }
-            out.push(' ');
-            i = j;
-            continue;
+            if closed {
+                out.push(' ');
+                i = j;
+                continue;
+            }
+            // No closing bracket: this is not a real channel tag (a stray
+            // "<channel" someone typed, or an unbalanced quote). Swallowing to
+            // end-of-string would silently cost every door for the turn, so
+            // treat the remainder as ordinary body text and stop stripping.
+            out.push_str(&prompt[i..]);
+            break;
         }
         let ch = rest.chars().next().unwrap();
         out.push(ch);
@@ -151,6 +161,15 @@ pub fn dig_pointer(key: &str, id: &str, memory: Option<&str>) -> String {
     }
 }
 
+/// How specific a trigger is: how many message tokens it spans, then how many
+/// characters. A longer span is a more precise statement about the message.
+fn specificity(trigger: &str) -> (usize, usize) {
+    (
+        triggers::tokens(trigger, false).len(),
+        trigger.chars().count(),
+    )
+}
+
 /// Decide which doors open for one prompt.
 ///
 /// `already_fired` holds the `(key, entry id)` pairs this session has seen, and
@@ -182,7 +201,19 @@ pub fn select(
             continue;
         }
         let hits = triggers::match_triggers(&message_tokens, cand.triggers, false);
-        let Some(trigger) = hits.into_iter().next() else {
+        // Report the MOST SPECIFIC trigger, not whichever was stored first.
+        // An entry carrying both `gerf` and `gerf_slips` should say
+        // `gerf_slips` fired on "gerf_slips is permanent" — the longer match
+        // covers more of the message and is what the reader needs to see.
+        // Specificity is token count first, then characters; ties keep stored
+        // order so output stays deterministic.
+        let Some(trigger) = hits.into_iter().reduce(|best, t| {
+            if specificity(&t) > specificity(&best) {
+                t
+            } else {
+                best
+            }
+        }) else {
             continue;
         };
         let count = fire_counts.get(&pair).copied().unwrap_or(0);
@@ -269,6 +300,66 @@ mod tests {
     fn strip_channel_tolerates_gt_inside_an_attribute() {
         let out = strip_channel_tags(r#"<channel room_name="a > b">hi</channel>"#);
         assert_eq!(out.trim(), "hi");
+    }
+
+    #[test]
+    fn unterminated_channel_tag_does_not_swallow_the_turn() {
+        // A stray "<channel" with no closing bracket must not eat the rest of
+        // the prompt -- that would cost every door for the turn.
+        let out = strip_channel_tags("<channel source=\"matrix\" oops konkon is here");
+        assert!(out.contains("konkon"), "body survived: {out}");
+
+        // Same with an unbalanced quote, which is how the scan runs off the end.
+        let out = strip_channel_tags("<channel user=\"unclosed konkon");
+        assert!(out.contains("konkon"), "body survived: {out}");
+    }
+
+    #[test]
+    fn unterminated_channel_tag_still_fires_doors() {
+        let trig = vec!["konkon".to_string()];
+        let cands = [cand("facts", "aaa", "v", "2026-01-01T00:00:00Z", &trig)];
+        let sel = select(
+            "<channel user=\"unclosed good morning konkon",
+            &cands,
+            &HashSet::new(),
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(sel.fired.len(), 1, "a malformed tag must not lose the door");
+    }
+
+    #[test]
+    fn most_specific_trigger_is_reported() {
+        // Stored order puts the SHORT trigger first, so first-match would
+        // report `gerf` for a message that actually said `gerf_slips`.
+        let trig = vec!["gerf".to_string(), "gerf_slips".to_string()];
+        let cands = [cand(
+            "doors",
+            "aaa",
+            "Gerf is GEOFF",
+            "2026-01-01T00:00:00Z",
+            &trig,
+        )];
+        let sel = select(
+            "gerf_slips is permanent",
+            &cands,
+            &HashSet::new(),
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(sel.fired[0].trigger, "gerf_slips");
+
+        // And a message with only the short form still reports the short form.
+        let sel = select("ask gerf", &cands, &HashSet::new(), &HashMap::new(), 2);
+        assert_eq!(sel.fired[0].trigger, "gerf");
+    }
+
+    #[test]
+    fn specificity_prefers_more_tokens_then_more_characters() {
+        assert!(specificity("kon kon") > specificity("konkon"));
+        assert!(specificity("gerf_slips") > specificity("gerf"));
+        // Equal triggers tie, so stored order decides and output stays stable.
+        assert_eq!(specificity("alpha"), specificity("bravo"));
     }
 
     #[test]

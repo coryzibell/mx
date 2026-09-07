@@ -18,7 +18,11 @@ use rust_stemmers::{Algorithm, Stemmer};
 /// Steps, in order, so author-time and match-time agree exactly:
 ///   1. `normalize_trigger` — NFC canonicalize + lowercase + whitespace-collapse
 ///      (the single shared normalizer; see `src/knowledge.rs`). Returns no tokens
-///      for empty/whitespace-only input.
+///      for empty/whitespace-only input. NFC is canonical composition, NOT the
+///      compatibility form NFKC, so compatibility-equivalent text does not fold:
+///      fullwidth `ｋｏｎｋｏｎ` and the ligature `ﬁ` stay distinct from their
+///      ASCII spellings and will not match a plain trigger. That is deliberate —
+///      NFKC would also collapse things a proper-noun matcher wants kept apart.
 ///   2. Split on Unicode word boundaries: any run of non-alphanumeric characters
 ///      separates tokens. This is what makes matching **word-boundary** — "ai"
 ///      tokenizes "said" as `["said"]`, never exposing a bare "ai" token, so the

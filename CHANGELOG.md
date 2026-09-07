@@ -7,6 +7,22 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- `mx doors` — trigger-based ambient memory, intended as a Claude Code
+  `UserPromptSubmit` hook. Any history/list entry carrying `triggers` becomes a
+  *door*: when one of its phrases appears in a prompt, `mx doors hook` prints one
+  line with a fragment and a `<key>/kv-<id>` pointer. Subcommands: `hook`,
+  `check`, `stats`, `reset`. The hook reads the kv file only — no SurrealDB, no
+  network — and **always exits 0**, because on `UserPromptSubmit` an exit of 2
+  blocks the turn and erases the typed prompt.
+- Entries in `history` and `list` keys gained two optional fields, `triggers` and
+  `fragment`, settable with `mx kv push --trigger/--fragment` and
+  `mx kv update --trigger/--fragment`. Both are omitted from the serialized entry
+  when unset, so existing data files load and round-trip unchanged. On `update`,
+  `--trigger` replaces the whole list and `--trigger ""` clears it;
+  `--fragment ""` clears the override.
+- `mx kv triggers [KEY] [--json]` lists every entry carrying triggers, with
+  all-time fire counts.
+
 - `mx memory list` and `mx memory search` now emit a best-effort **stderr**
   hint when the caller's own private entries match the query but are hidden by
   the public-only default (Issue #400). The hint reads
@@ -73,6 +89,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   run on a contended init.
 
 ### Changed
+- **Removed `mx memory trigger-check` and `mx memory trigger-reset`** (Issue
+  #246). Their matching engine survives in `src/triggers.rs` and is what `mx
+  doors` runs on; only the graph-backed storage and CLI are gone. The
+  session fired-state file (`MX_TRIGGER_FIRED_PATH`, default
+  `/tmp/wonka-triggered-fired.json`) is no longer read or written. The
+  `triggers` field on knowledge entries is unaffected: `mx memory add/update/show`
+  still author and display it.
+- `triggers::stem_tokens(raw)` is now `triggers::tokens(raw, stem: bool)`, and
+  `match_triggers`/`match_entries` take the same flag. Doors match with stemming
+  **off** — the English Snowball stemmer folds Tagalog "ayos" onto "ayo", which
+  would open an `ayo-` door on unrelated text.
+- Library-internal: `KvStore::push`/`push_with_ts` take an `EntryAttrs` struct and
+  `KvStore::update_entry` an `EntryPatch`, instead of positional
+  `data`/`memory` arguments. No CLI behaviour changes from this.
+
 - `mx log` and `mx show` no longer silently print the raw encoded blob when a
   commit body fails to decode. Every decode error — unknown dictionary, decode
   failure, failed decompression, bad UTF-8 — previously collapsed into

@@ -147,22 +147,33 @@ fn hook(dry_run: bool, budget: usize) {
     if selection.fired.is_empty() {
         return;
     }
-    print_fired(&selection.fired);
+
+    // RECORD BEFORE PRINT. A door that prints without its fire row being
+    // persisted has no dedup: it opens again on the next prompt, and the one
+    // after, forever. That is the exact shape of the migration hazard — if
+    // `doors_fired` is missing from the schema every push fails, and printing
+    // first would turn a one-line setup mistake into a door that shouts on
+    // every message. Failing to record means failing to fire.
     if !dry_run && let Err(e) = record(&mut store, &input.session_id, &selection.fired) {
-        eprintln!("[mx doors] could not record fires: {e:#}");
+        eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
+        return;
     }
+    print_fired(&selection.fired);
 }
 
 fn check(message: &str, session: &str, dry_run: bool, json: bool, budget: usize) -> Result<i32> {
     let mut store = KvStore::from_env()?;
     let selection = evaluate(&store, session, message, budget);
+    // Same ordering as the hook: a door that reports without recording is a
+    // door with no dedup. Here the error propagates instead of being swallowed,
+    // because `check` is run by a person who wants to see it.
+    if !dry_run {
+        record(&mut store, session, &selection.fired)?;
+    }
     if json {
         println!("{}", serde_json::to_string(&selection)?);
     } else {
         print_fired(&selection.fired);
-    }
-    if !dry_run {
-        record(&mut store, session, &selection.fired)?;
     }
     Ok(crate::kv::EXIT_OK)
 }

@@ -1,8 +1,14 @@
 //! Integration tests for `mx doors` and the `mx kv` trigger surface.
 //!
 //! Drives the built binary against an isolated `MX_HOME` (harness mirrors
-//! `tests/kv_set_cli.rs`). `mx doors` touches only flat files under `MX_HOME`,
-//! so no serialization lock is needed and nothing reaches SurrealDB.
+//! `tests/kv_set_cli.rs`). Nothing here reaches SurrealDB.
+//!
+//! These tests need no serialization lock because each one owns a private
+//! tempdir store and runs `mx` one process at a time. That is a property of the
+//! HARNESS, not of kv: in production `mx doors hook` writes a fire row at
+//! prompt-submit time, concurrently with whatever else is writing kv, and it
+//! relies on the store lock from #429 to not lose rows. Read nothing here as a
+//! claim that kv writes are safe unserialized.
 //!
 //! The acceptance gate is `konkon_fires_from_a_matrix_channel_block`: a real
 //! channel block, a door living on a NON-`doors` key, one line on stdout, one
@@ -38,7 +44,12 @@ trigger = { type = "string" }
 /// in the body. `user="carmel"` must never open a `carmel` door on its own.
 const CHANNEL_PROMPT: &str = concat!(
     r#"<channel source="matrix" chat_id="!r:s" message_id="$e" user="carmel" "#,
-    r#"user_id="@j:s" room_name="delta">\ngood morning konkon\n</channel>"#
+    r#"user_id="@j:s" room_name="delta">"#,
+    // REAL newlines. A raw string would make these a literal backslash and an
+    // "n", which `json!` then escapes again -- the gate would never see the
+    // line breaks a genuine channel block carries.
+    "\ngood morning konkon\n",
+    "</channel>"
 );
 
 fn setup() -> TempDir {
@@ -129,6 +140,18 @@ fn fire_rows(dir: &TempDir) -> Vec<serde_json::Value> {
 
 #[test]
 fn konkon_fires_from_a_matrix_channel_block() {
+    // Guard the fixture itself: a raw string here would make these literal
+    // backslash-n and the gate would silently stop testing a real payload.
+    assert_eq!(
+        CHANNEL_PROMPT.matches('\n').count(),
+        2,
+        "the acceptance payload must carry REAL newlines"
+    );
+    assert!(
+        !CHANNEL_PROMPT.contains("\\n"),
+        "no escaped newlines in the fixture"
+    );
+
     let dir = setup();
     let id = push_door(
         &dir,
@@ -343,6 +366,53 @@ fn hook_always_exits_zero_on_every_failure_mode() {
     );
 }
 
+/// If the fire row cannot be persisted, the door must NOT print. A door that
+/// prints without recording has no dedup and would open on every prompt
+/// forever. Reproduced with a schema that has no `doors_fired` key at all,
+/// which is exactly the state between deploying the binary and running the
+/// schema migration.
+#[test]
+fn a_door_that_cannot_be_recorded_does_not_open() {
+    let dir = TempDir::new().unwrap();
+    let schema_dir = dir.path().join("kv").join("schema");
+    std::fs::create_dir_all(&schema_dir).unwrap();
+    std::fs::write(
+        schema_dir.join("test.toml"),
+        "[keys.facts]\ntype = \"list\"\n",
+    )
+    .unwrap();
+
+    push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
+
+    let out = mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
+    assert_eq!(out.status.code(), Some(0), "still exits 0");
+    assert!(
+        out.stdout.is_empty(),
+        "an unrecordable door must stay shut: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("could not record"),
+        "and must say why on stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // --dry-run is the deliberate exception: it never records, so it prints.
+    let dry = mx_stdin(
+        &dir,
+        &["doors", "hook", "--dry-run"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
+    assert!(
+        !dry.stdout.is_empty(),
+        "--dry-run still reports what would fire"
+    );
+}
+
 #[test]
 fn no_match_is_silent_and_writes_nothing() {
     let dir = setup();
@@ -541,6 +611,88 @@ fn stats_counts_fires_and_names_doors_never_opened() {
     let never = v["never_fired"].as_array().unwrap();
     assert_eq!(never.len(), 1);
     assert_eq!(never[0]["entry"], quiet);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency (design doc section 5, case 21)
+// ---------------------------------------------------------------------------
+
+/// Eight hooks fire at once on distinct sessions, while an unrelated `kv push`
+/// runs alongside. Every fire must be recorded and the unrelated row must
+/// survive.
+///
+/// IGNORED ON PURPOSE. `KvStore` has no write lock on `main`: every write is
+/// load-whole-file, mutate, write-whole-file, so two overlapping writers each
+/// save their own snapshot and the second silently discards the first. This
+/// test reproduces that as 3-5 lost rows. It is not a doors bug and doors
+/// cannot fix it from here -- it is what #429 (`kv: advisory file lock around
+/// read-modify-write`) exists to fix. Un-ignore this when #429 lands.
+#[test]
+#[ignore = "requires the kv write lock from #429; without it concurrent writers silently drop rows"]
+fn eight_concurrent_hooks_all_record_and_do_not_clobber_an_unrelated_key() {
+    use std::thread;
+
+    let dir = setup();
+    push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
+    let dir_path = dir.path().to_path_buf();
+
+    let mut handles = Vec::new();
+    for n in 0..8 {
+        let path = dir_path.clone();
+        handles.push(thread::spawn(move || {
+            let mut cmd = Command::new(MX);
+            common::isolate(&mut cmd, &path);
+            cmd.args(["doors", "hook"])
+                .env("MX_CURRENT_AGENT", "test")
+                .env_remove("MX_KV_SCHEMA")
+                .env_remove("MX_KV_DATA")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd.spawn().unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(hook_input(&format!("sess{n}"), "hi konkon").as_bytes())
+                .unwrap();
+            drop(child.stdin.take());
+            child.wait_with_output().unwrap()
+        }));
+    }
+
+    // An unrelated writer racing the hooks. Its row must not be lost.
+    let path = dir_path.clone();
+    let writer = thread::spawn(move || {
+        let mut cmd = Command::new(MX);
+        common::isolate(&mut cmd, &path);
+        cmd.args(["kv", "push", "doors", "unrelated row"])
+            .env("MX_CURRENT_AGENT", "test")
+            .env_remove("MX_KV_SCHEMA")
+            .env_remove("MX_KV_DATA")
+            .output()
+            .unwrap()
+    });
+
+    for h in handles {
+        let out = h.join().unwrap();
+        assert_eq!(out.status.code(), Some(0), "every hook exits 0");
+    }
+    assert!(writer.join().unwrap().status.success());
+
+    let rows = fire_rows(&dir);
+    assert_eq!(
+        rows.len(),
+        8,
+        "one fire row per session, none lost: {rows:?}"
+    );
+
+    let doors_key = ok(&mx(&dir, &["kv", "get", "doors"]), "kv get doors");
+    assert!(
+        doors_key.contains("unrelated row"),
+        "the concurrent unrelated write must survive: {doors_key}"
+    );
 }
 
 // ---------------------------------------------------------------------------

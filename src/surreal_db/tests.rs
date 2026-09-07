@@ -3042,7 +3042,7 @@ fn test_triggers_default_empty_when_absent() {
 // encounters any row whose embedding dimension differs from the query
 // vector. A single off-dimension row (famously, a dim-4 unit-test fixture
 // that leaked into the live graph) therefore broke add-dedup, auto_anchor
-// (#362), semantic search, and trigger-check (#246) all at once.
+// (#362) and semantic search all at once.
 //
 // The fix adds `AND array::len(embedding) = $dim` to every cosine query so a
 // mismatched row is SKIPPED rather than aborting the scan. These tests would
