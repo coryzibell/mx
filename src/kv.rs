@@ -9740,7 +9740,11 @@ type = "history"
                 },
             )
             .unwrap();
-        assert!(get_list_entry(&store, "facts", push.index).triggers.is_none());
+        assert!(
+            get_list_entry(&store, "facts", push.index)
+                .triggers
+                .is_none()
+        );
         assert!(store.iter_triggered().is_empty());
     }
 
@@ -9771,7 +9775,9 @@ type = "history"
     #[test]
     fn update_fragment_sets_and_clears_without_touching_value() {
         let (mut store, _dir) = setup_store(doors_schema());
-        let push = store.push("facts", "the value", EntryAttrs::default()).unwrap();
+        let push = store
+            .push("facts", "the value", EntryAttrs::default())
+            .unwrap();
         let id = IdRef::Index(push.index);
 
         store
@@ -9798,7 +9804,11 @@ type = "history"
                 },
             )
             .unwrap();
-        assert!(get_list_entry(&store, "facts", push.index).fragment.is_none());
+        assert!(
+            get_list_entry(&store, "facts", push.index)
+                .fragment
+                .is_none()
+        );
     }
 
     #[test]

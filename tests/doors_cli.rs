@@ -114,7 +114,10 @@ fn hook_input(session: &str, prompt: &str) -> String {
 }
 
 fn fire_rows(dir: &TempDir) -> Vec<serde_json::Value> {
-    let out = mx(dir, &["kv", "last", "doors_fired", "--count", "100", "--json"]);
+    let out = mx(
+        dir,
+        &["kv", "last", "doors_fired", "--count", "100", "--json"],
+    );
     if !out.status.success() {
         return Vec::new();
     }
@@ -185,7 +188,11 @@ fn same_session_fires_once_then_a_fresh_session_re_fires() {
     let dir = setup();
     push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
 
-    let first = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "hi konkon")));
+    let first = mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
     assert!(!ok(&first, "first hook").is_empty());
     assert_eq!(fire_rows(&dir).len(), 1);
 
@@ -197,7 +204,11 @@ fn same_session_fires_once_then_a_fresh_session_re_fires() {
     assert_eq!(ok(&second, "second hook"), "", "deduped within the session");
     assert_eq!(fire_rows(&dir).len(), 1, "no second row");
 
-    let third = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s2", "hi konkon")));
+    let third = mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s2", "hi konkon")),
+    );
     assert!(
         !ok(&third, "third hook").is_empty(),
         "a fresh session re-fires"
@@ -209,7 +220,12 @@ fn same_session_fires_once_then_a_fresh_session_re_fires() {
 fn budget_caps_distinct_entries_and_defers_the_rest() {
     let dir = setup();
     for n in 1..=3 {
-        push_door(&dir, "doors", &format!("door {n}"), &["--trigger", "konkon"]);
+        push_door(
+            &dir,
+            "doors",
+            &format!("door {n}"),
+            &["--trigger", "konkon"],
+        );
     }
     let out = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "konkon")));
     let stdout = ok(&out, "hook");
@@ -316,7 +332,11 @@ fn hook_always_exits_zero_on_every_failure_mode() {
             c.wait_with_output()
         })
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "missing agent must still exit 0");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "missing agent must still exit 0"
+    );
     assert!(out.stdout.is_empty());
     assert!(
         !out.stderr.is_empty(),
@@ -328,14 +348,23 @@ fn hook_always_exits_zero_on_every_failure_mode() {
 fn no_match_is_silent_and_writes_nothing() {
     let dir = setup();
     push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
-    let before = std::fs::metadata(data_path(&dir)).unwrap().modified().unwrap();
+    let before = std::fs::metadata(data_path(&dir))
+        .unwrap()
+        .modified()
+        .unwrap();
 
     let out = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "hello")));
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stdout.is_empty(), "no match means empty stdout");
 
-    let after = std::fs::metadata(data_path(&dir)).unwrap().modified().unwrap();
-    assert_eq!(before, after, "a no-match prompt must not write the kv file");
+    let after = std::fs::metadata(data_path(&dir))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "a no-match prompt must not write the kv file"
+    );
 }
 
 #[test]
@@ -351,8 +380,15 @@ fn dry_run_prints_without_recording() {
     assert!(!ok(&out, "dry-run hook").is_empty(), "dry-run still prints");
     assert!(fire_rows(&dir).is_empty(), "dry-run records nothing");
 
-    let real = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "hi konkon")));
-    assert!(!ok(&real, "real hook").is_empty(), "the door is still eligible");
+    let real = mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
+    assert!(
+        !ok(&real, "real hook").is_empty(),
+        "the door is still eligible"
+    );
     assert_eq!(fire_rows(&dir).len(), 1);
 }
 
@@ -369,7 +405,11 @@ fn dig_pointer_carries_the_memory_link() {
         "A real machine in the fleet.",
         &["--trigger", "slaptop", "--memory", "kn-02e73234"],
     );
-    let out = mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "the slaptop")));
+    let out = mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "the slaptop")),
+    );
     assert!(
         ok(&out, "hook").contains(&format!("(dig: doors/kv-{id}, kn-02e73234)")),
         "the kn- link rides along with the kv pointer"
@@ -383,7 +423,12 @@ fn authored_fragment_beats_the_first_line_rule() {
         &dir,
         "doors",
         "line one of the value\nline two",
-        &["--trigger", "gerf", "--fragment", "Gerf is GEOFF, not a typo."],
+        &[
+            "--trigger",
+            "gerf",
+            "--fragment",
+            "Gerf is GEOFF, not a typo.",
+        ],
     );
     push_door(
         &dir,
@@ -396,7 +441,10 @@ fn authored_fragment_beats_the_first_line_rule() {
         &mx(&dir, &["doors", "check", "ask gerf", "--session", "a"]),
         "check",
     );
-    assert!(authored.contains("Gerf is GEOFF, not a typo."), "{authored}");
+    assert!(
+        authored.contains("Gerf is GEOFF, not a typo."),
+        "{authored}"
+    );
     assert!(!authored.contains("line one"));
 
     let derived = ok(
@@ -415,7 +463,14 @@ fn check_matches_the_hook_and_reports_json() {
     let via_check = ok(
         &mx(
             &dir,
-            &["doors", "check", "hi konkon", "--session", "s9", "--dry-run"],
+            &[
+                "doors",
+                "check",
+                "hi konkon",
+                "--session",
+                "s9",
+                "--dry-run",
+            ],
         ),
         "check",
     );
@@ -433,7 +488,13 @@ fn check_matches_the_hook_and_reports_json() {
         &mx(
             &dir,
             &[
-                "doors", "check", "hi konkon", "--session", "s9", "--json", "--dry-run",
+                "doors",
+                "check",
+                "hi konkon",
+                "--session",
+                "s9",
+                "--json",
+                "--dry-run",
             ],
         ),
         "check --json",
@@ -453,7 +514,10 @@ fn reset_clears_fires_for_one_session_or_all() {
     }
     assert_eq!(fire_rows(&dir).len(), 2);
 
-    ok(&mx(&dir, &["doors", "reset", "--session", "s1"]), "reset s1");
+    ok(
+        &mx(&dir, &["doors", "reset", "--session", "s1"]),
+        "reset s1",
+    );
     assert_eq!(fire_rows(&dir).len(), 1);
 
     ok(&mx(&dir, &["doors", "reset"]), "reset all");
@@ -465,7 +529,11 @@ fn stats_counts_fires_and_names_doors_never_opened() {
     let dir = setup();
     push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
     let quiet = push_door(&dir, "doors", "never used", &["--trigger", "slaptop"]);
-    mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "hi konkon")));
+    mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
 
     let json = ok(&mx(&dir, &["doors", "stats", "--json"]), "stats");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -487,7 +555,14 @@ fn push_normalizes_and_dedupes_trigger_flags() {
         &dir,
         "facts",
         "x",
-        &["--trigger", "  Kon Kon ", "--trigger", "KON KON", "--trigger", "konkon"],
+        &[
+            "--trigger",
+            "  Kon Kon ",
+            "--trigger",
+            "KON KON",
+            "--trigger",
+            "konkon",
+        ],
     );
     let json = ok(&mx(&dir, &["kv", "triggers", "--json"]), "kv triggers");
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -536,7 +611,10 @@ fn update_replaces_clears_triggers_and_fragment() {
 
     // Clearing the triggers removes the door entirely.
     ok(
-        &mx(&dir, &["kv", "update", "facts", "--id", &kv_id, "--trigger", ""]),
+        &mx(
+            &dir,
+            &["kv", "update", "facts", "--id", &kv_id, "--trigger", ""],
+        ),
         "clear triggers",
     );
     let v: serde_json::Value =
@@ -551,7 +629,11 @@ fn kv_triggers_lists_across_keys_and_filters_by_key() {
     push_door(&dir, "doors", "b", &["--trigger", "gerf"]);
     push_door(&dir, "doors", "c", &["--trigger", "slaptop"]);
     push_door(&dir, "doors", "d", &["--trigger", "ayo-"]);
-    mx_stdin(&dir, &["doors", "hook"], Some(&hook_input("s1", "hi konkon")));
+    mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
 
     let all: serde_json::Value =
         serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "--json"]), "all")).unwrap();
@@ -572,8 +654,11 @@ fn kv_triggers_lists_across_keys_and_filters_by_key() {
         .unwrap();
     assert_eq!(konkon["fires"], 1, "fire counts come from the log");
 
-    let doors_only: serde_json::Value =
-        serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "doors", "--json"]), "one")).unwrap();
+    let doors_only: serde_json::Value = serde_json::from_str(&ok(
+        &mx(&dir, &["kv", "triggers", "doors", "--json"]),
+        "one",
+    ))
+    .unwrap();
     assert_eq!(doors_only.as_array().unwrap().len(), 3);
 
     let text = ok(&mx(&dir, &["kv", "triggers"]), "plain");
@@ -586,7 +671,10 @@ fn plain_entries_are_untouched_by_the_new_columns() {
     let dir = setup();
     push_door(&dir, "facts", "no door here", &[]);
     let raw = std::fs::read_to_string(data_path(&dir)).unwrap();
-    assert!(!raw.contains("triggers"), "absent fields stay absent: {raw}");
+    assert!(
+        !raw.contains("triggers"),
+        "absent fields stay absent: {raw}"
+    );
     assert!(!raw.contains("fragment"));
 
     let out = ok(&mx(&dir, &["kv", "triggers"]), "kv triggers");
