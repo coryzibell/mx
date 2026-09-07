@@ -355,8 +355,26 @@ fn parse_json_input(raw: &str) -> Result<SetInput, String> {
     }
 }
 
+/// Commands that never call `save`. Anything not listed keeps the store's
+/// exclusive lock for the whole command, so a miss here costs contention rather
+/// than a lost write.
+fn is_read_only(cmd: &KvCommands) -> bool {
+    matches!(
+        cmd,
+        KvCommands::Get { .. }
+            | KvCommands::Last { .. }
+            | KvCommands::Since { .. }
+            | KvCommands::Dump { .. }
+            | KvCommands::Search { .. }
+            | KvCommands::Random { .. }
+            | KvCommands::Count { .. }
+    )
+}
+
 /// Handle all `mx kv` subcommands. Returns the exit code directly.
 pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
+    let read_only = is_read_only(&cmd);
+
     let mut store = match KvStore::from_env() {
         Ok(s) => s,
         Err(e) => {
@@ -368,6 +386,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             return Err(e);
         }
     };
+
+    if read_only {
+        store.unlock();
+    }
 
     match cmd {
         KvCommands::Get {

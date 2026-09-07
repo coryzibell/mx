@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
+use fs2::FileExt;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -900,6 +901,7 @@ pub struct KvStore {
     pub data: DataFile,
     pub data_path: PathBuf,
     pub schema_path: PathBuf,
+    lock: Option<fs::File>,
 }
 
 impl KvStore {
@@ -949,6 +951,7 @@ impl KvStore {
             data,
             data_path: data_path.to_path_buf(),
             schema_path: schema_path.to_path_buf(),
+            lock: None,
         };
 
         if needs_save {
@@ -987,7 +990,12 @@ impl KvStore {
             eprintln!("{}", LEGACY_KV_WARNING);
         }
 
+        // Taken before the read so the whole load-mutate-save cycle is one
+        // critical section: two writers that both loaded first would each save a
+        // snapshot missing the other's entry.
+        let lock = Self::acquire_lock(&data_path)?;
         let mut store = Self::load(&schema_path, &data_path)?;
+        store.lock = Some(lock);
 
         // Populate _schema field from agent name if empty (SHOULD-FIX 5)
         if store.data.schema_id.is_empty() {
@@ -1021,6 +1029,47 @@ impl KvStore {
             crate::paths::kv_data_path(agent),
             crate::paths::legacy_crewu_kv_data_path(agent),
         )
+    }
+
+    fn lock_path(data_path: &Path) -> PathBuf {
+        let mut raw = data_path.as_os_str().to_os_string();
+        raw.push(".lock");
+        PathBuf::from(raw)
+    }
+
+    /// Take the exclusive advisory lock guarding this store's read-modify-write.
+    ///
+    /// The lock lives on a sidecar file rather than on the data file itself
+    /// because [`KvStore::save`] replaces the data file by rename: a lock held
+    /// on the pre-rename inode guards a file the next writer never opens.
+    fn acquire_lock(data_path: &Path) -> Result<fs::File> {
+        let path = Self::lock_path(data_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("Failed to open kv lock file: {}", path.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("Failed to flock {}", path.display()))?;
+        Ok(file)
+    }
+
+    /// Drop the exclusive lock before doing work that never writes.
+    ///
+    /// Readers need no lock at all: `save` publishes by rename, so a reader sees
+    /// either the whole previous file or the whole next one. Holding it anyway
+    /// would stall every writer for the length of a read command, which for
+    /// `--memory` includes a SurrealDB round trip.
+    pub fn unlock(&mut self) {
+        if let Some(file) = self.lock.take() {
+            let _ = FileExt::unlock(&file);
+        }
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
