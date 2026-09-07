@@ -96,8 +96,7 @@ fn push_door(dir: &TempDir, key: &str, value: &str, extra: &[&str]) -> String {
     let mut args = vec!["kv", "push", key, value];
     args.extend_from_slice(extra);
     let out = ok(&mx(dir, &args), "kv push");
-    out.trim()
-        .split_whitespace()
+    out.split_whitespace()
         .next()
         .unwrap()
         .trim_start_matches("kv-")
