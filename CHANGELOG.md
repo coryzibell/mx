@@ -33,8 +33,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   immediately after loading and take none for the rest of the command: the
   atomic rename already gives them a whole-file snapshot, and holding it would
   stall writers for the length of a read, which under `--memory` includes a
-  SurrealDB round trip. **No change** to any command's stdout, `--json` output,
-  or exit codes; concurrent writers now queue instead of racing.
+  SurrealDB round trip. The wait for the lock is **bounded at 2 s** and then
+  fails with a message naming the lock file and how to find the holder; a
+  blocking `flock` would turn one wedged `mx kv` (a suspended shell job, a
+  process killed with the descriptor still open) into a silent freeze of every
+  `mx kv` call on the machine. A command that fails before it can touch the data
+  file no longer creates the data directory or an empty lock file. **No change**
+  to any command's stdout, `--json` output, or exit codes on success; concurrent
+  writers now queue instead of racing, and a wedged lock exits 1 with a
+  diagnostic on stderr instead of hanging.
 - `mx commit` now verifies that the encoded body decodes back to the original
   message before committing, and re-rolls the codec pair when it does not.
   `validate_encoded_output` only ever checked that the output was *safe* (no

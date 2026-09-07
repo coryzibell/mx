@@ -10,7 +10,12 @@
 //! Harness mirrors `tests/kv_set_cli.rs`: the built binary against an isolated
 //! MX_HOME so nothing touches the live store.
 
-use std::process::Command;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use fs2::FileExt;
 use tempfile::TempDir;
 
 mod common;
@@ -116,32 +121,110 @@ fn concurrent_pushes_to_different_keys_all_land() {
     assert_eq!(count(&dir, "other"), WRITERS / 2 + 1);
 }
 
-/// A read command releases the lock before it does anything else, so it cannot
-/// wedge a concurrent writer.
+/// A read releases the lock before it touches its output, so a writer runs to
+/// completion while the read is still mid-flight.
+///
+/// The reader is pinned mid-flight by pipe backpressure rather than by a sleep:
+/// its stdout is a pipe nobody drains, so once it has written a buffer's worth
+/// it blocks in the kernel and stays there. The first byte of output proves it
+/// is past `KvStore::from_env`, since `handle_kv` releases the lock before any
+/// command arm prints. This fails on the pre-unlock design, where the writer
+/// waits out the whole lock timeout and exits non-zero.
 #[test]
-fn reads_do_not_block_writes() {
+fn reads_release_the_lock_before_printing() {
     let dir = setup();
-    run(&dir, &["kv", "push", "race", "seed"]);
 
-    let mut readers: Vec<_> = (0..WRITERS)
-        .map(|_| {
-            cmd(&dir, &["kv", "last", "race"])
-                .spawn()
-                .expect("failed to spawn mx")
-        })
-        .collect();
-    let mut writers: Vec<_> = (0..WRITERS)
-        .map(|i| {
-            let value = format!("v{}", i);
-            cmd(&dir, &["kv", "push", "race", &value])
-                .spawn()
-                .expect("failed to spawn mx")
-        })
-        .collect();
-
-    for kid in readers.iter_mut().chain(writers.iter_mut()) {
-        assert!(kid.wait().expect("child did not exit").success());
+    // 20 x 8 KB is ~160 KB of output, comfortably past a 64 KB pipe buffer.
+    let big = "x".repeat(8000);
+    for _ in 0..20 {
+        assert!(run(&dir, &["kv", "push", "race", &big]).status.success());
     }
 
-    assert_eq!(count(&dir, "race"), WRITERS + 1);
+    let mut reader = cmd(&dir, &["kv", "last", "race", "--count", "20"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mx");
+
+    let mut first = [0u8; 1];
+    reader
+        .stdout
+        .as_mut()
+        .expect("piped stdout")
+        .read_exact(&mut first)
+        .expect("reader produced no output");
+
+    assert!(
+        reader.try_wait().expect("try_wait").is_none(),
+        "reader finished instead of blocking; the fixture is too small to fill the pipe"
+    );
+
+    let writer = run(&dir, &["kv", "push", "race", "written-during-read"]);
+    assert!(
+        writer.status.success(),
+        "writer did not finish while a read was in flight: {}",
+        String::from_utf8_lossy(&writer.stderr)
+    );
+    assert!(
+        reader.try_wait().expect("try_wait").is_none(),
+        "reader exited before the writer did; the test proved nothing"
+    );
+
+    let out = reader.wait_with_output().expect("reader did not exit");
+    assert!(out.status.success());
+    assert_eq!(count(&dir, "race"), 21);
+}
+
+/// A wedged lock holder makes `mx kv` fail loudly instead of hanging forever.
+///
+/// A blocking `flock` turns one suspended `mx kv` into a silent freeze of every
+/// `mx kv` call on the machine, including the ones on the prompt-submit path.
+#[test]
+fn a_held_lock_times_out_loudly() {
+    let dir = setup();
+    assert!(run(&dir, &["kv", "push", "race", "seed"]).status.success());
+
+    let lock = dir.path().join("kv").join("data").join("test.json.lock");
+    let held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .expect("lock file should exist after a write");
+    held.lock_exclusive().expect("failed to hold the lock");
+
+    let started = Instant::now();
+    let blocked = run(&dir, &["kv", "push", "race", "blocked"]);
+    let waited = started.elapsed();
+
+    assert!(!blocked.status.success(), "blocked write reported success");
+    let stderr = String::from_utf8_lossy(&blocked.stderr);
+    assert!(stderr.contains("Timed out"), "stderr was: {}", stderr);
+    assert!(
+        stderr.contains(lock.to_str().expect("utf-8 lock path")),
+        "stderr did not name the lock file: {}",
+        stderr
+    );
+    assert!(
+        waited < Duration::from_secs(10),
+        "waited {:?}; the timeout did not fire",
+        waited
+    );
+
+    FileExt::unlock(&held).expect("failed to release the lock");
+    assert!(run(&dir, &["kv", "push", "race", "after"]).status.success());
+    assert_eq!(count(&dir, "race"), 2);
+}
+
+/// A command that fails before it can touch the data file leaves nothing behind.
+#[test]
+fn a_missing_store_is_not_created_by_a_failed_read() {
+    let dir = TempDir::new().unwrap();
+
+    let out = run(&dir, &["kv", "get", "nope"]);
+    assert!(!out.status.success());
+
+    assert!(
+        !dir.path().join("kv").exists(),
+        "a failed read created {}",
+        dir.path().join("kv").display()
+    );
 }
