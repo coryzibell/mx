@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
-use fs2::FileExt;
 use chrono::{DateTime, NaiveDate, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::TimeRangeArgs;
