@@ -4,7 +4,7 @@
 //! (serialize to tmp, fsync, rename). No networking, no database.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
 use chrono::{DateTime, NaiveDate, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::TimeRangeArgs;
@@ -1084,14 +1083,13 @@ impl KvStore {
             .open(&path)
             .with_context(|| format!("Failed to open kv lock file: {}", path.display()))?;
 
-        let contended = fs2::lock_contended_error().kind();
         let deadline = Instant::now() + LOCK_TIMEOUT;
         loop {
-            match file.try_lock_exclusive() {
+            match file.try_lock() {
                 Ok(()) => return Ok(file),
-                Err(e) if e.kind() == contended => {}
-                Err(e) => {
-                    return Err(e).with_context(|| format!("Failed to flock {}", path.display()));
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("Failed to lock {}", path.display()));
                 }
             }
             if Instant::now() >= deadline {
@@ -1110,13 +1108,17 @@ impl KvStore {
 
     /// Drop the exclusive lock before doing work that never writes.
     ///
+    /// Crate-private on purpose: calling this and then [`KvStore::save`] is the
+    /// unprotected read-modify-write this lock exists to prevent. Only
+    /// `handle_kv`'s read-only dispatch may call it.
+    ///
     /// Readers need no lock at all: `save` publishes by rename, so a reader sees
     /// either the whole previous file or the whole next one. Holding it anyway
     /// would stall every writer for the length of a read command, which for
     /// `--memory` includes a SurrealDB round trip.
-    pub fn unlock(&mut self) {
+    pub(crate) fn unlock(&mut self) {
         if let Some(file) = self.lock.take() {
-            let _ = FileExt::unlock(&file);
+            let _ = file.unlock();
         }
     }
 

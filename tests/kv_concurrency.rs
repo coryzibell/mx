@@ -15,7 +15,6 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
 use tempfile::TempDir;
 
 mod common;
@@ -189,7 +188,7 @@ fn a_held_lock_times_out_loudly() {
         .write(true)
         .open(&lock)
         .expect("lock file should exist after a write");
-    held.lock_exclusive().expect("failed to hold the lock");
+    held.lock().expect("failed to hold the lock");
 
     let started = Instant::now();
     let blocked = run(&dir, &["kv", "push", "race", "blocked"]);
@@ -209,7 +208,7 @@ fn a_held_lock_times_out_loudly() {
         waited
     );
 
-    FileExt::unlock(&held).expect("failed to release the lock");
+    held.unlock().expect("failed to release the lock");
     assert!(run(&dir, &["kv", "push", "race", "after"]).status.success());
     assert_eq!(count(&dir, "race"), 2);
 }
