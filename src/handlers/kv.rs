@@ -698,6 +698,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             value,
             data,
             memory,
+            triggers,
+            fragment,
             create,
             max_entries,
         } => {
@@ -762,7 +764,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 None => None,
             };
 
-            match store.push(&key, &value, parsed_data, memory) {
+            let attrs = kv::EntryAttrs {
+                data: parsed_data,
+                memory,
+                triggers: Some(crate::knowledge::normalize_triggers(triggers)),
+                fragment,
+            };
+            match store.push(&key, &value, attrs) {
                 Ok(result) => {
                     store.save()?;
                     println!("kv-{} ({})", result.id, result.index);
@@ -1002,10 +1010,23 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             value,
             id,
             data,
+            triggers,
+            fragment,
         } => {
-            // 1. Reject the no-op case (both fields missing).
-            if value.is_none() && data.is_none() {
-                eprintln!("Error: provide a value argument and/or --data to update");
+            // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
+            // list is a real instruction, so an all-empty `triggers` vec still
+            // counts as an update. Only an entirely absent flag means "leave it".
+            let trigger_patch = if triggers.is_empty() {
+                None
+            } else {
+                Some(crate::knowledge::normalize_triggers(triggers))
+            };
+
+            // 1. Reject the no-op case (nothing at all was given).
+            if value.is_none() && data.is_none() && trigger_patch.is_none() && fragment.is_none() {
+                eprintln!(
+                    "Error: provide a value argument, --data, --trigger, or --fragment to update"
+                );
                 return Ok(kv::EXIT_INVALID_INPUT);
             }
 
@@ -1042,7 +1063,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         );
                         return Ok(kv::EXIT_INVALID_INPUT);
                     }
-                    if val.as_object().is_some_and(|o| o.is_empty()) && value.is_none() {
+                    if val.as_object().is_some_and(|o| o.is_empty())
+                        && value.is_none()
+                        && trigger_patch.is_none()
+                        && fragment.is_none()
+                    {
                         eprintln!(
                             "Error: --data is an empty object and no value was given — nothing to update"
                         );
@@ -1054,7 +1079,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
 
             // 4. Dispatch to engine.
-            match store.update_entry(&key, &id_ref, value.as_deref(), parsed_data) {
+            let patch = kv::EntryPatch {
+                value,
+                data: parsed_data,
+                triggers: trigger_patch,
+                fragment,
+            };
+            match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {
                     store.save()?;
                     println!("Updated entry {} (kv-{})", result.index, result.id);
@@ -1062,6 +1093,76 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 }
                 Err(e) => handle_kv_err(e),
             }
+        }
+
+        KvCommands::Triggers { key, json } => {
+            // Fire counts come from the doors fire log. Its absence is normal
+            // (nothing has fired yet), so a missing key means zero, not an error.
+            let mut fires: std::collections::HashMap<(String, String), u64> =
+                std::collections::HashMap::new();
+            if let Ok(kv::DataValue::History { entries, .. }) = store.get(crate::doors::FIRED_KEY) {
+                for e in entries {
+                    let get = |n: &str| {
+                        e.data
+                            .as_ref()
+                            .and_then(|d| d.get(n))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    *fires.entry((get("key"), get("entry"))).or_insert(0) += 1;
+                }
+            }
+
+            let rows: Vec<_> = store
+                .iter_triggered()
+                .into_iter()
+                .filter(|c| key.as_deref().is_none_or(|k| k == c.key))
+                .map(|c| {
+                    let n = fires
+                        .get(&(c.key.to_string(), c.id.to_string()))
+                        .copied()
+                        .unwrap_or(0);
+                    (c, n)
+                })
+                .collect();
+
+            if json {
+                let out: Vec<serde_json::Value> = rows
+                    .iter()
+                    .map(|(c, n)| {
+                        serde_json::json!({
+                            "key": c.key,
+                            "id": c.id,
+                            "triggers": c.triggers,
+                            "fragment": crate::doors::derive_fragment(c.value, c.fragment),
+                            "authored_fragment": c.fragment,
+                            "memory": c.memory,
+                            "fires": n,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&out)?);
+                return Ok(kv::EXIT_OK);
+            }
+
+            if rows.is_empty() {
+                eprintln!("No entries carry triggers");
+                return Ok(kv::EXIT_OK);
+            }
+            let mut current = "";
+            for (c, n) in &rows {
+                if c.key != current {
+                    current = c.key;
+                    println!("{}", current);
+                }
+                println!("  kv-{}  [{}]  fires={}", c.id, c.triggers.join(", "), n);
+                println!(
+                    "      {}",
+                    crate::doors::derive_fragment(c.value, c.fragment)
+                );
+            }
+            Ok(kv::EXIT_OK)
         }
 
         KvCommands::Search {
