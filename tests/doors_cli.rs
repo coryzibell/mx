@@ -700,6 +700,160 @@ fn eight_concurrent_hooks_all_record_and_do_not_clobber_an_unrelated_key() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn a_trigger_that_can_never_fire_is_rejected() {
+    let dir = setup();
+    // `--trigger=X` rather than `--trigger X` so a leading-hyphen value reaches
+    // the validator instead of being read by clap as another flag.
+    for dead in ["\u{1f98a}", "!!!", "---", "..."] {
+        let flag = format!("--trigger={dead}");
+        let out = mx(&dir, &["kv", "push", "facts", "x", &flag]);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{dead:?} must be rejected, not stored as a door that never fires"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("could never fire"),
+            "stderr must say why: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // And nothing was written.
+    assert!(ok(&mx(&dir, &["kv", "triggers"]), "kv triggers").is_empty());
+}
+
+#[test]
+fn a_trigger_that_collapses_to_one_short_token_warns_with_what_it_became() {
+    let dir = setup();
+    let out = mx(
+        &dir,
+        &["kv", "push", "facts", "the language", "--trigger", "c++"],
+    );
+    assert!(out.status.success(), "a warning must not block the write");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("warning"), "{err}");
+    assert!(
+        err.contains("\"c++\"") && err.contains("\"c\""),
+        "the author must see what the trigger BECAME: {err}"
+    );
+}
+
+#[test]
+fn clearing_triggers_is_not_mistaken_for_a_dead_trigger() {
+    let dir = setup();
+    let id = push_door(&dir, "facts", "x", &["--trigger", "konkon"]);
+    let out = mx(
+        &dir,
+        &[
+            "kv",
+            "update",
+            "facts",
+            "--id",
+            &format!("kv-{id}"),
+            "--trigger",
+            "",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "--trigger \"\" is the documented clear gesture: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(ok(&mx(&dir, &["kv", "triggers"]), "kv triggers").is_empty());
+}
+
+#[test]
+fn audit_view_shows_what_a_trigger_actually_matches() {
+    let dir = setup();
+    push_door(&dir, "doors", "shell alias", &["--trigger", "ayo-"]);
+
+    let text = ok(&mx(&dir, &["kv", "triggers"]), "kv triggers");
+    assert!(
+        text.contains("matches as"),
+        "the stored form differs from the matched form: {text}"
+    );
+
+    let v: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "--json"]), "json")).unwrap();
+    assert_eq!(v[0]["triggers"], serde_json::json!(["ayo-"]));
+    assert_eq!(v[0]["matches_as"], serde_json::json!(["ayo"]));
+}
+
+#[test]
+fn stats_never_fired_ignores_the_since_window() {
+    let dir = setup();
+    push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
+    let quiet = push_door(&dir, "doors", "never used", &["--trigger", "slaptop"]);
+    mx_stdin(
+        &dir,
+        &["doors", "hook"],
+        Some(&hook_input("s1", "hi konkon")),
+    );
+
+    // A window narrow enough to exclude the fire that just happened would, with
+    // the bug, report the konkon door as never fired -- the exact signal used to
+    // decide a door is bad and prune it.
+    let json = ok(
+        &mx(&dir, &["doors", "stats", "--since", "1m", "--json"]),
+        "stats --since",
+    );
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let never: Vec<&str> = v["never_fired"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["entry"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        never,
+        vec![quiet.as_str()],
+        "only the genuinely-unfired door is listed"
+    );
+}
+
+#[test]
+fn since_rejection_says_what_it_accepts() {
+    let dir = setup();
+    let out = mx(&dir, &["doors", "stats", "--since", "1s"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("30m") || err.contains("minutes"),
+        "the error must name the accepted shape: {err}"
+    );
+}
+
+#[test]
+fn a_bare_hash_id_error_names_the_prefix() {
+    let dir = setup();
+    let id = push_door(&dir, "facts", "x", &["--trigger", "konkon"]);
+    // The migration doc form: a bare hash with no kv- prefix.
+    let out = mx(
+        &dir,
+        &["kv", "update", "facts", "--id", &id, "--trigger", "beta"],
+    );
+    assert_eq!(out.status.code(), Some(4));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!("kv-{id}")),
+        "the error must show the corrected form: {err}"
+    );
+}
+
+#[test]
+fn hook_survives_a_numeric_session_id() {
+    let dir = setup();
+    push_door(&dir, "facts", "the fox-sound", &["--trigger", "konkon"]);
+    let payload = r#"{"session_id": 12345, "prompt": "hi konkon"}"#;
+    let out = mx_stdin(&dir, &["doors", "hook"], Some(payload));
+    assert!(
+        !ok(&out, "numeric session_id").is_empty(),
+        "a numeric session_id must not silence the hook"
+    );
+    assert_eq!(fire_rows(&dir)[0]["data"]["session"], "12345");
+}
+
+#[test]
 fn push_normalizes_and_dedupes_trigger_flags() {
     let dir = setup();
     push_door(

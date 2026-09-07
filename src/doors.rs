@@ -34,10 +34,28 @@ pub const FIRED_KEY: &str = "doors_fired";
 /// payload that grows new keys.
 #[derive(Debug, Deserialize)]
 pub struct HookInput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub session_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     pub prompt: String,
+}
+
+/// Accept a JSON string, number, or null where a string is expected.
+///
+/// Claude Code sends `session_id` as a string today. If that ever arrives as a
+/// number, a strict `String` field would fail the WHOLE payload and the hook
+/// would go silent for that prompt with no door and no clue why. Coercing is
+/// strictly better than losing the turn: a numeric id still dedups correctly,
+/// it just stringifies first.
+fn lenient_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    })
 }
 
 /// One door that opened.
@@ -158,6 +176,47 @@ pub fn dig_pointer(key: &str, id: &str, memory: Option<&str>) -> String {
     match memory {
         Some(m) if !m.trim().is_empty() => format!("{}/kv-{}, {}", key, id, m.trim()),
         _ => format!("{}/kv-{}", key, id),
+    }
+}
+
+/// Shortest single-token trigger that is not flagged as dangerously broad.
+const MIN_TRIGGER_TOKEN_CHARS: usize = 3;
+
+/// What a trigger will actually match on, and whether that is a problem.
+///
+/// Matching tokenizes on runs of non-alphanumeric characters, so a name carrying
+/// punctuation collapses in ways the author does not expect: `c++`, `c#` and
+/// `F#` all match as the bare token `c` or `f`, and `🦊` matches as nothing at
+/// all. A trigger that matches nothing is a dead door — it sits in the audit
+/// view at `fires=0` forever and looks like a door nobody has said the word for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerVerdict {
+    /// No alphanumeric content survives tokenization; it can never fire.
+    Dead,
+    /// Fires, but as a single very short token, so it will fire constantly.
+    Broad { matched_as: String },
+    /// Fires as `matched_as`, which may still differ from what was typed.
+    Fine { matched_as: String },
+}
+
+/// The token sequence a trigger actually matches on, space-joined. This is what
+/// the reader should be shown, because it is what the matcher sees — `ayo-`
+/// matches as `ayo`, and `gerf_slips` as `gerf slips`.
+pub fn matched_form(trigger: &str) -> String {
+    triggers::tokens(trigger, false).join(" ")
+}
+
+/// Judge an authored trigger before it is stored.
+pub fn inspect_trigger(trigger: &str) -> TriggerVerdict {
+    let toks = triggers::tokens(trigger, false);
+    if toks.is_empty() {
+        return TriggerVerdict::Dead;
+    }
+    let matched_as = toks.join(" ");
+    if toks.len() == 1 && toks[0].chars().count() < MIN_TRIGGER_TOKEN_CHARS {
+        TriggerVerdict::Broad { matched_as }
+    } else {
+        TriggerVerdict::Fine { matched_as }
     }
 }
 
@@ -352,6 +411,72 @@ mod tests {
         // And a message with only the short form still reports the short form.
         let sel = select("ask gerf", &cands, &HashSet::new(), &HashMap::new(), 2);
         assert_eq!(sel.fired[0].trigger, "gerf");
+    }
+
+    #[test]
+    fn dead_triggers_are_recognised() {
+        // No alphanumeric content survives tokenization.
+        assert_eq!(inspect_trigger("\u{1f98a}"), TriggerVerdict::Dead);
+        assert_eq!(inspect_trigger("!!!"), TriggerVerdict::Dead);
+        assert_eq!(inspect_trigger("---"), TriggerVerdict::Dead);
+    }
+
+    #[test]
+    fn punctuation_names_collapse_to_a_broad_single_token() {
+        // The whole point: the author types a language name, the matcher sees a
+        // single letter.
+        for (raw, becomes) in [("c++", "c"), ("c#", "c"), ("F#", "f")] {
+            assert_eq!(
+                inspect_trigger(raw),
+                TriggerVerdict::Broad {
+                    matched_as: becomes.to_string()
+                },
+                "{raw} must be flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_triggers_are_fine_and_report_what_they_match() {
+        assert_eq!(
+            inspect_trigger("konkon"),
+            TriggerVerdict::Fine {
+                matched_as: "konkon".to_string()
+            }
+        );
+        // Fine, but the matched form differs from the stored text -- the caller
+        // surfaces that so `ayo-` is not a surprise.
+        assert_eq!(
+            inspect_trigger("ayo-"),
+            TriggerVerdict::Fine {
+                matched_as: "ayo".to_string()
+            }
+        );
+        assert_eq!(matched_form("gerf_slips"), "gerf slips");
+        assert_eq!(matched_form(".NET"), "net");
+    }
+
+    #[test]
+    fn lenient_string_accepts_a_numeric_session_id() {
+        // A strict String field would reject the whole payload and the hook
+        // would go silent for that prompt.
+        let input: HookInput =
+            serde_json::from_str(r#"{"session_id": 12345, "prompt": "hi konkon"}"#).unwrap();
+        assert_eq!(input.session_id, "12345");
+        assert_eq!(input.prompt, "hi konkon");
+    }
+
+    #[test]
+    fn hook_input_tolerates_missing_null_and_unknown_fields() {
+        let input: HookInput = serde_json::from_str(
+            r#"{"prompt": "hi", "session_id": null, "something_new": {"a": 1}}"#,
+        )
+        .unwrap();
+        assert_eq!(input.session_id, "");
+        assert_eq!(input.prompt, "hi");
+
+        let bare: HookInput = serde_json::from_str("{}").unwrap();
+        assert_eq!(bare.prompt, "");
     }
 
     #[test]

@@ -181,12 +181,28 @@ fn check(message: &str, session: &str, dry_run: bool, json: bool, budget: usize)
 fn stats(since: Option<&str>, json: bool) -> Result<i32> {
     let store = KvStore::from_env()?;
     let cutoff = match since {
-        Some(s) => Some(crate::kv::parse_relative_time(s)?),
+        Some(s) => Some(crate::kv::parse_relative_time(s).map_err(|e| {
+            anyhow::anyhow!(
+                "{e} -- --since takes a relative window of minutes or longer (e.g. 30m, 24h, 7d, 2w); seconds are not a unit"
+            )
+        })?),
         None => None,
     };
 
-    let rows: Vec<FireRow> = read_fire_log(&store)
-        .into_iter()
+    let all_rows = read_fire_log(&store);
+
+    // "Never fired" is computed over the WHOLE log, deliberately. It is the
+    // signal used to decide a door is bad and should be pruned, so scoping it to
+    // the --since window would report every door that fired only before the
+    // window as one that has never fired at all. --since narrows the COUNTS, not
+    // the definition of never.
+    let ever_fired: HashSet<DoorId> = all_rows
+        .iter()
+        .map(|r| (r.key.clone(), r.entry.clone()))
+        .collect();
+
+    let rows: Vec<&FireRow> = all_rows
+        .iter()
         .filter(|r| match cutoff {
             Some(c) => chrono::DateTime::parse_from_rfc3339(&r.ts)
                 .map(|t| t.with_timezone(&chrono::Utc) >= c)
@@ -208,7 +224,7 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         .iter_triggered()
         .iter()
         .map(|c| (c.key.to_string(), c.id.to_string()))
-        .filter(|p| !per_entry.contains_key(p))
+        .filter(|p| !ever_fired.contains(p))
         .collect();
 
     if json {

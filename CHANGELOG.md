@@ -21,7 +21,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `--trigger` replaces the whole list and `--trigger ""` clears it;
   `--fragment ""` clears the override.
 - `mx kv triggers [KEY] [--json]` lists every entry carrying triggers, with
-  all-time fire counts.
+  all-time fire counts, and shows what each trigger actually MATCHES on when
+  that differs from the stored text (`ayo-` matches as `ayo`).
+- `mx kv push`/`update` now vet authored triggers. A trigger with no letters or
+  digits (`🦊`, `!!!`) is **rejected** with exit 4 — it could never fire, and
+  would otherwise sit in the audit view at `fires=0` looking merely unused. A
+  trigger that collapses to a single one- or two-character token (`c++` and `c#`
+  both match as `c`) is **warned** about, naming what it became. Warnings and
+  notes go to stderr; stdout stays machine-readable. `--trigger ""` remains the
+  clear gesture and is never treated as a dead trigger.
 
 - `mx memory list` and `mx memory search` now emit a best-effort **stderr**
   hint when the caller's own private entries match the query but are hidden by
@@ -58,6 +66,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   to any command's stdout, `--json` output, or exit codes on success; concurrent
   writers now queue instead of racing, and a wedged lock exits 1 with a
   diagnostic on stderr instead of hanging.
+- `mx doors stats --since` no longer reports a door as "never fired" merely
+  because its only fires fall outside the window. Never-fired is computed over
+  the whole log; `--since` narrows the counts only. That list is the signal used
+  to prune bad doors, so scoping it made it lie.
+- `mx doors hook` accepts a `session_id` that arrives as a JSON number rather
+  than failing the whole payload and going silent for that prompt.
+- `mx kv` id errors now name the expected form: `invalid ID '4UW1oq' -- use a
+  numeric index, or the stable id with its prefix: kv-4UW1oq`.
+
 - `mx commit` now verifies that the encoded body decodes back to the original
   message before committing, and re-rolls the codec pair when it does not.
   `validate_encoded_output` only ever checked that the output was *safe* (no
