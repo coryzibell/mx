@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "mx"
-version = "0.1.215"
+version = "0.1.216"
 dependencies = [
  "anyhow",
  "base-d",
