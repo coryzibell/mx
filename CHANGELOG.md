@@ -20,6 +20,28 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   over-report relative to what `--include-private --semantic` actually shows.
 
 ### Fixed
+- `mx kv` write commands now hold an exclusive advisory lock (`flock`) across
+  the whole load-mutate-save cycle, on a sidecar `<data>.lock` file beside the
+  data file. Every `mx kv` invocation reads the entire JSON store, mutates it in
+  memory, and rewrites the whole file; with no lock, two overlapping writers
+  each saved a snapshot taken before the other's change and one write was
+  silently lost. Reproduced at 8 concurrent `kv push` calls, where 4 of 9
+  expected entries survived. The lock lives on a sidecar rather than on the data
+  file because `save` publishes by rename, so a lock held on the pre-rename
+  inode guards a file the next writer never opens. Read-only commands (`get`,
+  `last`, `since`, `dump`, `search`, `random`, `count`) release the lock
+  immediately after loading and take none for the rest of the command: the
+  atomic rename already gives them a whole-file snapshot, and holding it would
+  stall writers for the length of a read, which under `--memory` includes a
+  SurrealDB round trip. The wait for the lock is **bounded at 2 s** and then
+  fails with a message naming the lock file and how to find the holder; a
+  blocking `flock` would turn one wedged `mx kv` (a suspended shell job, a
+  process killed with the descriptor still open) into a silent freeze of every
+  `mx kv` call on the machine. A command that fails before it can touch the data
+  file no longer creates the data directory or an empty lock file. **No change**
+  to any command's stdout, `--json` output, or exit codes on success; concurrent
+  writers now queue instead of racing, and a wedged lock exits 1 with a
+  diagnostic on stderr instead of hanging.
 - `mx commit` now verifies that the encoded body decodes back to the original
   message before committing, and re-rolls the codec pair when it does not.
   `validate_encoded_output` only ever checked that the output was *safe* (no

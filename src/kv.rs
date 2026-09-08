@@ -4,10 +4,11 @@
 //! (serialize to tmp, fsync, rename). No networking, no database.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
@@ -23,6 +24,21 @@ static LEGACY_KV_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
 /// Cached dictionary registry for ID generation -- avoids re-allocating
 /// the HashMap on every `generate_entry_id` call.
 static DICT_REGISTRY: OnceLock<DictionaryRegistry> = OnceLock::new();
+
+/// How long to wait for the kv write lock before giving up.
+///
+/// A whole load-mutate-save cycle measures ~8 ms, so this is ~250x the expected
+/// critical section: by the time it expires the holder is wedged (a suspended
+/// shell job, a process killed with the descriptor still open) rather than
+/// merely busy, and waiting longer will not help. It also stays well inside the
+/// 10 s timeout budget of the UserPromptSubmit hook chain, which calls `mx kv`
+/// on every prompt and must not be the thing that stalls it.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Retry interval while the lock is contended. Two orders of magnitude below
+/// `LOCK_TIMEOUT` and well under a normal critical section, so a queued writer
+/// starts within a poll of the holder finishing.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The single legacy-fallback warning copy. Lives here so the schema and data
 /// resolvers cannot drift apart.
@@ -900,6 +916,7 @@ pub struct KvStore {
     pub data: DataFile,
     pub data_path: PathBuf,
     pub schema_path: PathBuf,
+    lock: Option<fs::File>,
 }
 
 impl KvStore {
@@ -949,6 +966,7 @@ impl KvStore {
             data,
             data_path: data_path.to_path_buf(),
             schema_path: schema_path.to_path_buf(),
+            lock: None,
         };
 
         if needs_save {
@@ -987,7 +1005,20 @@ impl KvStore {
             eprintln!("{}", LEGACY_KV_WARNING);
         }
 
+        // A missing schema makes `load` bail before it can touch the data file,
+        // so there is nothing to serialize. Checking first keeps a failing
+        // command from creating the data directory and an empty lock file for a
+        // store that does not exist.
+        if !schema_path.exists() {
+            return Self::load(&schema_path, &data_path);
+        }
+
+        // Taken before the read so the whole load-mutate-save cycle is one
+        // critical section: two writers that both loaded first would each save a
+        // snapshot missing the other's entry.
+        let lock = Self::acquire_lock(&data_path)?;
         let mut store = Self::load(&schema_path, &data_path)?;
+        store.lock = Some(lock);
 
         // Populate _schema field from agent name if empty (SHOULD-FIX 5)
         if store.data.schema_id.is_empty() {
@@ -1021,6 +1052,74 @@ impl KvStore {
             crate::paths::kv_data_path(agent),
             crate::paths::legacy_crewu_kv_data_path(agent),
         )
+    }
+
+    fn lock_path(data_path: &Path) -> PathBuf {
+        let mut raw = data_path.as_os_str().to_os_string();
+        raw.push(".lock");
+        PathBuf::from(raw)
+    }
+
+    /// Take the exclusive advisory lock guarding this store's read-modify-write.
+    ///
+    /// The lock lives on a sidecar file rather than on the data file itself
+    /// because [`KvStore::save`] replaces the data file by rename: a lock held
+    /// on the pre-rename inode guards a file the next writer never opens.
+    ///
+    /// The wait is bounded (`LOCK_TIMEOUT`) and fails loudly. A blocking
+    /// `flock` would make one wedged holder silently freeze every `mx kv` call
+    /// on the machine, including the ones on the prompt-submit path.
+    fn acquire_lock(data_path: &Path) -> Result<fs::File> {
+        let path = Self::lock_path(data_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("Failed to open kv lock file: {}", path.display()))?;
+
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("Failed to lock {}", path.display()));
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "Timed out after {:?} waiting for the kv write lock at {}.\n\
+                     Another process is holding it -- look for a suspended or stuck `mx kv` \
+                     (`ps aux | grep 'mx kv'`, or `fuser {}`). No data was read or written.",
+                    LOCK_TIMEOUT,
+                    path.display(),
+                    path.display()
+                );
+            }
+            std::thread::sleep(LOCK_POLL_INTERVAL);
+        }
+    }
+
+    /// Drop the exclusive lock before doing work that never writes.
+    ///
+    /// Crate-private on purpose: calling this and then [`KvStore::save`] is the
+    /// unprotected read-modify-write this lock exists to prevent. Only
+    /// `handle_kv`'s read-only dispatch may call it.
+    ///
+    /// Readers need no lock at all: `save` publishes by rename, so a reader sees
+    /// either the whole previous file or the whole next one. Holding it anyway
+    /// would stall every writer for the length of a read command, which for
+    /// `--memory` includes a SurrealDB round trip.
+    pub(crate) fn unlock(&mut self) {
+        if let Some(file) = self.lock.take() {
+            let _ = file.unlock();
+        }
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
