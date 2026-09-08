@@ -1,8 +1,10 @@
+mod doors;
 mod kv;
 mod memory;
 mod metadata;
 mod state;
 
+pub(crate) use doors::handle_doors;
 pub(crate) use kv::handle_kv;
 pub(crate) use memory::handle_memory;
 pub(crate) use state::handle_state;

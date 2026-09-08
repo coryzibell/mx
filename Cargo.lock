@@ -1746,16 +1746,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fs2"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
-dependencies = [
- "libc",
- "winapi",
-]
-
-[[package]]
 name = "fst"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3057,7 +3047,6 @@ dependencies = [
  "clap",
  "colored",
  "dirs",
- "fs2",
  "hf-hub",
  "hmac",
  "jsonwebtoken 10.4.0",

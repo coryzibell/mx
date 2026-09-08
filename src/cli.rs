@@ -136,6 +136,12 @@ pub enum Commands {
         command: KvCommands,
     },
 
+    /// Trigger-based ambient memory over the kv store
+    Doors {
+        #[command(subcommand)]
+        command: DoorsCommands,
+    },
+
     /// Git worktree lifecycle management for Claude Code agent dispatches
     Worktree {
         #[command(subcommand)]
@@ -422,14 +428,6 @@ pub enum RecentSortOrder {
     Resonance,
 }
 
-/// Output format for `mx memory trigger-check` (Issue #246).
-#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
-pub enum TriggerFormat {
-    /// Rendered memory bodies ready for context injection (title + body per
-    /// fired memory, separated by `---`). Empty stdout when nothing fires.
-    Context,
-}
-
 #[derive(Subcommand)]
 // The Add/Update variants carry many optional flags by design (clap arg structs);
 // boxing individual fields would fight the destructuring in handlers. Mirrors the
@@ -486,37 +484,6 @@ pub enum MemoryCommands {
         /// Output only the body content (for piping)
         #[arg(long)]
         content_only: bool,
-    },
-
-    /// Check a message for trigger-word matches and inject matching memories
-    /// (Issue #246). Reactive memory: dormant memories whose triggers appear in
-    /// the message fire ONCE per session. Exit 0 = ran (firing nothing is still
-    /// success); exit 4 = empty message after stdin fallback.
-    TriggerCheck {
-        /// Message to check. If omitted/empty, read the message from stdin to EOF.
-        message: Option<String>,
-
-        /// Output as JSON: {"fired":[{"id","title","triggers_matched":[...]}],"deferred_count":N}
-        #[arg(long)]
-        json: bool,
-
-        /// Output format when not --json. `context` (default) renders memory
-        /// bodies for injection; empty stdout when nothing fires.
-        #[arg(long, value_enum, default_value_t = TriggerFormat::Context)]
-        format: TriggerFormat,
-
-        /// Report matches WITHOUT marking them fired (debugging). A subsequent
-        /// real check will still fire them.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Clear the session-scoped trigger fired-state file (Issue #246). Lets a
-    /// memory fire again — for testing or a deliberate mid-session reset.
-    TriggerReset {
-        /// Output as JSON: {"reset":true,"path":"..."}
-        #[arg(long)]
-        json: bool,
     },
 
     /// Show index statistics
@@ -1910,6 +1877,63 @@ pub struct TimeRangeArgs {
 }
 
 #[derive(Subcommand)]
+pub enum DoorsCommands {
+    /// Claude Code UserPromptSubmit entry point. Reads hook JSON on stdin and
+    /// prints one line per door that fires. ALWAYS exits 0 — a non-zero exit on
+    /// this hook event either erases the user's prompt (2) or paints a hook-error
+    /// notice into every turn.
+    Hook {
+        /// Match and print without recording fires
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum distinct entries to fire on one prompt
+        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
+        budget: usize,
+    },
+
+    /// Run the same engine against plain text, for humans and tests
+    Check {
+        /// Message to match against
+        message: String,
+
+        /// Session id for dedup (default: an ad-hoc "cli" session)
+        #[arg(long, default_value = "cli")]
+        session: String,
+
+        /// Match and print without recording fires
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON: {"fired":[...],"deferred":N}
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum distinct entries to fire
+        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
+        budget: usize,
+    },
+
+    /// Fire telemetry: fires per entry and per trigger, plus doors never fired
+    Stats {
+        /// Only count fires within this relative window (e.g. 30d, 1w)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete fire rows so doors become eligible again
+    Reset {
+        /// Only reset this session (default: every session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum KvCommands {
     /// Get the current value of a key, or specific entries by ID
     Get {
@@ -1987,6 +2011,15 @@ pub enum KvCommands {
         /// Link a memory entry (kn- ID) to this entry
         #[arg(long)]
         memory: Option<String>,
+
+        /// Trigger phrase that opens this entry as a door (repeatable)
+        #[arg(long = "trigger", value_name = "PHRASE")]
+        triggers: Vec<String>,
+
+        /// One-line fragment printed when a door fires (defaults to the
+        /// entry's first line)
+        #[arg(long)]
+        fragment: Option<String>,
 
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
@@ -2096,6 +2129,26 @@ pub enum KvCommands {
         /// Null field values delete that field from the merged result.
         #[arg(long)]
         data: Option<String>,
+
+        /// Replace the entry's whole trigger list (repeatable). A single
+        /// `--trigger ""` clears it.
+        #[arg(long = "trigger", value_name = "PHRASE")]
+        triggers: Vec<String>,
+
+        /// Set the door fragment; `--fragment ""` clears it and the first-line
+        /// rule resumes.
+        #[arg(long)]
+        fragment: Option<String>,
+    },
+
+    /// List every entry carrying triggers, with fire counts
+    Triggers {
+        /// Restrict to one key (default: all keys)
+        key: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search entries in a list/history by substring and/or structured data filters

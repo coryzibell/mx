@@ -7,6 +7,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ## [Unreleased]
 
 ### Added
+- `mx doors` — trigger-based ambient memory, intended as a Claude Code
+  `UserPromptSubmit` hook. Any history/list entry carrying `triggers` becomes a
+  *door*: when one of its phrases appears in a prompt, `mx doors hook` prints one
+  line with a fragment and a `<key>/kv-<id>` pointer. Subcommands: `hook`,
+  `check`, `stats`, `reset`. The hook reads the kv file only — no SurrealDB, no
+  network — and **always exits 0**, because on `UserPromptSubmit` an exit of 2
+  blocks the turn and erases the typed prompt.
+- Entries in `history` and `list` keys gained two optional fields, `triggers` and
+  `fragment`, settable with `mx kv push --trigger/--fragment` and
+  `mx kv update --trigger/--fragment`. Both are omitted from the serialized entry
+  when unset, so existing data files load and round-trip unchanged. On `update`,
+  `--trigger` replaces the whole list and `--trigger ""` clears it;
+  `--fragment ""` clears the override.
+- `mx kv triggers [KEY] [--json]` lists every entry carrying triggers, with
+  all-time fire counts, and shows what each trigger actually MATCHES on when
+  that differs from the stored text (`ayo-` matches as `ayo`).
+- `mx kv push`/`update` now vet authored triggers. A trigger with no letters or
+  digits (`🦊`, `!!!`) is **rejected** with exit 4 — it could never fire, and
+  would otherwise sit in the audit view at `fires=0` looking merely unused. A
+  trigger that collapses to a single one- or two-character token (`c++` and `c#`
+  both match as `c`) is **warned** about, naming what it became. Warnings and
+  notes go to stderr; stdout stays machine-readable. `--trigger ""` remains the
+  clear gesture and is never treated as a dead trigger.
+
 - `mx memory list` and `mx memory search` now emit a best-effort **stderr**
   hint when the caller's own private entries match the query but are hidden by
   the public-only default (Issue #400). The hint reads
@@ -42,6 +66,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   to any command's stdout, `--json` output, or exit codes on success; concurrent
   writers now queue instead of racing, and a wedged lock exits 1 with a
   diagnostic on stderr instead of hanging.
+- `mx doors stats --since` no longer reports a door as "never fired" merely
+  because its only fires fall outside the window. Never-fired is computed over
+  the whole log; `--since` narrows the counts only. That list is the signal used
+  to prune bad doors, so scoping it made it lie.
+- `mx doors hook` accepts a `session_id` that arrives as a JSON number rather
+  than failing the whole payload and going silent for that prompt.
+- `mx kv` id errors now name the expected form: `invalid ID '4UW1oq' -- use a
+  numeric index, or the stable id with its prefix: kv-4UW1oq`.
+
 - `mx commit` now verifies that the encoded body decodes back to the original
   message before committing, and re-rolls the codec pair when it does not.
   `validate_encoded_output` only ever checked that the output was *safe* (no
@@ -73,6 +106,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   run on a contended init.
 
 ### Changed
+- **Removed `mx memory trigger-check` and `mx memory trigger-reset`** (Issue
+  #246). Their matching engine survives in `src/triggers.rs` and is what `mx
+  doors` runs on; only the graph-backed storage and CLI are gone. The
+  session fired-state file (`MX_TRIGGER_FIRED_PATH`, default
+  `/tmp/wonka-triggered-fired.json`) is no longer read or written. The
+  `triggers` field on knowledge entries is unaffected: `mx memory add/update/show`
+  still author and display it.
+- `triggers::stem_tokens(raw)` is now `triggers::tokens(raw, stem: bool)`, and
+  `match_triggers`/`match_entries` take the same flag. Doors match with stemming
+  **off** — the English Snowball stemmer folds Tagalog "ayos" onto "ayo", which
+  would open an `ayo-` door on unrelated text.
+- Library-internal: `KvStore::push`/`push_with_ts` take an `EntryAttrs` struct and
+  `KvStore::update_entry` an `EntryPatch`, instead of positional
+  `data`/`memory` arguments. No CLI behaviour changes from this.
+
 - `mx log` and `mx show` no longer silently print the raw encoded blob when a
   commit body fails to decode. Every decode error — unknown dictionary, decode
   failure, failed decompression, bad UTF-8 — previously collapsed into

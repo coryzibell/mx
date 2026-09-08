@@ -7,6 +7,7 @@ mod commit;
 mod content_ops;
 mod convert;
 mod display;
+mod doors;
 mod embedded;
 mod embeddings;
 mod engage;
@@ -84,6 +85,13 @@ fn main() -> Result<()> {
         Commands::State { command } => handle_state(command),
         Commands::Kv { command } => {
             let code = handle_kv(command, cli.verbose)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Commands::Doors { command } => {
+            let code = handle_doors(command)?;
             if code != 0 {
                 std::process::exit(code);
             }
