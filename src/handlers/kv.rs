@@ -406,6 +406,7 @@ fn is_read_only(cmd: &KvCommands) -> bool {
             | KvCommands::Search { .. }
             | KvCommands::Random { .. }
             | KvCommands::Count { .. }
+            | KvCommands::Triggers { .. }
     )
 }
 

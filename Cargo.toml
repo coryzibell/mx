@@ -63,7 +63,6 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # cross-process file locking for session-scoped fired-state.
 rust-stemmers = "1"
 unicode-normalization = "0.1"
-fs2 = "0.4"
 
 # Terminal colors
 colored = "2"

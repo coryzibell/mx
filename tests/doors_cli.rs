@@ -621,14 +621,11 @@ fn stats_counts_fires_and_names_doors_never_opened() {
 /// runs alongside. Every fire must be recorded and the unrelated row must
 /// survive.
 ///
-/// IGNORED ON PURPOSE. `KvStore` has no write lock on `main`: every write is
-/// load-whole-file, mutate, write-whole-file, so two overlapping writers each
-/// save their own snapshot and the second silently discards the first. This
-/// test reproduces that as 3-5 lost rows. It is not a doors bug and doors
-/// cannot fix it from here -- it is what #429 (`kv: advisory file lock around
-/// read-modify-write`) exists to fix. Un-ignore this when #429 lands.
+/// This is the test that could not pass before #429. Without the kv write lock
+/// every write was load-whole-file, mutate, write-whole-file, so overlapping
+/// writers each saved a snapshot taken before the other's change: running this
+/// on the pre-lock main reproducibly lost 3-6 of the 8 rows. It is live now.
 #[test]
-#[ignore = "requires the kv write lock from #429; without it concurrent writers silently drop rows"]
 fn eight_concurrent_hooks_all_record_and_do_not_clobber_an_unrelated_key() {
     use std::thread;
 
