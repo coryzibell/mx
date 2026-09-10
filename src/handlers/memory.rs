@@ -4302,9 +4302,6 @@ mod dedup_gate_tests {
         fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_all(ctx)
         }
-        fn list_with_triggers(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
-            self.inner.list_with_triggers(ctx)
-        }
         fn count(&self) -> Result<usize> {
             self.inner.count()
         }
@@ -4646,9 +4643,6 @@ mod dedup_gate_tests {
         }
         fn list_all(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_all(ctx)
-        }
-        fn list_with_triggers(&self, ctx: &AgentContext) -> Result<Vec<knowledge::KnowledgeEntry>> {
-            self.inner.list_with_triggers(ctx)
         }
         fn count(&self) -> Result<usize> {
             self.inner.count()
