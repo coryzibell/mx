@@ -3508,3 +3508,38 @@ fn test_search_knowledge_returns_applicability() {
         "search results must carry the written applies_to edge"
     );
 }
+
+#[test]
+fn test_get_knowledge_returns_applicability() {
+    // Regression: get_knowledge_async -- the single-entry read behind `mx memory
+    // show` -- calls get_applicability_for_entry_async to hydrate applicability.
+    // Neither sibling test above exercises this call path: the first reads
+    // applicability directly, the second goes through search_knowledge. So the
+    // crossing had no coverage -- no test seeded an entry with applicability and
+    // read it back through get_knowledge. This test does that, proving the
+    // single-entry path reaches the hydration and carries the edge through.
+    //
+    // Known gap: this does not guard the throw-vs-swallow behavior in
+    // get_applicability_for_entry_async (the `.context("Failed to deserialize
+    // applicability")?` in relationships.rs, from #425). Reverting that line to
+    // `.unwrap_or_default()` leaves this test green -- nothing here produces a
+    // row that actually fails to deserialize, and that needs a corrupt-row
+    // fixture this file doesn't build.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let mut entry = make_test_entry("kn-applies-get", 5, 0.01);
+    entry.applicability = vec!["backend".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let fetched = db
+        .get("kn-applies-get", &ctx)
+        .expect("get_knowledge must not fail when the entry has applicability")
+        .expect("entry must be found");
+
+    assert_eq!(
+        fetched.applicability,
+        vec!["backend".to_string()],
+        "get_knowledge must carry the written applies_to edge through"
+    );
+}
