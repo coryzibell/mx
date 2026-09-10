@@ -3696,10 +3696,14 @@ fn semantic_search_no_flag_category_thinned_chunk_query_fills_to_limit() {
 // #401 replaced the per-entry `get_knowledge_async` hydration in the semantic
 // chunk fill loop with `get_knowledge_batch_async`, which fans out to
 // `get_tags_for_entries_async` and `get_applicability_for_entries_async`. Both
-// of those filter with `WHERE in IN $knowledge`. `in` is a SurrealQL keyword,
-// so that clause does not bind the edge's in-field and matches nothing; both
-// call sites then swallow the empty result with `take(0).unwrap_or_default()`
-// and report "this entry has no tags".
+// of those filter with `WHERE in IN $knowledge`. The bind is correct and does
+// reach the edge's in-field -- `in = $one` on that same field matches. What
+// fails is the plan: `tagged_with` and `applies_to` each carry a UNIQUE
+// composite index on (in, out) (schema/surrealdb-schema.surql:310 and :316),
+// and `in IN $knowledge` plans as a `union` lookup over the `in` prefix of that
+// composite index, which returns nothing. Both call sites then swallow the
+// empty result with `take(0).unwrap_or_default()` and report "this entry has no
+// tags".
 //
 // Two consequences, both user-visible:
 //   1. `keep_after_exclude(&[], prefixes)` is always true, so `--exclude-tags`
