@@ -96,10 +96,6 @@ impl KnowledgeStore for SurrealDatabase {
         self.list_all(ctx)
     }
 
-    fn list_with_triggers(&self, ctx: &crate::store::AgentContext) -> Result<Vec<KnowledgeEntry>> {
-        self.list_with_triggers(ctx)
-    }
-
     fn count(&self) -> Result<usize> {
         self.count()
     }
@@ -260,6 +256,16 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
         self.get_facts_for_session(session_id)
+    }
+
+    fn get_entries_for_session(
+        &self,
+        session_id: &str,
+        owner: Option<&str>,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Vec<crate::store::DedupCandidate>> {
+        self.get_entries_for_session(session_id, owner, category, ctx)
     }
 
     fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {

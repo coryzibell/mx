@@ -4,10 +4,11 @@
 //! (serialize to tmp, fsync, rename). No networking, no database.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
+use std::fs::{self, TryLockError};
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use base_d::{DictionaryRegistry, HashAlgorithm, encode, hash};
@@ -23,6 +24,21 @@ static LEGACY_KV_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
 /// Cached dictionary registry for ID generation -- avoids re-allocating
 /// the HashMap on every `generate_entry_id` call.
 static DICT_REGISTRY: OnceLock<DictionaryRegistry> = OnceLock::new();
+
+/// How long to wait for the kv write lock before giving up.
+///
+/// A whole load-mutate-save cycle measures ~8 ms, so this is ~250x the expected
+/// critical section: by the time it expires the holder is wedged (a suspended
+/// shell job, a process killed with the descriptor still open) rather than
+/// merely busy, and waiting longer will not help. It also stays well inside the
+/// 10 s timeout budget of the UserPromptSubmit hook chain, which calls `mx kv`
+/// on every prompt and must not be the thing that stalls it.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Retry interval while the lock is contended. Two orders of magnitude below
+/// `LOCK_TIMEOUT` and well under a normal critical section, so a queued writer
+/// starts within a poll of the holder finishing.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The single legacy-fallback warning copy. Lives here so the schema and data
 /// resolvers cannot drift apart.
@@ -411,6 +427,8 @@ impl<'de> Deserialize<'de> for DataValue {
                                 ts: String::new(),
                                 data: None,
                                 memory: None,
+                                triggers: None,
+                                fragment: None,
                             }
                         }
                     })
@@ -436,6 +454,10 @@ pub struct HistoryEntry {
     pub data: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -450,6 +472,62 @@ pub struct ListEntry {
     pub data: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<String>,
+}
+
+/// Optional attachments carried by a pushed entry.
+///
+/// Bundled rather than passed positionally: `push` would otherwise cross
+/// clippy's argument-count threshold, and every one of these is independently
+/// optional, so a struct with `Default` keeps the common `push(key, value,
+/// EntryAttrs::default())` call honest.
+#[derive(Debug, Default, Clone)]
+pub struct EntryAttrs {
+    pub data: Option<serde_json::Value>,
+    pub memory: Option<String>,
+    pub triggers: Option<Vec<String>>,
+    pub fragment: Option<String>,
+}
+
+/// A partial update to an existing entry. `None` leaves a field untouched.
+///
+/// `triggers: Some(vec![])` and `fragment: Some(String::new())` are the *clear*
+/// signals — one command removes a bad door — and both are stored back as
+/// `None` so they vanish from the serialized entry.
+#[derive(Debug, Default, Clone)]
+pub struct EntryPatch {
+    pub value: Option<String>,
+    pub data: Option<serde_json::Value>,
+    pub triggers: Option<Vec<String>>,
+    pub fragment: Option<String>,
+}
+
+impl EntryPatch {
+    /// True when the patch carries nothing that would change the entry.
+    pub fn is_empty(&self) -> bool {
+        self.value.is_none()
+            && self.data.is_none()
+            && self.triggers.is_none()
+            && self.fragment.is_none()
+    }
+}
+
+/// A borrowed view of one trigger-carrying entry, with the key it lives under.
+///
+/// History and List entries are distinct types, so the scan flattens both into
+/// this shape rather than returning a trait object.
+#[derive(Debug, Clone, Copy)]
+pub struct TriggeredRef<'a> {
+    pub key: &'a str,
+    pub id: &'a str,
+    pub value: &'a str,
+    pub ts: &'a str,
+    pub triggers: &'a [String],
+    pub fragment: Option<&'a str>,
+    pub memory: Option<&'a str>,
 }
 
 /// Shared field access for entry types that live in History and List values.
@@ -459,46 +537,63 @@ pub struct ListEntry {
 pub trait UpdateableEntry {
     fn entry_index(&self) -> u64;
     fn entry_id(&self) -> &str;
+    fn entry_value(&self) -> &str;
+    fn entry_ts(&self) -> &str;
     fn entry_data(&self) -> &Option<serde_json::Value>;
+    fn entry_memory(&self) -> Option<&str>;
+    fn entry_triggers(&self) -> Option<&[String]>;
+    fn entry_fragment(&self) -> Option<&str>;
     fn set_value(&mut self, v: &str);
     fn set_data(&mut self, d: Option<serde_json::Value>);
+    fn set_triggers(&mut self, t: Option<Vec<String>>);
+    fn set_fragment(&mut self, f: Option<String>);
 }
 
-impl UpdateableEntry for HistoryEntry {
-    fn entry_index(&self) -> u64 {
-        self.index
-    }
-    fn entry_id(&self) -> &str {
-        &self.id
-    }
-    fn entry_data(&self) -> &Option<serde_json::Value> {
-        &self.data
-    }
-    fn set_value(&mut self, v: &str) {
-        self.value = v.to_string();
-    }
-    fn set_data(&mut self, d: Option<serde_json::Value>) {
-        self.data = d;
-    }
+macro_rules! impl_updateable_entry {
+    ($ty:ty) => {
+        impl UpdateableEntry for $ty {
+            fn entry_index(&self) -> u64 {
+                self.index
+            }
+            fn entry_id(&self) -> &str {
+                &self.id
+            }
+            fn entry_value(&self) -> &str {
+                &self.value
+            }
+            fn entry_ts(&self) -> &str {
+                &self.ts
+            }
+            fn entry_data(&self) -> &Option<serde_json::Value> {
+                &self.data
+            }
+            fn entry_memory(&self) -> Option<&str> {
+                self.memory.as_deref()
+            }
+            fn entry_triggers(&self) -> Option<&[String]> {
+                self.triggers.as_deref()
+            }
+            fn entry_fragment(&self) -> Option<&str> {
+                self.fragment.as_deref()
+            }
+            fn set_value(&mut self, v: &str) {
+                self.value = v.to_string();
+            }
+            fn set_data(&mut self, d: Option<serde_json::Value>) {
+                self.data = d;
+            }
+            fn set_triggers(&mut self, t: Option<Vec<String>>) {
+                self.triggers = t.filter(|list| !list.is_empty());
+            }
+            fn set_fragment(&mut self, f: Option<String>) {
+                self.fragment = f.filter(|s| !s.trim().is_empty());
+            }
+        }
+    };
 }
 
-impl UpdateableEntry for ListEntry {
-    fn entry_index(&self) -> u64 {
-        self.index
-    }
-    fn entry_id(&self) -> &str {
-        &self.id
-    }
-    fn entry_data(&self) -> &Option<serde_json::Value> {
-        &self.data
-    }
-    fn set_value(&mut self, v: &str) {
-        self.value = v.to_string();
-    }
-    fn set_data(&mut self, d: Option<serde_json::Value>) {
-        self.data = d;
-    }
-}
+impl_updateable_entry!(HistoryEntry);
+impl_updateable_entry!(ListEntry);
 
 /// Find the slice index for an entry identified by `id`, handling ambiguous
 /// prefix matches.  Returns the positional index into `entries`.
@@ -546,10 +641,11 @@ fn apply_entry_update<T: UpdateableEntry>(
     entries: &mut [T],
     id: &IdRef,
     key: &str,
-    new_value: Option<&str>,
-    new_data: Option<&serde_json::Value>,
+    patch: &EntryPatch,
     def: &KeyDef,
 ) -> Result<UpdateResult, KvError> {
+    let new_value = patch.value.as_deref();
+    let new_data = patch.data.as_ref();
     let idx = find_entry_idx(entries, id, key)?;
 
     // Compute merged data from the located entry (immutable borrow ends here).
@@ -618,6 +714,12 @@ fn apply_entry_update<T: UpdateableEntry>(
     let result_index = entry.entry_index();
     let result_id = entry.entry_id().to_string();
     entry.set_data(merged_data);
+    if let Some(triggers) = patch.triggers.clone() {
+        entry.set_triggers(Some(crate::knowledge::normalize_triggers(triggers)));
+    }
+    if let Some(fragment) = patch.fragment.clone() {
+        entry.set_fragment(Some(fragment));
+    }
     Ok(UpdateResult {
         index: result_index,
         id: result_id,
@@ -900,6 +1002,7 @@ pub struct KvStore {
     pub data: DataFile,
     pub data_path: PathBuf,
     pub schema_path: PathBuf,
+    lock: Option<fs::File>,
 }
 
 impl KvStore {
@@ -949,6 +1052,7 @@ impl KvStore {
             data,
             data_path: data_path.to_path_buf(),
             schema_path: schema_path.to_path_buf(),
+            lock: None,
         };
 
         if needs_save {
@@ -987,7 +1091,20 @@ impl KvStore {
             eprintln!("{}", LEGACY_KV_WARNING);
         }
 
+        // A missing schema makes `load` bail before it can touch the data file,
+        // so there is nothing to serialize. Checking first keeps a failing
+        // command from creating the data directory and an empty lock file for a
+        // store that does not exist.
+        if !schema_path.exists() {
+            return Self::load(&schema_path, &data_path);
+        }
+
+        // Taken before the read so the whole load-mutate-save cycle is one
+        // critical section: two writers that both loaded first would each save a
+        // snapshot missing the other's entry.
+        let lock = Self::acquire_lock(&data_path)?;
         let mut store = Self::load(&schema_path, &data_path)?;
+        store.lock = Some(lock);
 
         // Populate _schema field from agent name if empty (SHOULD-FIX 5)
         if store.data.schema_id.is_empty() {
@@ -1021,6 +1138,74 @@ impl KvStore {
             crate::paths::kv_data_path(agent),
             crate::paths::legacy_crewu_kv_data_path(agent),
         )
+    }
+
+    fn lock_path(data_path: &Path) -> PathBuf {
+        let mut raw = data_path.as_os_str().to_os_string();
+        raw.push(".lock");
+        PathBuf::from(raw)
+    }
+
+    /// Take the exclusive advisory lock guarding this store's read-modify-write.
+    ///
+    /// The lock lives on a sidecar file rather than on the data file itself
+    /// because [`KvStore::save`] replaces the data file by rename: a lock held
+    /// on the pre-rename inode guards a file the next writer never opens.
+    ///
+    /// The wait is bounded (`LOCK_TIMEOUT`) and fails loudly. A blocking
+    /// `flock` would make one wedged holder silently freeze every `mx kv` call
+    /// on the machine, including the ones on the prompt-submit path.
+    fn acquire_lock(data_path: &Path) -> Result<fs::File> {
+        let path = Self::lock_path(data_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("Failed to open kv lock file: {}", path.display()))?;
+
+        let deadline = Instant::now() + LOCK_TIMEOUT;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => {
+                    return Err(e).with_context(|| format!("Failed to lock {}", path.display()));
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "Timed out after {:?} waiting for the kv write lock at {}.\n\
+                     Another process is holding it -- look for a suspended or stuck `mx kv` \
+                     (`ps aux | grep 'mx kv'`, or `fuser {}`). No data was read or written.",
+                    LOCK_TIMEOUT,
+                    path.display(),
+                    path.display()
+                );
+            }
+            std::thread::sleep(LOCK_POLL_INTERVAL);
+        }
+    }
+
+    /// Drop the exclusive lock before doing work that never writes.
+    ///
+    /// Crate-private on purpose: calling this and then [`KvStore::save`] is the
+    /// unprotected read-modify-write this lock exists to prevent. Only
+    /// `handle_kv`'s read-only dispatch may call it.
+    ///
+    /// Readers need no lock at all: `save` publishes by rename, so a reader sees
+    /// either the whole previous file or the whole next one. Holding it anyway
+    /// would stall every writer for the length of a read command, which for
+    /// `--memory` includes a SurrealDB round trip.
+    pub(crate) fn unlock(&mut self) {
+        if let Some(file) = self.lock.take() {
+            let _ = file.unlock();
+        }
     }
 
     /// Atomic write: serialize to tmp, fsync, rename.
@@ -1698,10 +1883,9 @@ impl KvStore {
         &mut self,
         key: &str,
         value: &str,
-        data: Option<serde_json::Value>,
-        memory: Option<String>,
+        attrs: EntryAttrs,
     ) -> Result<PushResult, KvError> {
-        self.push_with_ts(key, value, Utc::now(), data, memory)
+        self.push_with_ts(key, value, Utc::now(), attrs)
     }
 
     /// Push with an explicit timestamp (used by tests).
@@ -1710,10 +1894,18 @@ impl KvStore {
         key: &str,
         value: &str,
         ts: DateTime<Utc>,
-        data: Option<serde_json::Value>,
-        memory: Option<String>,
+        attrs: EntryAttrs,
     ) -> Result<PushResult, KvError> {
         let def = self.key_def(key)?.clone();
+
+        let EntryAttrs {
+            data,
+            memory,
+            triggers,
+            fragment,
+        } = attrs;
+        let triggers = triggers.filter(|t| !t.is_empty());
+        let fragment = fragment.filter(|f| !f.trim().is_empty());
 
         def.validate_data(key, &data)?;
 
@@ -1740,6 +1932,8 @@ impl KvStore {
                                 ts: ts_str,
                                 data,
                                 memory,
+                                triggers,
+                                fragment,
                             },
                         );
                         // Drop oldest at max_entries
@@ -1775,6 +1969,8 @@ impl KvStore {
                             ts: ts_str,
                             data,
                             memory,
+                            triggers,
+                            fragment,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
@@ -2778,12 +2974,14 @@ impl KvStore {
         &mut self,
         key: &str,
         id: &IdRef,
-        new_value: Option<&str>,
-        new_data: Option<serde_json::Value>,
+        patch: EntryPatch,
     ) -> Result<UpdateResult, KvError> {
-        // Empty-object patch with no value change — nothing would be written.
-        if new_value.is_none()
-            && new_data
+        // Empty-object patch with no other change — nothing would be written.
+        if patch.value.is_none()
+            && patch.triggers.is_none()
+            && patch.fragment.is_none()
+            && patch
+                .data
                 .as_ref()
                 .and_then(|d| d.as_object())
                 .is_some_and(|o| o.is_empty())
@@ -2810,16 +3008,55 @@ impl KvStore {
 
         match self.data.entries.get_mut(key) {
             Some(DataValue::History { entries, .. }) => {
-                apply_entry_update(entries, id, key, new_value, new_data.as_ref(), &def)
+                apply_entry_update(entries, id, key, &patch, &def)
             }
-            Some(DataValue::List { items, .. }) => {
-                apply_entry_update(items, id, key, new_value, new_data.as_ref(), &def)
-            }
+            Some(DataValue::List { items, .. }) => apply_entry_update(items, id, key, &patch, &def),
             _ => Err(KvError::EntryNotFound {
                 key: key.to_string(),
                 id: format!("{:?}", id),
             }),
         }
+    }
+
+    /// Every History/List entry in the store that carries at least one trigger.
+    ///
+    /// One linear pass over all keys; each non-triggered entry costs an
+    /// `Option::is_some` check. Order is `BTreeMap` key order, then entry order
+    /// within a key, so the result is deterministic across runs.
+    pub fn iter_triggered(&self) -> Vec<TriggeredRef<'_>> {
+        fn collect<'a, T: UpdateableEntry>(
+            key: &'a str,
+            entries: &'a [T],
+            out: &mut Vec<TriggeredRef<'a>>,
+        ) {
+            for e in entries {
+                let Some(triggers) = e.entry_triggers() else {
+                    continue;
+                };
+                if triggers.is_empty() {
+                    continue;
+                }
+                out.push(TriggeredRef {
+                    key,
+                    id: e.entry_id(),
+                    value: e.entry_value(),
+                    ts: e.entry_ts(),
+                    triggers,
+                    fragment: e.entry_fragment(),
+                    memory: e.entry_memory(),
+                });
+            }
+        }
+
+        let mut out = Vec::new();
+        for (key, value) in &self.data.entries {
+            match value {
+                DataValue::History { entries, .. } => collect(key, entries, &mut out),
+                DataValue::List { items, .. } => collect(key, items, &mut out),
+                _ => {}
+            }
+        }
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -3602,9 +3839,11 @@ type = "state"
     fn history_push_and_last() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
-        store.push("flavor_history", "lapsang", None, None).unwrap();
+        store
+            .push("flavor_history", "lapsang", EntryAttrs::default())
+            .unwrap();
 
         let last = store.last("flavor_history", 1, None, &[]).unwrap();
         assert_eq!(last.len(), 1);
@@ -3618,10 +3857,18 @@ type = "state"
     fn history_max_entries_overflow() {
         let (mut store, _dir) = setup_store(test_schema());
         // max_entries = 3
-        store.push("flavor_history", "a", None, None).unwrap();
-        store.push("flavor_history", "b", None, None).unwrap();
-        store.push("flavor_history", "c", None, None).unwrap();
-        store.push("flavor_history", "d", None, None).unwrap();
+        store
+            .push("flavor_history", "a", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "b", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "c", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "d", EntryAttrs::default())
+            .unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -3643,10 +3890,10 @@ type = "state"
         let new_time = Utc::now() - chrono::Duration::minutes(10);
 
         store
-            .push_with_ts("flavor_history", "old_one", old_time, None, None)
+            .push_with_ts("flavor_history", "old_one", old_time, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "new_one", new_time, None, None)
+            .push_with_ts("flavor_history", "new_one", new_time, EntryAttrs::default())
             .unwrap();
 
         let results = store.since("flavor_history", "1h").unwrap();
@@ -3659,9 +3906,9 @@ type = "state"
     #[test]
     fn list_push_pop_last() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         let last = store.last("tags", 2, None, &[]).unwrap();
         assert_eq!(last.len(), 2);
@@ -3679,7 +3926,7 @@ type = "state"
         // max_entries = 5
         for i in 0..8 {
             store
-                .push("tags", &format!("item_{}", i), None, None)
+                .push("tags", &format!("item_{}", i), EntryAttrs::default())
                 .unwrap();
         }
         match store.get("tags").unwrap() {
@@ -3705,7 +3952,7 @@ type = "state"
     #[test]
     fn type_mismatch_push_on_counter() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("warmth", "value", None, None);
+        let result = store.push("warmth", "value", EntryAttrs::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Type mismatch"));
     }
@@ -3751,7 +3998,9 @@ type = "state"
     #[test]
     fn reset_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "test", None, None).unwrap();
+        store
+            .push("flavor_history", "test", EntryAttrs::default())
+            .unwrap();
         store.reset("flavor_history").unwrap();
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => assert!(entries.is_empty()),
@@ -3799,7 +4048,7 @@ type = "counter"
         store.inc("warmth", 7).unwrap();
         store.set("current_mood", "happy", None).unwrap();
         store
-            .push("flavor_history", "earl grey", None, None)
+            .push("flavor_history", "earl grey", EntryAttrs::default())
             .unwrap();
         store.save().unwrap();
 
@@ -3827,8 +4076,12 @@ type = "counter"
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
-        store.push_with_ts("tags", "rust", ts, None, None).unwrap();
+        store
+            .push_with_ts("tags", "focus", ts, EntryAttrs::default())
+            .unwrap();
+        store
+            .push_with_ts("tags", "rust", ts, EntryAttrs::default())
+            .unwrap();
 
         let compact = store.dump_compact();
 
@@ -3855,7 +4108,7 @@ type = "counter"
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts, EntryAttrs::default())
             .unwrap();
 
         let compact = store.dump_compact();
@@ -3952,9 +4205,11 @@ type = "counter"
     #[test]
     fn remove_list_by_value_first_match() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "alpha-2", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store
+            .push("tags", "alpha-2", EntryAttrs::default())
+            .unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, false)
@@ -3976,9 +4231,11 @@ type = "counter"
     #[test]
     fn remove_list_by_value_all_matches() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "alpha-2", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store
+            .push("tags", "alpha-2", EntryAttrs::default())
+            .unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, true)
@@ -3997,9 +4254,9 @@ type = "counter"
     #[test]
     fn remove_list_by_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         // Get the index of "beta"
         let beta_idx = match store.get("tags").unwrap() {
@@ -4018,11 +4275,13 @@ type = "counter"
     fn remove_history_by_value() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
-        store.push("flavor_history", "lapsang", None, None).unwrap();
         store
-            .push("flavor_history", "bergamot vanilla", None, None)
+            .push("flavor_history", "lapsang", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "bergamot vanilla", EntryAttrs::default())
             .unwrap();
 
         let result = store
@@ -4041,8 +4300,8 @@ type = "counter"
     #[test]
     fn remove_case_insensitive() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "Alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "Alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         let result = store
             .remove("tags", Some("alpha"), None::<&IdRef>, false)
@@ -4064,9 +4323,13 @@ type = "counter"
     #[test]
     fn search_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "rust-lang", None, None).unwrap();
-        store.push("tags", "focus", None, None).unwrap();
-        store.push("tags", "rust-tools", None, None).unwrap();
+        store
+            .push("tags", "rust-lang", EntryAttrs::default())
+            .unwrap();
+        store.push("tags", "focus", EntryAttrs::default()).unwrap();
+        store
+            .push("tags", "rust-tools", EntryAttrs::default())
+            .unwrap();
 
         let hits = store.search("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(hits.len(), 2);
@@ -4078,11 +4341,13 @@ type = "counter"
     fn search_history() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
-        store.push("flavor_history", "lapsang", None, None).unwrap();
         store
-            .push("flavor_history", "bergamot vanilla", None, None)
+            .push("flavor_history", "lapsang", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "bergamot vanilla", EntryAttrs::default())
             .unwrap();
 
         let hits = store
@@ -4094,9 +4359,11 @@ type = "counter"
     #[test]
     fn search_case_insensitive() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "Rust", None, None).unwrap();
-        store.push("tags", "RUST-tools", None, None).unwrap();
-        store.push("tags", "python", None, None).unwrap();
+        store.push("tags", "Rust", EntryAttrs::default()).unwrap();
+        store
+            .push("tags", "RUST-tools", EntryAttrs::default())
+            .unwrap();
+        store.push("tags", "python", EntryAttrs::default()).unwrap();
 
         let hits = store.search("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(hits.len(), 2);
@@ -4105,7 +4372,7 @@ type = "counter"
     #[test]
     fn search_no_matches() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let hits = store.search("tags", Some("zzz"), None, &[]).unwrap();
         assert!(hits.is_empty());
@@ -4125,11 +4392,13 @@ type = "counter"
     fn get_by_id_single_history() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
-        store.push("flavor_history", "lapsang", None, None).unwrap();
         store
-            .push("flavor_history", "earl grey", None, None)
+            .push("flavor_history", "lapsang", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "earl grey", EntryAttrs::default())
             .unwrap();
 
         // Get the index of the second entry
@@ -4149,9 +4418,9 @@ type = "counter"
     #[test]
     fn get_by_id_single_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         // Read the actual index of the second entry from the store
         let target_idx = match store.get("tags").unwrap() {
@@ -4170,9 +4439,9 @@ type = "counter"
     #[test]
     fn get_by_id_range_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(1), IdRef::Index(2), IdRef::Index(3)])
@@ -4186,9 +4455,9 @@ type = "counter"
     #[test]
     fn get_by_id_multi_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(1), IdRef::Index(3)])
@@ -4201,8 +4470,8 @@ type = "counter"
     #[test]
     fn get_by_id_partial_match() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         // Request IDs 1, 2, 99 — only 1 and 2 exist
         let hits = store
@@ -4217,7 +4486,7 @@ type = "counter"
     #[test]
     fn get_by_id_all_not_found() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(99), IdRef::Index(100)])
@@ -4270,9 +4539,9 @@ type = "counter"
     #[test]
     fn count_list_total() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None, None).unwrap();
-        store.push("tags", "b", None, None).unwrap();
-        store.push("tags", "c", None, None).unwrap();
+        store.push("tags", "a", EntryAttrs::default()).unwrap();
+        store.push("tags", "b", EntryAttrs::default()).unwrap();
+        store.push("tags", "c", EntryAttrs::default()).unwrap();
 
         let result = store.count("tags", None, None, &[]).unwrap();
         assert_eq!(result.matched, 3);
@@ -4282,9 +4551,13 @@ type = "counter"
     #[test]
     fn count_list_filtered() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "rust-lang", None, None).unwrap();
-        store.push("tags", "focus", None, None).unwrap();
-        store.push("tags", "rust-tools", None, None).unwrap();
+        store
+            .push("tags", "rust-lang", EntryAttrs::default())
+            .unwrap();
+        store.push("tags", "focus", EntryAttrs::default()).unwrap();
+        store
+            .push("tags", "rust-tools", EntryAttrs::default())
+            .unwrap();
 
         let result = store.count("tags", Some("rust"), None, &[]).unwrap();
         assert_eq!(result.matched, 2);
@@ -4302,13 +4575,18 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts1, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts1, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot vanilla", ts2, None, None)
+            .push_with_ts(
+                "flavor_history",
+                "bergamot vanilla",
+                ts2,
+                EntryAttrs::default(),
+            )
             .unwrap();
         store
-            .push_with_ts("flavor_history", "lapsang", ts1, None, None)
+            .push_with_ts("flavor_history", "lapsang", ts1, EntryAttrs::default())
             .unwrap();
 
         let result = store
@@ -4350,9 +4628,15 @@ type = "counter"
     #[test]
     fn history_ids_auto_increment() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "a", None, None).unwrap();
-        store.push("flavor_history", "b", None, None).unwrap();
-        store.push("flavor_history", "c", None, None).unwrap();
+        store
+            .push("flavor_history", "a", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "b", EntryAttrs::default())
+            .unwrap();
+        store
+            .push("flavor_history", "c", EntryAttrs::default())
+            .unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
@@ -4372,9 +4656,9 @@ type = "counter"
     #[test]
     fn list_ids_auto_increment() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None, None).unwrap();
-        store.push("tags", "b", None, None).unwrap();
-        store.push("tags", "c", None, None).unwrap();
+        store.push("tags", "a", EntryAttrs::default()).unwrap();
+        store.push("tags", "b", EntryAttrs::default()).unwrap();
+        store.push("tags", "c", EntryAttrs::default()).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4389,9 +4673,9 @@ type = "counter"
     #[test]
     fn list_ids_stable_after_remove() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "a", None, None).unwrap();
-        store.push("tags", "b", None, None).unwrap();
-        store.push("tags", "c", None, None).unwrap();
+        store.push("tags", "a", EntryAttrs::default()).unwrap();
+        store.push("tags", "b", EntryAttrs::default()).unwrap();
+        store.push("tags", "c", EntryAttrs::default()).unwrap();
 
         // Remove "b"
         store
@@ -4399,7 +4683,7 @@ type = "counter"
             .unwrap();
 
         // Push "d" — should get id=4, not reuse id=2
-        store.push("tags", "d", None, None).unwrap();
+        store.push("tags", "d", EntryAttrs::default()).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4495,7 +4779,9 @@ type = "counter"
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
+        store
+            .push_with_ts("tags", "focus", ts, EntryAttrs::default())
+            .unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -4515,8 +4801,12 @@ type = "counter"
         let ts = DateTime::parse_from_rfc3339("2026-04-22T10:30:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        store.push_with_ts("tags", "focus", ts, None, None).unwrap();
-        store.push_with_ts("tags", "rust", ts, None, None).unwrap();
+        store
+            .push_with_ts("tags", "focus", ts, EntryAttrs::default())
+            .unwrap();
+        store
+            .push_with_ts("tags", "rust", ts, EntryAttrs::default())
+            .unwrap();
 
         let output = format_value(store.get("tags").unwrap());
         // New format: "1 [kv-XXXX]: focus (ts)"
@@ -4531,7 +4821,7 @@ type = "counter"
     fn format_value_history_shows_ids() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
 
         let output = format_value(store.get("flavor_history").unwrap());
@@ -4549,10 +4839,10 @@ type = "counter"
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("tags", "dsi-panel", ts, None, None)
+            .push_with_ts("tags", "dsi-panel", ts, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("tags", "anytype", ts, None, None)
+            .push_with_ts("tags", "anytype", ts, EntryAttrs::default())
             .unwrap();
 
         let compact = store.dump_compact();
@@ -4567,7 +4857,7 @@ type = "counter"
     fn set_get_memory_on_history() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
 
         // Initially no memory pointer
@@ -4592,7 +4882,7 @@ type = "counter"
     #[test]
     fn set_get_memory_on_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         store
             .set_memory("tags", Some("kn-def456".to_string()))
@@ -4640,7 +4930,7 @@ type = "counter"
     fn clear_memory_with_empty_string() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
 
         // Set then clear
@@ -4662,7 +4952,7 @@ type = "counter"
     #[test]
     fn clear_memory_with_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         store
             .set_memory("tags", Some("kn-abc123".to_string()))
@@ -4675,7 +4965,7 @@ type = "counter"
     fn memory_not_serialized_when_none() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
@@ -4778,7 +5068,7 @@ type = "counter"
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts, EntryAttrs::default())
             .unwrap();
         store
             .set_memory("flavor_history", Some("kn-def456".to_string()))
@@ -4804,7 +5094,7 @@ type = "counter"
             .unwrap()
             .with_timezone(&Utc);
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts, EntryAttrs::default())
             .unwrap();
         // No memory pointer set
 
@@ -4838,14 +5128,16 @@ type = "counter"
     fn memory_survives_push() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
 
         // Push another entry
-        store.push("flavor_history", "lapsang", None, None).unwrap();
+        store
+            .push("flavor_history", "lapsang", EntryAttrs::default())
+            .unwrap();
 
         // Memory pointer should still be set
         assert_eq!(
@@ -4858,7 +5150,7 @@ type = "counter"
     fn memory_survives_reset() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
@@ -5287,10 +5579,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "inside", ts_in, None, None)
+            .push_with_ts("flavor_history", "inside", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "outside", ts_out, None, None)
+            .push_with_ts("flavor_history", "outside", ts_out, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5308,10 +5600,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "a", ts, None, None)
+            .push_with_ts("flavor_history", "a", ts, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "b", ts, None, None)
+            .push_with_ts("flavor_history", "b", ts, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5332,10 +5624,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("tags", "rust-in", ts_in, None, None)
+            .push_with_ts("tags", "rust-in", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("tags", "rust-out", ts_out, None, None)
+            .push_with_ts("tags", "rust-out", ts_out, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5358,13 +5650,13 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("tags", "inside", ts_in, None, None)
+            .push_with_ts("tags", "inside", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("tags", "outside", ts_out, None, None)
+            .push_with_ts("tags", "outside", ts_out, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("tags", "also-inside", ts_in, None, None)
+            .push_with_ts("tags", "also-inside", ts_in, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5391,10 +5683,20 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot-in", ts_in, None, None)
+            .push_with_ts(
+                "flavor_history",
+                "bergamot-in",
+                ts_in,
+                EntryAttrs::default(),
+            )
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot-out", ts_out, None, None)
+            .push_with_ts(
+                "flavor_history",
+                "bergamot-out",
+                ts_out,
+                EntryAttrs::default(),
+            )
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5417,13 +5719,18 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts_in, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "lapsang", ts_in, None, None)
+            .push_with_ts("flavor_history", "lapsang", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot earl", ts_out, None, None)
+            .push_with_ts(
+                "flavor_history",
+                "bergamot earl",
+                ts_out,
+                EntryAttrs::default(),
+            )
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5453,10 +5760,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "april", ts_apr, None, None)
+            .push_with_ts("flavor_history", "april", ts_apr, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "may", ts_may, None, None)
+            .push_with_ts("flavor_history", "may", ts_may, EntryAttrs::default())
             .unwrap();
 
         let range = parse_month("2026-04").unwrap();
@@ -5478,9 +5785,9 @@ type = "counter"
     #[test]
     fn random_returns_requested_count() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         let results = store.random("tags", 2, None, &[]).unwrap();
         assert_eq!(results.len(), 2);
@@ -5489,8 +5796,8 @@ type = "counter"
     #[test]
     fn random_returns_all_when_count_exceeds_available() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         let results = store.random("tags", 10, None, &[]).unwrap();
         assert_eq!(results.len(), 2);
@@ -5515,10 +5822,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "vanilla", ts, None, None)
+            .push_with_ts("flavor_history", "vanilla", ts, EntryAttrs::default())
             .unwrap();
 
         let results = store.random("flavor_history", 1, None, &[]).unwrap();
@@ -5539,10 +5846,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("tags", "inside", ts_in, None, None)
+            .push_with_ts("tags", "inside", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("tags", "outside", ts_out, None, None)
+            .push_with_ts("tags", "outside", ts_out, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5563,10 +5870,10 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "inside", ts_in, None, None)
+            .push_with_ts("flavor_history", "inside", ts_in, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "outside", ts_out, None, None)
+            .push_with_ts("flavor_history", "outside", ts_out, EntryAttrs::default())
             .unwrap();
 
         let range = parse_day("2026-04-25").unwrap();
@@ -5617,7 +5924,14 @@ type = "counter"
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active", "tags": ["rust", "kv"]});
         store
-            .push("tags", "my-item", Some(data.clone()), None)
+            .push(
+                "tags",
+                "my-item",
+                EntryAttrs {
+                    data: Some(data.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         match store.get("tags").unwrap() {
@@ -5633,7 +5947,9 @@ type = "counter"
     #[test]
     fn push_without_data_stores_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "bare-item", None, None).unwrap();
+        store
+            .push("tags", "bare-item", EntryAttrs::default())
+            .unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -5649,7 +5965,14 @@ type = "counter"
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"mood": "focused"});
         store
-            .push("flavor_history", "bergamot", Some(data.clone()), None)
+            .push(
+                "flavor_history",
+                "bergamot",
+                EntryAttrs {
+                    data: Some(data.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         match store.get("flavor_history").unwrap() {
@@ -5665,7 +5988,14 @@ type = "counter"
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": 1, "tags": ["a", "b"]});
         store
-            .push("tags", "item", Some(data.clone()), None)
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(data.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         store.data.schema_id = "test".to_string();
         store.save().unwrap();
@@ -5836,24 +6166,30 @@ type = "counter"
             .push(
                 "tags",
                 "task-1",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "task-2",
-                Some(serde_json::json!({"status": "closed"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "closed"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "task-3",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -5871,16 +6207,20 @@ type = "counter"
             .push(
                 "tags",
                 "item-a",
-                Some(serde_json::json!({"labels": ["bug", "urgent"]})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"labels": ["bug", "urgent"]})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "item-b",
-                Some(serde_json::json!({"labels": ["feature"]})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"labels": ["feature"]})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -5893,13 +6233,17 @@ type = "counter"
     #[test]
     fn search_with_where_excludes_entries_without_data() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "no-data", None, None).unwrap();
+        store
+            .push("tags", "no-data", EntryAttrs::default())
+            .unwrap();
         store
             .push(
                 "tags",
                 "has-data",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -5916,24 +6260,30 @@ type = "counter"
             .push(
                 "tags",
                 "rust-fix",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "rust-feature",
-                Some(serde_json::json!({"status": "closed"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "closed"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "python-fix",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -5948,14 +6298,23 @@ type = "counter"
     fn search_with_only_where_no_query() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "a", Some(serde_json::json!({"type": "bug"})), None)
+            .push(
+                "tags",
+                "a",
+                EntryAttrs {
+                    data: Some(serde_json::json!({"type": "bug"})),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         store
             .push(
                 "tags",
                 "b",
-                Some(serde_json::json!({"type": "feature"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"type": "feature"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -5972,16 +6331,20 @@ type = "counter"
             .push(
                 "tags",
                 "match-both",
-                Some(serde_json::json!({"status": "active", "priority": "high"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active", "priority": "high"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "match-one",
-                Some(serde_json::json!({"status": "active", "priority": "low"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active", "priority": "low"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -6003,24 +6366,30 @@ type = "counter"
             .push(
                 "tags",
                 "a",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "b",
-                Some(serde_json::json!({"status": "closed"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "closed"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "c",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -6040,24 +6409,30 @@ type = "counter"
             .push(
                 "tags",
                 "active-1",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "closed-1",
-                Some(serde_json::json!({"status": "closed"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "closed"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "active-2",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -6083,24 +6458,30 @@ type = "counter"
             .push(
                 "tags",
                 "a",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "b",
-                Some(serde_json::json!({"status": "closed"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "closed"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
         store
             .push(
                 "tags",
                 "c",
-                Some(serde_json::json!({"status": "active"})),
-                None,
+                EntryAttrs {
+                    data: Some(serde_json::json!({"status": "active"})),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -6117,7 +6498,14 @@ type = "counter"
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"status": "active"});
         store
-            .push("tags", "item", Some(data.clone()), None)
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(data.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let hits = store.search("tags", Some("item"), None, &[]).unwrap();
@@ -6130,7 +6518,14 @@ type = "counter"
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"priority": "high"});
         store
-            .push("tags", "item", Some(data.clone()), None)
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(data.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let hits = store.get_entries_by_id("tags", &[IdRef::Index(1)]).unwrap();
@@ -6162,7 +6557,16 @@ type = "counter"
     fn format_value_includes_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"k": "v"});
-        store.push("tags", "item", Some(data), None).unwrap();
+        store
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(data),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         let formatted = format_value(store.get("tags").unwrap());
         assert!(formatted.contains("{\"k\":\"v\"}"));
@@ -6171,7 +6575,9 @@ type = "counter"
     #[test]
     fn format_value_no_data_unchanged() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "plain-item", None, None).unwrap();
+        store
+            .push("tags", "plain-item", EntryAttrs::default())
+            .unwrap();
 
         let formatted = format_value(store.get("tags").unwrap());
         assert!(formatted.contains("plain-item"));
@@ -6185,7 +6591,16 @@ type = "counter"
     fn last_output_includes_data() {
         let (mut store, _dir) = setup_store(test_schema());
         let data = serde_json::json!({"x": 1});
-        store.push("tags", "item", Some(data), None).unwrap();
+        store
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(data),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         let items = store.last("tags", 1, None, &[]).unwrap();
         assert_eq!(items.len(), 1);
@@ -6197,7 +6612,7 @@ type = "counter"
     #[test]
     fn push_returns_push_result_with_index_and_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
         assert_eq!(result.index, 1);
         assert!(!result.id.is_empty());
         // ID should be 5-6 base58 chars
@@ -6259,7 +6674,7 @@ type = "counter"
     #[test]
     fn get_by_numeric_index_still_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(result.index)])
@@ -6271,7 +6686,7 @@ type = "counter"
     #[test]
     fn get_by_id_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Id(result.id.clone())])
@@ -6284,7 +6699,7 @@ type = "counter"
     #[test]
     fn get_by_id_prefix_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         // Use first 3 chars as prefix
         let prefix = &result.id[..3];
@@ -6298,8 +6713,8 @@ type = "counter"
     #[test]
     fn get_by_mixed_id_types() {
         let (mut store, _dir) = setup_store(test_schema());
-        let r1 = store.push("tags", "alpha", None, None).unwrap();
-        let r2 = store.push("tags", "beta", None, None).unwrap();
+        let r1 = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        let r2 = store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(r1.index), IdRef::Id(r2.id.clone())])
@@ -6310,9 +6725,9 @@ type = "counter"
     #[test]
     fn remove_by_id_works() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        let r2 = store.push("tags", "beta", None, None).unwrap();
-        store.push("tags", "gamma", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        let r2 = store.push("tags", "beta", EntryAttrs::default()).unwrap();
+        store.push("tags", "gamma", EntryAttrs::default()).unwrap();
 
         let result = store
             .remove("tags", None, Some(&IdRef::Id(r2.id.clone())), false)
@@ -6334,8 +6749,8 @@ type = "counter"
     #[test]
     fn remove_by_ambiguous_id_prefix_errors() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         // Manually set both entries to share an ID prefix.
         match store.data.entries.get_mut("tags").unwrap() {
@@ -6365,7 +6780,7 @@ type = "counter"
     #[test]
     fn id_appears_in_last_output() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let items = store.last("tags", 1, None, &[]).unwrap();
         assert_eq!(items.len(), 1);
@@ -6375,7 +6790,7 @@ type = "counter"
     #[test]
     fn id_appears_in_search_output() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let hits = store.search("tags", Some("alpha"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -6385,7 +6800,7 @@ type = "counter"
     #[test]
     fn id_stored_on_entry_structs() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -6399,7 +6814,7 @@ type = "counter"
     fn id_stored_on_history_entry() {
         let (mut store, _dir) = setup_store(test_schema());
         let result = store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
 
         match store.get("flavor_history").unwrap() {
@@ -6422,7 +6837,7 @@ type = "counter"
         let saved_id;
         {
             let mut store = KvStore::load(&schema_path, &data_path).unwrap();
-            let result = store.push("tags", "alpha", None, None).unwrap();
+            let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
             saved_id = result.id;
             store.save().unwrap();
         }
@@ -6443,7 +6858,14 @@ type = "counter"
     fn push_with_memory_stores_on_entry() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "linked-item", None, Some("kn-abc123".to_string()))
+            .push(
+                "tags",
+                "linked-item",
+                EntryAttrs {
+                    memory: Some("kn-abc123".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         match store.get("tags").unwrap() {
@@ -6457,7 +6879,9 @@ type = "counter"
     #[test]
     fn push_without_memory_has_none() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "plain-item", None, None).unwrap();
+        store
+            .push("tags", "plain-item", EntryAttrs::default())
+            .unwrap();
 
         match store.get("tags").unwrap() {
             DataValue::List { items, .. } => {
@@ -6474,8 +6898,10 @@ type = "counter"
             .push(
                 "flavor_history",
                 "bergamot",
-                None,
-                Some("kn-hist123".to_string()),
+                EntryAttrs {
+                    memory: Some("kn-hist123".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -6490,7 +6916,7 @@ type = "counter"
     #[test]
     fn set_entry_memory_by_numeric_index() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         store
             .set_entry_memory(
@@ -6511,7 +6937,7 @@ type = "counter"
     #[test]
     fn set_entry_memory_by_id() {
         let (mut store, _dir) = setup_store(test_schema());
-        let result = store.push("tags", "alpha", None, None).unwrap();
+        let result = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         store
             .set_entry_memory(
@@ -6532,7 +6958,7 @@ type = "counter"
     #[test]
     fn set_entry_memory_not_found_errors() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
 
         let result = store.set_entry_memory("tags", &IdRef::Index(999), Some("kn-x".to_string()));
         assert!(result.is_err());
@@ -6543,7 +6969,7 @@ type = "counter"
     fn set_entry_memory_history_by_numeric_index() {
         let (mut store, _dir) = setup_store(test_schema());
         let result = store
-            .push("flavor_history", "bergamot", None, None)
+            .push("flavor_history", "bergamot", EntryAttrs::default())
             .unwrap();
 
         store
@@ -6566,9 +6992,16 @@ type = "counter"
     fn per_entry_memory_in_search_hit() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "linked", None, Some("kn-search1".to_string()))
+            .push(
+                "tags",
+                "linked",
+                EntryAttrs {
+                    memory: Some("kn-search1".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        store.push("tags", "plain", None, None).unwrap();
+        store.push("tags", "plain", EntryAttrs::default()).unwrap();
 
         let hits = store.search("tags", Some("linked"), None, &[]).unwrap();
         assert_eq!(hits.len(), 1);
@@ -6583,9 +7016,18 @@ type = "counter"
     fn last_returns_search_hit_with_memory() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "with-mem", None, Some("kn-last1".to_string()))
+            .push(
+                "tags",
+                "with-mem",
+                EntryAttrs {
+                    memory: Some("kn-last1".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        store.push("tags", "without-mem", None, None).unwrap();
+        store
+            .push("tags", "without-mem", EntryAttrs::default())
+            .unwrap();
 
         let hits = store.last("tags", 2, None, &[]).unwrap();
         assert_eq!(hits.len(), 2);
@@ -6597,7 +7039,14 @@ type = "counter"
     fn random_returns_search_hit_with_memory() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("tags", "only-item", None, Some("kn-rand1".to_string()))
+            .push(
+                "tags",
+                "only-item",
+                EntryAttrs {
+                    memory: Some("kn-rand1".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let hits = store.random("tags", 1, None, &[]).unwrap();
@@ -6641,7 +7090,14 @@ type = "counter"
     fn clear_entry_memory_with_empty_string() {
         let (mut store, _dir) = setup_store(test_schema());
         let result = store
-            .push("tags", "alpha", None, Some("kn-clear1".to_string()))
+            .push(
+                "tags",
+                "alpha",
+                EntryAttrs {
+                    memory: Some("kn-clear1".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         // Set memory to empty string should clear it
@@ -6661,9 +7117,18 @@ type = "counter"
     fn get_entries_by_id_carries_memory() {
         let (mut store, _dir) = setup_store(test_schema());
         let r1 = store
-            .push("tags", "with-mem", None, Some("kn-byid1".to_string()))
+            .push(
+                "tags",
+                "with-mem",
+                EntryAttrs {
+                    memory: Some("kn-byid1".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        store.push("tags", "without", None, None).unwrap();
+        store
+            .push("tags", "without", EntryAttrs::default())
+            .unwrap();
 
         let hits = store
             .get_entries_by_id("tags", &[IdRef::Index(r1.index)])
@@ -6685,8 +7150,8 @@ type = "counter"
     #[test]
     fn set_entry_memory_ambiguous_id_prefix_errors() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
 
         // Manually set both entries to share an ID prefix.
         match store.data.entries.get_mut("tags").unwrap() {
@@ -6729,7 +7194,14 @@ type = "counter"
         {
             let mut store = KvStore::load(&schema_path, &data_path).unwrap();
             store
-                .push("tags", "persistent", None, Some("kn-persist".to_string()))
+                .push(
+                    "tags",
+                    "persistent",
+                    EntryAttrs {
+                        memory: Some("kn-persist".to_string()),
+                        ..Default::default()
+                    },
+                )
                 .unwrap();
             store.save().unwrap();
         }
@@ -6861,7 +7333,7 @@ type = "counter"
 
         let ts = Utc::now() - chrono::Duration::minutes(5);
         store
-            .push_with_ts("flavor_history", "recent_flavor", ts, None, None)
+            .push_with_ts("flavor_history", "recent_flavor", ts, EntryAttrs::default())
             .unwrap();
 
         let entries = store.since("flavor_history", "1h").unwrap();
@@ -6924,13 +7396,18 @@ type = "counter"
             .with_timezone(&Utc);
 
         store
-            .push_with_ts("flavor_history", "bergamot", ts1, None, None)
+            .push_with_ts("flavor_history", "bergamot", ts1, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "lapsang", ts1, None, None)
+            .push_with_ts("flavor_history", "lapsang", ts1, EntryAttrs::default())
             .unwrap();
         store
-            .push_with_ts("flavor_history", "bergamot earl grey", ts2, None, None)
+            .push_with_ts(
+                "flavor_history",
+                "bergamot earl grey",
+                ts2,
+                EntryAttrs::default(),
+            )
             .unwrap();
 
         let result = store
@@ -7336,7 +7813,14 @@ opt = { type = "string" }
             "repo": "mx",
             "priority": 1
         });
-        let result = store.push("projects", "my-project", Some(data.clone()), None);
+        let result = store.push(
+            "projects",
+            "my-project",
+            EntryAttrs {
+                data: Some(data.clone()),
+                ..Default::default()
+            },
+        );
         assert!(result.is_ok(), "push with valid data should succeed");
 
         // Verify the entry is stored
@@ -7355,7 +7839,14 @@ opt = { type = "string" }
         let data = serde_json::json!({
             "status": 42
         });
-        let result = store.push("projects", "bad-project", Some(data), None);
+        let result = store.push(
+            "projects",
+            "bad-project",
+            EntryAttrs {
+                data: Some(data),
+                ..Default::default()
+            },
+        );
         assert!(result.is_err(), "push with invalid data should fail");
         let err = result.unwrap_err();
         assert!(
@@ -7374,7 +7865,7 @@ opt = { type = "string" }
     #[test]
     fn push_without_data_when_required() {
         let (mut store, _dir) = setup_store(data_schema());
-        let result = store.push("projects", "no-data", None, None);
+        let result = store.push("projects", "no-data", EntryAttrs::default());
         assert!(
             result.is_err(),
             "push without data when schema has required fields should fail"
@@ -7404,7 +7895,7 @@ note = { type = "string" }
 count = { type = "number" }
 "#;
         let (mut store, _dir) = setup_store(schema);
-        let result = store.push("loose", "no-data-ok", None, None);
+        let result = store.push("loose", "no-data-ok", EntryAttrs::default());
         assert!(
             result.is_ok(),
             "push without data when all fields optional should succeed"
@@ -7423,7 +7914,7 @@ count = { type = "number" }
     fn push_without_data_freeform() {
         let (mut store, _dir) = setup_store(data_schema());
         // "notes" has no [keys.notes.data] section -- freeform
-        let result = store.push("notes", "anything goes", None, None);
+        let result = store.push("notes", "anything goes", EntryAttrs::default());
         assert!(
             result.is_ok(),
             "push without data on freeform key should succeed"
@@ -7555,6 +8046,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: Some(serde_json::json!({"tags": ["rust"]})),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7600,6 +8093,8 @@ type = "counter"
                         serde_json::json!({"status": "active", "tags": ["rust"], "priority": 5}),
                     ),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7629,6 +8124,8 @@ type = "counter"
                         "obsolete_field": "should be removed"
                     })),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7670,6 +8167,8 @@ type = "counter"
                         "extra": "stays"
                     })),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7703,6 +8202,8 @@ type = "counter"
                         "priority": "not-a-number"
                     })),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7753,6 +8254,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: Some(serde_json::json!({})),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7784,6 +8287,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: None,
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7825,6 +8330,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: Some(serde_json::json!({"tags": ["rust"]})),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7864,6 +8371,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: None,
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -7979,6 +8488,8 @@ type = "counter"
                         "obsolete": "should stay in dry run"
                     })),
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -8019,6 +8530,8 @@ type = "counter"
                     ts: "2026-01-01T00:00:00Z".to_string(),
                     data: None,
                     memory: None,
+                    triggers: None,
+                    fragment: None,
                 }],
                 memory: None,
             },
@@ -8086,15 +8599,19 @@ count = { type = "number" }
     #[test]
     fn update_value_only_preserves_ts_and_id_history() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store.push("flavor_history", "mint", None, None).unwrap();
+        let push = store
+            .push("flavor_history", "mint", EntryAttrs::default())
+            .unwrap();
         let before = get_history_entry(&store, "flavor_history", push.index);
 
         let result = store
             .update_entry(
                 "flavor_history",
                 &IdRef::Index(push.index),
-                Some("peppermint"),
-                None,
+                EntryPatch {
+                    value: Some("peppermint".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let after = get_history_entry(&store, "flavor_history", push.index);
@@ -8110,11 +8627,18 @@ count = { type = "number" }
     #[test]
     fn update_value_only_preserves_ts_and_id_list() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store.push("tags", "alpha", None, None).unwrap();
+        let push = store.push("tags", "alpha", EntryAttrs::default()).unwrap();
         let before = get_list_entry(&store, "tags", push.index);
 
         let result = store
-            .update_entry("tags", &IdRef::Index(push.index), Some("beta"), None)
+            .update_entry(
+                "tags",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    value: Some("beta".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let after = get_list_entry(&store, "tags", push.index);
 
@@ -8131,7 +8655,14 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
         let initial_data = serde_json::json!({"a": 1, "b": 2});
         let push = store
-            .push("flavor_history", "chai", Some(initial_data), None)
+            .push(
+                "flavor_history",
+                "chai",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let before = get_history_entry(&store, "flavor_history", push.index);
 
@@ -8140,8 +8671,10 @@ count = { type = "number" }
             .update_entry(
                 "flavor_history",
                 &IdRef::Index(push.index),
-                None,
-                Some(patch),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let after = get_history_entry(&store, "flavor_history", push.index);
@@ -8159,13 +8692,27 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
         let initial_data = serde_json::json!({"a": 1, "b": 2});
         let push = store
-            .push("tags", "item", Some(initial_data), None)
+            .push(
+                "tags",
+                "item",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let before = get_list_entry(&store, "tags", push.index);
 
         let patch = serde_json::json!({"b": 3});
         store
-            .update_entry("tags", &IdRef::Index(push.index), None, Some(patch))
+            .update_entry(
+                "tags",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let after = get_list_entry(&store, "tags", push.index);
 
@@ -8182,7 +8729,14 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
         let initial_data = serde_json::json!({"x": 10});
         let push = store
-            .push("flavor_history", "original", Some(initial_data), None)
+            .push(
+                "flavor_history",
+                "original",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let patch = serde_json::json!({"x": 99});
@@ -8190,8 +8744,11 @@ count = { type = "number" }
             .update_entry(
                 "flavor_history",
                 &IdRef::Index(push.index),
-                Some("updated"),
-                Some(patch),
+                EntryPatch {
+                    value: Some("updated".to_string()),
+                    data: Some(patch),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let after = get_history_entry(&store, "flavor_history", push.index);
@@ -8206,7 +8763,14 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
         let initial_data = serde_json::json!({"a": 1, "b": 2});
         let push = store
-            .push("flavor_history", "rooibos", Some(initial_data), None)
+            .push(
+                "flavor_history",
+                "rooibos",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         let patch = serde_json::json!({"b": null});
@@ -8214,8 +8778,10 @@ count = { type = "number" }
             .update_entry(
                 "flavor_history",
                 &IdRef::Index(push.index),
-                None,
-                Some(patch),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let after = get_history_entry(&store, "flavor_history", push.index);
@@ -8231,15 +8797,19 @@ count = { type = "number" }
     #[test]
     fn update_data_on_entry_with_no_data() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store.push("flavor_history", "oolong", None, None).unwrap();
+        let push = store
+            .push("flavor_history", "oolong", EntryAttrs::default())
+            .unwrap();
 
         let patch = serde_json::json!({"a": 1});
         store
             .update_entry(
                 "flavor_history",
                 &IdRef::Index(push.index),
-                None,
-                Some(patch),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
             )
             .unwrap();
         let after = get_history_entry(&store, "flavor_history", push.index);
@@ -8253,13 +8823,27 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema_with_data());
         let initial_data = serde_json::json!({"status": "open"});
         let push = store
-            .push("items", "task-1", Some(initial_data), None)
+            .push(
+                "items",
+                "task-1",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let before = get_history_entry(&store, "items", push.index);
 
         let patch = serde_json::json!({"unknown_field": "bad"});
         let err = store
-            .update_entry("items", &IdRef::Index(push.index), None, Some(patch))
+            .update_entry(
+                "items",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
+            )
             .unwrap_err();
 
         assert!(
@@ -8279,14 +8863,28 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema_with_data());
         let initial_data = serde_json::json!({"status": "open"});
         let push = store
-            .push("items", "task-2", Some(initial_data), None)
+            .push(
+                "items",
+                "task-2",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let before = get_history_entry(&store, "items", push.index);
 
         // count is type=number; passing a string triggers type mismatch
         let patch = serde_json::json!({"count": "not-a-number"});
         let err = store
-            .update_entry("items", &IdRef::Index(push.index), None, Some(patch))
+            .update_entry(
+                "items",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
+            )
             .unwrap_err();
 
         assert!(
@@ -8307,13 +8905,27 @@ count = { type = "number" }
         // Push with status (required) and count (optional)
         let initial_data = serde_json::json!({"status": "open", "count": 1});
         let push = store
-            .push("items", "task-3", Some(initial_data), None)
+            .push(
+                "items",
+                "task-3",
+                EntryAttrs {
+                    data: Some(initial_data),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         // Patch only updates count — status is not in patch but is satisfied by existing data
         let patch = serde_json::json!({"count": 2});
         store
-            .update_entry("items", &IdRef::Index(push.index), None, Some(patch))
+            .update_entry(
+                "items",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(patch),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let after = get_history_entry(&store, "items", push.index);
 
@@ -8330,11 +8942,18 @@ count = { type = "number" }
     fn update_entry_not_found_by_index() {
         let (mut store, _dir) = setup_store(test_schema());
         store
-            .push("flavor_history", "darjeeling", None, None)
+            .push("flavor_history", "darjeeling", EntryAttrs::default())
             .unwrap();
 
         let err = store
-            .update_entry("flavor_history", &IdRef::Index(999), Some("new"), None)
+            .update_entry(
+                "flavor_history",
+                &IdRef::Index(999),
+                EntryPatch {
+                    value: Some("new".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap_err();
         assert!(
             matches!(err, KvError::EntryNotFound { .. }),
@@ -8346,14 +8965,18 @@ count = { type = "number" }
     #[test]
     fn update_entry_not_found_by_id_prefix() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "sencha", None, None).unwrap();
+        store
+            .push("flavor_history", "sencha", EntryAttrs::default())
+            .unwrap();
 
         let err = store
             .update_entry(
                 "flavor_history",
                 &IdRef::Id("nonexistentprefix".to_string()),
-                Some("new"),
-                None,
+                EntryPatch {
+                    value: Some("new".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap_err();
         assert!(
@@ -8366,15 +8989,17 @@ count = { type = "number" }
     #[test]
     fn update_ambiguous_id_prefix() {
         let (mut store, _tmp) = setup_store(test_schema());
-        store.push("tags", "alpha", None, None).unwrap();
-        store.push("tags", "beta", None, None).unwrap();
+        store.push("tags", "alpha", EntryAttrs::default()).unwrap();
+        store.push("tags", "beta", EntryAttrs::default()).unwrap();
         // Empty prefix matches every entry — always ambiguous when there are 2+.
         let err = store
             .update_entry(
                 "tags",
                 &IdRef::Id("".to_string()),
-                Some("beta-updated"),
-                None,
+                EntryPatch {
+                    value: Some("beta-updated".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap_err();
         match err {
@@ -8387,7 +9012,14 @@ count = { type = "number" }
     fn update_wrong_key_type_counter() {
         let (mut store, _dir) = setup_store(test_schema());
         let err = store
-            .update_entry("warmth", &IdRef::Index(0), Some("5"), None)
+            .update_entry(
+                "warmth",
+                &IdRef::Index(0),
+                EntryPatch {
+                    value: Some("5".to_string()),
+                    ..Default::default()
+                },
+            )
             .unwrap_err();
         assert!(
             matches!(err, KvError::TypeMismatch { .. }),
@@ -8399,7 +9031,9 @@ count = { type = "number" }
     #[test]
     fn update_id_lookup_by_prefix_unique() {
         let (mut store, _dir) = setup_store(test_schema());
-        let push = store.push("flavor_history", "gyokuro", None, None).unwrap();
+        let push = store
+            .push("flavor_history", "gyokuro", EntryAttrs::default())
+            .unwrap();
 
         // Take first 4 chars of id as prefix
         let prefix = push.id[..4.min(push.id.len())].to_string();
@@ -8408,8 +9042,10 @@ count = { type = "number" }
             .update_entry(
                 "flavor_history",
                 &IdRef::Id(prefix),
-                Some("gyokuro-updated"),
-                None,
+                EntryPatch {
+                    value: Some("gyokuro-updated".to_string()),
+                    ..Default::default()
+                },
             )
             .unwrap();
 
@@ -8426,8 +9062,12 @@ count = { type = "number" }
         let (mut store, _dir) = setup_store(test_schema());
 
         // Push some data into flavor_history so there is something to rename
-        let push1 = store.push("flavor_history", "matcha", None, None).unwrap();
-        let push2 = store.push("flavor_history", "hojicha", None, None).unwrap();
+        let push1 = store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
+        let push2 = store
+            .push("flavor_history", "hojicha", EntryAttrs::default())
+            .unwrap();
         store.save().unwrap();
 
         store.rename_key("flavor_history", "tea_history").unwrap();
@@ -8530,7 +9170,14 @@ count = { type = "number" }
         // Push entries with data payloads
         let data_json = serde_json::json!({"mood": "calm"});
         store
-            .push("flavor_history", "sencha", Some(data_json.clone()), None)
+            .push(
+                "flavor_history",
+                "sencha",
+                EntryAttrs {
+                    data: Some(data_json.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
         store.save().unwrap();
 
@@ -8651,7 +9298,9 @@ count = { type = "number" }
     fn key_has_content_empty_vs_populated() {
         let (mut store, _dir) = setup_store(test_schema());
         // History with entries is content; empty string is not.
-        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
         assert!(store.key_has_content("flavor_history"));
 
         store.set("current_mood", "", None).unwrap();
@@ -8680,7 +9329,9 @@ count = { type = "number" }
     #[test]
     fn drop_key_non_empty_removes_schema_and_data() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
         store.save().unwrap();
         assert!(store.data.entries.contains_key("flavor_history"));
 
@@ -8706,7 +9357,9 @@ count = { type = "number" }
     #[test]
     fn drop_key_with_memory_link_discards_pointer() {
         let (mut store, _dir) = setup_store(test_schema());
-        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
         store
             .set_memory("flavor_history", Some("kn-abc123".to_string()))
             .unwrap();
@@ -8858,7 +9511,9 @@ count = { type = "number" }
     #[test]
     fn drop_key_rollback_on_data_write_failure() {
         let (mut store, dir) = setup_store(test_schema());
-        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
         store.save().unwrap();
 
         // Snapshot good on-disk state for the later assertion.
@@ -8932,7 +9587,9 @@ count = { type = "number" }
     #[test]
     fn rename_key_rollback_on_data_write_failure() {
         let (mut store, dir) = setup_store(test_schema());
-        store.push("flavor_history", "matcha", None, None).unwrap();
+        store
+            .push("flavor_history", "matcha", EntryAttrs::default())
+            .unwrap();
         store.save().unwrap();
 
         let good_schema_path = store.schema_path.clone();
@@ -8959,5 +9616,219 @@ count = { type = "number" }
         let reloaded = KvStore::load(&good_schema_path, &good_data_path).unwrap();
         assert!(reloaded.schema.keys.contains_key("flavor_history"));
         assert!(!reloaded.schema.keys.contains_key("tea_history"));
+    }
+
+    // -- Triggers and fragments (doors) --
+
+    fn doors_schema() -> &'static str {
+        r#"
+[keys.facts]
+type = "list"
+
+[keys.log]
+type = "history"
+"#
+    }
+
+    #[test]
+    fn entry_without_triggers_loads_and_round_trips_without_the_keys() {
+        // A data file written before the columns existed must load, report None,
+        // and NOT grow the keys when saved back (skip_serializing_if).
+        let dir = TempDir::new().unwrap();
+        let schema_path = dir.path().join("s.toml");
+        let data_path = dir.path().join("d.json");
+        fs::write(&schema_path, doors_schema()).unwrap();
+        fs::write(
+            &data_path,
+            r#"{"_schema":"t","_updated":"2026-01-01T00:00:00Z","facts":{"items":[{"id":1,"hash":"aaa111","value":"old row","ts":"2026-01-01T00:00:00Z"}]}}"#,
+        )
+        .unwrap();
+
+        let mut store = KvStore::load(&schema_path, &data_path).unwrap();
+        let entry = get_list_entry(&store, "facts", 1);
+        assert_eq!(entry.value, "old row");
+        assert!(entry.triggers.is_none());
+        assert!(entry.fragment.is_none());
+
+        store.save().unwrap();
+        let raw = fs::read_to_string(&data_path).unwrap();
+        assert!(!raw.contains("triggers"), "absent fields must stay absent");
+        assert!(!raw.contains("fragment"));
+    }
+
+    #[test]
+    fn push_stores_triggers_and_fragment_on_both_entry_types() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        for key in ["facts", "log"] {
+            store
+                .push(
+                    key,
+                    "the value",
+                    EntryAttrs {
+                        triggers: Some(vec!["konkon".to_string()]),
+                        fragment: Some("a fragment".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        let found = store.iter_triggered();
+        assert_eq!(found.len(), 2);
+        for c in &found {
+            assert_eq!(c.triggers, ["konkon".to_string()]);
+            assert_eq!(c.fragment, Some("a fragment"));
+        }
+    }
+
+    #[test]
+    fn push_with_empty_trigger_list_stores_nothing() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        store
+            .push(
+                "facts",
+                "v",
+                EntryAttrs {
+                    triggers: Some(Vec::new()),
+                    fragment: Some("   ".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let e = get_list_entry(&store, "facts", 1);
+        assert!(e.triggers.is_none());
+        assert!(e.fragment.is_none());
+        assert!(store.iter_triggered().is_empty());
+    }
+
+    #[test]
+    fn update_replaces_the_whole_trigger_list_and_clears_on_empty() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push(
+                "facts",
+                "v",
+                EntryAttrs {
+                    triggers: Some(vec!["alpha".to_string(), "beta".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let id = IdRef::Index(push.index);
+
+        store
+            .update_entry(
+                "facts",
+                &id,
+                EntryPatch {
+                    triggers: Some(vec!["gamma".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index).triggers,
+            Some(vec!["gamma".to_string()])
+        );
+
+        store
+            .update_entry(
+                "facts",
+                &id,
+                EntryPatch {
+                    triggers: Some(Vec::new()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            get_list_entry(&store, "facts", push.index)
+                .triggers
+                .is_none()
+        );
+        assert!(store.iter_triggered().is_empty());
+    }
+
+    #[test]
+    fn update_normalizes_and_dedupes_triggers() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store.push("facts", "v", EntryAttrs::default()).unwrap();
+        store
+            .update_entry(
+                "facts",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    triggers: Some(vec![
+                        "  Kon   Kon ".to_string(),
+                        "KON KON".to_string(),
+                        "konkon".to_string(),
+                    ]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index).triggers,
+            Some(vec!["kon kon".to_string(), "konkon".to_string()])
+        );
+    }
+
+    #[test]
+    fn update_fragment_sets_and_clears_without_touching_value() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push("facts", "the value", EntryAttrs::default())
+            .unwrap();
+        let id = IdRef::Index(push.index);
+
+        store
+            .update_entry(
+                "facts",
+                &id,
+                EntryPatch {
+                    fragment: Some("authored".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let e = get_list_entry(&store, "facts", push.index);
+        assert_eq!(e.fragment.as_deref(), Some("authored"));
+        assert_eq!(e.value, "the value");
+
+        store
+            .update_entry(
+                "facts",
+                &id,
+                EntryPatch {
+                    fragment: Some(String::new()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            get_list_entry(&store, "facts", push.index)
+                .fragment
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn iter_triggered_skips_untriggered_entries_and_reports_its_key() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        store.push("facts", "plain", EntryAttrs::default()).unwrap();
+        store
+            .push(
+                "log",
+                "door",
+                EntryAttrs {
+                    memory: Some("kn-abc".to_string()),
+                    triggers: Some(vec!["slaptop".to_string()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let found = store.iter_triggered();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].key, "log");
+        assert_eq!(found[0].memory, Some("kn-abc"));
     }
 }

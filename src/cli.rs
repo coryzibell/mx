@@ -136,6 +136,12 @@ pub enum Commands {
         command: KvCommands,
     },
 
+    /// Trigger-based ambient memory over the kv store
+    Doors {
+        #[command(subcommand)]
+        command: DoorsCommands,
+    },
+
     /// Git worktree lifecycle management for Claude Code agent dispatches
     Worktree {
         #[command(subcommand)]
@@ -347,7 +353,7 @@ pub enum SyncCommands {
 }
 
 /// Shared filter flags for search/list commands (extracted from duplicated definitions)
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, Default, clap::Args)]
 pub struct EntryFilter {
     /// Filter by category (comma-separated, see 'mx memory categories list' for valid names)
     #[arg(short, long, value_delimiter = ',')]
@@ -411,6 +417,16 @@ pub struct EntryFilter {
     /// Filter by tags (can specify multiple: focus,rust) (matches any)
     #[arg(long, value_delimiter = ',')]
     pub tags: Option<Vec<String>>,
+
+    /// Exclude entries whose tags prefix-match any of these comma-separated values (e.g. 'tier/' drops every entry tagged tier/<anything>). Specify once; comma-separate multiple prefixes -- repeating the flag is a parse error.
+    // Option<String>, not Vec<String> like the neighboring `tags` field: this
+    // deliberately mirrors wake-fetch's `--exclude-tags` for exact parse
+    // parity, since both flow through the same `parse_exclude_prefixes`
+    // trim/empty-drop logic. Repeating this flag (`--exclude-tags a
+    // --exclude-tags b`) is a clap parse error (ArgumentConflict), not a
+    // silent override -- pinned in the test module below.
+    #[arg(long, value_name = "PREFIXES")]
+    pub exclude_tags: Option<String>,
 }
 
 /// Sort order for `memory recent` results.
@@ -420,14 +436,6 @@ pub enum RecentSortOrder {
     Chronological,
     /// Sort by effective resonance (highest first, decay-adjusted)
     Resonance,
-}
-
-/// Output format for `mx memory trigger-check` (Issue #246).
-#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
-pub enum TriggerFormat {
-    /// Rendered memory bodies ready for context injection (title + body per
-    /// fired memory, separated by `---`). Empty stdout when nothing fires.
-    Context,
 }
 
 #[derive(Subcommand)]
@@ -486,37 +494,6 @@ pub enum MemoryCommands {
         /// Output only the body content (for piping)
         #[arg(long)]
         content_only: bool,
-    },
-
-    /// Check a message for trigger-word matches and inject matching memories
-    /// (Issue #246). Reactive memory: dormant memories whose triggers appear in
-    /// the message fire ONCE per session. Exit 0 = ran (firing nothing is still
-    /// success); exit 4 = empty message after stdin fallback.
-    TriggerCheck {
-        /// Message to check. If omitted/empty, read the message from stdin to EOF.
-        message: Option<String>,
-
-        /// Output as JSON: {"fired":[{"id","title","triggers_matched":[...]}],"deferred_count":N}
-        #[arg(long)]
-        json: bool,
-
-        /// Output format when not --json. `context` (default) renders memory
-        /// bodies for injection; empty stdout when nothing fires.
-        #[arg(long, value_enum, default_value_t = TriggerFormat::Context)]
-        format: TriggerFormat,
-
-        /// Report matches WITHOUT marking them fired (debugging). A subsequent
-        /// real check will still fire them.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Clear the session-scoped trigger fired-state file (Issue #246). Lets a
-    /// memory fire again — for testing or a deliberate mid-session reset.
-    TriggerReset {
-        /// Output as JSON: {"reset":true,"path":"..."}
-        #[arg(long)]
-        json: bool,
     },
 
     /// Show index statistics
@@ -694,6 +671,21 @@ pub enum MemoryCommands {
         /// Skip synchronous embedding generation on write
         #[arg(long)]
         no_embed: bool,
+
+        /// Write through even if an identical (same session, same owner)
+        /// entry already exists this session. Without this flag, a
+        /// recased/repunctuated near-duplicate is skipped (exit 0) rather
+        /// than written -- this is a deliberate override for an intentional
+        /// re-add, not "permission" for an accidental one.
+        ///
+        /// Caveat: entry ids are derived from path/title (`generate_id`), so
+        /// a byte-identical re-add with this flag set overwrites the SAME
+        /// row in place (new `updated_at`, same id) rather than creating a
+        /// second entry -- this only produces a genuinely distinct row for a
+        /// recased/reworded near-duplicate, not an exact repeat. Vary the
+        /// title if you need a second row for identical content.
+        #[arg(long)]
+        allow_duplicate: bool,
     },
 
     /// Update an existing entry in the database
@@ -1228,7 +1220,8 @@ pub enum MemoryCommands {
 
         /// Exclude entries whose tags prefix-match any of these comma-separated values.
         /// E.g. --exclude-tags 'project/' drops every entry tagged project/<anything>.
-        /// Multiple prefixes: --exclude-tags 'project/,foo/'
+        /// Specify once; comma-separate multiple prefixes: --exclude-tags 'project/,foo/'.
+        /// Repeating the flag is a parse error.
         #[arg(long, value_name = "PREFIXES")]
         exclude_tags: Option<String>,
     },
@@ -1910,6 +1903,63 @@ pub struct TimeRangeArgs {
 }
 
 #[derive(Subcommand)]
+pub enum DoorsCommands {
+    /// Claude Code UserPromptSubmit entry point. Reads hook JSON on stdin and
+    /// prints one line per door that fires. ALWAYS exits 0 — a non-zero exit on
+    /// this hook event either erases the user's prompt (2) or paints a hook-error
+    /// notice into every turn.
+    Hook {
+        /// Match and print without recording fires
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum distinct entries to fire on one prompt
+        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
+        budget: usize,
+    },
+
+    /// Run the same engine against plain text, for humans and tests
+    Check {
+        /// Message to match against
+        message: String,
+
+        /// Session id for dedup (default: an ad-hoc "cli" session)
+        #[arg(long, default_value = "cli")]
+        session: String,
+
+        /// Match and print without recording fires
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output as JSON: {"fired":[...],"deferred":N}
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum distinct entries to fire
+        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
+        budget: usize,
+    },
+
+    /// Fire telemetry: fires per entry and per trigger, plus doors never fired
+    Stats {
+        /// Only count fires within this relative window (e.g. 30d, 1w)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete fire rows so doors become eligible again
+    Reset {
+        /// Only reset this session (default: every session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum KvCommands {
     /// Get the current value of a key, or specific entries by ID
     Get {
@@ -1987,6 +2037,15 @@ pub enum KvCommands {
         /// Link a memory entry (kn- ID) to this entry
         #[arg(long)]
         memory: Option<String>,
+
+        /// Trigger phrase that opens this entry as a door (repeatable)
+        #[arg(long = "trigger", value_name = "PHRASE")]
+        triggers: Vec<String>,
+
+        /// One-line fragment printed when a door fires (defaults to the
+        /// entry's first line)
+        #[arg(long)]
+        fragment: Option<String>,
 
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
@@ -2096,6 +2155,26 @@ pub enum KvCommands {
         /// Null field values delete that field from the merged result.
         #[arg(long)]
         data: Option<String>,
+
+        /// Replace the entry's whole trigger list (repeatable). A single
+        /// `--trigger ""` clears it.
+        #[arg(long = "trigger", value_name = "PHRASE")]
+        triggers: Vec<String>,
+
+        /// Set the door fragment; `--fragment ""` clears it and the first-line
+        /// rule resumes.
+        #[arg(long)]
+        fragment: Option<String>,
+    },
+
+    /// List every entry carrying triggers, with fire counts
+    Triggers {
+        /// Restrict to one key (default: all keys)
+        key: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search entries in a list/history by substring and/or structured data filters
@@ -2404,5 +2483,74 @@ mod tests {
             let (_, auto) = merge_flags(&["mx", "pr", "merge", "375", mode, "--auto"]);
             assert!(auto, "--auto with {mode} should parse and set auto");
         }
+    }
+
+    fn search_exclude_tags(args: &[&str]) -> Option<String> {
+        match Cli::try_parse_from(args) {
+            Ok(Cli {
+                command:
+                    Commands::Memory {
+                        command: MemoryCommands::Search { filter, .. },
+                    },
+                ..
+            }) => filter.exclude_tags,
+            Ok(_) => panic!("expected memory search subcommand"),
+            Err(e) => panic!("parse should succeed for {args:?}: {e}"),
+        }
+    }
+
+    // `--exclude-tags` is `Option<String>` (comma-separated), not
+    // `Option<Vec<String>>` like the neighboring `--tags` -- deliberate,
+    // for exact parse parity with wake-fetch (see field doc comment above).
+    // Pinning the repeated-flag behavior: an `Option<String>` field with no
+    // explicit `action(...)` gets clap's default `Set` action, and *unlike*
+    // the (incorrect, pre-test) assumption that Set silently keeps the last
+    // occurrence, clap 4's `Set` action actually rejects a second occurrence
+    // outright with `ErrorKind::ArgumentConflict` ("cannot be used multiple
+    // times"). So repeating `--exclude-tags` fails loud, not silent -- the
+    // opposite failure mode from the one that needed guarding against. This
+    // test exists so that never regresses to a silent override without a
+    // test failing (e.g. if someone later adds `.action(ArgAction::Set)`
+    // explicitly, or an `overrides_with`, to "fix" what isn't broken).
+    #[test]
+    fn search_exclude_tags_repeated_flag_errors_instead_of_silently_overriding() {
+        let err = parse_err(&[
+            "mx",
+            "memory",
+            "search",
+            "query",
+            "--exclude-tags",
+            "tier/",
+            "--exclude-tags",
+            "project/",
+        ]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn wake_fetch_exclude_tags_repeated_flag_errors_instead_of_silently_overriding() {
+        let err = parse_err(&[
+            "mx",
+            "memory",
+            "wake-fetch",
+            "--exclude-tags",
+            "tier/",
+            "--exclude-tags",
+            "project/",
+        ]);
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn search_exclude_tags_single_flag_carries_comma_separated_prefixes() {
+        let value = search_exclude_tags(&[
+            "mx",
+            "memory",
+            "search",
+            "query",
+            "--exclude-tags",
+            "tier/,project/",
+        ]);
+        assert_eq!(value.as_deref(), Some("tier/,project/"));
     }
 }

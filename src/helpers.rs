@@ -6,11 +6,47 @@ use crate::knowledge;
 use crate::store;
 use crate::surreal_db::SurrealDatabase;
 
+/// Parse a `--exclude-tags` CSV value into a list of prefix strings.
+///
+/// Segments are trimmed; empty segments (from trailing commas, repeated commas,
+/// or whitespace-only input) are dropped. A `None` input yields an empty list.
+///
+/// Single definition shared by wake-fetch, `memory search`, and `memory list` —
+/// do not duplicate this in a handler.
+pub(crate) fn parse_exclude_prefixes(exclude_tags: Option<&str>) -> Vec<String> {
+    exclude_tags
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether an entry should be KEPT given the active exclude prefixes.
+///
+/// Returns `false` (exclude) when ANY of the entry's tags prefix-matches ANY of
+/// the requested exclude prefixes. An empty prefix list keeps every entry.
+///
+/// Single definition shared by wake-fetch, `memory search`, and `memory list`.
+pub(crate) fn keep_after_exclude(tags: &[String], exclude_prefixes: &[String]) -> bool {
+    if exclude_prefixes.is_empty() {
+        return true;
+    }
+    !tags.iter().any(|tag| {
+        exclude_prefixes
+            .iter()
+            .any(|prefix| tag.starts_with(prefix.as_str()))
+    })
+}
+
 /// Apply in-memory field presence filters to a list of entries
 pub(crate) fn apply_entry_filters(
     entries: Vec<knowledge::KnowledgeEntry>,
     filter: &EntryFilter,
 ) -> Vec<knowledge::KnowledgeEntry> {
+    let exclude_prefixes = parse_exclude_prefixes(filter.exclude_tags.as_deref());
+
     let mut entries: Vec<_> = entries
         .into_iter()
         .filter(|e| !filter.has_wake_phrase || e.has_any_wake_phrase())
@@ -29,6 +65,14 @@ pub(crate) fn apply_entry_filters(
                 .as_ref()
                 .is_none_or(|filter_tags| filter_tags.iter().any(|t| e.tags.contains(t)))
         })
+        // Exclusion runs before the limit truncate so a caller always gets up to
+        // `limit` non-excluded entries on the keyword/list paths (neither issues a
+        // DB-level LIMIT, so filter-then-truncate here is exact, not a heuristic).
+        // This is the sole enforcement point for keyword/list. The semantic
+        // search path already excludes at the DB/hydration layer, so running
+        // this filter again there is a harmless no-op safety net, not a
+        // second independent gate.
+        .filter(|e| keep_after_exclude(&e.tags, &exclude_prefixes))
         .collect();
 
     // Apply limit if specified
@@ -233,6 +277,11 @@ pub(crate) fn hidden_private_hint(
         min_resonance: filter.min_resonance,
         max_resonance: filter.max_resonance,
         categories: filter.category.clone(),
+        // Not pushed down here: this is the candidate-fetch query, and the
+        // in-memory `apply_entry_filters` call below (which DOES honor
+        // `exclude_tags`) runs over every candidate before the count is
+        // taken, so exclusion is still applied before the hint fires.
+        exclude_tag_prefixes: Vec::new(),
     };
 
     // Best-effort: on ANY error, stay silent. The hint must never turn a
@@ -1188,6 +1237,369 @@ mod auto_anchor_tests {
         assert!(got.is_empty(), "no embedding -> no anchoring");
     }
 
+    /// Wraps a real in-memory SurrealDB store and forces
+    /// `semantic_search_entries_scored` to return `Err` -- simulating a
+    /// transient candidate-fetch failure AFTER the `embedding.is_none()`
+    /// early return, i.e. on an entry that IS embedded. Every other method
+    /// is a real pass-through. Mirrors `handlers::memory::FailingStore`
+    /// (same shape, different failing method).
+    struct FailingScoredStore {
+        inner: Box<dyn KnowledgeStore>,
+    }
+
+    impl FailingScoredStore {
+        fn new() -> Self {
+            Self {
+                inner: Box::new(SurrealDatabase::open_in_memory().unwrap()),
+            }
+        }
+    }
+
+    impl KnowledgeStore for FailingScoredStore {
+        fn upsert_knowledge(&self, entry: &KnowledgeEntry) -> Result<()> {
+            self.inner.upsert_knowledge(entry)
+        }
+        fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+            self.inner.get(id, ctx)
+        }
+        fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.delete(id, ctx)
+        }
+        fn search(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.search(query, ctx, filter)
+        }
+        fn semantic_search(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner
+                .semantic_search(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_scored(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_entries_scored(
+            &self,
+            _query_embedding: &[f32],
+            _ctx: &AgentContext,
+            _limit: usize,
+        ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+            anyhow::bail!("simulated transient candidate-fetch failure")
+        }
+        fn list_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.list_by_category(category, ctx, filter)
+        }
+        fn count_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<usize> {
+            self.inner.count_by_category(category, ctx, filter)
+        }
+        fn owned_private_matching(
+            &self,
+            agent: &str,
+            query: Option<&str>,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.owned_private_matching(agent, query, filter)
+        }
+        fn list_all(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.list_all(ctx)
+        }
+        fn count(&self) -> Result<usize> {
+            self.inner.count()
+        }
+        fn wake_cascade(
+            &self,
+            ctx: &AgentContext,
+            limit: usize,
+            min_resonance: Option<i32>,
+            days: i64,
+        ) -> Result<store::WakeCascade> {
+            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+        }
+        fn update_activations(&self, ids: &[String]) -> Result<()> {
+            self.inner.update_activations(ids)
+        }
+        fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.update_summary(id, summary, ctx)
+        }
+        fn apply_update(
+            &self,
+            id: &str,
+            spec: &crate::store_update::UpdateSpec,
+            ctx: &AgentContext,
+        ) -> Result<crate::store_update::UpdateOutcome> {
+            self.inner.apply_update(id, spec, ctx)
+        }
+        fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+            self.inner.increment_activation_count(ids)
+        }
+        fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.query_recent_facts(days)
+        }
+        fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.query_recent_facts_all_types(days)
+        }
+        fn reinforce(
+            &self,
+            id: &str,
+            amount: i32,
+            cap: Option<i32>,
+            ctx: &AgentContext,
+        ) -> Result<Option<store::ReinforcementResult>> {
+            self.inner.reinforce(id, amount, cap, ctx)
+        }
+        fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+            self.inner.delete_embedding_chunks(entry_id)
+        }
+        fn insert_embedding_chunk(
+            &self,
+            entry_id: &str,
+            chunk_index: usize,
+            chunk_text: &str,
+            token_offset: usize,
+            token_count: usize,
+            embedding: &[f32],
+            model_id: &str,
+        ) -> Result<()> {
+            self.inner.insert_embedding_chunk(
+                entry_id,
+                chunk_index,
+                chunk_text,
+                token_offset,
+                token_count,
+                embedding,
+                model_id,
+            )
+        }
+        fn semantic_search_chunks(
+            &self,
+            query_embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<(String, f32)>> {
+            self.inner.semantic_search_chunks(query_embedding, limit)
+        }
+        fn edit_content(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+            old_text: &str,
+            new_text: &str,
+            replace_all: bool,
+            nth: Option<usize>,
+        ) -> Result<store::EditResult> {
+            self.inner
+                .edit_content(id, ctx, old_text, new_text, replace_all, nth)
+        }
+        fn append_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.append_content(id, ctx, content)
+        }
+        fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.prepend_content(id, ctx, content)
+        }
+        fn backup_content(
+            &self,
+            entry: &KnowledgeEntry,
+            operation: &str,
+            agent: Option<&str>,
+        ) -> Result<String> {
+            self.inner.backup_content(entry, operation, agent)
+        }
+        fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+            self.inner.list_backups(entry_id)
+        }
+        fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>> {
+            self.inner.latest_backup(entry_id)
+        }
+        fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
+            self.inner.purge_backups(entry_id, keep)
+        }
+        fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_entry(entry_id)
+        }
+        fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_entry(entry_id, tags)
+        }
+        fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+            self.inner.list_all_tags(category)
+        }
+        fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_entry(entry_id)
+        }
+        fn set_applicability_for_entry(&self, entry_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_entry(entry_id, ids)
+        }
+        fn list_applicability_types(&self) -> Result<Vec<crate::types::ApplicabilityType>> {
+            self.inner.list_applicability_types()
+        }
+        fn upsert_applicability_type(&self, atype: &crate::types::ApplicabilityType) -> Result<()> {
+            self.inner.upsert_applicability_type(atype)
+        }
+        fn list_categories(&self) -> Result<Vec<crate::types::Category>> {
+            self.inner.list_categories()
+        }
+        fn get_category(&self, id: &str) -> Result<Option<crate::types::Category>> {
+            self.inner.get_category(id)
+        }
+        fn upsert_category(&self, category: &crate::types::Category) -> Result<()> {
+            self.inner.upsert_category(category)
+        }
+        fn delete_category(&self, id: &str) -> Result<bool> {
+            self.inner.delete_category(id)
+        }
+        fn list_projects(&self, active_only: bool) -> Result<Vec<crate::types::Project>> {
+            self.inner.list_projects(active_only)
+        }
+        fn get_project(&self, id: &str) -> Result<Option<crate::types::Project>> {
+            self.inner.get_project(id)
+        }
+        fn upsert_project(&self, project: &crate::types::Project) -> Result<()> {
+            self.inner.upsert_project(project)
+        }
+        fn get_tags_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_project(project_id)
+        }
+        fn set_tags_for_project(&self, project_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_project(project_id, tags)
+        }
+        fn get_applicability_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_project(project_id)
+        }
+        fn set_applicability_for_project(&self, project_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_project(project_id, ids)
+        }
+        fn list_agents(&self) -> Result<Vec<crate::types::Agent>> {
+            self.inner.list_agents()
+        }
+        fn get_agent(&self, id: &str) -> Result<Option<crate::types::Agent>> {
+            self.inner.get_agent(id)
+        }
+        fn upsert_agent(&self, agent: &crate::types::Agent) -> Result<()> {
+            self.inner.upsert_agent(agent)
+        }
+        fn list_relationships_for_entry(
+            &self,
+            entry_id: &str,
+        ) -> Result<Vec<crate::types::Relationship>> {
+            self.inner.list_relationships_for_entry(entry_id)
+        }
+        fn add_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<String> {
+            self.inner.add_relationship(from, to, rel_type)
+        }
+        fn delete_relationship(&self, id: &str) -> Result<bool> {
+            self.inner.delete_relationship(id)
+        }
+        fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+            self.inner.get_facts_for_session(session_id)
+        }
+        fn get_entries_for_session(
+            &self,
+            session_id: &str,
+            owner: Option<&str>,
+            category: &str,
+            ctx: &AgentContext,
+        ) -> Result<Vec<store::DedupCandidate>> {
+            self.inner
+                .get_entries_for_session(session_id, owner, category, ctx)
+        }
+        fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+            self.inner.get_session_for_fact(fact_id)
+        }
+        fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<crate::types::Session>> {
+            self.inner.list_sessions(project_id)
+        }
+        fn get_session(&self, id: &str) -> Result<Option<crate::types::Session>> {
+            self.inner.get_session(id)
+        }
+        fn upsert_session(&self, session: &crate::types::Session) -> Result<()> {
+            self.inner.upsert_session(session)
+        }
+        fn list_source_types(&self) -> Result<Vec<crate::types::SourceType>> {
+            self.inner.list_source_types()
+        }
+        fn list_entry_types(&self) -> Result<Vec<crate::types::EntryType>> {
+            self.inner.list_entry_types()
+        }
+        fn list_content_types(&self) -> Result<Vec<crate::types::ContentType>> {
+            self.inner.list_content_types()
+        }
+        fn list_session_types(&self) -> Result<Vec<crate::types::SessionType>> {
+            self.inner.list_session_types()
+        }
+        fn list_relationship_types(&self) -> Result<Vec<crate::types::RelationshipType>> {
+            self.inner.list_relationship_types()
+        }
+        fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String> {
+            self.inner.create_wake_session(session)
+        }
+        fn get_wake_session(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<crate::wake_token::WakeSession>> {
+            self.inner.get_wake_session(session_id)
+        }
+        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
+            self.inner.update_wake_session(session)
+        }
+        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
+            self.inner.delete_wake_session(session_id)
+        }
+        fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
+            self.inner.sweep_ghost_anchors(dry_run)
+        }
+        fn list_tables(&self) -> Result<Vec<String>> {
+            self.inner.list_tables()
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn anchor_failure_on_embedded_entry_propagates_err() {
+        // Cory's B2 (PR #399 re-review): `auto_anchor` early-returns `Ok(())`
+        // when `embedding.is_none()` (covered by `no_embedding_skips_anchoring`
+        // above), but the path PAST that guard -- a candidate-fetch failure on
+        // an entry that IS embedded -- had zero coverage. This forces that
+        // failure and proves it surfaces as `Err`, which is what lets
+        // `add_one` (handlers::memory) catch it non-fatally and record it as
+        // `anchor_deferred` in the write outcome instead of the failure
+        // silently vanishing.
+        clear_agent_env();
+        let db = FailingScoredStore::new();
+        let target = entry_with_embedding("kn-embedded", unit_query(), "public", None, vec![]);
+        db.upsert_knowledge(&target).unwrap();
+
+        let result = auto_anchor("kn-embedded", &db, None);
+
+        assert!(
+            result.is_err(),
+            "a candidate-fetch failure on an already-embedded entry must surface as Err, \
+             not be swallowed inside auto_anchor itself"
+        );
+    }
+
     /// PR #366 hardening: the degenerate near-duplicate-flood case. When MORE
     /// than (K - max_anchors) entries score above the band ceiling, the initial
     /// bounded top-K (= max_anchors * ANCHOR_CANDIDATE_OVERFETCH = 25) is filled
@@ -1645,6 +2057,7 @@ mod hidden_private_hint_tests {
             missing_resonance_type: false,
             limit: None,
             tags: None,
+            exclude_tags: None,
         }
     }
 
@@ -1865,6 +2278,42 @@ mod hidden_private_hint_tests {
     }
 
     #[test]
+    fn hint_respects_exclude_tags_filter() {
+        // The hint's count runs the SAME `apply_entry_filters` chokepoint the
+        // main query uses (see `filter_no_limit` above), so `--exclude-tags`
+        // must drop an owned-private candidate from the hint count exactly as
+        // it would from a visible (public) result set.
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        db.upsert_knowledge(&priv_entry(
+            "kn-a",
+            "agent-a",
+            "note",
+            "b",
+            vec!["tier/archived".to_string()],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_for_agent("agent-a");
+
+        // The only owned-private match carries an excluded prefix -> no hint,
+        // even though it would otherwise be hidden-and-countable.
+        let mut f = base_filter();
+        f.exclude_tags = Some("tier/".to_string());
+        assert!(
+            hidden_private_hint(&db, &ctx, &f, None, false).is_none(),
+            "an owned-private match excluded by --exclude-tags must not count toward the hint"
+        );
+
+        // A non-matching exclude prefix leaves the entry countable -> hint fires.
+        let mut f2 = base_filter();
+        f2.exclude_tags = Some("project/".to_string());
+        assert!(
+            hidden_private_hint(&db, &ctx, &f2, None, false).is_some(),
+            "--exclude-tags that doesn't match the entry's tags must not suppress the hint"
+        );
+    }
+
+    #[test]
     fn hint_count_ignores_display_limit() {
         // The display `--limit` truncates the visible list but must NOT cap the
         // hint count: the hint reports the TOTAL owned-private matches hidden.
@@ -1948,5 +2397,196 @@ mod hidden_private_hint_tests {
                 "no MX_CURRENT_AGENT -> agent_id None -> hint suppressed"
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod entry_exclude_tests {
+    //! Tests for `parse_exclude_prefixes` / `keep_after_exclude` (relocated from
+    //! `src/handlers/memory.rs`'s wake-fetch tests — this is the single shared
+    //! definition consumed by wake-fetch, `memory search`, and `memory list`)
+    //! and for their wiring into `apply_entry_filters`.
+
+    use super::*;
+    use crate::knowledge::KnowledgeEntry;
+
+    fn prefixes(raw: &str) -> Vec<String> {
+        parse_exclude_prefixes(Some(raw))
+    }
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ---- parse_exclude_prefixes / keep_after_exclude (pure) ----
+
+    #[test]
+    fn single_prefix_drops_matching_tag_keeps_others() {
+        let ex = prefixes("project/");
+        // An entry tagged project/x is excluded.
+        assert!(!keep_after_exclude(&tags(&["project/x"]), &ex));
+        // An untagged entry survives.
+        assert!(keep_after_exclude(&[], &ex));
+        // An entry whose tags don't match the prefix survives.
+        assert!(keep_after_exclude(&tags(&["scratch/y", "notes"]), &ex));
+        // Mixed: one matching tag is enough to exclude the whole entry.
+        assert!(!keep_after_exclude(&tags(&["notes", "project/deep"]), &ex));
+    }
+
+    #[test]
+    fn multiple_prefixes_exclude_any_match() {
+        let ex = prefixes("project/,scratch/");
+        assert!(!keep_after_exclude(&tags(&["project/a"]), &ex));
+        assert!(!keep_after_exclude(&tags(&["scratch/b"]), &ex));
+        assert!(keep_after_exclude(&tags(&["docs/c"]), &ex));
+    }
+
+    #[test]
+    fn empty_whitespace_and_trailing_comma_input_yields_no_prefixes() {
+        // Each of these parses to an empty prefix list -> nothing is excluded.
+        for raw in ["", "   ", ",", ",,", "project/,", " , project/ "] {
+            let ex = parse_exclude_prefixes(Some(raw));
+            // Trailing/empty segments are dropped; only real prefixes remain.
+            let expected_excludes = raw.contains("project/");
+            // A project/ tag is excluded only when a real prefix survived parsing.
+            assert_eq!(
+                !keep_after_exclude(&tags(&["project/x"]), &ex),
+                expected_excludes,
+                "raw input {raw:?} produced prefixes {ex:?}"
+            );
+        }
+        // Pure empty/whitespace cases produce zero prefixes.
+        assert!(parse_exclude_prefixes(Some("")).is_empty());
+        assert!(parse_exclude_prefixes(Some("   ")).is_empty());
+        assert!(parse_exclude_prefixes(Some(",,")).is_empty());
+        // Trailing comma drops the empty segment but keeps the real one.
+        assert_eq!(parse_exclude_prefixes(Some("project/,")), vec!["project/"]);
+    }
+
+    #[test]
+    fn none_input_is_empty_prefix_list_and_keeps_everything() {
+        let ex = parse_exclude_prefixes(None);
+        assert!(ex.is_empty());
+        // Empty prefix list keeps every entry, even ones with tags.
+        assert!(keep_after_exclude(&tags(&["project/x", "anything"]), &ex));
+        assert!(keep_after_exclude(&[], &ex));
+    }
+
+    // ---- apply_entry_filters wiring (list + keyword-search merge point) ----
+
+    /// Minimal fixture entry carrying only an id and tags — every other field
+    /// takes an inert default, since apply_entry_filters's exclusion step reads
+    /// only `tags`.
+    fn entry(id: &str, tags: &[&str]) -> KnowledgeEntry {
+        let now = chrono::Utc::now().to_rfc3339();
+        KnowledgeEntry {
+            id: id.to_string(),
+            category_id: "test".to_string(),
+            title: format!("Entry {id}"),
+            body: Some("body".to_string()),
+            summary: None,
+            applicability: vec![],
+            source_project_id: None,
+            source_agent_id: None,
+            file_path: None,
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            created_at: Some(now.clone()),
+            updated_at: Some(now.clone()),
+            content_hash: Some(format!("hash-{id}")),
+            source_type_id: Some("manual".to_string()),
+            entry_type_id: Some("primary".to_string()),
+            session_id: None,
+            ephemeral: false,
+            content_type_id: Some("text".to_string()),
+            owner: None,
+            visibility: "public".to_string(),
+            resonance: 5,
+            resonance_type: None,
+            last_activated: Some(now),
+            activation_count: 0,
+            decay_rate: 0.0,
+            anchors: vec![],
+            wake_phrases: vec![],
+            triggers: vec![],
+            wake_order: None,
+            wake_phrase: None,
+            embedding: None,
+            embedding_model: None,
+            embedded_at: None,
+            chunk_count: 0,
+            format: "markdown".to_string(),
+            effective_resonance: None,
+        }
+    }
+
+    #[test]
+    fn list_path_excludes_prefix_tagged_entries_keeps_untagged() {
+        // Criterion: `mx memory list --exclude-tags 'tier/'` omits every entry
+        // tagged tier/archived and includes an untagged entry.
+        let entries = vec![
+            entry("kn-1", &["tier/archived"]),
+            entry("kn-2", &[]),
+            entry("kn-3", &["project/x"]),
+        ];
+        let filter = EntryFilter {
+            exclude_tags: Some("tier/".to_string()),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        let ids: Vec<_> = kept.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["kn-2", "kn-3"]);
+    }
+
+    #[test]
+    fn no_flag_behavior_is_unchanged() {
+        // A None exclude_tags (the pre-existing default) must not drop anything
+        // that the prior filter set wouldn't already have dropped.
+        let entries = vec![entry("kn-1", &["tier/archived"]), entry("kn-2", &[])];
+        let filter = EntryFilter::default();
+        let kept = apply_entry_filters(entries, &filter);
+        assert_eq!(kept.len(), 2, "no --exclude-tags means nothing is excluded");
+    }
+
+    #[test]
+    fn exclusion_wins_over_overlapping_include_tag() {
+        // An entry tagged both project/x (matches --tags) AND tier/archived
+        // (matches --exclude-tags) must be excluded: exclusion wins over
+        // inclusion when both filters are active.
+        let entries = vec![
+            entry("kn-1", &["project/x", "tier/archived"]),
+            entry("kn-2", &["project/x"]),
+        ];
+        let filter = EntryFilter {
+            tags: Some(vec!["project/x".to_string()]),
+            exclude_tags: Some("tier/".to_string()),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        let ids: Vec<_> = kept.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["kn-2"],
+            "an entry matching both --tags and --exclude-tags must be excluded"
+        );
+    }
+
+    #[test]
+    fn exclusion_runs_before_limit_truncate() {
+        // If exclusion ran AFTER the limit truncate instead of before, a
+        // --limit 1 request whose first candidate is excluded would return
+        // zero results instead of the next non-excluded entry.
+        let entries = vec![
+            entry("kn-1", &["tier/archived"]),
+            entry("kn-2", &[]),
+            entry("kn-3", &[]),
+        ];
+        let filter = EntryFilter {
+            exclude_tags: Some("tier/".to_string()),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let kept = apply_entry_filters(entries, &filter);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "kn-2");
     }
 }

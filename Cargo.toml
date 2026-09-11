@@ -1,6 +1,6 @@
 [package]
 name = "mx"
-version = "0.1.214"
+version = "0.1.218"
 edition = "2024"
 description = "A Swiss army knife for Claude Code and multi-agent toolkits"
 authors = ["Cory Zibell <cory@zibell.cloud>"]
@@ -63,7 +63,6 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # cross-process file locking for session-scoped fired-state.
 rust-stemmers = "1"
 unicode-normalization = "0.1"
-fs2 = "0.4"
 
 # Terminal colors
 colored = "2"
