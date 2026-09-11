@@ -49,6 +49,15 @@ pub struct KnowledgeFilter {
     pub min_resonance: Option<i32>,
     pub max_resonance: Option<i32>,
     pub categories: Option<Vec<String>>,
+    /// Pre-parsed `--exclude-tags` prefixes (see `parse_exclude_prefixes` in
+    /// `src/helpers.rs`). Unlike the CLI-facing `EntryFilter::exclude_tags`
+    /// (`Option<String>`, kept as a raw CSV string for exact wake-fetch parse
+    /// parity), this DB-layer filter takes the already-parsed prefix list
+    /// directly, since the SQL builder has no reason to re-parse it. Pushed
+    /// into the semantic search candidate-set WHERE clause (review fix) so
+    /// exclusion happens BEFORE the DB-side `LIMIT`, instead of thinning an
+    /// already-limited result set after the fact. Empty = no exclusion.
+    pub exclude_tag_prefixes: Vec<String>,
 }
 
 /// Result of a wake-up cascade query
