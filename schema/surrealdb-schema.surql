@@ -157,8 +157,8 @@ DEFINE INDEX IF NOT EXISTS knowledge_wake_order ON knowledge FIELDS wake_order;
 -- An earlier version of this comment asserted "no backfill is needed" for
 -- `triggers`, on the theory that read-path coalescing + write-path binding
 -- meant no row was ever stranded. That reasoning is WRONG for a populated
--- pre-existing graph (Issue #360, ~5,283-row graph reported via the hearth
--- federation). Here is the real write path:
+-- pre-existing graph (Issue #360, ~5,283-row graph reported downstream).
+-- Here is the real write path:
 --
 --   * `DEFINE FIELD ... TYPE array<string>` does NOT validate at define-time.
 --     The strict type is only enforced on the NEXT WRITE that touches a row.
@@ -495,7 +495,7 @@ UPSERT applicability_type:api SET description = 'API design', scope = 'domain';
 --     (resonance/activation_count/decay_rate) are still NONE on that same row.
 --   * apply_schema sends the whole file through one `db.query` and uses
 --     `take_errors()` (all-or-nothing), so one stranded row fails every connect.
--- Reported by the hearth federation on a ~5,283-row graph; the
+-- Reported downstream on a ~5,283-row graph; the
 -- interim workaround was MX_SKIP_SCHEMA=1.
 --
 -- WHAT DOESN'T WORK (do not relitigate — all tried, all fail):
