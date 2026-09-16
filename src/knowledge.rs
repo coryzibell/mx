@@ -159,11 +159,11 @@ where
 }
 
 /// Common LLM-regenerated Unicode punctuation glyphs that stand in for their
-/// ASCII counterparts: smart quotes, en/em dash, and horizontal ellipsis
-/// (fix-round review, minor finding: `is_ascii_punctuation` alone leaves
-/// these untouched, so "don't" vs "don't" -- straight vs smart apostrophe --
-/// fails to dedup even though it's the exact recase/repunctuate class this
-/// gate targets). A false negative here only means a real duplicate slips
+/// ASCII counterparts: smart quotes, en/em dash, and horizontal ellipsis.
+/// `is_ascii_punctuation` alone leaves these untouched, so "don't" vs
+/// "don't" -- straight vs smart apostrophe -- fails to dedup even though
+/// it's the exact recase/repunctuate class this gate targets. A false
+/// negative here only means a real duplicate slips
 /// through uncaught, never a false-positive merge of distinct content, so
 /// extending this list is one-directional safe.
 const DEDUP_UNICODE_PUNCTUATION: [char; 7] = [
@@ -205,8 +205,8 @@ pub fn normalize_for_dedup(content: &str) -> String {
 /// but never enforced) -- that field is untouched by this. `dedup_hash` keys
 /// on title+body and is the write-boundary gate's identity key.
 ///
-/// Hashes title and body as a length-prefixed PAIR, never a joined string
-/// (fix-round review, finding 1): `normalize_for_dedup` collapses ALL
+/// Hashes title and body as a length-prefixed PAIR, never a joined string:
+/// `normalize_for_dedup` collapses ALL
 /// whitespace -- including any separator character we might pick, since
 /// separators are themselves whitespace or get stripped as punctuation -- so
 /// `dedup_hash("Ship it", "now.")` and `dedup_hash("Ship it now", "")`
@@ -470,9 +470,9 @@ mod tests {
 
     #[test]
     fn test_normalize_for_dedup_strips_common_unicode_punctuation() {
-        // Fix-round review, minor finding: smart quotes / em-dash / ellipsis
-        // are the exact glyphs LLM regeneration swaps in for their ASCII
-        // counterparts -- must fold to the same normalized form.
+        // Smart quotes / em-dash / ellipsis are the exact glyphs LLM
+        // regeneration swaps in for their ASCII counterparts -- must fold
+        // to the same normalized form.
         assert_eq!(
             normalize_for_dedup("don't"),
             normalize_for_dedup("don\u{2019}t")
@@ -520,8 +520,8 @@ mod tests {
 
     #[test]
     fn test_dedup_hash_does_not_collapse_title_body_boundary() {
-        // Fix-round review, finding 1: pre-fix, both sides normalized to the
-        // identical string "ship it now" (the `\n` joiner is whitespace, so
+        // Before this fix, both sides normalized to the identical string
+        // "ship it now" (the `\n` joiner is whitespace, so
         // `normalize_for_dedup`'s split_whitespace/join collapses it exactly
         // like any other space) and hashed equal -- a false-positive skip
         // that silently drops a distinct entry. They must now differ.

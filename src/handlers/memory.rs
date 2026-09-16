@@ -227,7 +227,7 @@ impl DedupIndex {
         // codebase (private writes always set an owner), so public_only()
         // is correct and honest there -- never a fabricated agent id.
         //
-        // Honest disclosure (PR #402, extended fix-round): this queries the
+        // Honest disclosure (PR #402): this queries the
         // store AS the caller-supplied `owner`, so a `Duplicate` hit is a
         // content-existence oracle under a claimed owner -- bounded to the
         // pre-existing owner-claim authz (a caller can already assert their
@@ -329,8 +329,8 @@ enum DedupProceedReason {
     /// query issued. Callers surface this so a
     /// session-less write is never silently assumed to have been deduped.
     NoSession,
-    /// `ensure_group`'s candidate lookup failed and the gate failed OPEN
-    /// (fix-round review, finding 2): a transient read blip must not cost a
+    /// `ensure_group`'s candidate lookup failed and the gate failed OPEN:
+    /// a transient read blip must not cost a
     /// write that would otherwise succeed, since the gate already tolerates
     /// a TOCTOU race between two concurrent writers -- a dedup mechanism
     /// that tolerates a race can tolerate a read blip too. The write
@@ -340,8 +340,7 @@ enum DedupProceedReason {
     LookupFailed { msg: String },
 }
 
-/// Outcome of the write-boundary dedup gate (original implementation plus a
-/// later fix round).
+/// Outcome of the write-boundary dedup gate.
 enum DedupGate {
     Proceed(DedupProceedReason),
     Skip { duplicate_of: String },
@@ -351,18 +350,17 @@ enum DedupGate {
 /// category)` candidate group is loaded, then check title+body against it.
 /// This is the ONE place all three new-entry write funnels -- `add_one`'s
 /// standard path, the single-add `--type` fact path, and the batch inline
-/// fact path -- make the dedup decision (fix-round review, structural
-/// finding: the gate was hand-rolled at three call sites with drifting
-/// bypass-signal and fail-open/fail-closed behavior between them). A fourth
-/// funnel now has to edit this function to diverge, not just forget to
-/// copy a change.
+/// fact path -- make the dedup decision. Before this, the gate was
+/// hand-rolled at three call sites with drifting bypass-signal and
+/// fail-open/fail-closed behavior between them. A fourth funnel now has to
+/// edit this function to diverge, not just forget to copy a change.
 ///
 /// `category` scopes the candidate group (PR #402 finding 1): identical
 /// title+body filed under a different category is a distinct fact, never a
 /// dedup candidate. See `DedupIndex`'s doc-comment for why category is a
 /// query-scope decision rather than a hash field.
 ///
-/// Fails OPEN on a lookup error (finding 2): logs a warning to stderr and
+/// Fails OPEN on a lookup error: logs a warning to stderr and
 /// returns `Proceed`, never aborts the write via `?`.
 #[allow(clippy::too_many_arguments)] // one gate, one signature -- see doc-comment above.
 fn dedup_gate(
@@ -1231,8 +1229,8 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // fact-routing path is a THIRD new-entry write funnel earlier
                 // review passes missed: it never touches add_one and
                 // never consulted the shared DedupIndex before this fix.
-                // Routed through the shared `dedup_gate` (fix-round
-                // structural finding) rather than hand-rolled here: bind
+                // Routed through the shared `dedup_gate` rather than
+                // hand-rolled here: bind
                 // `entry.owner.as_deref()` (= `agent:{agent_id}`), never the
                 // bare `agent_id`, or the candidate query's owner predicate
                 // returns empty and dedup silently no-ops. Bind `session`
@@ -1259,10 +1257,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     DedupGate::Proceed(reason) => {
                         // No --json support on this path -- stderr is the
                         // only signal surface (mirrors the standard path's
-                        // bypass note; fix-round finding: this funnel was
-                        // one of the three that emitted nothing on a
-                        // session-less write). The LookupFailed warning is
-                        // already printed once by `dedup_gate` itself.
+                        // bypass note; this funnel was one of the three
+                        // that used to emit nothing on a session-less
+                        // write). The LookupFailed warning is already
+                        // printed once by `dedup_gate` itself.
                         if matches!(reason, DedupProceedReason::NoSession) {
                             eprintln!("  (dedup bypassed: no --session provided)");
                         }
@@ -1470,9 +1468,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 // `id` mirrors every success payload's `id`
-                                // key (fix-round review, minor finding: a
-                                // skip payload with no `id` key means
-                                // `jq -r .id` silently reads null on a skip).
+                                // key: a skip payload with no `id` key
+                                // means `jq -r .id` silently reads null on
+                                // a skip.
                                 "id": duplicate_of,
                                 "skipped": true,
                                 "duplicate_of": duplicate_of,
@@ -1496,17 +1494,16 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
             };
 
-            // Per the write-boundary dedup rulings and a later fix-round
-            // finding: surface the two non-fresh proceed reasons so neither
-            // is silent. Stderr note is unconditional (mirrors dedup_gate's
+            // Surface the two non-fresh proceed reasons so neither is
+            // silent. Stderr note is unconditional (mirrors dedup_gate's
             // own fail-open warning);
             // json mode ALSO gets a payload field below. Guarding the stderr
-            // note on `!json` here (fix-round review, json-mode nuance: the
-            // pre-fix code printed this unconditionally, so --json got both
-            // the stderr note AND the json field, contradicting the docs'
-            // mode-exclusive phrasing) -- the LookupFailed warning is
-            // intentionally NOT re-gated here since dedup_gate already
-            // printed it once, unconditionally, before this point.
+            // note on `!json` here matters: the pre-fix code printed this
+            // unconditionally, so --json got both the stderr note AND the
+            // json field, contradicting the docs' mode-exclusive phrasing.
+            // The LookupFailed warning is intentionally NOT re-gated here
+            // since dedup_gate already printed it once, unconditionally,
+            // before this point.
             if matches!(dedup_reason, DedupProceedReason::NoSession) && !json {
                 eprintln!("  (dedup bypassed: no --session-id provided)");
             }
@@ -2761,14 +2758,14 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                     // Write-boundary dedup gate. This inline fact-type
                     // path is the funnel earlier review missed: it never
-                    // touches add_one, so it routes through the shared `dedup_gate`
-                    // (fix-round structural finding) with the SAME shared
-                    // DedupIndex threaded across the whole batch.
+                    // touches add_one, so it routes through the shared
+                    // `dedup_gate` with the SAME shared DedupIndex threaded
+                    // across the whole batch.
                     //
-                    // Fail-open (fix-round finding 2): a lookup error used to
-                    // `continue` here, which DROPPED this line's write on a
-                    // transient read blip -- the write always wins now, same
-                    // as the other two funnels.
+                    // Fail-open: a lookup error used to `continue` here,
+                    // which DROPPED this line's write on a transient read
+                    // blip -- the write always wins now, same as the other
+                    // two funnels.
                     let allow_duplicate = bool_field("allow_duplicate");
                     match dedup_gate(
                         &mut dedup,
@@ -3064,9 +3061,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             println!("  [{}] Added entry: {} ({})", line_idx + 1, entry.id, title);
                             // Batch has no --json mode -- stderr is the only
                             // signal surface here. Mirrors the standard
-                            // single-add path's bypass note (fix-round
-                            // finding: this funnel was one of the three that
-                            // emitted nothing on a session-less write).
+                            // single-add path's bypass note; this funnel
+                            // was one of the three that used to emit
+                            // nothing on a session-less write.
                             if matches!(reason, DedupProceedReason::NoSession) {
                                 eprintln!(
                                     "  line {}: (dedup bypassed: no session_id provided)",
@@ -4683,9 +4680,9 @@ mod dedup_gate_tests {
 
     /// Wraps a real in-memory SurrealDB store and forces
     /// `get_entries_for_session` to return `Err` -- simulating the transient
-    /// read blip finding 2 (fix-round review) covers: a lookup failure must
-    /// fail the GATE open, not the write. Every other method is a real
-    /// pass-through, same shape as `CountingStore`.
+    /// read blip case: a lookup failure must fail the GATE open, not the
+    /// write. Every other method is a real pass-through, same shape as
+    /// `CountingStore`.
     struct FailingStore {
         inner: Box<dyn KnowledgeStore>,
     }
@@ -5663,13 +5660,12 @@ mod dedup_gate_tests {
 
     #[test]
     fn public_owned_and_public_unowned_identical_content_do_not_dedup() {
-        // Fix-round review, minor finding (garbaggio): `owner` is a hard
-        // AND-conjoined predicate, so a PUBLIC+owned entry and a later
-        // PUBLIC+unowned entry with identical normalized content -- both
-        // visible to every reader, the exact case this gate targets -- never
-        // dedup against each other. This is a known, documented false
-        // negative (misses a dupe, never merges distinct content), accepted
-        // rather than fixed this round (documented in docs/src/memory.typ's
+        // `owner` is a hard AND-conjoined predicate, so a PUBLIC+owned
+        // entry and a later PUBLIC+unowned entry with identical normalized
+        // content -- both visible to every reader, the exact case this gate
+        // targets -- never dedup against each other. This is a known,
+        // documented false negative (misses a dupe, never merges distinct
+        // content), accepted as-is (documented in docs/src/memory.typ's
         // coverage-boundary note). This test PINS the current behavior so a
         // future change to the owner predicate can't silently alter it.
         let db = CountingStore::new();
@@ -5718,9 +5714,9 @@ mod dedup_gate_tests {
 
     #[test]
     fn lookup_failure_fails_open_and_the_write_still_lands() {
-        // Fix-round review, finding 2: a transient `ensure_group` lookup
-        // failure must NOT abort the write via `?` -- pre-fix this test
-        // would have returned `Err` here instead of a landed write.
+        // A transient `ensure_group` lookup failure must NOT abort the
+        // write via `?` -- before this fix, this test would have returned
+        // `Err` here instead of a landed write.
         let db = FailingStore::new();
         let mut dedup = DedupIndex::default();
 

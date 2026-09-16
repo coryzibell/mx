@@ -183,6 +183,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   are always empty, and it has no `--json` mode at all — stderr is its only
   signal surface. `add`'s `--type` fact-routing path ignores `--json`
   (pre-existing), so it surfaces the warning on stderr and nothing in JSON.
+- `mx memory sweep-ghosts --dry-run`'s "To apply" hint printed
+  `hearth mx memory sweep-ghosts`, naming a wrapper the `mx` binary has no
+  business knowing exists. Now prints `mx memory sweep-ghosts`, correct for
+  anyone invoking the binary directly; a deployment that only reaches `mx`
+  through a wrapper still needs to prepend it themselves, same as with any
+  other command in this help text.
 
 ### Changed
 - **Removed `mx memory trigger-check` and `mx memory trigger-reset`** (Issue
