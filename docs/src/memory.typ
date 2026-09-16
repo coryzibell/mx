@@ -719,8 +719,7 @@ unaffected.
 This flag exists to amortize the ~435 MB embedding model cold-load: use it with
 `add-batch` (which does its own single hoisted embed pass at the end), or set
 `MX_SKIP_WRITE_EMBED=1` globally in a deployment where a nightly
-`mx memory embed --all` job (e.g. a scheduled timer) keeps the graph
-fresh.]
+`mx memory embed --all` job keeps the graph fresh.]
 
 
 // ═══════════════════════════════════════════════════════════════════════
