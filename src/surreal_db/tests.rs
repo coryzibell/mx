@@ -4274,3 +4274,173 @@ fn semantic_search_returns_chunked_entries_with_their_tags_hydrated() {
          vacuous"
     );
 }
+
+// =========================================================================
+// list_by_category_limited
+// =========================================================================
+//
+// list_by_category_async had ZERO coverage before this LIMIT pushdown was
+// added; this pins the two things the CLI-level pushdown tests
+// (tests/list_limit_pushdown.rs) cannot, by design, distinguish from a
+// no-op fallback: that the SQL LIMIT actually bounds the row count, and
+// that the limited query returns the SAME rows, in the SAME order, as the
+// unbounded query's prefix -- re-establishing at the DB layer what ad hoc
+// EXPLAIN/data probes checked while building the fix (not part of the
+// committed test suite).
+
+#[test]
+fn list_by_category_limited_returns_exact_prefix_of_unbounded_order() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+
+    // Five entries, one category, ids picked so string/lexicographic order
+    // is unambiguous.
+    for id in [
+        "kn-limtest-1",
+        "kn-limtest-2",
+        "kn-limtest-3",
+        "kn-limtest-4",
+        "kn-limtest-5",
+    ] {
+        db.upsert_knowledge(&make_test_entry(id, 5, 0.0)).unwrap();
+    }
+
+    let unbounded = db.list_by_category("test", &ctx, &filter).unwrap();
+    assert_eq!(
+        unbounded.len(),
+        5,
+        "precondition: all 5 seeded rows must come back unbounded"
+    );
+
+    let limited = db
+        .list_by_category_limited("test", &ctx, &filter, Some(2))
+        .unwrap();
+
+    assert_eq!(
+        limited.len(),
+        2,
+        "list_by_category_limited(.., Some(2)) must return EXACTLY 2 rows, \
+         not the whole category -- a LIMIT that silently doesn't apply would \
+         still pass every CLI-level test in tests/list_limit_pushdown.rs, \
+         since apply_entry_filters truncates to `limit` in Rust afterward, \
+         so a SQL LIMIT that never applies produces byte-identical \
+         observable output"
+    );
+    assert_eq!(
+        limited.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        unbounded[..2]
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        "the limited result must be the EXACT PREFIX of the unbounded order, \
+         not just 2 rows from the category -- re-asserts ordering identity \
+         between the pushdown path and list_by_category's unbounded path"
+    );
+
+    // limit larger than the table: must return everything, unchanged.
+    let over_limit = db
+        .list_by_category_limited("test", &ctx, &filter, Some(999))
+        .unwrap();
+    assert_eq!(
+        over_limit.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        unbounded.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+
+    // limit 0: zero rows, not the whole category.
+    let zero_limit = db
+        .list_by_category_limited("test", &ctx, &filter, Some(0))
+        .unwrap();
+    assert!(zero_limit.is_empty());
+
+    // None must behave exactly like list_by_category itself.
+    let none_limit = db
+        .list_by_category_limited("test", &ctx, &filter, None)
+        .unwrap();
+    assert_eq!(
+        none_limit.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+        unbounded.iter().map(|e| e.id.as_str()).collect::<Vec<_>>()
+    );
+}
+
+// =========================================================================
+// owned_private_matching: BM25 full-text coverage. `owned_private_matching`
+// had no test calling it with an actual `query` before this. `query =
+// Some(...)` exercises the BM25 `@@` predicate in `search_clause`, the one
+// variant in this file's history with an actual crash (coryzibell/mx#191,
+// "No iterator has been found"). The only production caller
+// (`warn_hidden_private`) swallows errors by design, so a broken `@@` path
+// here would silently stop showing the hint rather than fail loudly.
+// =========================================================================
+
+#[test]
+fn owned_private_matching_scopes_ordering_and_full_text_query() {
+    use crate::store::KnowledgeFilter;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let owned_ids = [
+        "kn-ownedpriv-charlie",
+        "kn-ownedpriv-alpha",
+        "kn-ownedpriv-echo",
+    ];
+    for id in owned_ids {
+        let mut e = make_test_entry(id, 5, 0.0);
+        e.visibility = "private".to_string();
+        e.owner = Some("agent-owner".to_string());
+        db.upsert_knowledge(&e).unwrap();
+    }
+    // A private entry owned by someone ELSE, and a PUBLIC entry -- neither
+    // must appear in the result (visibility-bypass guard, not just ordering).
+    let mut other_owner = make_test_entry("kn-ownedpriv-other-owner", 5, 0.0);
+    other_owner.visibility = "private".to_string();
+    other_owner.owner = Some("someone-else".to_string());
+    db.upsert_knowledge(&other_owner).unwrap();
+    db.upsert_knowledge(&make_test_entry("kn-ownedpriv-public", 5, 0.0))
+        .unwrap();
+
+    let filter = KnowledgeFilter::default();
+    let got = db
+        .owned_private_matching("agent-owner", None, &filter)
+        .unwrap();
+    let got_ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+
+    let mut expected: Vec<&str> = owned_ids.to_vec();
+    expected.sort();
+
+    assert_eq!(
+        got_ids, expected,
+        "owned_private_matching must return exactly the caller's own \
+         private rows, in ascending record-id order, and never another \
+         owner's row"
+    );
+
+    // `make_test_entry` gives every owned row the literal body "Test body"
+    // -- a real full-text match against all three, plus a non-matching
+    // term returning empty.
+    let matching = db
+        .owned_private_matching("agent-owner", Some("body"), &filter)
+        .unwrap();
+    let matching_ids: Vec<&str> = matching.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        matching_ids, expected,
+        "a full-text query matching every owned row's body must return the \
+         same ascending-id list as the unfiltered call -- proves the @@ \
+         predicate is wired correctly"
+    );
+
+    let non_matching = db
+        .owned_private_matching("agent-owner", Some("zzz-no-such-term-zzz"), &filter)
+        .unwrap();
+    assert!(
+        non_matching.is_empty(),
+        "a full-text query matching nothing must return zero rows, not the \
+         whole owned set: got {:?}",
+        non_matching
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>()
+    );
+}

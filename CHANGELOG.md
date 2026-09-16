@@ -73,6 +73,32 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   over-report relative to what `--include-private --semantic` actually shows.
 
 ### Fixed
+- `mx memory list --category <c> --limit N` on a large category (~3,281 rows
+  out of 8,998 total in the reference graph) was measured at ~11s; it now
+  runs in ~111ms (~98x), from three changes in
+  `SurrealDatabase::list_by_category_async`
+  (`src/surreal_db/queries.rs`): (1) `WITH INDEX knowledge_category` forces
+  the planner off `knowledge_visibility` (every row is public, so that index
+  matched the WHOLE table, not just the category); (2) the query now orders
+  on the raw record id inside a nested subquery instead of the outer
+  `meta::id(id) AS id` projection alias — ordering by that computed alias
+  shadowed the index-backed sort key, forcing a full materialize-and-heap-sort
+  of every matched row through a per-row function call; and (3) `--limit` is
+  now pushed into the SQL query itself, budgeted per category in the order
+  categories are walked (user-typed `--category` order, or alphabetical
+  `list_categories()` order for a bare `list`), instead of fetched in full and
+  `entries.truncate(n)`'d in Rust after every row was hydrated
+  (`apply_entry_filters` in `src/helpers.rs`). Pushdown only applies when no
+  client-side-only filter (`--tags`, `--exclude-tags` with a non-empty parsed
+  prefix list, `--has-wake-phrase`/`--missing-wake-phrase`,
+  `--has-anchors`/`--missing-anchors`, `--has-resonance-type`/
+  `--missing-resonance-type`) is active — those still run after a full,
+  unbounded fetch, exactly as before. `KnowledgeStore` gained a new required
+  method, `list_by_category_limited`, rather than a new `KnowledgeFilter`
+  field, so every backend (including test mocks) has to confront the pushdown
+  contract at compile time. No ordering or filtering behavior changes for any
+  existing caller — `--limit` was already an exact truncation of the same
+  row set, just applied earlier now.
 - `mx kv` write commands now hold an exclusive advisory lock (`flock`) across
   the whole load-mutate-save cycle, on a sidecar `<data>.lock` file beside the
   data file. Every `mx kv` invocation reads the entire JSON store, mutates it in
