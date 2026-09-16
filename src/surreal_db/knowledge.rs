@@ -782,7 +782,7 @@ impl SurrealDatabase {
         Ok(Some(record.into_knowledge_entry(tags, applicability)))
     }
 
-    /// Write-boundary dedup candidates (W447). See
+    /// Write-boundary dedup candidates. See
     /// `KnowledgeStore::get_entries_for_session` for the full contract.
     ///
     /// Queries the indexed `session` record-link FIELD directly (matches on

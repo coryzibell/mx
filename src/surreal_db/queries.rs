@@ -1833,7 +1833,7 @@ impl SurrealDatabase {
     ///
     /// Strategy:
     ///   1. Fetch all entries that have at least one anchor (no visibility
-    ///      filter — soren-vault has full access and we must repair ALL entries).
+    ///      filter — this runs as a privileged account and must repair ALL entries).
     ///   2. Collect every unique anchor ID referenced across the graph.
     ///   3. Batch-check which of those IDs actually exist in the knowledge table.
     ///   4. For each entry, compute the set of ghost anchors (referenced but
@@ -1852,7 +1852,7 @@ impl SurrealDatabase {
         // ----------------------------------------------------------------
         // Phase 1: Fetch all entries with non-empty anchors.
         // No visibility filter — this is a maintenance operation running as
-        // soren-vault. We need to repair all entries regardless of visibility.
+        // the vault account. We need to repair all entries regardless of visibility.
         // ----------------------------------------------------------------
         let mut response = with_db!(self, db, {
             db.query(

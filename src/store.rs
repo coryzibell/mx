@@ -91,7 +91,7 @@ pub struct EditResult {
     pub new_content: String,
 }
 
-/// Lightweight candidate row for write-boundary dedup (W447): id/title/body
+/// Lightweight candidate row for write-boundary dedup: id/title/body
 /// only, NEVER the full `KnowledgeEntry` (which carries a 768-dim
 /// embedding). Used to compute `dedup_hash` for each candidate without
 /// paying for the embedding on every dedup check.
@@ -492,7 +492,7 @@ pub trait KnowledgeStore {
     /// Get facts extracted from a specific session
     fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>>;
 
-    /// Write-boundary dedup candidates (W447): entries whose `session`
+    /// Write-boundary dedup candidates: entries whose `session`
     /// record-link FIELD equals `session_id` (indexed: `knowledge_session`),
     /// scoped by `owner` (indexed: `knowledge_owner`) AND by `category`
     /// (review PR #402 finding 1). Field-scoped, NOT the `EXTRACTED_FROM`

@@ -1,4 +1,4 @@
-//! CLI-level integration tests for write-boundary dedup (W447).
+//! CLI-level integration tests for write-boundary dedup.
 //!
 //! Root cause: mx stores `content_hash` but never enforced it, so
 //! regenerated/recased duplicates (same meaning, different case/punctuation)
@@ -545,9 +545,9 @@ fn standard_batch_path_also_dedups_via_add_one() {
     // Title case differs ("Batch Note" vs "batch note") so `generate_id`
     // (title+path keyed, case-sensitive) would produce TWO DIFFERENT ids --
     // i.e. without the dedup gate this lands as two separate rows, which is
-    // exactly the W447 evidence class (regenerated duplicates differ only by
-    // case/punctuation). `dedup_hash` normalizes case, so the gate must
-    // still catch it.
+    // exactly the evidence class this gate targets (regenerated duplicates
+    // differ only by case/punctuation). `dedup_hash` normalizes case, so the
+    // gate must still catch it.
     let batch = "{\"category\": \"insight\", \"title\": \"Batch Note\", \"content\": \"Same body twice.\", \"session_id\": \"sess-1\"}\n\
                  {\"category\": \"insight\", \"title\": \"batch note\", \"content\": \"same body twice.\", \"session_id\": \"sess-1\"}\n";
     let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], batch);
@@ -577,7 +577,7 @@ fn standard_batch_path_also_dedups_via_add_one() {
 // builds a KnowledgeEntry inline and calls `db.upsert_knowledge` directly,
 // never touching `add_one` and never (until this fix) consulting the shared
 // DedupIndex. Requires `--session`: `ensure_group`/`check` both bypass on a
-// `None` session by design (W447 rulings #6), so this suite must always pass
+// `None` session by design, so this suite must always pass
 // `--session` or it would green-pass without ever exercising the gate.
 // =========================================================================
 
@@ -656,7 +656,7 @@ fn single_add_fact_type_path_allow_duplicate_forces_the_write_through() {
 
     // Note: same body -> same `fact_title` -> same `generate_id` output for
     // this fact-routing path, so a same-content re-add overwrites to one row
-    // via `generate_id` regardless of the dedup gate (documented W447 caveat,
+    // via `generate_id` regardless of the dedup gate (a documented caveat,
     // mirrors `allow_duplicate_forces_the_second_write_through` above for the
     // standard path) -- this test asserts `--allow-duplicate` bypasses the
     // skip (both writes go through, neither says "Already saved"), not a
