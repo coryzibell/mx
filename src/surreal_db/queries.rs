@@ -1852,7 +1852,7 @@ impl SurrealDatabase {
         // ----------------------------------------------------------------
         // Phase 1: Fetch all entries with non-empty anchors.
         // No visibility filter — this is a maintenance operation running as
-        // the vault account. We need to repair all entries regardless of visibility.
+        // a privileged account. We need to repair all entries regardless of visibility.
         // ----------------------------------------------------------------
         let mut response = with_db!(self, db, {
             db.query(
