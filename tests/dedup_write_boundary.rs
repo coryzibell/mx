@@ -1,4 +1,4 @@
-//! CLI-level integration tests for write-boundary dedup (W447).
+//! CLI-level integration tests for write-boundary dedup.
 //!
 //! Root cause: mx stores `content_hash` but never enforced it, so
 //! regenerated/recased duplicates (same meaning, different case/punctuation)
@@ -192,14 +192,14 @@ fn standard_path_recased_duplicate_is_skipped_exactly_one_entry() {
         stdout(&second)
     );
 
-    // Test-authority fix (fix-round review, finding 3): the CLI's
-    // self-reported `"skipped": true` is not proof nothing was written --
-    // ask the store directly. mystery-meat proved this gap live: a patched
-    // `add_one` that still fell through to a second `upsert_knowledge` after
-    // a detected duplicate kept every `dedup_gate_tests` unit test green and
-    // still printed a clean `"skipped": true`, while `mx memory list` showed
-    // two persisted rows. This assertion is the one thing in the suite that
-    // would have caught that.
+    // Test-authority fix: the CLI's self-reported `"skipped": true` is not
+    // proof nothing was written -- ask the store directly. This gap was
+    // demonstrated live: a patched `add_one` that still fell through to a
+    // second `upsert_knowledge` after a detected duplicate kept every
+    // `dedup_gate_tests` unit test green and still printed a clean
+    // `"skipped": true`, while `mx memory list` showed two persisted rows.
+    // This assertion is the one thing in the suite that would have caught
+    // that.
     let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
     assert!(list.status.success(), "list failed: {}", stderr(&list));
     let entries = extract_json_array(&stdout(&list));
@@ -349,12 +349,11 @@ fn session_id_none_writes_through_with_no_dedup() {
             serde_json::json!("bypassed_no_session"),
             "json payload must surface the bypass signal"
         );
-        // Fix-round review, json-mode double-signal nuance: pre-fix, the
-        // plain-mode stderr note fired UNCONDITIONALLY, so --json mode got
-        // both the stderr note and the json field, contradicting the docs'
-        // mode-exclusive phrasing ("a bypass signal ... in --json mode, and
-        // a stderr note in plain mode"). In --json mode only the json field
-        // should appear.
+        // Before this fix, the plain-mode stderr note fired
+        // UNCONDITIONALLY, so --json mode got both the stderr note and the
+        // json field, contradicting the docs' mode-exclusive phrasing ("a
+        // bypass signal ... in --json mode, and a stderr note in plain
+        // mode"). In --json mode only the json field should appear.
         assert!(
             !stderr(&out).contains("dedup bypassed"),
             "--json mode must not ALSO print the plain-mode stderr bypass note: {}",
@@ -392,9 +391,9 @@ fn session_id_none_plain_mode_prints_bypass_note_on_stderr() {
 
 #[test]
 fn skip_json_payload_carries_the_duplicate_id_under_the_id_key() {
-    // Fix-round review, minor finding: every success payload has an `id`
-    // key; the skip payload had none, so `jq -r .id` silently read null on a
-    // skip. The skip payload's `id` must equal `duplicate_of`.
+    // Every success payload has an `id` key; the skip payload had none, so
+    // `jq -r .id` silently read null on a skip. The skip payload's `id`
+    // must equal `duplicate_of`.
     let env = setup();
 
     let first = mx(
@@ -469,18 +468,17 @@ fn fact_type_batch_path_idempotent_across_reruns() {
         stderr(&first)
     );
     let first_out = stdout(&first);
-    // Anchored to the full summary line, not a bare `contains("1 added")`
-    // (fix-round review, hygiene finding: that substring also matches "21
-    // added" at larger magnitudes -- harmless today, fragile if this suite
-    // is ever reused at scale).
+    // Anchored to the full summary line, not a bare `contains("1 added")`:
+    // that substring also matches "21 added" at larger magnitudes --
+    // harmless today, fragile if this suite is ever reused at scale.
     assert!(
         first_out
             .contains("Batch complete: 1 added, 1 already saved (no action needed), 0 failed."),
         "first run must add exactly one entry and skip exactly one: {first_out}"
     );
 
-    // Test-authority fix (fix-round review, finding 3): confirm the actual
-    // row count, not just the self-reported summary line.
+    // Test-authority fix: confirm the actual row count, not just the
+    // self-reported summary line.
     let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
     assert!(list.status.success(), "list failed: {}", stderr(&list));
     assert_eq!(
@@ -545,23 +543,23 @@ fn standard_batch_path_also_dedups_via_add_one() {
     // Title case differs ("Batch Note" vs "batch note") so `generate_id`
     // (title+path keyed, case-sensitive) would produce TWO DIFFERENT ids --
     // i.e. without the dedup gate this lands as two separate rows, which is
-    // exactly the W447 evidence class (regenerated duplicates differ only by
-    // case/punctuation). `dedup_hash` normalizes case, so the gate must
-    // still catch it.
+    // exactly the evidence class this gate targets (regenerated duplicates
+    // differ only by case/punctuation). `dedup_hash` normalizes case, so the
+    // gate must still catch it.
     let batch = "{\"category\": \"insight\", \"title\": \"Batch Note\", \"content\": \"Same body twice.\", \"session_id\": \"sess-1\"}\n\
                  {\"category\": \"insight\", \"title\": \"batch note\", \"content\": \"same body twice.\", \"session_id\": \"sess-1\"}\n";
     let out = mx_stdin(&env, &["memory", "add-batch", "--no-embed"], batch);
     assert!(out.status.success());
     let text = stdout(&out);
-    // Anchored to the full summary line (fix-round review, hygiene finding),
-    // not loose `contains("1 added")` substrings.
+    // Anchored to the full summary line, not loose `contains("1 added")`
+    // substrings.
     assert!(
         text.contains("Batch complete: 1 added, 1 already saved (no action needed), 0 failed."),
         "expected exactly one add and one skip: {text}"
     );
 
-    // Test-authority fix (fix-round review, finding 3): confirm the actual
-    // row count via the store, not just the self-reported summary line.
+    // Test-authority fix: confirm the actual row count via the store, not
+    // just the self-reported summary line.
     let list = mx(&env, &["memory", "list", "--category", "insight", "--json"]);
     assert!(list.status.success(), "list failed: {}", stderr(&list));
     assert_eq!(
@@ -577,7 +575,7 @@ fn standard_batch_path_also_dedups_via_add_one() {
 // builds a KnowledgeEntry inline and calls `db.upsert_knowledge` directly,
 // never touching `add_one` and never (until this fix) consulting the shared
 // DedupIndex. Requires `--session`: `ensure_group`/`check` both bypass on a
-// `None` session by design (W447 rulings #6), so this suite must always pass
+// `None` session by design, so this suite must always pass
 // `--session` or it would green-pass without ever exercising the gate.
 // =========================================================================
 
@@ -656,7 +654,7 @@ fn single_add_fact_type_path_allow_duplicate_forces_the_write_through() {
 
     // Note: same body -> same `fact_title` -> same `generate_id` output for
     // this fact-routing path, so a same-content re-add overwrites to one row
-    // via `generate_id` regardless of the dedup gate (documented W447 caveat,
+    // via `generate_id` regardless of the dedup gate (a documented caveat,
     // mirrors `allow_duplicate_forces_the_second_write_through` above for the
     // standard path) -- this test asserts `--allow-duplicate` bypasses the
     // skip (both writes go through, neither says "Already saved"), not a
@@ -691,10 +689,10 @@ fn single_add_fact_type_path_allow_duplicate_forces_the_write_through() {
 }
 
 // =========================================================================
-// Bypass-signal consistency across all four write funnels (fix-round review,
-// tail finding: "bypass is never silent" held on only the standard `add_one`
-// caller path before this fix -- the other three emitted nothing on a
-// session-less write, contrary to the documented guarantee).
+// Bypass-signal consistency across all four write funnels. "Bypass is never
+// silent" held on only the standard `add_one` caller path before this fix
+// -- the other three emitted nothing on a session-less write, contrary to
+// the documented guarantee.
 // =========================================================================
 
 #[test]
@@ -750,14 +748,12 @@ fn standard_batch_path_no_session_id_emits_bypass_note_on_stderr() {
 }
 
 // =========================================================================
-// Claimed-owner existence oracle (fix-round review, minor finding,
-// author-disclosed and accepted): a `duplicate_of` hit confirms content
+// Claimed-owner existence oracle: a `duplicate_of` hit confirms content
 // exists under a CLAIMED owner, before any authz that would reject a forged
 // write. This is accepted behavior, not a bug -- this test PINS it so a
 // future change can't silently alter it without a test failure forcing the
-// question back into view. Extended per the review to the batch per-line
-// owner vector, the sharper form (one batch call can probe many
-// owner+content combinations).
+// question back into view. Also covers the batch per-line owner vector, the
+// sharper form (one batch call can probe many owner+content combinations).
 // =========================================================================
 
 #[test]

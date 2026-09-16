@@ -944,7 +944,7 @@ passed to `gh pr merge --subject ... --body ...`.
 for change detection during seed/import operations.
 
 #note[This is distinct from the runtime write-boundary `dedup_hash`
-(`knowledge::dedup_hash`, W447): `content_hash` is *title-only*, computed at
+(`knowledge::dedup_hash`): `content_hash` is *title-only*, computed at
 import/seed time, and never enforced (no write-time check reads it back).
 `dedup_hash` is *title+body*, computed on every `mx memory add` /
 `add-batch` write, checked against the writer's own same-session entries
