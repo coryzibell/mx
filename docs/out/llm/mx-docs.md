@@ -1311,7 +1311,7 @@ printf '{"category":"insight","title":"T1","content":"C1","source_agent":"agent-
 
 ``` bash
 # File (safer through sudo wrappers)
-mx memory add-batch --file /tmp/pocket-entries.jsonl
+mx memory add-batch --file /tmp/memory-batch.jsonl
 ```
 
 ``` bash

@@ -116,7 +116,7 @@ content automatically.]
   ),
   examples: (
     "# Stdin pipe\nprintf '{\"category\":\"insight\",\"title\":\"T1\",\"content\":\"C1\",\"source_agent\":\"agent-1\"}\\n{\"type\":\"decision\",\"content\":\"chose Rust\",\"source_agent\":\"agent-1\"}\\n' \\\n  | mx memory add-batch",
-    "# File (safer through sudo wrappers)\nmx memory add-batch --file /tmp/pocket-entries.jsonl",
+    "# File (safer through sudo wrappers)\nmx memory add-batch --file /tmp/memory-batch.jsonl",
     "# Skip embedding — defer to nightly embed --all\nmx memory add-batch --file entries.jsonl --no-embed",
   ),
 )
