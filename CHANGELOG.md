@@ -31,7 +31,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   notes go to stderr; stdout stays machine-readable. `--trigger ""` remains the
   clear gesture and is never treated as a dead trigger.
 - `mx memory add` and `mx memory add-batch` now run a write-boundary
-  duplicate check (W447) before every new-entry write. Dedup identity is the
+  duplicate check before every new-entry write. Dedup identity is the
   4-tuple **(session_id, owner, category, normalized title+body hash)** —
   `category` is part of the key (fixing PR #402 finding 1 where an
   identical title+body filed under a different category was wrongly treated

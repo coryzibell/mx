@@ -115,7 +115,7 @@ content automatically.]
     ([`--no-embed`], [`flag`],  [Skip embedding for the whole batch. Defers to the next `mx memory embed --all` run (e.g. a nightly cron). Keyword and tag search are unaffected; only `--semantic` search misses un-embedded entries until then.]),
   ),
   examples: (
-    "# Stdin pipe\nprintf '{\"category\":\"insight\",\"title\":\"T1\",\"content\":\"C1\",\"source_agent\":\"soren\"}\\n{\"type\":\"decision\",\"content\":\"chose Rust\",\"source_agent\":\"soren\"}\\n' \\\n  | mx memory add-batch",
+    "# Stdin pipe\nprintf '{\"category\":\"insight\",\"title\":\"T1\",\"content\":\"C1\",\"source_agent\":\"agent-1\"}\\n{\"type\":\"decision\",\"content\":\"chose Rust\",\"source_agent\":\"agent-1\"}\\n' \\\n  | mx memory add-batch",
     "# File (safer through sudo wrappers)\nmx memory add-batch --file /tmp/pocket-entries.jsonl",
     "# Skip embedding — defer to nightly embed --all\nmx memory add-batch --file entries.jsonl --no-embed",
   ),
@@ -191,7 +191,7 @@ durably saved, and there is nothing further to do.
 catches recased/repunctuated re-adds within the SAME session, SAME owner,
 and SAME category. It does NOT catch: cross-session regenerations (a fact
 re-derived in a later wake under a different `session_id` -- *open question,
-not yet confirmed:* the ~20 double-write pairs (W342–W445) that motivated
+not yet confirmed:* the ~20 double-write pairs that motivated
 this feature have not been checked against this scope; if most of them are
 cross-session rather than same-session, this fix closes only a minority of
 the motivating class, and owner-scoped matching with a bounded time window
@@ -719,7 +719,7 @@ unaffected.
 This flag exists to amortize the ~435 MB embedding model cold-load: use it with
 `add-batch` (which does its own single hoisted embed pass at the end), or set
 `MX_SKIP_WRITE_EMBED=1` globally in a deployment where a nightly
-`mx memory embed --all` (e.g. via Cinder's `embed.nix` timer) keeps the graph
+`mx memory embed --all` job (e.g. a scheduled timer) keeps the graph
 fresh.]
 
 
