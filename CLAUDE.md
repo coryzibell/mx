@@ -12,7 +12,8 @@ The `--mine` flag scopes queries to the calling agent (`MX_CURRENT_AGENT`).
 ## Maintenance Rule
 
 If you change behavior of existing commands, note it in the CHANGELOG and
-verify agent-facing usage elsewhere in your deployment still holds.
+verify the call sites that invoke it — agent configs, wrapper scripts,
+hooks — still hold.
 
 Write-boundary dedup (`mx memory add` / `add-batch`) is documented as
 in-process, best-effort duplicate prevention: read-then-write within a
