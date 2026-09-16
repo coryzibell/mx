@@ -1385,6 +1385,15 @@ mod tests {
             ) -> Result<Vec<KnowledgeEntry>> {
                 unreachable!()
             }
+            fn list_by_category_limited(
+                &self,
+                _c: &str,
+                _ctx: &AgentContext,
+                _f: &KnowledgeFilter,
+                _limit: Option<usize>,
+            ) -> Result<Vec<KnowledgeEntry>> {
+                unreachable!()
+            }
             fn count_by_category(
                 &self,
                 _c: &str,
