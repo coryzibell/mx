@@ -170,7 +170,7 @@ const DEDUP_UNICODE_PUNCTUATION: [char; 7] = [
     '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2013}', '\u{2014}', '\u{2026}',
 ];
 
-/// Normalize content for write-boundary DEDUPLICATION (W447). Lowercases,
+/// Normalize content for write-boundary DEDUPLICATION. Lowercases,
 /// strips ASCII punctuation plus the common Unicode punctuation glyphs LLM
 /// regeneration substitutes for them (see [`DEDUP_UNICODE_PUNCTUATION`]), and
 /// collapses whitespace, so a recased/repunctuated regenerated duplicate
@@ -194,7 +194,7 @@ pub fn normalize_for_dedup(content: &str) -> String {
         .join(" ")
 }
 
-/// Compute the write-boundary dedup hash for an entry's title+body (W447).
+/// Compute the write-boundary dedup hash for an entry's title+body.
 /// Two entries whose title+body normalize identically -- same text modulo
 /// case, punctuation, and whitespace -- hash equal, so a
 /// regenerated/recased near-duplicate is caught at the write boundary before
@@ -318,7 +318,7 @@ impl KnowledgeEntry {
     /// "hello, world!" (lowercased/collapsed). Thread-matching (helpers.rs)
     /// depends on this exact behavior, so this function is intentionally
     /// left unchanged; see `normalize_for_dedup` below for the punctuation-
-    /// stripping variant used by write-boundary dedup (W447).
+    /// stripping variant used by write-boundary dedup.
     pub fn normalize_content(content: &str) -> String {
         content
             .trim()
@@ -495,7 +495,7 @@ mod tests {
     fn test_normalize_content_not_mutated_by_dedup_work() {
         // normalize_content must still lowercase/collapse WITHOUT stripping
         // punctuation -- thread-matching (helpers.rs) depends on the exact
-        // pre-W447 behavior.
+        // original behavior.
         assert_eq!(
             KnowledgeEntry::normalize_content("hello, world!"),
             "hello, world!"
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_dedup_hash_recased_repunctuated_pair_equal() {
-        // W447 evidence class: regenerated duplicates differ only by case,
+        // Evidence class: regenerated duplicates differ only by case,
         // punctuation, or whitespace -- dedup_hash must collapse them.
         let a = dedup_hash("The External Plan", "Ship it, and move on.");
         let b = dedup_hash("the external plan", "ship it and move on");

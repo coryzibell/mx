@@ -224,7 +224,7 @@ pub(crate) fn find_most_recent_session() -> Result<PathBuf> {
             // and every real session — bare-UUID or otherwise — is picked
             // up as long as its stem parses as a UUID.
             //
-            // Evidence: W420 codex archive lost 5 sessions because the
+            // Evidence: a codex archive run lost 5 sessions because the
             // pocket-skill workaround had to compensate for this selector
             // returning the wrong session.
             if let Some(stem) = file_path.file_stem().and_then(|s| s.to_str())
@@ -376,7 +376,7 @@ mod tests {
 
     // ----- find_most_recent_session UUID filter -----
     //
-    // Regression guard for the dead `agent-` prefix filter (W420).
+    // Regression guard for the dead `agent-` prefix filter.
     //
     // Claude writes sub-agent JSONLs into `<project>/<session_id>/subagents/`
     // — NOT alongside root sessions in `<project>/`. The legacy filter

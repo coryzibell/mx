@@ -129,7 +129,7 @@ fn write_verification_ctx(
     }
 }
 
-/// Write-boundary dedup decision (W447): either the content is fresh, or a
+/// Write-boundary dedup decision: either the content is fresh, or a
 /// same-(session, owner) entry with an equal `dedup_hash` already exists.
 enum DedupDecision {
     Fresh,
@@ -137,7 +137,7 @@ enum DedupDecision {
 }
 
 /// In-process, best-effort write-boundary dedup index for a single `mx
-/// memory add` / `add-batch` invocation (W447).
+/// memory add` / `add-batch` invocation.
 ///
 /// Candidates are fetched from the store LAZILY, one query per distinct
 /// `(session_id, owner)` group actually encountered -- not one per entry.
@@ -152,8 +152,8 @@ enum DedupDecision {
 ///
 /// Keyed by `(session_id, owner, category, dedup_hash)`: owner is part of
 /// the key so a hash collision under one owner never shadows a distinct
-/// write by another owner (W447 rulings #2); session is part of the key so
-/// the same hash in a DIFFERENT session is never treated as a duplicate;
+/// write by another owner; session is part of the key so the same hash in a
+/// DIFFERENT session is never treated as a duplicate;
 /// `category` is part of the key (PR #402 finding 1) so the same hash filed
 /// under a DIFFERENT category is never treated as a duplicate either --
 /// identical title+body re-filed under a new category is a distinct fact,
@@ -176,8 +176,8 @@ enum DedupDecision {
 ///
 /// TOCTOU: read-then-write, per-process, with no DB-level unique constraint
 /// backing it. Two concurrent `mx` invocations can still both write the same
-/// normalized content. Accepted (W447 rulings #8): prevention, not a
-/// store-level uniqueness guarantee.
+/// normalized content. Accepted: prevention, not a store-level uniqueness
+/// guarantee.
 ///
 /// `seen` is a `HashMap`, so if the DB already holds MULTIPLE pre-existing
 /// rows sharing one normalized hash under the same group (only reachable
@@ -195,8 +195,8 @@ struct DedupIndex {
 impl DedupIndex {
     /// Ensure the `(session_id, owner, category)` group's DB candidates are
     /// loaded. No query at all when `session_id` is `None` -- dedup is
-    /// bypassed entirely for session-less writes (settled, W447 rulings
-    /// #6) -- and no REPEAT query when the group was already fetched by an
+    /// bypassed entirely for session-less writes (settled) -- and no
+    /// REPEAT query when the group was already fetched by an
     /// earlier line in this run. A write under a NEW category in an
     /// already-fetched `(session, owner)` pair still triggers its own query
     /// (PR #402 finding 1): category is part of the group key, so it is a
@@ -326,7 +326,7 @@ enum DedupProceedReason {
     /// `--allow-duplicate` bypassed the gate entirely -- no check, no query.
     AllowDuplicate,
     /// `session_id` is `None`: dedup is bypassed by design, no candidate
-    /// query issued (W447 rulings #6). Callers surface this so a
+    /// query issued. Callers surface this so a
     /// session-less write is never silently assumed to have been deduped.
     NoSession,
     /// `ensure_group`'s candidate lookup failed and the gate failed OPEN
@@ -340,7 +340,8 @@ enum DedupProceedReason {
     LookupFailed { msg: String },
 }
 
-/// Outcome of the write-boundary dedup gate (W447 + fix-round).
+/// Outcome of the write-boundary dedup gate (original implementation plus a
+/// later fix round).
 enum DedupGate {
     Proceed(DedupProceedReason),
     Skip { duplicate_of: String },
@@ -396,7 +397,7 @@ fn dedup_gate(
 }
 
 /// Result of [`add_one`]: either the entry was written, or the write-boundary
-/// dedup gate (W447) found a same-owner, same-session match and skipped the
+/// dedup gate found a same-owner, same-session match and skipped the
 /// write. `Skipped` is an `Ok` variant, never `Err` -- an `Err` would abort
 /// the whole batch via `?` for what is, by design, a successful no-op.
 enum WriteOutcome {
@@ -468,7 +469,7 @@ struct AddOneArgs {
 ///                     `write_embed_enabled(no_embed)` from the caller.
 /// `no_auto_anchor`  — passed through to `write_anchor_enabled`; mirrors the
 ///                     same flag on the single-add path.
-/// `dedup`           — write-boundary dedup index (W447), threaded `&mut`
+/// `dedup`           — write-boundary dedup index, threaded `&mut`
 ///                     across a whole add/add-batch run so later lines
 ///                     dedup against earlier ones too.
 /// `allow_duplicate` — caller's explicit override (`--allow-duplicate` /
@@ -528,7 +529,7 @@ fn add_one(
         effective_resonance: None,
     };
 
-    // Write-boundary dedup gate (W447). Runs BEFORE any side effect (upsert,
+    // Write-boundary dedup gate. Runs BEFORE any side effect (upsert,
     // edge, embed, anchor) so a skip is a true no-op -- not a partial write.
     let proceed_reason = match dedup_gate(
         dedup,
@@ -1226,7 +1227,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     effective_resonance: None,
                 };
 
-                // Write-boundary dedup gate (W447). This single-add `--type`
+                // Write-boundary dedup gate. This single-add `--type`
                 // fact-routing path is a THIRD new-entry write funnel earlier
                 // review passes missed: it never touches add_one and
                 // never consulted the shared DedupIndex before this fix.
@@ -1495,9 +1496,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 }
             };
 
-            // W447 rulings #6 + fix-round finding 2/tail: surface the two
-            // non-fresh proceed reasons so neither is silent. Stderr note is
-            // unconditional (mirrors dedup_gate's own fail-open warning);
+            // Per the write-boundary dedup rulings and a later fix-round
+            // finding: surface the two non-fresh proceed reasons so neither
+            // is silent. Stderr note is unconditional (mirrors dedup_gate's
+            // own fail-open warning);
             // json mode ALSO gets a payload field below. Guarding the stderr
             // note on `!json` here (fix-round review, json-mode nuance: the
             // pre-fix code printed this unconditionally, so --json got both
@@ -2606,7 +2608,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             let mut added_ids: Vec<String> = Vec::new();
             let mut entry_errors: Vec<(usize, String)> = Vec::new();
             let mut skipped_count: usize = 0;
-            // Write-boundary dedup (W447), threaded across the whole batch so
+            // Write-boundary dedup, threaded across the whole batch so
             // later lines dedup against earlier ones. See `DedupIndex` --
             // fetches lazily, one query per distinct (session, owner) group.
             let mut dedup = DedupIndex::default();
@@ -2757,7 +2759,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                         effective_resonance: None,
                     };
 
-                    // Write-boundary dedup gate (W447). This inline fact-type
+                    // Write-boundary dedup gate. This inline fact-type
                     // path is the funnel earlier review missed: it never
                     // touches add_one, so it routes through the shared `dedup_gate`
                     // (fix-round structural finding) with the SAME shared
@@ -3151,7 +3153,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             // Summary. Skips get their OWN reassuring category, never folded
             // into "failed" -- a duplicate-skip is a successful no-op, not
-            // an error (W447).
+            // an error.
             println!(
                 "\nBatch complete: {} added, {} already saved (no action needed), {} failed.",
                 added_ids.len(),
@@ -4029,7 +4031,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                 if dry_run && result.ghosts_found > 0 {
                     println!();
-                    println!("To apply: hearth mx memory sweep-ghosts (without --dry-run)");
+                    println!("To apply: mx memory sweep-ghosts (without --dry-run)");
                 } else if !dry_run && result.ghosts_removed > 0 {
                     println!();
                     println!(
@@ -4314,8 +4316,9 @@ mod write_verification_tests {
 
     #[test]
     fn genuinely_absent_entry_is_reported_rejected() {
-        // Preserve Geoff's intent: a row that truly is not present (simulating a
-        // silently-rejected write) reads back as None and would bail loudly.
+        // Preserve the intended contract: a row that truly is not present
+        // (simulating a silently-rejected write) reads back as None and
+        // would bail loudly.
         let db = SurrealDatabase::open_in_memory().unwrap();
         let ctx = write_verification_ctx("private", Some("agent:writer"), "agent:writer");
         assert!(
@@ -4338,7 +4341,7 @@ mod dedup_gate_tests {
     /// pass-through to the real store -- this is real-store correctness plus
     /// one counter, not a mock of the logic under test. Proves the batch
     /// dedup gate issues ONE query per distinct `(session, owner)` group,
-    /// not one per entry (W447 acceptance gate).
+    /// not one per entry.
     struct CountingStore {
         inner: Box<dyn KnowledgeStore>,
         calls: Cell<usize>,
@@ -5611,9 +5614,10 @@ mod dedup_gate_tests {
 
     #[test]
     fn cross_owner_public_entry_is_not_a_dedup_candidate() {
-        // RIFT: two owners writing normalized-identical content in the same
-        // session must both land -- a same-hash PUBLIC row from a different
-        // owner must never cause a false-positive skip or leak its id.
+        // Cross-owner isolation: two owners writing normalized-identical
+        // content in the same session must both land -- a same-hash PUBLIC
+        // row from a different owner must never cause a false-positive skip
+        // or leak its id.
         let db = CountingStore::new();
         let mut dedup = DedupIndex::default();
 
@@ -5890,8 +5894,8 @@ mod dedup_gate_tests {
     #[serial]
     fn anchor_failure_is_captured_as_anchor_deferred_not_swallowed() {
         // Pins Add's `anchor_deferred` capture (PR #399 fix round 1, item 2)
-        // at the one path Wren's remedy makes reachable: a handler-level
-        // test with a failing store double, driving `add_one` directly.
+        // at the one path reachable this way: a handler-level test with a
+        // failing store double, driving `add_one` directly.
         // The CLI integration suite (`tests/write_side_effect_nonfatal.rs`)
         // cannot reach this -- see `FailingAnchorStore`'s doc comment above
         // for why. `embed: true` is required so the entry carries a real
