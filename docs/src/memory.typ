@@ -569,7 +569,7 @@ cascade; a token-based ritual flow is available for programmatic use.
     ([`--no-activate`], [`flag`],   [Do not update activation counts.]),
     ([`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.]),
     ([`--bloom-id`],    [`string`], [Bloom ID for `--respond`.]),
-    ([`--respond`],     [`string`], [Submit your one guess for this bloom.]),
+    ([`--respond`],     [`string`], [Submit your one guess for this bloom. Maximum 2000 characters.]),
     ([`--session`],     [`string`], [Session token for chained ritual (required with `--respond`).]),
     ([`--wake`],        [`int`],    [Wake number recorded on every guess row (with `--begin`). Optional; mx keeps no counter of its own.]),
     ([`--model`],       [`string`], [Model identifier recorded on every guess row (with `--begin`). Optional; mx cannot discover it.]),
@@ -578,7 +578,7 @@ cascade; a token-based ritual flow is available for programmatic use.
   examples: (
     "# Default wake -- top 20 blooms, text output\nmx memory wake",
     "# All blooms with resonance >= 7\nmx memory wake --min-resonance 7",
-    "# Token-based ritual (for non-TTY / programmatic use)\nmx memory wake --begin --wake 463 --model some-model-id\nmx memory wake --bloom-id kn-abc --respond \"your guess\" --session tok-xyz",
+    "# Token-based ritual (for non-TTY / programmatic use)\nmx memory wake --begin --wake 7 --model some-model-id\nmx memory wake --bloom-id kn-abc --respond \"your guess\" --session tok-xyz",
   ),
 )
 
@@ -603,6 +603,20 @@ matched. The bucket names what the tool did, not what the responder knew.
 
 The final response carries a summary of bucket counts split by phrase source
 (`authored`, `derived`, `auto`) and nothing else.
+
+Two statuses judge no guess, write no row, and omit `bucket`, `guess` and
+`match`: `chunk_truncated`, when the entry shrank past the session's chunk
+cursor, and `bloom_missing`, when the entry was deleted mid-ritual. Both still
+advance the step, so the token the caller spent stops verifying.
+
+A guess is refused outright, with no row written and no advance, when it is
+longer than 2000 characters (counted in characters, and never truncated) or
+carries no alphanumeric content at all. A refused call can simply be retried
+with the same session token.
+
+The ritual is scoped to the agent that began it: `MX_CURRENT_AGENT` must match
+the session's agent, and a session created by a version of mx older than the
+one-guess ritual is refused rather than continued.
 
 === The guess log
 
