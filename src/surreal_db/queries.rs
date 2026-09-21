@@ -20,6 +20,10 @@ fn excluded_tag_of(entry: &KnowledgeEntry) -> Option<&'static str> {
 
 /// Drop entries carrying an excluded tag, recording each dropped id once.
 /// With `include_excluded` the entries pass through and nothing is recorded.
+///
+/// For a layer with no quota — the `--min-resonance` path, where the whole
+/// result set IS the wake set — every excluded entry genuinely cost a place.
+/// Layers with a quota use `take_included` instead.
 fn keep_included(
     entries: Vec<KnowledgeEntry>,
     include_excluded: bool,
@@ -38,6 +42,36 @@ fn keep_included(
             None => true,
         })
         .collect()
+}
+
+/// Walk an ordered layer, taking up to `limit` entries that carry no excluded
+/// tag, and record the excluded ones passed on the way.
+///
+/// The tally stops with the take, which is what keeps the reported count
+/// meaningful. A layer is usually fetched wider than its quota — the core
+/// query widens its window to make room for exclusions, and the recent and
+/// bridge queries over-fetch by 2x — so counting every excluded entry in what
+/// came back would report entries ranked below the wake set, which would have
+/// been left out whether or not they were tagged.
+fn take_included(
+    entries: impl IntoIterator<Item = KnowledgeEntry>,
+    limit: usize,
+    include_excluded: bool,
+    dropped: &mut HashMap<String, &'static str>,
+) -> Vec<KnowledgeEntry> {
+    let mut kept = Vec::with_capacity(limit);
+    for entry in entries {
+        if kept.len() >= limit {
+            break;
+        }
+        match excluded_tag_of(&entry) {
+            Some(tag) if !include_excluded => {
+                dropped.insert(entry.id.clone(), tag);
+            }
+            _ => kept.push(entry),
+        }
+    }
+    kept
 }
 
 /// Per-tag counts of the distinct entries that were dropped.
@@ -191,7 +225,8 @@ impl SurrealDatabase {
     // WAKE CASCADE - Three-layer resonance query for identity loading
     // =========================================================================
 
-    /// Wake-up cascade: Load Q's identity through three layers of resonance
+    /// Wake-up cascade: load the calling agent's identity through three layers
+    /// of resonance
     pub fn wake_cascade(
         &self,
         ctx: &crate::store::AgentContext,
@@ -241,28 +276,49 @@ impl SurrealDatabase {
 
         // Layer 1: Core foundational/transformative blooms (resonance 8+).
         //
-        // Widen the SQL LIMIT by the number of excluded entries seen and fetch
-        // again, so an excluded entry never costs a kept one its slot. Each
-        // pass strictly widens the window, so this terminates: it stops once
-        // the window holds `limit` kept entries or the table is exhausted.
+        // Widen the SQL window until it holds `limit` entries that survive the
+        // exclusion, so an excluded entry never costs a kept one its slot.
         //
         // Bounded rather than fetching the whole ordered set and truncating in
         // Rust, because `knowledge_select_fields` carries `embedding` and an
         // unbounded core query would drag a 768-float vector per row on every
         // wake, growing with the graph.
-        let mut core;
+        //
+        // Growth is geometric. Widening by exactly the number of exclusions
+        // seen terminates, but a long run of excluded entries sorting above
+        // everything kept costs O(E/limit) round trips, each re-fetching what
+        // the last one already did, each carrying those vectors — the cost the
+        // bound exists to avoid. Doubling converges in O(log E); a realistic
+        // graph finishes in one or two passes either way.
+        //
+        // Termination: on a pass that does not break, `kept < limit` and
+        // `fetched.len() == window`, so the next window is at least
+        // `window * 2 >= window + 1` — strictly increasing while `window >= 1`.
+        // The table is finite, so some pass returns fewer rows than it asked
+        // for, sets `exhausted`, and breaks.
+        //
+        // `limit == 0` is the one case that does not grow: the window stays 0
+        // and `LIMIT 0` returns nothing, so `exhausted` is false and the loop
+        // breaks solely because the test is `kept >= limit` and `0 >= 0`.
+        // Tightening that to `>` is an infinite loop on `--limit 0`.
         let mut window = limit;
-        loop {
+        let fetched = loop {
             let fetched = self.query_core_blooms(ctx, window).await?;
             let exhausted = fetched.len() < window;
-            let fetched_len = fetched.len();
-            core = keep_included(fetched, include_excluded, &mut dropped);
-            if core.len() >= limit || exhausted {
-                break;
+            let kept = fetched
+                .iter()
+                .filter(|entry| include_excluded || excluded_tag_of(entry).is_none())
+                .count();
+            if kept >= limit || exhausted {
+                break fetched;
             }
-            window = limit + (fetched_len - core.len());
-        }
-        core.truncate(limit);
+            let excluded_here = fetched.len() - kept;
+            window = (limit + excluded_here).max(window.saturating_mul(2));
+        };
+
+        // Tally only as far as the quota is filled: entries after the last one
+        // taken were scanned by a widened window, not passed over for a slot.
+        let core = take_included(fetched, limit, include_excluded, &mut dropped);
         let remaining = limit.saturating_sub(core.len());
 
         // Layer 2: Recent blooms (last N days)
@@ -270,11 +326,12 @@ impl SurrealDatabase {
         let core_ids: HashSet<String> = core.iter().map(|e| e.id.clone()).collect();
 
         let all_recent = self.query_recent_blooms(ctx, remaining * 2, days).await?;
-        let recent: Vec<_> = keep_included(all_recent, include_excluded, &mut dropped)
-            .into_iter()
-            .filter(|e| !core_ids.contains(&e.id))
-            .take(remaining)
-            .collect();
+        let recent = take_included(
+            all_recent.into_iter().filter(|e| !core_ids.contains(&e.id)),
+            remaining,
+            include_excluded,
+            &mut dropped,
+        );
         let remaining = remaining.saturating_sub(recent.len());
 
         // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+).
@@ -300,11 +357,14 @@ impl SurrealDatabase {
             let all_bridges = self
                 .query_bridge_blooms(ctx, remaining * 2, &anchor_ids)
                 .await?;
-            keep_included(all_bridges, include_excluded, &mut dropped)
-                .into_iter()
-                .filter(|e| !existing_ids.contains(&e.id))
-                .take(remaining)
-                .collect()
+            take_included(
+                all_bridges
+                    .into_iter()
+                    .filter(|e| !existing_ids.contains(&e.id)),
+                remaining,
+                include_excluded,
+                &mut dropped,
+            )
         };
 
         Ok(crate::store::WakeCascade {
@@ -1718,6 +1778,7 @@ impl SurrealDatabase {
                     step = $step,
                     unhinted_count = $unhinted_count,
                     revealed_count = $revealed_count,
+                    unjudged_count = $unjudged_count,
                     created_at = <datetime>$created_at,
                     bloom_chunk_meta = $bloom_chunk_meta
                 ",
@@ -1732,6 +1793,7 @@ impl SurrealDatabase {
             .bind(("step", session.step as i64))
             .bind(("unhinted_count", session.unhinted_count as i64))
             .bind(("revealed_count", session.revealed_count as i64))
+            .bind(("unjudged_count", session.unjudged_count as i64))
             .bind(("created_at", normalize_datetime(&created_at)))
             .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
@@ -1774,6 +1836,7 @@ impl SurrealDatabase {
                     step,
                     unhinted_count,
                     revealed_count,
+                    unjudged_count,
                     <int>time::unix(<datetime>created_at) AS created_at,
                     bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
@@ -1830,6 +1893,7 @@ impl SurrealDatabase {
         let step = obj["step"].as_u64().unwrap_or(0) as u32;
         let unhinted_count = obj["unhinted_count"].as_u64().unwrap_or(0) as u32;
         let revealed_count = obj["revealed_count"].as_u64().unwrap_or(0) as u32;
+        let unjudged_count = obj["unjudged_count"].as_u64().unwrap_or(0) as u32;
         let wake = obj["wake"].as_i64();
         let model_id = obj
             .get("model_id")
@@ -1865,6 +1929,7 @@ impl SurrealDatabase {
             step,
             unhinted_count,
             revealed_count,
+            unjudged_count,
             created_at,
             bloom_chunk_meta,
         }))
@@ -1889,6 +1954,7 @@ impl SurrealDatabase {
                     step = $step,
                     unhinted_count = $unhinted_count,
                     revealed_count = $revealed_count,
+                    unjudged_count = $unjudged_count,
                     bloom_chunk_meta = $bloom_chunk_meta
                 ",
             )
@@ -1898,6 +1964,7 @@ impl SurrealDatabase {
             .bind(("step", session.step as i64))
             .bind(("unhinted_count", session.unhinted_count as i64))
             .bind(("revealed_count", session.revealed_count as i64))
+            .bind(("unjudged_count", session.unjudged_count as i64))
             .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
             .context("Failed to update wake session")

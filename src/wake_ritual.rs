@@ -327,13 +327,16 @@ pub fn respond_ritual(
         );
     }
 
-    // The token authorises the session, not the holder. A caller that names a
-    // different agent would otherwise drive someone else's ritual, and every
-    // row it wrote would be stamped with the owner's agent. A caller that
-    // names no agent cannot be impersonating one; the CLI always names one.
-    if let Some(caller) = ctx.agent_id.as_deref()
-        && caller != session.agent
-    {
+    // The token authorises the session, not the holder. The caller must BE the
+    // agent that began it — a caller naming no agent fails to establish that
+    // just as surely as one naming a different agent, so both are refused.
+    //
+    // The blooms are fetched with the caller's context further down, and an
+    // entry that context cannot see is indistinguishable from one that was
+    // deleted. Requiring the owner keeps that conflation out of reach: a
+    // caller with less visibility than the session's owner cannot get here to
+    // step over the entries it is unable to read.
+    if ctx.agent_id.as_deref() != Some(session.agent.as_str()) {
         bail!(
             "This ritual was begun by another agent. Run `mx memory wake --begin` \
              to start your own."
@@ -357,6 +360,32 @@ pub fn respond_ritual(
     // ritual already walked past must not brick the rest of it.
     let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
 
+    // Entries can be deleted between one call and the next, including the one
+    // the caller was just handed as `next`. Step over whatever has gone before
+    // deciding what is being asked about, so a deletion mid-ritual cannot
+    // strand the session on an entry that no longer exists.
+    let mut vanished: Vec<String> = Vec::new();
+    while !session.is_complete() && session.current_bloom_is_missing(&all_blooms) {
+        if let Some(id) = session.current_bloom_id() {
+            vanished.push(id.to_string());
+        }
+        session.advance_unjudged();
+    }
+
+    // A caller naming an entry that has just gone is answered about that
+    // entry, not told it guessed the wrong id — it is following the sequence
+    // it was given.
+    if vanished.iter().any(|id| id == bloom_id) || (session.is_complete() && !vanished.is_empty()) {
+        return Ok(serde_json::to_string(&unjudged_response(
+            db,
+            &mut session,
+            &session_id,
+            &all_blooms,
+            "bloom_missing",
+            None,
+        )?)?);
+    }
+
     let expected_id = session
         .current_bloom_id()
         .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?
@@ -372,19 +401,9 @@ pub fn respond_ritual(
         return Ok(serde_json::to_string(&response)?);
     }
 
-    // The entry on the table is the one that vanished. Step over it: there is
-    // nothing to show and nothing to judge.
-    let Some(bloom) = all_blooms.get(&expected_id) else {
-        session.advance_unjudged();
-        return Ok(serde_json::to_string(&unjudged_response(
-            db,
-            &mut session,
-            &session_id,
-            &all_blooms,
-            "bloom_missing",
-            None,
-        )?)?);
-    };
+    let bloom = all_blooms
+        .get(&expected_id)
+        .ok_or_else(|| anyhow::anyhow!("Bloom not found after the missing-entry sweep"))?;
 
     let content = bloom_content(bloom);
     let plan = compute_chunks(&content, chunk_threshold());
@@ -597,6 +616,7 @@ fn get_next_and_progress(
             chunks: session.step as usize,
             blooms: session.total_blooms(),
             buckets,
+            unjudged: session.unjudged_count,
         };
         Ok((None, progress, Some(summary)))
     } else {
@@ -701,8 +721,13 @@ mod tests {
         serde_json::from_str(&begin_ritual(store, cascade, meta()).unwrap()).unwrap()
     }
 
+    /// Respond as the agent that `meta()` began the ritual with.
+    ///
+    /// Deliberately NOT an anonymous context: driving respond with no agent is
+    /// the one case the ownership guard lets through, and a helper that did it
+    /// by default would make every test here depend on that hole staying open.
     fn respond(store: &MockStore, bloom_id: &str, guess: &str, token: &str) -> serde_json::Value {
-        let ctx = AgentContext::public_only();
+        let ctx = AgentContext::for_agent("test-agent");
         serde_json::from_str(&respond_ritual(store, &ctx, bloom_id, guess, token).unwrap()).unwrap()
     }
 
@@ -834,7 +859,7 @@ mod tests {
         assert_eq!(resp["status"], "shown");
 
         // Re-using the begin token replays a consumed step.
-        let ctx = AgentContext::public_only();
+        let ctx = AgentContext::for_agent("test-agent");
         let err = respond_ritual(&store, &ctx, &bloom_id, "alpha", &token).unwrap_err();
         assert!(
             err.to_string().contains("Token out of sync"),
@@ -857,7 +882,7 @@ mod tests {
         let begin_json = begin(&store, &test_cascade(vec![bloom]));
         let raw = respond_ritual(
             &store,
-            &AgentContext::public_only(),
+            &AgentContext::for_agent("test-agent"),
             &bloom_id,
             MISS,
             &token_from_response(&begin_json),
@@ -1108,7 +1133,7 @@ mod tests {
         store.fail_guess_write.set(true);
         let err = respond_ritual(
             &store,
-            &AgentContext::public_only(),
+            &AgentContext::for_agent("test-agent"),
             &bloom_id,
             "alpha",
             &token,
@@ -1139,7 +1164,7 @@ mod tests {
 
     #[test]
     fn a_bloom_deleted_while_it_is_on_the_table_is_stepped_over() {
-        // Poppy's brick case covers an entry already walked past. This is the
+        // The brick case above covers an entry already walked past. This is the
         // harder one: the entry the ritual is asking about right now.
         let store = MockStore::new();
         let mut first = entry_with_phrases(vec!["alpha"]);
@@ -1685,7 +1710,7 @@ mod tests {
         /// punctuation-only phrase both normalize to the empty string and
         /// compare EQUAL — logged as `exact`, bucketed `unhinted`.
         ///
-        /// Ruled by Q, Wake 462: refuse, no row, no advance.
+        /// Ruled during review: refuse, no row, no advance.
         #[test]
         fn a_guess_that_normalizes_to_nothing_is_refused() {
             // The empty string, whitespace, and punctuation that survives a
@@ -1701,7 +1726,7 @@ mod tests {
                 let begin_json = begin(&store, &test_cascade(vec![bloom]));
                 let out = respond_ritual(
                     &store,
-                    &AgentContext::public_only(),
+                    &AgentContext::for_agent("test-agent"),
                     &bloom_id,
                     guess,
                     &token_from_response(&begin_json),
@@ -1785,7 +1810,7 @@ mod tests {
 
             let out = respond_ritual(
                 &store,
-                &AgentContext::public_only(),
+                &AgentContext::for_agent("test-agent"),
                 "kn-second",
                 "bravo",
                 &token,
@@ -1887,7 +1912,7 @@ mod tests {
 
             let out = respond_ritual(
                 &store,
-                &AgentContext::public_only(),
+                &AgentContext::for_agent("test-agent"),
                 &bloom_id,
                 "alpha",
                 &token,
@@ -1944,7 +1969,7 @@ mod tests {
         }
 
         /// The guess is model output written verbatim into the database with
-        /// no bound anywhere on the path. Ruled by Q, Wake 462: a guess longer
+        /// no bound anywhere on the path. Ruled during review: a guess longer
         /// than 2000 CHARACTERS is REFUSED — error, no row, no advance — not
         /// truncated. A truncated guess is not what the model guessed, and the
         /// log exists to be honest about guesses; better nothing than a row
@@ -1978,7 +2003,7 @@ mod tests {
                 let at_limit = filler.repeat(LIMIT);
                 let out = respond_ritual(
                     &store,
-                    &AgentContext::public_only(),
+                    &AgentContext::for_agent("test-agent"),
                     &bloom_id,
                     &at_limit,
                     &token,
@@ -2004,7 +2029,7 @@ mod tests {
                 let over = filler.repeat(LIMIT + 1);
                 let out = respond_ritual(
                     &store,
-                    &AgentContext::public_only(),
+                    &AgentContext::for_agent("test-agent"),
                     &bloom_id,
                     &over,
                     &token,
@@ -2053,7 +2078,7 @@ mod tests {
 
             let out = respond_ritual(
                 &store,
-                &AgentContext::public_only(),
+                &AgentContext::for_agent("test-agent"),
                 &bloom_id,
                 "alpha",
                 &token,
@@ -2081,6 +2106,163 @@ mod tests {
                 store.sessions.borrow().len(),
                 1,
                 "a second begin left the first ritual's session behind"
+            );
+        }
+
+        // =================================================================
+        // Round two: the code added to close round one.
+        // =================================================================
+
+        /// The ownership guard refuses a caller naming a DIFFERENT agent but
+        /// waves through a caller naming NO agent, on the reasoning that an
+        /// anonymous caller cannot be impersonating anyone and the CLI always
+        /// names one.
+        ///
+        /// Anonymity is not innocence here. The guard's job is to establish
+        /// that the caller IS the owner, and `None` fails to establish that
+        /// just as surely as a mismatch does. The exemption was needed because
+        /// this file's own tests drove respond anonymously; they no longer do,
+        /// so nothing depends on the hole staying open.
+        ///
+        /// It matters because of what an anonymous context does further down:
+        /// entries it cannot SEE come back from `fetch_blooms_by_ids` as
+        /// absent, and absent is now silently stepped over as `bloom_missing`.
+        /// An anonymous caller therefore does not merely walk another agent's
+        /// ritual — it walks it while skipping every entry it lacks the
+        /// visibility to read, logging no row for any of them, and the owner's
+        /// session is deleted at the end as though the ritual completed.
+        #[test]
+        fn a_respond_from_a_caller_with_no_agent_is_refused() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
+
+            // `meta()` begins as "test-agent".
+            let begin_json = begin(&store, &test_cascade(vec![bloom]));
+            let out = respond_ritual(
+                &store,
+                &AgentContext::public_only(),
+                &bloom_id,
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+
+            assert!(
+                out.is_err(),
+                "an anonymous caller walked an owned ritual: {out:?}"
+            );
+            assert!(
+                store.guesses.borrow().is_empty(),
+                "an anonymous respond filed a row under the owner's agent: {:?}",
+                store.guesses.borrow().first().map(|r| r.agent.clone())
+            );
+        }
+
+        /// `bloom_missing` means "not in the map `fetch_blooms_by_ids` built",
+        /// and that map is built with the CALLER's context. Deleted and
+        /// not-visible-to-you are therefore the same thing to this path: an
+        /// entry that still exists but has become unreadable is reported as
+        /// missing, stepped over, and dropped from the log — silently, with
+        /// the ritual reporting success.
+        ///
+        /// Driven here through the one context difference the guard permits.
+        /// With the guard tightened this becomes unreachable from outside,
+        /// which is the point: the visibility conflation is only exploitable
+        /// while the anonymous exemption stands.
+        #[test]
+        fn an_unreadable_entry_is_not_silently_treated_as_deleted() {
+            let store = MockStore::new();
+            let mut visible = entry_with_phrases(vec!["alpha"]);
+            visible.id = "kn-visible".to_string();
+            let mut hidden = entry_with_phrases(vec!["bravo"]);
+            hidden.id = "kn-hidden".to_string();
+            store.seed(&visible);
+            store.seed(&hidden);
+
+            let begin_json = begin(&store, &test_cascade(vec![visible, hidden]));
+
+            // Stand in for "still in the database, but this caller may not
+            // read it": the entry is gone from what the fetch can return,
+            // while never having been deleted.
+            store.blooms.borrow_mut().remove("kn-hidden");
+
+            let resp = respond(
+                &store,
+                "kn-visible",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+
+            // An entry the fetch cannot return can never produce a guess row —
+            // there is nothing to put to the responder. What the summary must
+            // not do is let that pass unremarked, leaving a reader to notice
+            // the shortfall by subtracting one number from another.
+            let logged = store.guesses.borrow().len();
+            assert_eq!(
+                resp["summary"]["blooms"], 2,
+                "precondition: both entries were in the sequence: {resp}"
+            );
+            assert_eq!(logged, 1, "only the readable entry could be judged");
+            assert_eq!(
+                resp["summary"]["unjudged"], 1,
+                "an entry vanished from the log and the summary did not say so: \
+                 {} of 2 rows written, summary {}",
+                logged, resp["summary"]
+            );
+            assert_eq!(
+                resp["summary"]["chunks"].as_u64().unwrap(),
+                logged as u64 + resp["summary"]["unjudged"].as_u64().unwrap(),
+                "the chunk count must be fully explained by the two halves"
+            );
+        }
+
+        /// `summary.chunks` now counts steps where nothing was judged, while
+        /// the bucket totals do not. The model reads both in one object, so a
+        /// summary of 3 chunks over 2 bucketed guesses invites exactly the
+        /// "2 out of 3" the vocabulary section retired — and the one number
+        /// that would explain the gap is the one not reported.
+        ///
+        /// Either the two agree, or the summary names the difference. It must
+        /// not be left as a subtraction for the reader to perform.
+        #[test]
+        fn the_summary_does_not_leave_an_unexplained_gap_to_subtract() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut gone = entry_with_phrases(vec!["bravo"]);
+            gone.id = "kn-gone".to_string();
+            let mut last = entry_with_phrases(vec!["charlie"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&gone);
+            store.seed(&last);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, gone, last]));
+            let mut token = token_from_response(&begin_json);
+
+            let resp = respond(&store, "kn-first", "alpha", &token);
+            token = token_from_response(&resp);
+
+            store.blooms.borrow_mut().remove("kn-gone");
+
+            let resp = respond(&store, "kn-last", "charlie", &token);
+            let summary = &resp["summary"];
+
+            let chunks = summary["chunks"].as_u64().unwrap();
+            let bucketed = ["unhinted", "revealed"]
+                .iter()
+                .flat_map(|b| {
+                    ["authored", "derived", "auto"]
+                        .iter()
+                        .map(move |s| summary["buckets"][b][s].as_u64().unwrap_or(0))
+                })
+                .sum::<u64>();
+
+            assert!(
+                chunks == bucketed || summary.get("unjudged").is_some(),
+                "summary reports {chunks} chunks against {bucketed} bucketed \
+                 guesses and does not name the difference: {summary}"
             );
         }
     }

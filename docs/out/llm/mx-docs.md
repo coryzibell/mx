@@ -1945,22 +1945,28 @@ mechanical facts: `kind` is `exact`, `close` or `none`, and
 did, not what the responder knew.
 
 The final response carries a summary of bucket counts split by phrase
-source (`authored`, `derived`, `auto`) and nothing else.
+source (`authored`, `derived`, `auto`), the number of chunks walked, and
+`unjudged` --- the steps where no guess was judged. `chunks` always
+equals the bucket totals plus `unjudged`, so the difference never has to
+be worked out by subtraction.
 
 Two statuses judge no guess, write no row, and omit `bucket`, `guess`
 and `match`: `chunk_truncated`, when the entry shrank past the session's
 chunk cursor, and `bloom_missing`, when the entry was deleted
 mid-ritual. Both still advance the step, so the token the caller spent
-stops verifying.
+stops verifying, and both are counted in `unjudged`.
+
+The ritual is walked by the agent that began it: `MX_CURRENT_AGENT` must
+equal the session's agent, and a caller naming no agent is refused as
+well.
 
 A guess is refused outright, with no row written and no advance, when it
 is longer than 2000 characters (counted in characters, and never
 truncated) or carries no alphanumeric content at all. A refused call can
 simply be retried with the same session token.
 
-The ritual is scoped to the agent that began it: `MX_CURRENT_AGENT` must
-match the session's agent, and a session created by a version of mx
-older than the one-guess ritual is refused rather than continued.
+A session created by a version of mx older than the one-guess ritual is
+refused rather than continued.
 
 ### The guess log
 
@@ -1980,6 +1986,14 @@ Entries tagged `archive` or `wake-exclude` are kept out of every cascade
 layer by default, and `--begin` reports per-tag counts in its `excluded`
 field. The match is exact, so a tag that merely starts with `archive` is
 unaffected. `--include-excluded` turns the exclusion off.
+
+Exclusion never costs a kept entry its place: each layer fetches wider
+to make room and counts only as far as its quota is filled, so an entry
+ranked below the wake set is never counted. The reported figure is an
+upper bound on the entries the exclusion kept out --- an excluded entry
+displaces everything after it, so one reached only because an earlier
+exclusion pushed the window down is counted too, although it would not
+have made the cut untagged.
 
 ## `mx memory wake-fetch`
 

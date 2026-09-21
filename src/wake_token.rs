@@ -169,6 +169,11 @@ pub struct WakeSession {
     pub step: u32,
     pub unhinted_count: u32,
     pub revealed_count: u32,
+    /// Steps walked where no guess was judged — a chunk that vanished under
+    /// the cursor, or an entry deleted mid-ritual. Reported in the summary so
+    /// the gap between `chunks` and the bucket totals is never a subtraction
+    /// the reader has to perform.
+    pub unjudged_count: u32,
     pub created_at: i64,
     /// Per-bloom outcome counters (1:1 with `bloom_ids`).
     pub bloom_chunk_meta: Vec<BloomChunkMeta>,
@@ -203,6 +208,7 @@ impl WakeSession {
             step: 0,
             unhinted_count: 0,
             revealed_count: 0,
+            unjudged_count: 0,
             created_at: chrono::Utc::now().timestamp(),
             bloom_chunk_meta,
         }
@@ -315,6 +321,7 @@ impl WakeSession {
     /// nothing was guessed — so `summary.chunks` counts this step while the
     /// bucket totals do not.
     pub fn advance_unjudged(&mut self) {
+        self.unjudged_count = self.unjudged_count.saturating_add(1);
         self.step = self.step.saturating_add(1);
         self.current_index += 1;
         self.current_chunk_index = 0;
@@ -363,9 +370,17 @@ pub struct WakeBeginResponse {
     pub session: String,
     pub prompt: BloomPrompt,
     pub progress: Progress,
-    /// Per-tag counts of the entries that would have been in this wake set and
-    /// were dropped because they carry an excluded tag. Always present; an
-    /// empty object means nothing was dropped.
+    /// Per-tag counts of the entries kept out of this wake set by an excluded
+    /// tag. Always present; an empty object means nothing was dropped.
+    ///
+    /// An UPPER BOUND, not an exact count. Each layer counts the excluded
+    /// entries it walked past while filling its quota and stops counting at
+    /// the quota, so an entry ranked below the wake set is never included. But
+    /// an excluded entry displaces everything after it, so one that was only
+    /// reached *because* an earlier exclusion pushed the window down is
+    /// counted too, even though it would not have made the cut untagged. The
+    /// exact figure would need the untagged ordering re-ranked — a second
+    /// query to sharpen a diagnostic.
     pub excluded: BTreeMap<String, usize>,
 }
 
@@ -472,9 +487,15 @@ pub struct BucketTotals {
 /// by phrase source. No total, no ratio, no similarity value.
 #[derive(Debug, Serialize)]
 pub struct Summary {
+    /// Every step the ritual walked, judged or not.
     pub chunks: usize,
     pub blooms: usize,
     pub buckets: Buckets,
+    /// Steps where no guess was judged, because the chunk vanished under the
+    /// cursor or the entry was deleted mid-ritual. `chunks` always equals the
+    /// bucket totals plus this, so the difference never has to be derived —
+    /// deriving it is how an "N out of M" score gets reinvented.
+    pub unjudged: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]

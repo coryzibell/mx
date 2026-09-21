@@ -412,6 +412,9 @@ DEFINE FIELD IF NOT EXISTS wake ON wake_session TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS model_id ON wake_session TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS unhinted_count ON wake_session TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS revealed_count ON wake_session TYPE int DEFAULT 0;
+-- Steps walked where no guess was judged, reported in the final summary so the
+-- gap between the chunk count and the bucket totals is never left to be derived.
+DEFINE FIELD IF NOT EXISTS unjudged_count ON wake_session TYPE int DEFAULT 0;
 -- remembered_count, needed_help_count, skipped_count and attempts_on_current
 -- above are no longer read or written. The definitions stay so existing rows
 -- keep validating under SCHEMAFULL.
@@ -468,7 +471,7 @@ UPSERT category:insight SET description = 'Learnings and observations';
 UPSERT category:gotcha SET description = 'Pitfalls and things to watch for';
 UPSERT category:reference SET description = 'Reference material and documentation';
 UPSERT category:decision SET description = 'Architectural and design decisions';
-UPSERT category:bloom SET description = 'Identity discoveries and personal growth - Q private';
+UPSERT category:bloom SET description = 'Identity discoveries and personal growth';
 UPSERT category:session SET description = 'Daily session logs and activity records';
 
 -- Source types

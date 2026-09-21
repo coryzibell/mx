@@ -4472,6 +4472,163 @@ fn wake_cascade_counts_a_doubly_qualifying_excluded_entry_once() {
     assert_eq!(cascade.excluded.get("archive"), Some(&1));
 }
 
+/// The bounded core query widens its window by the number of excluded entries
+/// it saw and fetches again. One widening is only enough when the widened
+/// window holds no further excluded entries; interleaving them forces the loop
+/// to run several passes, which is the case the single-pass tests never reach.
+///
+/// Layout, pinned by `wake_order`: X X K X X K, limit 2. The window has to
+/// widen more than once before it holds two kept entries. The exact sizes are
+/// deliberately not asserted — they are a function of the growth rule, and the
+/// result must not be.
+#[test]
+fn the_core_query_widens_its_window_repeatedly_until_the_limit_is_filled() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-x0", true),
+        ("kn-x1", true),
+        ("kn-k2", false),
+        ("kn-x3", true),
+        ("kn-x4", true),
+        ("kn-k5", false),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k2".to_string(), "kn-k5".to_string()],
+        "an excluded entry must not cost a kept one its slot, however many \
+         passes that takes"
+    );
+    assert_eq!(cascade.excluded.get("archive"), Some(&4));
+}
+
+/// The widening loop stops as soon as the window holds `limit` kept entries,
+/// so an excluded entry ranked BELOW the last entry of the wake set is never
+/// scanned — and must not be counted, because it would not have been in the
+/// wake set even if it carried no tag. This is what keeps `excluded` meaning
+/// "kept out of your wake set" rather than "tagged somewhere in the graph".
+#[test]
+fn the_excluded_count_ignores_entries_ranked_below_the_wake_set() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-k0", false),
+        ("kn-x1", true),
+        ("kn-k2", false),
+        // Ranked below the whole wake set: out of contention on order alone.
+        ("kn-x3", true),
+        ("kn-x4", true),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k0".to_string(), "kn-k2".to_string()]
+    );
+    assert_eq!(
+        cascade.excluded.get("archive"),
+        Some(&1),
+        "only the excluded entry that displaced a slot counts: {:?}",
+        cascade.excluded
+    );
+}
+
+/// The excluded count is an UPPER BOUND on the entries the exclusion kept out
+/// of the wake set, not an exact one, and this is the shape that separates the
+/// two.
+///
+/// Layout X K X K with limit 2. Filling two slots means walking past both
+/// excluded entries, so both are counted. But untag them and the top two would
+/// be X@1 and K@2 — only the first would have been in the wake set. The second
+/// is counted because the first displaced everything after it, not because it
+/// would have made the cut on its own.
+///
+/// Reporting two here is the honest-but-loose answer, and the count is
+/// documented as an upper bound rather than quietly corrected: the tighter
+/// number would have to re-rank the untagged set, which is a second query to
+/// sharpen a diagnostic.
+#[test]
+fn the_excluded_count_is_an_upper_bound_when_exclusions_interleave() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-x0", true),
+        ("kn-k1", false),
+        ("kn-x2", true),
+        ("kn-k3", false),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k1".to_string(), "kn-k3".to_string()],
+        "the wake set itself is exact: the two kept entries, in order"
+    );
+    assert_eq!(
+        cascade.excluded.get("archive"),
+        Some(&2),
+        "both excluded entries were walked past while filling two slots"
+    );
+
+    // The tighter number, for the record: untagged, the top two are kn-x0 and
+    // kn-k1, so exactly one excluded entry would have been in the wake set.
+    let untagged = db.wake_cascade(&ctx, 2, None, 7, true).unwrap();
+    assert_eq!(
+        cascade_ids(&untagged),
+        vec!["kn-x0".to_string(), "kn-k1".to_string()],
+        "only one of the two would have made the cut untagged, which is why \
+         the reported count is an upper bound and is described as one"
+    );
+}
+
+/// `--limit 0` asks for nothing and must return nothing, promptly.
+///
+/// The widening loop breaks on `kept >= limit`, which at `limit == 0` is
+/// `0 >= 0` — true on the first pass, because `LIMIT 0` returns no rows and so
+/// never sets `exhausted`. Tightening that comparison to `>` would spin
+/// forever on this input.
+#[test]
+fn a_limit_of_zero_returns_an_empty_cascade_without_spinning() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-drop", &["archive"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 0, None, 7, false).unwrap();
+    assert!(cascade_ids(&cascade).is_empty(), "nothing was asked for");
+    assert!(
+        cascade.excluded.is_empty(),
+        "no slot was contested, so nothing was kept out of anything: {:?}",
+        cascade.excluded
+    );
+}
+
 #[test]
 fn wake_cascade_counts_an_entry_carrying_both_excluded_tags_once() {
     // One entry, both tags. It is one dropped entry, and it is attributed to

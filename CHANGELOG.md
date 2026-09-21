@@ -29,13 +29,19 @@ JSON must be updated; the shapes below are the whole contract.
   `bucket`, `guess` and `match`: `chunk_truncated`, where the entry shrank past
   the session's chunk cursor, and `bloom_missing`, where it was deleted
   mid-ritual — the latter omits `bloom` too, there being nothing left to show.
-  Both still advance the step, so the token the caller spent stops verifying.
+  Both still advance the step, so the token the caller spent stops verifying,
+  and both are counted in `summary.unjudged`. An entry deleted between one call
+  and the next is stepped over at the start of the following one, so a caller
+  that names the entry it was just handed is answered about that entry rather
+  than told it used the wrong id.
 - **Final summary** is `{chunks, blooms, buckets: {unhinted: {authored,
   derived, auto}, revealed: {...}}}` and nothing else. No total, no ratio, no
   per-entry roll-up string; `summary.blooms_complete` and the `BloomRollup`
   type behind it are both removed. `chunks` counts every step the ritual
-  walked, including the ones where no guess was judged, so the bucket totals
-  can legitimately sum to less than it.
+  walked, and `unjudged` counts the ones where no guess was judged, so
+  `chunks` always equals the bucket totals plus `unjudged` and the difference
+  never has to be derived — deriving it is how an "N out of M" score gets
+  reinvented.
 - **Prompt payload** is `{id, title, phrase_source, chunk?}`. `resonance`,
   `resonance_type` and `wake_phrase_count` are dropped — the last existed only
   to tell a consumer whether `--skip` was legal.
@@ -46,11 +52,13 @@ JSON must be updated; the shapes below are the whole contract.
   `agent` field, and the loader refuses it and asks for a fresh `--begin`
   rather than walking it and filing every guess under an empty agent. Sessions
   live for one ritual, so at most one is affected per deployment.
-- **A `--respond` from a different agent than the one that began the ritual is
-  refused**, and writes no row. The session token authorises the session, not
-  whoever holds it; without this a foreign caller could drive someone else's
-  ritual to completion and every row it wrote would be stamped with the
-  owner's agent.
+- **A `--respond` must come from the agent that began the ritual**, and is
+  refused otherwise, writing no row. The session token authorises the session,
+  not whoever holds it. A caller naming no agent is refused too: the blooms are
+  fetched with the caller's context, and an entry that context cannot see is
+  indistinguishable from one that was deleted, so a caller with less visibility
+  than the owner would otherwise walk the ritual while silently stepping over
+  every entry it could not read.
 - **A guess is refused, rather than logged, when it is not usable data.** Over
   2000 characters (counted in characters, not bytes, and never truncated), or
   carrying no alphanumeric content at all — an empty, whitespace-only or
@@ -92,12 +100,17 @@ JSON must be updated; the shapes below are the whole contract.
   Entries tagged `archive` or `wake-exclude` are kept out of every layer of the
   wake cascade — core, recent, bridges and the `--min-resonance` path — and
   `--begin` reports per-tag counts in `excluded`, a key that is always present
-  and empty when nothing was dropped. The count means *entries that would have
-  been in this wake set*: the core layer widens its query by the number of
-  excluded entries it has seen and fetches again, so exclusion never costs a
-  kept entry its slot and never reports entries ranked below the limit that
-  would not have appeared anyway. The two tags are separate because a live
-  entry merely kept out of the wake set is not an archived copy.
+  and empty when nothing was dropped. Exclusion never costs a kept entry its
+  slot: the core layer widens its query until it holds a full set of entries
+  that survive the exclusion, and every layer counts only as far as its quota
+  is filled, so an entry ranked below the wake set is never counted. The count
+  is an **upper bound** on the entries the exclusion kept out, not an exact
+  figure — an excluded entry displaces everything after it, so one reached only
+  *because* an earlier exclusion pushed the window down is counted too, though
+  it would not have made the cut untagged. Reporting it exactly would mean
+  re-ranking the untagged ordering in a second query, to sharpen a diagnostic.
+  The two tags are separate because a live entry merely kept out of the wake
+  set is not an archived copy.
   The match is **exact**: a tag that starts with `archive`, such as
   `archive/2026`, is not excluded. Applying the policy in mx rather than in
   caller-side text keeps it from being dropped in a rewrite.

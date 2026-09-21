@@ -360,7 +360,7 @@ fn one_guess_ritual_end_to_end() {
 }
 
 // =========================================================================
-// Yeet's admitted gaps 2 and 3: the DEFAULT three-layer cascade and
+// Coverage gaps 2 and 3 from review: the DEFAULT three-layer cascade and
 // `--include-excluded` driven through the real binary rather than the
 // min-resonance path and the query layer.
 // =========================================================================
@@ -702,6 +702,194 @@ fn no_retired_vocabulary_survives_in_the_wake_help_text() {
             "help text still carries the retired word {retired:?}"
         );
     }
+}
+
+// =========================================================================
+// The deleted-entry path, driven through the real binary and a real store.
+// It was covered only against the mock, whose `get` ignores the caller's
+// context and never round-trips a session.
+// =========================================================================
+
+/// Begin a ritual, walk it to the end missing every guess, and return the
+/// entry ids in sequence order. The order is stable across begins, so a later
+/// ritual over the same data walks the same sequence.
+fn walk_order(dir: &TempDir) -> Vec<String> {
+    let out = mx(dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let mut node = json_of(&out);
+    let mut token = node["session"].as_str().unwrap().to_string();
+    let mut id = node["prompt"]["id"].as_str().unwrap().to_string();
+    let mut ids = vec![id.clone()];
+    loop {
+        let out = mx(
+            dir,
+            &[
+                "memory",
+                "wake",
+                "--bloom-id",
+                &id,
+                "--respond",
+                "no match at all",
+                "--session",
+                &token,
+            ],
+        );
+        assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+        node = json_of(&out);
+        let Some(next) = node.get("next").filter(|n| !n.is_null()) else {
+            break;
+        };
+        id = next["id"].as_str().unwrap().to_string();
+        ids.push(id.clone());
+        token = node["session"].as_str().unwrap().to_string();
+    }
+    ids
+}
+
+fn seed_three(dir: &TempDir) {
+    add_bloom(dir, "Vanish One", "One body text.", "one cue", None);
+    add_bloom(dir, "Vanish Two", "Two body text.", "two cue", None);
+    add_bloom(dir, "Vanish Three", "Three body text.", "three cue", None);
+}
+
+/// An entry deleted while it is the one on the table comes back as
+/// `bloom_missing` — no body, nothing judged — and the ritual carries on.
+#[test]
+#[serial]
+fn an_entry_deleted_under_the_cursor_reports_bloom_missing_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    seed_three(&dir);
+    let order = walk_order(&dir);
+    assert_eq!(order.len(), 3, "precondition: three entries");
+
+    let out = mx(&dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    let mut token = begin["session"].as_str().unwrap().to_string();
+
+    // Answer the first, so the second becomes the entry on the table.
+    let out = mx(
+        &dir,
+        &[
+            "memory",
+            "wake",
+            "--bloom-id",
+            &order[0],
+            "--respond",
+            "one cue",
+            "--session",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let node = json_of(&out);
+    assert_eq!(node["next"]["id"], order[1].as_str());
+    token = node["session"].as_str().unwrap().to_string();
+
+    // Delete it out from under the open session.
+    let out = mx(&dir, &["memory", "delete", &order[1]]);
+    assert!(out.status.success(), "delete; stderr: {}", stderr_of(&out));
+
+    let out = mx(
+        &dir,
+        &[
+            "memory",
+            "wake",
+            "--bloom-id",
+            &order[1],
+            "--respond",
+            "two cue",
+            "--session",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let gone = json_of(&out);
+    assert_eq!(gone["status"], "bloom_missing", "{gone}");
+    assert!(
+        gone.get("bloom").is_none(),
+        "there is no entry left to show: {gone}"
+    );
+    assert!(gone.get("bucket").is_none(), "nothing was judged: {gone}");
+    assert_eq!(gone["next"]["id"], order[2].as_str());
+
+    // The ritual finishes normally on the entry after it.
+    let token = gone["session"].as_str().unwrap().to_string();
+    let out = mx(
+        &dir,
+        &[
+            "memory",
+            "wake",
+            "--bloom-id",
+            &order[2],
+            "--respond",
+            "three cue",
+            "--session",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    // The sequence is ordered by the cascade, not by insertion, so whether
+    // this guess happens to be the right cue is incidental. What matters is
+    // that the ritual finishes normally on the entry after the deleted one.
+    let last = json_of(&out);
+    assert_eq!(last["status"], "shown");
+    assert!(last.get("bloom").is_some(), "{last}");
+    assert!(last.get("summary").is_some(), "{last}");
+    assert_eq!(
+        last["summary"]["blooms"], 3,
+        "the deleted entry still counts toward the sequence length: {last}"
+    );
+}
+
+/// An entry deleted while the ritual is on the one BEFORE it is stepped over
+/// when the next prompt is chosen, so the responder is never handed an id
+/// that no longer resolves. This is the path that used to hard-fail with
+/// "Next bloom not found", and it is on the ordinary `shown` branch rather
+/// than the unjudged one.
+#[test]
+#[serial]
+fn an_entry_deleted_before_its_turn_is_stepped_over_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    seed_three(&dir);
+    let order = walk_order(&dir);
+
+    let out = mx(&dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    assert_eq!(begin["progress"]["bloom_total"], 3);
+    let token = begin["session"].as_str().unwrap().to_string();
+
+    // Delete the SECOND entry while the ritual sits on the first.
+    let out = mx(&dir, &["memory", "delete", &order[1]]);
+    assert!(out.status.success(), "delete; stderr: {}", stderr_of(&out));
+
+    let out = mx(
+        &dir,
+        &[
+            "memory",
+            "wake",
+            "--bloom-id",
+            &order[0],
+            "--respond",
+            "one cue",
+            "--session",
+            &token,
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "a deleted later entry must not fail the respond; stderr: {}",
+        stderr_of(&out)
+    );
+    let node = json_of(&out);
+    assert_eq!(node["status"], "shown");
+    assert_eq!(
+        node["next"]["id"],
+        order[2].as_str(),
+        "the deleted entry must be stepped over when choosing the next \
+         prompt: {node}"
+    );
 }
 
 /// Every file under `dir`, recursively. Returns nothing if `dir` is missing.
