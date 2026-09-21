@@ -72,6 +72,15 @@ JSON must be updated; the shapes below are the whole contract.
   existing rows keep validating, and are no longer read or written.
 
 ### Fixed
+- **A `wake_order` of zero is no longer read as unset (#456).** Every read path
+  selected the field with a truthiness test, and SurrealQL treats `0` as falsy,
+  so a stored order of `0` came back as null. The cascade queries derive
+  `has_wake_order` from that value, so the entry an author had put *first*
+  sorted behind every other ordered one. The field is now read with a presence
+  test. The other numeric fields in the same projection fall back to their own
+  zero and were never affected. (Unchanged and known: the `?? 999999` sentinel
+  that sorts unset orders last would collide with a stored `wake_order` of
+  999999.)
 - **`mx memory wake --respond` no longer re-runs the cascade (#451).** The
   cascade query and `increment_activation_count` ran before the command
   branched, so every guess incremented the activation count of all ~20 cascade

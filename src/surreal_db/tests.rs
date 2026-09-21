@@ -4506,6 +4506,59 @@ fn wake_cascade_entries_carry_their_tags_in_every_layer() {
 }
 
 #[test]
+fn a_wake_order_of_zero_round_trips_as_zero() {
+    // SurrealQL treats 0 as falsy, so reading wake_order with a truthiness
+    // test turned a stored 0 into null — indistinguishable from unset (#456).
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut zero = core_layer_entry("kn-zero", &[]);
+    zero.wake_order = Some(0);
+    db.upsert_knowledge(&zero).unwrap();
+    let mut unset = core_layer_entry("kn-unset", &[]);
+    unset.wake_order = None;
+    db.upsert_knowledge(&unset).unwrap();
+
+    assert_eq!(
+        db.get("kn-zero", &ctx).unwrap().unwrap().wake_order,
+        Some(0),
+        "a stored wake_order of 0 must read back as 0, not as unset"
+    );
+    assert_eq!(db.get("kn-unset", &ctx).unwrap().unwrap().wake_order, None);
+}
+
+#[test]
+fn an_entry_with_wake_order_zero_opens_the_ritual() {
+    // The lowest order opens the sequence, and 0 is a legitimate lowest.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // "kn-aaa" would win the id tiebreak if wake_order were lost.
+    db.upsert_knowledge(&core_layer_entry("kn-aaa", &[]))
+        .unwrap();
+    let mut opener = core_layer_entry("kn-zzz", &[]);
+    opener.wake_order = Some(0);
+    db.upsert_knowledge(&opener).unwrap();
+    let mut later = core_layer_entry("kn-mmm", &[]);
+    later.wake_order = Some(5);
+    db.upsert_knowledge(&later).unwrap();
+
+    for min_resonance in [None, Some(9)] {
+        let ordered = cascade_ids(&db.wake_cascade(&ctx, 50, min_resonance, 7, false).unwrap());
+        assert_eq!(
+            ordered.first().map(String::as_str),
+            Some("kn-zzz"),
+            "wake_order 0 must sort first (min_resonance {min_resonance:?}): {ordered:?}"
+        );
+        assert_eq!(
+            ordered.get(1).map(String::as_str),
+            Some("kn-mmm"),
+            "wake_order 5 sorts after 0 and before the unordered entries: {ordered:?}"
+        );
+    }
+}
+
+#[test]
 fn min_resonance_order_is_stable_and_wake_order_opens_the_ritual() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let ctx = crate::store::AgentContext::public_only();

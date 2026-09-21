@@ -301,6 +301,10 @@ impl SurrealDatabase {
     ///
     /// Shares the core query's ordering so the sequence is stable across wakes
     /// and `wake_order` decides which bloom opens the ritual.
+    ///
+    /// The `?? 999999` sentinel that every cascade layer uses to sort unset
+    /// orders last would collide with a legitimately stored `wake_order` of
+    /// 999999. Known and not addressed here.
     async fn query_blooms_by_resonance(
         &self,
         ctx: &crate::store::AgentContext,
