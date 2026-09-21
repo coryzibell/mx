@@ -641,8 +641,14 @@ by default, and `--begin` reports per-tag counts in its `excluded` field. The
 match is exact, so a tag that merely starts with `archive` is unaffected.
 `--include-excluded` turns the exclusion off.
 
-Exclusion never costs a kept entry its place: each layer fetches wider to make
-room and counts only as far as its quota is filled, so an entry ranked below
+The core layer never lets an exclusion cost a kept entry its place: it widens
+its query until it holds a full set of entries that survive the exclusion. The
+recent and bridge layers fetch double their quota, which absorbs the ordinary
+case but is not a guarantee — enough excluded entries in one layer can still
+leave the wake set short, and batch-archiving is how you would meet that, since
+a freshly tagged entry counts as recent for seven days.
+
+Every layer counts only as far as its quota is filled, so an entry ranked below
 the wake set is never counted. The reported figure is an upper bound on the
 entries the exclusion kept out — an excluded entry displaces everything after
 it, so one reached only because an earlier exclusion pushed the window down is

@@ -253,10 +253,13 @@ impl SurrealDatabase {
         include_excluded: bool,
     ) -> Result<crate::store::WakeCascade> {
         // Tag exclusion runs in Rust, on the `tags` field every cascade query
-        // populates via `value_to_knowledge_entry`. It is applied to each layer
-        // BEFORE that layer's `take(...)`, so an excluded entry never occupies
-        // a slot. `dropped` tracks distinct ids so an entry that both the core
-        // and recent queries return is counted once.
+        // populates via `value_to_knowledge_entry`, and is applied as each
+        // layer is taken, so an excluded entry never occupies a slot in the
+        // result. Whether the layer can then FILL its quota is a separate
+        // question: the core layer widens until it can, but recent and bridges
+        // only over-fetch 2x, so enough exclusions in one of them leaves the
+        // wake set short. `dropped` tracks distinct ids so an entry that both
+        // the core and recent queries return is counted once.
         let mut dropped: HashMap<String, &'static str> = HashMap::new();
 
         // If min_resonance is set, use simple query for all blooms >= threshold

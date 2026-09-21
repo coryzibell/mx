@@ -35,7 +35,7 @@ JSON must be updated; the shapes below are the whole contract.
   that names the entry it was just handed is answered about that entry rather
   than told it used the wrong id.
 - **Final summary** is `{chunks, blooms, buckets: {unhinted: {authored,
-  derived, auto}, revealed: {...}}}` and nothing else. No total, no ratio, no
+  derived, auto}, revealed: {...}}, unjudged}` and nothing else. No total, no ratio, no
   per-entry roll-up string; `summary.blooms_complete` and the `BloomRollup`
   type behind it are both removed. `chunks` counts every step the ritual
   walked, and `unjudged` counts the ones where no guess was judged, so
@@ -100,15 +100,19 @@ JSON must be updated; the shapes below are the whole contract.
   Entries tagged `archive` or `wake-exclude` are kept out of every layer of the
   wake cascade — core, recent, bridges and the `--min-resonance` path — and
   `--begin` reports per-tag counts in `excluded`, a key that is always present
-  and empty when nothing was dropped. Exclusion never costs a kept entry its
-  slot: the core layer widens its query until it holds a full set of entries
-  that survive the exclusion, and every layer counts only as far as its quota
+  and empty when nothing was dropped. **The core layer never lets an exclusion
+  cost a kept entry its slot**: it widens its query until it holds a full set
+  of entries that survive the exclusion. The recent and bridge layers fetch
+  double their quota, which absorbs the ordinary case but is not a guarantee —
+  enough excluded entries in one layer can still leave the wake set short.
+  Batch-archiving is how you would meet that, since a freshly tagged entry
+  counts as recent for seven days. Every layer counts only as far as its quota
   is filled, so an entry ranked below the wake set is never counted. The count
   is an **upper bound** on the entries the exclusion kept out, not an exact
   figure — an excluded entry displaces everything after it, so one reached only
   *because* an earlier exclusion pushed the window down is counted too, though
-  it would not have made the cut untagged. Reporting it exactly would mean
-  re-ranking the untagged ordering in a second query, to sharpen a diagnostic.
+  it would not have made the cut untagged. Tightening it means comparing
+  against the untagged ordering, which for the core layer is already in hand.
   The two tags are separate because a live entry merely kept out of the wake
   set is not an archived copy.
   The match is **exact**: a tag that starts with `archive`, such as

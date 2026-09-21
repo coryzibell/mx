@@ -892,6 +892,160 @@ fn an_entry_deleted_before_its_turn_is_stepped_over_end_to_end() {
     );
 }
 
+// =========================================================================
+// The conflation of "deleted" with "not visible to you".
+// =========================================================================
+
+/// `mx` as a named agent other than the harness default.
+fn mx_as(dir: &TempDir, agent: &str, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
+    cmd.args(args)
+        .env("MX_CURRENT_AGENT", agent)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to spawn mx");
+    drop(child.stdin.take());
+    child.wait_with_output().expect("failed to wait on mx")
+}
+
+/// Add a public bloom as `agent` and return its id.
+fn add_bloom_as(dir: &TempDir, agent: &str, title: &str, phrase: &str) -> String {
+    let out = mx_as(
+        dir,
+        agent,
+        &[
+            "memory",
+            "add",
+            "--category",
+            "bloom",
+            "--title",
+            title,
+            "--content",
+            "Body text.",
+            "--resonance",
+            "9",
+            "--resonance-type",
+            "foundational",
+            "--wake-phrase",
+            phrase,
+            "--no-embed",
+            "--no-auto-anchor",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "add {title:?} as {agent}; stderr: {}",
+        stderr_of(&out)
+    );
+    stdout_of(&out)
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("Added entry: ")
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| panic!("no id in add output: {}", stdout_of(&out)))
+}
+
+/// `respond_ritual` builds its entry map with the CALLER's context, so an
+/// entry that context cannot read is indistinguishable from one that was
+/// deleted. The ownership guard's comment claims requiring the owner keeps
+/// that conflation out of reach — "a caller with less visibility than the
+/// session's owner cannot get here".
+///
+/// The owner's OWN visibility is not fixed for the life of the ritual. A
+/// public entry belonging to another agent is in the owner's cascade at
+/// `--begin`; if that agent makes it private mid-ritual, the owner's context
+/// can no longer read it, and the ritual steps over it as vanished. The entry
+/// is still in the database the whole time.
+///
+/// This is the gate b332e54 set for itself: no public sentence may assert a
+/// property the code does not have.
+#[test]
+#[serial]
+#[ignore = "telling a deleted entry apart from one this caller can no longer \
+            read is follow-up work, not part of this change"]
+fn an_entry_made_private_mid_ritual_is_not_reported_as_deleted() {
+    let dir = TempDir::new().unwrap();
+    add_bloom_as(&dir, AGENT, "Owned By A", "a cue");
+    let b_id = add_bloom_as(&dir, "agent-b", "Owned By B", "b cue");
+
+    // The owner begins while both entries are public and visible.
+    let out = mx(&dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    assert_eq!(
+        begin["progress"]["bloom_total"], 2,
+        "precondition: both entries are in the wake set: {begin}"
+    );
+
+    // The other agent makes its entry private. Nothing is deleted.
+    let out = mx_as(
+        &dir,
+        "agent-b",
+        &[
+            "memory",
+            "update",
+            &b_id,
+            "--visibility",
+            "private",
+            "--owner",
+            "agent-b",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "making the entry private; stderr: {}",
+        stderr_of(&out)
+    );
+
+    // Walk the open ritual to the end.
+    let mut token = begin["session"].as_str().unwrap().to_string();
+    let mut id = begin["prompt"]["id"].as_str().unwrap().to_string();
+    let summary = loop {
+        let out = mx(
+            &dir,
+            &[
+                "memory",
+                "wake",
+                "--bloom-id",
+                &id,
+                "--respond",
+                "a guess",
+                "--session",
+                &token,
+            ],
+        );
+        assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+        let node = json_of(&out);
+        token = node["session"].as_str().unwrap().to_string();
+        if let Some(summary) = node.get("summary").filter(|s| !s.is_null()) {
+            break summary.clone();
+        }
+        id = node["next"]["id"].as_str().unwrap().to_string();
+    };
+
+    // The entry was never deleted: its owner can still list it.
+    let out = mx_as(
+        &dir,
+        "agent-b",
+        &["memory", "list", "--category", "bloom", "--include-private"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    assert!(
+        stdout_of(&out).contains("Owned By B"),
+        "precondition: the entry still exists for its owner: {}",
+        stdout_of(&out)
+    );
+
+    assert_eq!(
+        summary["unjudged"], 0,
+        "an entry that still exists was counted as vanished because the \
+         caller could no longer read it: {summary}"
+    );
+}
+
 /// Every file under `dir`, recursively. Returns nothing if `dir` is missing.
 fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();

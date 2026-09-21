@@ -333,9 +333,12 @@ pub fn respond_ritual(
     //
     // The blooms are fetched with the caller's context further down, and an
     // entry that context cannot see is indistinguishable from one that was
-    // deleted. Requiring the owner keeps that conflation out of reach: a
-    // caller with less visibility than the session's owner cannot get here to
-    // step over the entries it is unable to read.
+    // deleted. Requiring the owner removes the way a caller could arrive here
+    // with less visibility than the ritual was built with. It does NOT remove
+    // the conflation: the owner's own visibility is not fixed for the life of
+    // a ritual — another agent's public entry can be made private while this
+    // one is open — and the owner then steps over it as vanished while it is
+    // still in the database. Telling those two apart is open work.
     if ctx.agent_id.as_deref() != Some(session.agent.as_str()) {
         bail!(
             "This ritual was begun by another agent. Run `mx memory wake --begin` \
@@ -353,8 +356,6 @@ pub fn respond_ritual(
         );
     }
 
-    validate_guess(guess)?;
-
     // Entries can be deleted while a ritual is open. Fetch what is still
     // there rather than failing on the first id that is gone: an entry the
     // ritual already walked past must not brick the rest of it.
@@ -364,6 +365,11 @@ pub fn respond_ritual(
     // the caller was just handed as `next`. Step over whatever has gone before
     // deciding what is being asked about, so a deletion mid-ritual cannot
     // strand the session on an entry that no longer exists.
+    //
+    // Before `validate_guess`, deliberately: a caller answering about an entry
+    // that no longer exists should be told the entry is gone, not that its
+    // guess was unusable. The second answer does not describe the situation,
+    // and a client that retries on a guess error would retry forever.
     let mut vanished: Vec<String> = Vec::new();
     while !session.is_complete() && session.current_bloom_is_missing(&all_blooms) {
         if let Some(id) = session.current_bloom_id() {
@@ -374,8 +380,11 @@ pub fn respond_ritual(
 
     // A caller naming an entry that has just gone is answered about that
     // entry, not told it guessed the wrong id — it is following the sequence
-    // it was given.
-    if vanished.iter().any(|id| id == bloom_id) || (session.is_complete() && !vanished.is_empty()) {
+    // it was given. An id the caller was never handed is still a wrong id,
+    // including when the sweep ran the sequence out: answering it as vanished
+    // would delete the session on the way past and make the mistake
+    // uncorrectable.
+    if vanished.iter().any(|id| id == bloom_id) {
         return Ok(serde_json::to_string(&unjudged_response(
             db,
             &mut session,
@@ -386,10 +395,21 @@ pub fn respond_ritual(
         )?)?);
     }
 
-    let expected_id = session
-        .current_bloom_id()
-        .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?
-        .to_string();
+    let Some(expected_id) = session.current_bloom_id().map(str::to_string) else {
+        // The sweep consumed the rest of the sequence and the caller named
+        // something it was never handed. Nothing is persisted, so the session
+        // survives for a corrected call.
+        let response = WakeErrorResponse {
+            status: "error".to_string(),
+            error: "invalid_bloom_id".to_string(),
+            message: format!(
+                "No bloom is awaiting a response; {} was not part of this ritual",
+                bloom_id
+            ),
+            expected_id: None,
+        };
+        return Ok(serde_json::to_string(&response)?);
+    };
 
     if bloom_id != expected_id {
         let response = WakeErrorResponse {
@@ -400,6 +420,8 @@ pub fn respond_ritual(
         };
         return Ok(serde_json::to_string(&response)?);
     }
+
+    validate_guess(guess)?;
 
     let bloom = all_blooms
         .get(&expected_id)
@@ -2159,19 +2181,17 @@ mod tests {
             );
         }
 
-        /// `bloom_missing` means "not in the map `fetch_blooms_by_ids` built",
-        /// and that map is built with the CALLER's context. Deleted and
-        /// not-visible-to-you are therefore the same thing to this path: an
-        /// entry that still exists but has become unreadable is reported as
-        /// missing, stepped over, and dropped from the log — silently, with
-        /// the ritual reporting success.
+        /// An entry that cannot be fetched is stepped over and never judged.
+        /// That much is unavoidable — there is nothing to put to the responder
+        /// — so what this pins is the other half: it must not happen SILENTLY.
+        /// The summary has to account for the step, so a reader is never left
+        /// to notice the shortfall by subtracting one number from another.
         ///
-        /// Driven here through the one context difference the guard permits.
-        /// With the guard tightened this becomes unreachable from outside,
-        /// which is the point: the visibility conflation is only exploitable
-        /// while the anonymous exemption stands.
+        /// Whether such an entry was deleted or has merely become unreadable
+        /// to this caller is a distinction this path cannot draw. Telling them
+        /// apart is open work, and is not what this test claims.
         #[test]
-        fn an_unreadable_entry_is_not_silently_treated_as_deleted() {
+        fn an_unreadable_entry_is_accounted_for_in_the_summary() {
             let store = MockStore::new();
             let mut visible = entry_with_phrases(vec!["alpha"]);
             visible.id = "kn-visible".to_string();
@@ -2263,6 +2283,162 @@ mod tests {
                 chunks == bucketed || summary.get("unjudged").is_some(),
                 "summary reports {chunks} chunks against {bucketed} bucketed \
                  guesses and does not name the difference: {summary}"
+            );
+        }
+
+        // =================================================================
+        // Round three: the sweep that answers about a vanished entry.
+        // =================================================================
+
+        /// Answering a caller about the entry it was just handed is right.
+        /// Answering it about an entry it never named is not.
+        ///
+        /// The completion arm of the sweep gate is `session.is_complete() &&
+        /// !vanished.is_empty()`, which does not mention `bloom_id` at all. So
+        /// once the sweep consumes the rest of the sequence, ANY id is
+        /// answered with `bloom_missing` — including one that was never in the
+        /// session. A caller that sends a wrong id at that moment is told the
+        /// ritual finished, and the session is deleted on the way out, so the
+        /// mistake is unrecoverable rather than correctable.
+        ///
+        /// `invalid_bloom_id` exists precisely to say "that is not what you
+        /// were asked about", and it must not stop applying because the
+        /// sequence happened to end.
+        #[test]
+        fn a_bogus_id_is_still_rejected_when_the_sweep_ends_the_ritual() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut last = entry_with_phrases(vec!["bravo"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&last);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
+
+            // The entry the caller was just handed goes away.
+            store.blooms.borrow_mut().remove("kn-last");
+
+            // The caller names something that was never in this session.
+            let resp = respond(&store, "kn-never-in-this-session", "alpha", &token);
+
+            assert_eq!(
+                resp["status"], "error",
+                "an id that was never in the session must not be answered as \
+                 though it were the sequence: {resp}"
+            );
+            assert_eq!(resp["error"], "invalid_bloom_id");
+            assert!(
+                !store.sessions.borrow().is_empty(),
+                "a wrong id must not delete the session out from under the caller"
+            );
+        }
+
+        /// The sweep runs before `validate_guess`? No — it runs after. So a
+        /// caller answering about an entry that has vanished is told its GUESS
+        /// was unusable, when the truth is there was nothing to guess about.
+        ///
+        /// Minor on its own, but it means the refusal a caller sees does not
+        /// describe the situation it is in, and a client that retries on a
+        /// guess error will retry forever against an entry that is gone.
+        #[test]
+        fn a_vanished_entry_is_reported_before_the_guess_is_judged_unusable() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut last = entry_with_phrases(vec!["bravo"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&last);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
+
+            store.blooms.borrow_mut().remove("kn-last");
+
+            // An empty guess for an entry that no longer exists. There is
+            // nothing to guess about; the guess is beside the point.
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("test-agent"),
+                "kn-last",
+                "",
+                &token,
+            );
+
+            let reported_as_missing = match out {
+                Ok(ref json) => json.contains("\"status\":\"bloom_missing\""),
+                Err(_) => false,
+            };
+            assert!(
+                reported_as_missing,
+                "a vanished entry was reported as a bad guess instead: {out:?}"
+            );
+        }
+
+        /// `Summary.unjudged` exists because, in its own words, "deriving it is
+        /// how an 'N out of M' score gets reinvented". That reasoning is not
+        /// applied to `progress`, which carries the same two numbers and is
+        /// read on EVERY respond rather than once at the end.
+        ///
+        /// After an unjudged step, `progress.current - 1` steps have completed
+        /// while `progress.buckets` accounts for fewer, and the difference is
+        /// again there to be subtracted — for the whole rest of the ritual, not
+        /// just at the close.
+        #[test]
+        #[ignore = "running progress has the same gap the summary now names; \
+                    reporting it there too is follow-up work, not part of this change"]
+        fn running_progress_accounts_for_every_completed_step() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut gone = entry_with_phrases(vec!["bravo"]);
+            gone.id = "kn-gone".to_string();
+            let mut last = entry_with_phrases(vec!["charlie"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&gone);
+            store.seed(&last);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, gone, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
+
+            store.blooms.borrow_mut().remove("kn-gone");
+
+            // The step that walks over the deleted entry. The ritual is not
+            // finished, so this is `progress` without a `summary` beside it.
+            let resp = respond(&store, "kn-gone", "bravo", &token);
+            assert_eq!(resp["status"], "bloom_missing", "{resp}");
+
+            let progress = &resp["progress"];
+            let completed = progress["current"].as_u64().unwrap() - 1;
+            let bucketed = progress["buckets"]["unhinted"].as_u64().unwrap()
+                + progress["buckets"]["revealed"].as_u64().unwrap();
+
+            assert!(
+                completed == bucketed || progress.get("unjudged").is_some(),
+                "progress reports {completed} completed steps against \
+                 {bucketed} bucketed guesses and does not name the \
+                 difference: {progress}"
             );
         }
     }

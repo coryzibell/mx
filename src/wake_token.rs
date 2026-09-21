@@ -378,9 +378,9 @@ pub struct WakeBeginResponse {
     /// the quota, so an entry ranked below the wake set is never included. But
     /// an excluded entry displaces everything after it, so one that was only
     /// reached *because* an earlier exclusion pushed the window down is
-    /// counted too, even though it would not have made the cut untagged. The
-    /// exact figure would need the untagged ordering re-ranked — a second
-    /// query to sharpen a diagnostic.
+    /// counted too, even though it would not have made the cut untagged.
+    /// Tightening it means comparing against the untagged ordering, which for
+    /// the core layer is the prefix already in hand.
     pub excluded: BTreeMap<String, usize>,
 }
 
