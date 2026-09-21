@@ -506,7 +506,8 @@ the following field groups:
 - `last_activated` (datetime), `activation_count` (int)
 - `decay_rate` (float, 0.0--1.0) -- some memories fade, some do not
 - `anchors` (array\<string\>) -- IDs of related blooms this entry connects to
-- `wake_phrases` (array\<string\>) -- verification phrases for the wake ritual
+- `wake_phrases` (array\<string\>) -- cues the title is meant to evoke, used by
+  the wake ritual
 - `wake_order` (optional int) -- custom sequence position
 
 *Embeddings:*

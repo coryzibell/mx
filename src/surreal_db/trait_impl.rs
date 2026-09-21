@@ -106,8 +106,9 @@ impl KnowledgeStore for SurrealDatabase {
         limit: usize,
         min_resonance: Option<i32>,
         days: i64,
+        include_excluded: bool,
     ) -> Result<crate::store::WakeCascade> {
-        self.wake_cascade(ctx, limit, min_resonance, days)
+        self.wake_cascade(ctx, limit, min_resonance, days, include_excluded)
     }
 
     fn update_activations(&self, ids: &[String]) -> Result<()> {
@@ -406,6 +407,10 @@ impl KnowledgeStore for SurrealDatabase {
 
     fn delete_wake_session(&self, session_id: &str) -> Result<()> {
         self.delete_wake_session(session_id)
+    }
+
+    fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+        self.insert_wake_guess(row)
     }
 
     fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<crate::store::GhostSweepResult> {

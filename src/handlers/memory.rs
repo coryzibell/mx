@@ -3527,8 +3527,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             begin,
             bloom_id,
             respond,
-            skip,
             session,
+            wake,
+            model,
+            include_excluded,
         } => {
             let db = store::create_store(&config.db_path)?;
 
@@ -3542,46 +3544,53 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
             let ctx = store::AgentContext::for_agent(current_agent.clone());
 
-            // Run cascade
-            let cascade = db.wake_cascade(&ctx, limit, min_resonance, days)?;
-
-            // Increment activation counts for wake cascade entries.
-            // We do NOT reset last_activated here — wake surfacing is passive, not
-            // intentional access, and resetting the decay clock would create a feedback
-            // loop where frequently-surfaced entries never decay.
-            if !no_activate {
-                let ids = cascade.all_ids();
-                if !ids.is_empty() {
-                    db.increment_activation_count(&ids)?;
-                }
-            }
-
-            // Output
-            if begin {
-                // Start session-based ritual (state stored in DB)
-                let output = wake_ritual::begin_ritual(db.as_ref(), &cascade)?;
-                println!("{}", output);
-            } else if let Some(phrase) = respond {
-                // Submit wake phrase response
+            // The cascade is only needed to open a ritual or to print the set.
+            // A respond call re-running it was incrementing the activation
+            // count of every cascade entry once per guess (#451).
+            if let Some(guess) = respond {
                 let session_token =
                     session.ok_or_else(|| anyhow::anyhow!("--session required with --respond"))?;
                 let id = bloom_id
                     .ok_or_else(|| anyhow::anyhow!("--bloom-id required with --respond"))?;
 
                 let output =
-                    wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &phrase, &session_token)?;
-                println!("{}", output);
-            } else if skip {
-                // Skip a bloom
-                let session_token =
-                    session.ok_or_else(|| anyhow::anyhow!("--session required with --skip"))?;
-                let id =
-                    bloom_id.ok_or_else(|| anyhow::anyhow!("--bloom-id required with --skip"))?;
-
-                let output = wake_ritual::skip_ritual(db.as_ref(), &ctx, &id, &session_token)?;
+                    wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &guess, &session_token)?;
                 println!("{}", output);
             } else {
-                print_wake_cascade(&cascade);
+                let cascade = db.wake_cascade(
+                    &ctx,
+                    limit.unwrap_or(20),
+                    min_resonance,
+                    days.unwrap_or(7),
+                    include_excluded,
+                )?;
+
+                // Increment activation counts for wake cascade entries.
+                // We do NOT reset last_activated here — wake surfacing is passive, not
+                // intentional access, and resetting the decay clock would create a feedback
+                // loop where frequently-surfaced entries never decay.
+                if !no_activate {
+                    let ids = cascade.all_ids();
+                    if !ids.is_empty() {
+                        db.increment_activation_count(&ids)?;
+                    }
+                }
+
+                if begin {
+                    // Start session-based ritual (state stored in DB)
+                    let output = wake_ritual::begin_ritual(
+                        db.as_ref(),
+                        &cascade,
+                        wake_ritual::RitualMeta {
+                            agent: current_agent,
+                            wake,
+                            model_id: model,
+                        },
+                    )?;
+                    println!("{}", output);
+                } else {
+                    print_wake_cascade(&cascade);
+                }
             }
         }
 
@@ -4436,8 +4445,10 @@ mod dedup_gate_tests {
             limit: usize,
             min_resonance: Option<i32>,
             days: i64,
+            include_excluded: bool,
         ) -> Result<store::WakeCascade> {
-            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+            self.inner
+                .wake_cascade(ctx, limit, min_resonance, days, include_excluded)
         }
         fn update_activations(&self, ids: &[String]) -> Result<()> {
             self.inner.update_activations(ids)
@@ -4670,6 +4681,9 @@ mod dedup_gate_tests {
         fn delete_wake_session(&self, session_id: &str) -> Result<()> {
             self.inner.delete_wake_session(session_id)
         }
+        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+            self.inner.insert_wake_guess(row)
+        }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)
         }
@@ -4778,8 +4792,10 @@ mod dedup_gate_tests {
             limit: usize,
             min_resonance: Option<i32>,
             days: i64,
+            include_excluded: bool,
         ) -> Result<store::WakeCascade> {
-            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+            self.inner
+                .wake_cascade(ctx, limit, min_resonance, days, include_excluded)
         }
         fn update_activations(&self, ids: &[String]) -> Result<()> {
             self.inner.update_activations(ids)
@@ -5010,6 +5026,9 @@ mod dedup_gate_tests {
         fn delete_wake_session(&self, session_id: &str) -> Result<()> {
             self.inner.delete_wake_session(session_id)
         }
+        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+            self.inner.insert_wake_guess(row)
+        }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)
         }
@@ -5126,8 +5145,10 @@ mod dedup_gate_tests {
             limit: usize,
             min_resonance: Option<i32>,
             days: i64,
+            include_excluded: bool,
         ) -> Result<store::WakeCascade> {
-            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+            self.inner
+                .wake_cascade(ctx, limit, min_resonance, days, include_excluded)
         }
         fn update_activations(&self, ids: &[String]) -> Result<()> {
             self.inner.update_activations(ids)
@@ -5358,6 +5379,9 @@ mod dedup_gate_tests {
         }
         fn delete_wake_session(&self, session_id: &str) -> Result<()> {
             self.inner.delete_wake_session(session_id)
+        }
+        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+            self.inner.insert_wake_guess(row)
         }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)

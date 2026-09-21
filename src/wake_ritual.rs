@@ -5,96 +5,86 @@ use crate::engage::{MatchResult, fuzzy_match};
 use crate::knowledge::KnowledgeEntry;
 use crate::store::{AgentContext, KnowledgeStore, WakeCascade};
 use crate::wake_chunk::{
-    ChunkPlan, PhraseMatch, PhraseMode, chunk_threshold, compare_phrase, compute_chunks,
-    extract_auto_phrase, extract_salient_phrase,
+    ChunkPlan, PhraseMatch, chunk_threshold, compare_phrase, compute_chunks, extract_auto_phrase,
+    extract_salient_phrase,
 };
+use crate::wake_guess::{Bucket, MatchKind, WakeGuessRow, content_hash};
 use crate::wake_token::*;
 
-/// Which phrase source unlocked a chunk — authored by the bloom owner,
-/// auto-derived from the chunk's own content (§5 of the mx#211 design),
-/// or auto-generated for a phraseless bloom (mx#218).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PhraseSource {
-    Authored,
-    Derived,
-    /// Auto-generated phrase for a chunk that has neither authored nor derived
-    /// phrases. Extracted from the chunk's content via `extract_auto_phrase`
-    /// (mx#218). Uses the same tolerant matching as Derived phrases.
-    Auto,
+/// The phrases a chunk's guess is matched against, and where they came from.
+///
+/// For an `Authored` chunk this is every authored phrase on the bloom, not
+/// just the one at the chunk's index: a single-chunk bloom with three phrases
+/// used to be matched against phrase 0 only, which made phrases 1 and 2
+/// unreachable (#450). For `Derived` and `Auto` it is the one generated phrase.
+struct ChunkPhrases {
+    phrases: Vec<String>,
+    source: PhraseSource,
 }
 
-impl PhraseSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            PhraseSource::Authored => "authored",
-            PhraseSource::Derived => "derived",
-            PhraseSource::Auto => "auto",
-        }
-    }
-
-    fn mode(self) -> PhraseMode {
-        match self {
-            PhraseSource::Authored => PhraseMode::Authored,
-            // Auto phrases use the same tolerant comparison as derived —
-            // case-insensitive, trailing punct stripped, whitespace collapsed.
-            PhraseSource::Derived | PhraseSource::Auto => PhraseMode::Derived,
-        }
-    }
-
-    /// Convert to the persisted tag used for per-bloom counters on the
-    /// session (PR 3 observability). `PhraseSourceTag::None` is only emitted
-    /// by skip paths where no phrase was involved.
-    fn tag(self) -> PhraseSourceTag {
-        match self {
-            PhraseSource::Authored => PhraseSourceTag::Authored,
-            PhraseSource::Derived => PhraseSourceTag::Derived,
-            PhraseSource::Auto => PhraseSourceTag::Auto,
-        }
-    }
-}
-
-/// Pick the wake phrase for a specific chunk of a bloom. Authored phrases
-/// win when available at the given index; beyond the authored count we
-/// auto-derive from the chunk's own content (§5.2).
+/// Pick the phrase set for a specific chunk of a bloom.
 ///
-/// **P==0 semantics (mx#218):** for blooms with zero authored phrases we
-/// auto-generate a phrase from the chunk's content via `extract_auto_phrase`.
-/// This ensures every chunk in every bloom has a phrase — the 3-attempt +
-/// reveal engagement flow applies universally. No bloom can be `--skip`'d
-/// without engagement.
-///
-/// Returns `(phrase, source)`. `source` drives the comparison tolerance:
-/// authored phrases get exact-compare (Authored mode) while derived and
-/// auto phrases get softened comparisons (Derived mode).
-fn phrase_for_chunk(
+/// The source is decided by position: `authored` while the chunk index is
+/// below the bloom's authored-phrase count, `derived` beyond it, and `auto`
+/// for a bloom with no authored phrases at all. Since mx#218 every chunk
+/// resolves to a non-empty phrase list.
+fn phrases_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
     chunk_total: u16,
     chunk_content: &str,
-) -> Option<(String, PhraseSource)> {
-    let authored_count = authored_phrase_count(entry);
-    if authored_count == 0 {
-        // P==0: auto-generate a phrase from the chunk's content (mx#218).
-        // Uses `extract_auto_phrase` which has a title fallback tier,
-        // guaranteeing a non-empty phrase even for empty content.
-        let phrase = extract_auto_phrase(chunk_content, &entry.title);
-        return Some((phrase, PhraseSource::Auto));
+) -> ChunkPhrases {
+    let authored = authored_phrases(entry);
+    if authored.is_empty() {
+        return ChunkPhrases {
+            phrases: vec![extract_auto_phrase(chunk_content, &entry.title)],
+            source: PhraseSource::Auto,
+        };
     }
-    if chunk_idx < authored_count
-        && let Some(p) = authored_phrase_at(entry, chunk_idx as usize)
-    {
-        return Some((p, PhraseSource::Authored));
+    if (chunk_idx as usize) < authored.len() {
+        return ChunkPhrases {
+            phrases: authored,
+            source: PhraseSource::Authored,
+        };
     }
-    // Chunk beyond the authored count: auto-derive from chunk content.
-    Some((
-        extract_salient_phrase(chunk_content, chunk_idx, chunk_total),
-        PhraseSource::Derived,
-    ))
+    ChunkPhrases {
+        phrases: vec![extract_salient_phrase(
+            chunk_content,
+            chunk_idx,
+            chunk_total,
+        )],
+        source: PhraseSource::Derived,
+    }
+}
+
+/// Compare a guess against every phrase in the set and keep the best result.
+/// `exact` beats `close`; among equals the earliest phrase wins.
+fn best_match(guess: &str, phrases: &[String]) -> (MatchKind, Option<usize>) {
+    let mut best: Option<usize> = None;
+    for (idx, phrase) in phrases.iter().enumerate() {
+        let kind = match compare_phrase(guess, phrase) {
+            PhraseMatch::Exact => MatchKind::Exact,
+            PhraseMatch::Tolerant => MatchKind::Close,
+            PhraseMatch::Mismatch => match fuzzy_match(guess, phrase) {
+                MatchResult::Exact => MatchKind::Exact,
+                MatchResult::Close => MatchKind::Close,
+                MatchResult::Partial | MatchResult::Wrong => MatchKind::None,
+            },
+        };
+        match kind {
+            MatchKind::Exact => return (MatchKind::Exact, Some(idx)),
+            MatchKind::Close if best.is_none() => best = Some(idx),
+            _ => {}
+        }
+    }
+    match best {
+        Some(idx) => (MatchKind::Close, Some(idx)),
+        None => (MatchKind::None, None),
+    }
 }
 
 /// Compute the sum of chunk counts across all blooms in the session, using
-/// the current in-memory content. Eager total for `progress.total` at begin
-/// time (§7.1). Cheap: O(N * content_len), microseconds for typical cascades.
+/// the current in-memory content.
 fn total_chunks_across_cascade(
     session: &WakeSession,
     blooms: &HashMap<String, KnowledgeEntry>,
@@ -122,97 +112,146 @@ fn bloom_content(entry: &KnowledgeEntry) -> String {
         .unwrap_or_else(|| "(no content)".to_string())
 }
 
-/// Build a chunk-aware `BloomPrompt` for the bloom at the session's current
-/// cursor. Decorates the title with `(Part N/M)` server-side so existing
-/// CLIs that display the title surface chunk position for free.
-///
-/// If the chunk plan has only one chunk (i.e. content ≤ threshold), the
-/// prompt is identical to the non-chunked `BloomPrompt::from(entry)` —
-/// backward-compatible contract.
+/// The title as the responder sees it: decorated with `(Part N/M)` for a
+/// chunked bloom, plain otherwise.
+fn title_for_chunk(entry: &KnowledgeEntry, chunk_idx: u16, plan: &ChunkPlan) -> String {
+    if plan.total > 1 {
+        format!("{} (Part {}/{})", entry.title, chunk_idx + 1, plan.total)
+    } else {
+        entry.title.clone()
+    }
+}
+
+fn chunk_ref(chunk_idx: u16, plan: &ChunkPlan) -> Option<ChunkRef> {
+    if plan.total > 1 {
+        Some(ChunkRef {
+            index: chunk_idx + 1,
+            total: plan.total,
+            oversized: if plan.is_oversized(chunk_idx) {
+                Some(true)
+            } else {
+                None
+            },
+        })
+    } else {
+        None
+    }
+}
+
+/// The text of the chunk at `chunk_idx` under `plan`.
+fn chunk_text<'a>(plan: &ChunkPlan, content: &'a str, chunk_idx: u16) -> &'a str {
+    if plan.total > 1 {
+        plan.chunk(content, chunk_idx)
+    } else {
+        content
+    }
+}
+
+/// Build the prompt for one chunk: the title, and nothing that would answer it.
 fn build_prompt_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
     plan: &ChunkPlan,
     content: &str,
 ) -> BloomPrompt {
-    let mut prompt = BloomPrompt::from(entry);
-
-    // Determine phrase source for this chunk. After mx#218 every chunk has a
-    // phrase — authored, derived, or auto — so this always returns Some.
-    let chunk_content = if plan.total > 1 {
-        plan.chunk(content, chunk_idx)
-    } else {
-        content
-    };
-    if let Some((_, source)) = phrase_for_chunk(entry, chunk_idx, plan.total, chunk_content) {
-        prompt.phrase_source = Some(source.as_str().to_string());
-        // Auto-phrased chunks report wake_phrase_count=1 so the consumer
-        // knows a phrase exists and --respond is required (mx#218).
-        if source == PhraseSource::Auto {
-            prompt.wake_phrase_count = 1;
-        }
+    let resolved = phrases_for_chunk(
+        entry,
+        chunk_idx,
+        plan.total,
+        chunk_text(plan, content, chunk_idx),
+    );
+    BloomPrompt {
+        id: entry.id.clone(),
+        title: title_for_chunk(entry, chunk_idx, plan),
+        phrase_source: resolved.source.as_str().to_string(),
+        chunk: chunk_ref(chunk_idx, plan),
     }
-
-    if plan.total > 1 {
-        prompt.title = format!("{} (Part {}/{})", entry.title, chunk_idx + 1, plan.total);
-        prompt.chunk = Some(ChunkRef {
-            index: chunk_idx + 1,
-            total: plan.total,
-            oversized: if plan.is_oversized(chunk_idx) {
-                Some(true)
-            } else {
-                None
-            },
-        });
-    }
-    prompt
 }
 
-/// Build a chunk-aware `BloomFull` for the chunk currently being revealed.
-/// The `content` field is the *chunk's* content, not the whole bloom — this
-/// is the critical behavior change in mx#211.
+/// Build the full reveal for one chunk. `content` is the *chunk's* content,
+/// not the whole bloom.
 fn build_full_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
     plan: &ChunkPlan,
     content: &str,
-    matched_phrase: Option<String>,
-    source: Option<PhraseSource>,
-    chunk_truncated: bool,
+    phrases: Vec<String>,
+    source: PhraseSource,
 ) -> BloomFull {
-    let mut full = BloomFull::from(entry);
-    if plan.total > 1 {
-        let chunk_content = plan.chunk(content, chunk_idx);
-        full.content = chunk_content.to_string();
-        full.title = format!("{} (Part {}/{})", entry.title, chunk_idx + 1, plan.total);
-        full.chunk = Some(ChunkRef {
-            index: chunk_idx + 1,
-            total: plan.total,
-            oversized: if plan.is_oversized(chunk_idx) {
-                Some(true)
-            } else {
-                None
-            },
-        });
+    BloomFull {
+        id: entry.id.clone(),
+        title: title_for_chunk(entry, chunk_idx, plan),
+        phrases,
+        phrase_source: source.as_str().to_string(),
+        content: chunk_text(plan, content, chunk_idx).to_string(),
+        chunk: chunk_ref(chunk_idx, plan),
     }
-    // For single-chunk blooms, BloomFull::from already populates the full
-    // content. We only override for chunked blooms above.
+}
 
-    full.matched_phrase = matched_phrase;
-    full.phrase_source = source.map(|s| s.as_str().to_string());
-    if chunk_truncated {
-        full.chunk_truncated = Some(true);
+/// The longest guess the log accepts, in CHARACTERS.
+///
+/// A guess is model output written verbatim into the database, and nothing
+/// else on the path bounds it. Characters rather than bytes so the same guess
+/// is judged the same way whatever it is written in, and a refusal rather than
+/// a trim so a caller is never told its guess was logged when only part of it
+/// was. Nothing on this path slices by byte index.
+const MAX_GUESS_CHARS: usize = 2_000;
+
+/// Reject a guess that is not usable data, before anything is written or
+/// advanced, so the caller can simply guess again.
+fn validate_guess(guess: &str) -> Result<()> {
+    let chars = guess.chars().count();
+    if chars > MAX_GUESS_CHARS {
+        bail!(
+            "Guess is {} characters; the limit is {}. Send a shorter guess.",
+            chars,
+            MAX_GUESS_CHARS
+        );
     }
-    full
+    // Matching strips every non-alphanumeric character, so a guess with none
+    // is indistinguishable from an empty one — and would compare equal to any
+    // phrase that also strips to nothing.
+    if !guess.chars().any(|c| c.is_alphanumeric()) {
+        bail!("Guess is empty. Send what the title brought to mind, then continue.");
+    }
+    Ok(())
+}
+
+/// Identity of the ritual run, for the session and every guess row it writes.
+pub struct RitualMeta {
+    pub agent: String,
+    /// Wake number from `--wake`. mx does not read a counter of its own.
+    pub wake: Option<i64>,
+    /// Model identifier from `--model`. mx has no way to discover it.
+    pub model_id: Option<String>,
 }
 
 /// Start a new wake ritual session.
-pub fn begin_ritual(db: &dyn KnowledgeStore, cascade: &WakeCascade) -> Result<String> {
+pub fn begin_ritual(
+    db: &dyn KnowledgeStore,
+    cascade: &WakeCascade,
+    meta: RitualMeta,
+) -> Result<String> {
     if cascade.core.is_empty() && cascade.recent.is_empty() && cascade.bridges.is_empty() {
+        if !cascade.excluded.is_empty() {
+            // The entries are in the graph; a tag is keeping them out. Say so,
+            // and name the way back in — otherwise the only signal is an empty
+            // wake set that looks like data loss.
+            let counts: Vec<String> = cascade
+                .excluded
+                .iter()
+                .map(|(tag, n)| format!("{}: {}", tag, n))
+                .collect();
+            bail!(
+                "No blooms to wake: every entry that qualified was excluded by tag ({}). \
+                 Pass --include-excluded to wake them anyway, or remove the tag.",
+                counts.join(", ")
+            );
+        }
         bail!("No blooms to wake");
     }
 
-    let session = WakeSession::new(cascade);
+    let session = WakeSession::new(cascade, meta.agent, meta.wake, meta.model_id);
 
     // Build lookup map from the cascade we already have.
     let owned_blooms: HashMap<String, KnowledgeEntry> = build_bloom_map_owned(cascade);
@@ -245,347 +284,211 @@ pub fn begin_ritual(db: &dyn KnowledgeStore, cascade: &WakeCascade) -> Result<St
         progress: Progress {
             current: 1,
             total: total_steps.max(1),
-            remembered: None,
-            needed_help: None,
-            skipped: None,
-            bloom_current: Some(1),
-            bloom_total: Some(session.total_blooms()),
+            bloom_current: 1,
+            bloom_total: session.total_blooms(),
+            buckets: None,
         },
+        excluded: cascade.excluded.clone(),
     };
 
     Ok(serde_json::to_string(&response)?)
 }
 
-/// Process a wake phrase response.
+/// Judge one guess and show the bloom.
+///
+/// The guess is matched against the chunk's phrases, the outcome is written to
+/// the guess log, and only then does the session advance. A failed log write
+/// fails the call and leaves the session where it was — the guess is the data
+/// the ritual exists to collect, so it is not best-effort.
 pub fn respond_ritual(
     db: &dyn KnowledgeStore,
     ctx: &AgentContext,
     bloom_id: &str,
-    phrase: &str,
+    guess: &str,
     token_str: &str,
 ) -> Result<String> {
     let (session_id, token_step) =
         verify_token(token_str).map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
 
-    let mut session = db
-        .get_wake_session(&session_id)?
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
-
-    // Anti-replay: token step must match server-side state.
-    if session.step != token_step {
-        bail!(
-            "Token out of sync: token step {} but session at step {}",
-            token_step,
-            session.step
-        );
-    }
-
-    let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
-
-    let expected_id = session
-        .current_bloom_id()
-        .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?
-        .to_string();
-
-    if bloom_id != expected_id {
-        let response = WakeErrorResponse {
-            status: "error".to_string(),
-            error: "invalid_bloom_id".to_string(),
-            message: format!("Expected bloom {}, got {}", expected_id, bloom_id),
-            expected_id: Some(expected_id),
-        };
-        return Ok(serde_json::to_string(&response)?);
-    }
-
-    let bloom = all_blooms
-        .get(&expected_id)
-        .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", expected_id))?;
-
-    let content = bloom_content(bloom);
-    let plan = compute_chunks(&content, chunk_threshold());
-
-    // If the bloom shrank past our chunk cursor, advance to next bloom.
-    // Flagged via chunk_truncated (§2.2).
-    let chunk_truncated = session.clamp_if_chunks_shrank(plan.total);
-    if chunk_truncated {
-        // Persist the clamp and return a skip-like response so the consumer
-        // can see what happened.
-        let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
-        if session.is_complete() {
-            db.delete_wake_session(&session_id)?;
-        } else {
-            db.update_wake_session(&session)?;
-        }
-        let bloom_full =
-            build_full_for_chunk(bloom, 0, &plan, &content, None, None, chunk_truncated);
-        let new_token = create_token(&session_id, session.step);
-        let response = WakeRespondResponse {
-            status: "chunk_truncated".to_string(),
-            match_type: None,
-            bloom: Some(bloom_full),
-            attempt: None,
-            hint: None,
-            prompt: None,
-            session: new_token,
-            next,
-            progress: Some(progress),
-            summary,
-            derived_phrase_mismatch: None,
-        };
-        return Ok(serde_json::to_string(&response)?);
-    }
-
-    let chunk_idx = session.current_chunk_index;
-    let chunk_content = plan.chunk(&content, chunk_idx);
-
-    // Every chunk now resolves a phrase (authored, derived, or auto). The
-    // None branch is unreachable in normal flow — retained as a defensive guard.
-    let (wake_phrase, source) = match phrase_for_chunk(bloom, chunk_idx, plan.total, chunk_content)
-    {
-        Some(p) => p,
-        None => bail!("Internal error: phrase_for_chunk returned None"),
-    };
-
-    // Compare: first via our tolerant compare_phrase (picks up authored-vs-
-    // derived tolerance), then fall through to fuzzy_match for the existing
-    // Close/Partial/Wrong tiers so we don't regress the hint flow.
-    let tolerant = compare_phrase(phrase, &wake_phrase, source.mode());
-    let match_result = match tolerant {
-        PhraseMatch::Exact => MatchResult::Exact,
-        PhraseMatch::Tolerant => MatchResult::Close,
-        PhraseMatch::Mismatch => fuzzy_match(phrase, &wake_phrase),
-    };
-
-    match match_result {
-        MatchResult::Exact | MatchResult::Close => {
-            session.advance_remembered(plan.total, source.tag());
-
-            let match_type = if matches!(match_result, MatchResult::Exact) {
-                "exact"
-            } else {
-                "close"
-            };
-
-            let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
-
-            if session.is_complete() {
-                db.delete_wake_session(&session_id)?;
-            } else {
-                db.update_wake_session(&session)?;
-            }
-
-            let bloom_full = build_full_for_chunk(
-                bloom,
-                chunk_idx,
-                &plan,
-                &content,
-                Some(wake_phrase.clone()),
-                Some(source),
-                false,
-            );
-
-            let new_token = create_token(&session_id, session.step);
-
-            let response = WakeRespondResponse {
-                status: "remembered".to_string(),
-                match_type: Some(match_type.to_string()),
-                bloom: Some(bloom_full),
-                attempt: None,
-                hint: None,
-                prompt: None,
-                session: new_token,
-                next,
-                progress: Some(progress),
-                summary,
-                derived_phrase_mismatch: None,
-            };
-
-            Ok(serde_json::to_string(&response)?)
-        }
-        MatchResult::Partial | MatchResult::Wrong => {
-            session.increment_attempt();
-            let attempt = session.attempts_on_current;
-
-            if attempt >= 3 {
-                session.advance_helped(plan.total, source.tag());
-
-                let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
-
-                if session.is_complete() {
-                    db.delete_wake_session(&session_id)?;
-                } else {
-                    db.update_wake_session(&session)?;
-                }
-
-                let bloom_full = build_full_for_chunk(
-                    bloom,
-                    chunk_idx,
-                    &plan,
-                    &content,
-                    Some(wake_phrase.clone()),
-                    Some(source),
-                    false,
-                );
-
-                let new_token = create_token(&session_id, session.step);
-
-                let response = WakeRespondResponse {
-                    status: "revealed".to_string(),
-                    match_type: None,
-                    bloom: Some(bloom_full),
-                    attempt: None,
-                    hint: None,
-                    prompt: None,
-                    session: new_token,
-                    next,
-                    progress: Some(progress),
-                    summary,
-                    derived_phrase_mismatch: None,
-                };
-
-                Ok(serde_json::to_string(&response)?)
-            } else {
-                db.update_wake_session(&session)?;
-
-                let hint = generate_hint(&wake_phrase, attempt);
-
-                // Same step (retry), fresh token.
-                let new_token = create_token(&session_id, session.step);
-
-                // Risk 9 diagnostic: when the consumer's response misses
-                // against a derived phrase, surface `derived_phrase_mismatch`
-                // as an advisory. Consumers can use it to suggest a
-                // `--begin` restart when mid-ritual edits may have shifted
-                // the derived phrase out from under them. Best-effort: this
-                // fires on any derived-phrase mismatch — it does NOT
-                // guarantee content genuinely changed (a tighter check
-                // would need timestamp comparison against bloom.updated_at,
-                // deferred per §6 / §10 Risk 9). Field renamed from
-                // `content_changed_during_ritual` after Diffi's mx#213
-                // review called out the overpromise.
-                let derived_miss = matches!(source, PhraseSource::Derived | PhraseSource::Auto);
-
-                let response = WakeRespondResponse {
-                    status: "incorrect".to_string(),
-                    match_type: None,
-                    bloom: None,
-                    attempt: Some(attempt),
-                    hint: Some(hint),
-                    prompt: Some(build_prompt_for_chunk(bloom, chunk_idx, &plan, &content)),
-                    session: new_token,
-                    next: None,
-                    progress: None,
-                    summary: None,
-                    derived_phrase_mismatch: if derived_miss { Some(true) } else { None },
-                };
-
-                Ok(serde_json::to_string(&response)?)
-            }
-        }
-    }
-}
-
-/// Skip a bloom chunk (for phraseless blooms or consumer-initiated skip).
-pub fn skip_ritual(
-    db: &dyn KnowledgeStore,
-    ctx: &AgentContext,
-    bloom_id: &str,
-    token_str: &str,
-) -> Result<String> {
-    let (session_id, token_step) =
-        verify_token(token_str).map_err(|e| anyhow::anyhow!("Token verification failed: {}", e))?;
-
-    let mut session = db
-        .get_wake_session(&session_id)?
-        .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
-
-    if session.step != token_step {
-        bail!(
-            "Token out of sync: token step {} but session at step {}",
-            token_step,
-            session.step
-        );
-    }
-
-    let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
-
-    let expected_id = session
-        .current_bloom_id()
-        .ok_or_else(|| anyhow::anyhow!("Ritual already complete"))?
-        .to_string();
-
-    if bloom_id != expected_id {
-        let response = WakeErrorResponse {
-            status: "error".to_string(),
-            error: "invalid_bloom_id".to_string(),
-            message: format!("Expected bloom {}, got {}", expected_id, bloom_id),
-            expected_id: Some(expected_id),
-        };
-        return Ok(serde_json::to_string(&response)?);
-    }
-
-    let bloom = all_blooms
-        .get(&expected_id)
-        .ok_or_else(|| anyhow::anyhow!("Bloom not found: {}", expected_id))?;
-
-    let content = bloom_content(bloom);
-    let plan = compute_chunks(&content, chunk_threshold());
-    let chunk_truncated = session.clamp_if_chunks_shrank(plan.total);
-
-    // mx#220: if chunks shrank past our cursor, early-return with a response
-    // reflecting the NEW cursor position — same pattern as respond_ritual's
-    // chunk_truncated path. Without this, the code below would continue with
-    // stale bloom/plan/content from the OLD cursor position.
-    if chunk_truncated {
-        let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
-        if session.is_complete() {
-            db.delete_wake_session(&session_id)?;
-        } else {
-            db.update_wake_session(&session)?;
-        }
-        let bloom_full =
-            build_full_for_chunk(bloom, 0, &plan, &content, None, None, chunk_truncated);
-        let new_token = create_token(&session_id, session.step);
-        let response = WakeSkipResponse {
-            status: "chunk_truncated".to_string(),
-            bloom: bloom_full,
-            session: new_token,
-            next,
-            progress: Some(progress),
-            summary,
-        };
-        return Ok(serde_json::to_string(&response)?);
-    }
-
-    // Gate: skip is rejected for ALL blooms that have a phrase (mx#218
-    // extends mx#216). After auto-phrase generation, every chunk has a phrase
-    // — authored, derived, or auto — so --skip is only valid when
-    // chunk_truncated (content shrank past cursor). Consumers must use
-    // --respond; 3 incorrect attempts reveal the content. Priming requires
-    // engagement.
-    if !chunk_truncated {
-        let chunk_content = plan.chunk(&content, session.current_chunk_index);
-        if phrase_for_chunk(
-            bloom,
-            session.current_chunk_index,
-            plan.total,
-            chunk_content,
+    let mut session = db.get_wake_session(&session_id)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Session not found: {}. Run `mx memory wake --begin` to start a ritual.",
+            session_id
         )
-        .is_some()
-        {
-            let response = WakeErrorResponse {
-                status: "error".to_string(),
-                error: "skip_requires_phraseless_bloom".to_string(),
-                message: "This chunk has a wake phrase and cannot be skipped. Attempt a guess — three incorrect attempts will reveal the content. Priming requires engagement.".to_string(),
-                expected_id: Some(expected_id),
-            };
-            return Ok(serde_json::to_string(&response)?);
-        }
+    })?;
+
+    // `--begin` always stamps the calling agent, so a session with no agent is
+    // one an older binary wrote. Walking it would file every guess under an
+    // empty agent, unreachable from a log that is keyed by agent.
+    if session.agent.is_empty() {
+        bail!(
+            "This session was created by an older version of mx and cannot be continued. \
+             Run `mx memory wake --begin` to start a new ritual."
+        );
     }
 
-    // Skip advances past exactly one chunk (not the whole bloom if chunked).
+    // The token authorises the session, not the holder. The caller must BE the
+    // agent that began it — a caller naming no agent fails to establish that
+    // just as surely as one naming a different agent, so both are refused.
+    //
+    // The blooms are fetched with the caller's context further down, and an
+    // entry that context cannot see is indistinguishable from one that was
+    // deleted. Requiring the owner removes the way a caller could arrive here
+    // with less visibility than the ritual was built with. It does NOT remove
+    // the conflation: the owner's own visibility is not fixed for the life of
+    // a ritual — another agent's public entry can be made private while this
+    // one is open — and the owner then steps over it as vanished while it is
+    // still in the database. Telling those two apart is open work.
+    if ctx.agent_id.as_deref() != Some(session.agent.as_str()) {
+        bail!(
+            "This ritual was begun by another agent. Run `mx memory wake --begin` \
+             to start your own."
+        );
+    }
+
+    // Anti-replay: token step must match server-side state. Every respond
+    // advances the step, so a second respond on the same step lands here.
+    if session.step != token_step {
+        bail!(
+            "Token out of sync: token step {} but session at step {}",
+            token_step,
+            session.step
+        );
+    }
+
+    // Entries can be deleted while a ritual is open. Fetch what is still
+    // there rather than failing on the first id that is gone: an entry the
+    // ritual already walked past must not brick the rest of it.
+    let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
+
+    // Entries can be deleted between one call and the next, including the one
+    // the caller was just handed as `next`. Step over whatever has gone before
+    // deciding what is being asked about, so a deletion mid-ritual cannot
+    // strand the session on an entry that no longer exists.
+    //
+    // Before `validate_guess`, deliberately: a caller answering about an entry
+    // that no longer exists should be told the entry is gone, not that its
+    // guess was unusable. The second answer does not describe the situation,
+    // and a client that retries on a guess error would retry forever.
+    let mut vanished: Vec<String> = Vec::new();
+    while !session.is_complete() && session.current_bloom_is_missing(&all_blooms) {
+        if let Some(id) = session.current_bloom_id() {
+            vanished.push(id.to_string());
+        }
+        session.advance_unjudged();
+    }
+
+    // A caller naming an entry that has just gone is answered about that
+    // entry, not told it guessed the wrong id — it is following the sequence
+    // it was given. An id the caller was never handed is still a wrong id,
+    // including when the sweep ran the sequence out: answering it as vanished
+    // would delete the session on the way past and make the mistake
+    // uncorrectable.
+    if vanished.iter().any(|id| id == bloom_id) {
+        return Ok(serde_json::to_string(&unjudged_response(
+            db,
+            &mut session,
+            &session_id,
+            &all_blooms,
+            "bloom_missing",
+            None,
+        )?)?);
+    }
+
+    let Some(expected_id) = session.current_bloom_id().map(str::to_string) else {
+        // The sweep consumed the rest of the sequence and the caller named
+        // something it was never handed. Nothing is persisted, so the session
+        // survives for a corrected call.
+        let response = WakeErrorResponse {
+            status: "error".to_string(),
+            error: "invalid_bloom_id".to_string(),
+            message: format!(
+                "No bloom is awaiting a response; {} was not part of this ritual",
+                bloom_id
+            ),
+            expected_id: None,
+        };
+        return Ok(serde_json::to_string(&response)?);
+    };
+
+    if bloom_id != expected_id {
+        let response = WakeErrorResponse {
+            status: "error".to_string(),
+            error: "invalid_bloom_id".to_string(),
+            message: format!("Expected bloom {}, got {}", expected_id, bloom_id),
+            expected_id: Some(expected_id),
+        };
+        return Ok(serde_json::to_string(&response)?);
+    }
+
+    validate_guess(guess)?;
+
+    let bloom = all_blooms
+        .get(&expected_id)
+        .ok_or_else(|| anyhow::anyhow!("Bloom not found after the missing-entry sweep"))?;
+
+    let content = bloom_content(bloom);
+    let plan = compute_chunks(&content, chunk_threshold());
+
+    // If the bloom shrank past our chunk cursor, advance to the next bloom.
+    // No guess was judged, so no row is written — but the step still ticks, so
+    // the token the caller just spent stops verifying.
+    if session.clamp_if_chunks_shrank(plan.total) {
+        let resolved = phrases_for_chunk(bloom, 0, plan.total, chunk_text(&plan, &content, 0));
+        let shown =
+            build_full_for_chunk(bloom, 0, &plan, &content, resolved.phrases, resolved.source);
+        return Ok(serde_json::to_string(&unjudged_response(
+            db,
+            &mut session,
+            &session_id,
+            &all_blooms,
+            "chunk_truncated",
+            Some(shown),
+        )?)?);
+    }
+
     let chunk_idx = session.current_chunk_index;
-    session.advance_skipped(plan.total);
+    let chunk_content = chunk_text(&plan, &content, chunk_idx);
+    let resolved = phrases_for_chunk(bloom, chunk_idx, plan.total, chunk_content);
+
+    let (match_kind, match_index) = best_match(guess, &resolved.phrases);
+    let bucket = match match_kind {
+        MatchKind::None => Bucket::Revealed,
+        _ => Bucket::Unhinted,
+    };
+
+    db.insert_wake_guess(&WakeGuessRow {
+        agent: session.agent.clone(),
+        wake: session.wake,
+        session_id: session_id.clone(),
+        bloom_id: expected_id.clone(),
+        chunk_index: chunk_idx,
+        chunk_total: plan.total,
+        position: session.step,
+        bloom_position: session.current_index + 1,
+        bloom_total: session.total_blooms(),
+        title_shown: title_for_chunk(bloom, chunk_idx, &plan),
+        guess: guess.to_string(),
+        model_id: session.model_id.clone(),
+        phrase_source: resolved.source.as_str().to_string(),
+        phrases: resolved.phrases.clone(),
+        match_kind: match_kind.as_str().to_string(),
+        match_index,
+        bucket: bucket.as_str().to_string(),
+        content_hash: content_hash(chunk_content),
+    })?;
+
+    let shown = build_full_for_chunk(
+        bloom,
+        chunk_idx,
+        &plan,
+        &content,
+        resolved.phrases,
+        resolved.source,
+    );
+
+    session.advance(plan.total, bucket, resolved.source);
+    skip_missing_blooms(&mut session, &all_blooms);
 
     let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
 
@@ -595,20 +498,16 @@ pub fn skip_ritual(
         db.update_wake_session(&session)?;
     }
 
-    let new_token = create_token(&session_id, session.step);
-
-    let response = WakeSkipResponse {
-        status: "skipped".to_string(),
-        bloom: build_full_for_chunk(
-            bloom,
-            chunk_idx,
-            &plan,
-            &content,
-            None,
-            None,
-            chunk_truncated,
-        ),
-        session: new_token,
+    let response = WakeRespondResponse {
+        status: "shown".to_string(),
+        bucket: Some(bucket.as_str().to_string()),
+        guess: Some(guess.to_string()),
+        match_info: Some(MatchInfo {
+            kind: match_kind.as_str().to_string(),
+            phrase_index: match_index,
+        }),
+        bloom: Some(shown),
+        session: create_token(&session_id, session.step),
         next,
         progress: Some(progress),
         summary,
@@ -617,7 +516,55 @@ pub fn skip_ritual(
     Ok(serde_json::to_string(&response)?)
 }
 
-/// Fetch blooms by IDs and build lookup map
+/// Finish a step where no guess was judged: persist the already-advanced
+/// session, step over any blooms that have since been deleted, and build the
+/// response. Shared by the truncated-chunk and deleted-entry paths, which
+/// differ only in their status and in whether there is anything to show.
+fn unjudged_response(
+    db: &dyn KnowledgeStore,
+    session: &mut WakeSession,
+    session_id: &str,
+    all_blooms: &HashMap<String, KnowledgeEntry>,
+    status: &str,
+    shown: Option<BloomFull>,
+) -> Result<WakeRespondResponse> {
+    skip_missing_blooms(session, all_blooms);
+
+    let (next, progress, summary) = get_next_and_progress(session, all_blooms)?;
+    if session.is_complete() {
+        db.delete_wake_session(session_id)?;
+    } else {
+        db.update_wake_session(session)?;
+    }
+
+    Ok(WakeRespondResponse {
+        status: status.to_string(),
+        bucket: None,
+        guess: None,
+        match_info: None,
+        bloom: shown,
+        session: create_token(session_id, session.step),
+        next,
+        progress: Some(progress),
+        summary,
+    })
+}
+
+/// Step the cursor over blooms that are no longer in the database, so the
+/// next prompt names an entry that still exists. Each one costs a step, the
+/// same as any other advance.
+fn skip_missing_blooms(session: &mut WakeSession, all_blooms: &HashMap<String, KnowledgeEntry>) {
+    while !session.is_complete() && session.current_bloom_is_missing(all_blooms) {
+        session.advance_unjudged();
+    }
+}
+
+/// Fetch the blooms of a session that still exist.
+///
+/// Deliberately tolerant: a bloom the ritual already walked past can be
+/// deleted from another shell, and re-fetching every id on every respond used
+/// to hard-fail on the first one missing — bricking a session that could
+/// neither be finished nor cleared. Callers handle an absent current bloom.
 fn fetch_blooms_by_ids(
     db: &dyn KnowledgeStore,
     ctx: &AgentContext,
@@ -628,8 +575,6 @@ fn fetch_blooms_by_ids(
     for id in bloom_ids {
         if let Some(entry) = db.get(id, ctx)? {
             map.insert(id.clone(), entry);
-        } else {
-            bail!("Bloom not found in database: {}", id);
         }
     }
 
@@ -653,104 +598,47 @@ fn build_bloom_map_owned(cascade: &WakeCascade) -> HashMap<String, KnowledgeEntr
     map
 }
 
-/// Build the per-bloom roll-up list for `summary.blooms_complete`. One entry
-/// per bloom visited during the ritual, with total chunks + outcome counts
-/// + authored-vs-derived telemetry. PR 3 observability.
-fn build_bloom_rollups(
-    session: &WakeSession,
-    blooms: &HashMap<String, KnowledgeEntry>,
-) -> Vec<BloomRollup> {
-    session
-        .bloom_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, id)| {
-            let meta = session
-                .bloom_chunk_meta
-                .get(idx)
-                .cloned()
-                .unwrap_or_default();
-            let title = blooms
-                .get(id)
-                .map(|e| e.title.clone())
-                .unwrap_or_else(|| id.clone());
-            let total_outcomes = meta.remembered_chunks + meta.helped_chunks + meta.skipped_chunks;
-            let chunks_str = if total_outcomes == 0 {
-                "0/0 (not reached)".to_string()
-            } else if meta.remembered_chunks == total_outcomes {
-                format!("{}/{} remembered", meta.remembered_chunks, total_outcomes)
-            } else if meta.skipped_chunks == total_outcomes {
-                format!("{}/{} skipped", meta.skipped_chunks, total_outcomes)
-            } else {
-                // Mixed outcome — show each nonzero counter.
-                let mut parts = Vec::new();
-                if meta.remembered_chunks > 0 {
-                    parts.push(format!("{} remembered", meta.remembered_chunks));
-                }
-                if meta.helped_chunks > 0 {
-                    parts.push(format!("{} helped", meta.helped_chunks));
-                }
-                if meta.skipped_chunks > 0 {
-                    parts.push(format!("{} skipped", meta.skipped_chunks));
-                }
-                format!(
-                    "{}/{}  {}",
-                    total_outcomes,
-                    total_outcomes,
-                    parts.join(", ")
-                )
-            };
-            BloomRollup {
-                id: id.clone(),
-                title,
-                chunks: chunks_str,
-                remembered: meta.remembered_chunks,
-                needed_help: meta.helped_chunks,
-                skipped: meta.skipped_chunks,
-                total: total_outcomes,
-                authored_chunks: meta.authored_chunks,
-                derived_chunks: meta.derived_chunks,
-                auto_chunks: meta.auto_chunks,
-            }
-        })
-        .collect()
-}
-
 /// Get next bloom prompt and current progress. Handles both in-bloom chunk
 /// advancement (staying on the same bloom) and cross-bloom advancement.
 fn get_next_and_progress(
     session: &WakeSession,
     all_blooms: &HashMap<String, KnowledgeEntry>,
 ) -> Result<(Option<BloomPrompt>, Progress, Option<Summary>)> {
-    // `step` is 1-indexed for display. After an advance, session.step is the
-    // count of chunks already walked; display shows "we're on chunk step+1".
-    let display_current = session.step as usize + 1;
-
     // Re-compute total chunks for progress (cheap; keeps the total fresh for
-    // mid-ritual edits per §7.1).
+    // mid-ritual edits).
     let total_chunks = total_chunks_across_cascade(session, all_blooms).max(1);
-    let bloom_current = session.current_bloom_position().min(session.total_blooms());
+
+    // `current` is the chunk being worked on: one past the ones already
+    // walked. When the ritual is complete there is no such chunk, so it is the
+    // count walked — otherwise the last response of every ritual would report
+    // a position past the end, next to a summary that says otherwise. Clamped
+    // because a step where no guess was judged still ticks, and the recomputed
+    // total need not have a chunk for it.
+    let walked = session.step as usize;
+    let display_current = if session.is_complete() {
+        walked
+    } else {
+        walked + 1
+    }
+    .min(total_chunks);
+
+    let bloom_current = (session.current_index + 1).min(session.total_blooms());
+    let buckets = session.bucket_totals();
 
     let progress = Progress {
         current: display_current,
         total: total_chunks,
-        remembered: Some(session.remembered_count),
-        needed_help: Some(session.needed_help_count),
-        skipped: Some(session.skipped_count),
-        bloom_current: Some(bloom_current),
-        bloom_total: Some(session.total_blooms()),
+        bloom_current,
+        bloom_total: session.total_blooms(),
+        buckets: Some(buckets.totals()),
     };
 
     if session.is_complete() {
         let summary = Summary {
-            total: session.step as usize,
-            remembered: session.remembered_count,
-            needed_help: session.needed_help_count,
-            skipped: session.skipped_count,
-            blooms_complete: Some(build_bloom_rollups(session, all_blooms)),
-            chunks_remembered: Some(session.remembered_count),
-            chunks_needed_help: Some(session.needed_help_count),
-            chunks_skipped: Some(session.skipped_count),
+            chunks: session.step as usize,
+            blooms: session.total_blooms(),
+            buckets,
+            unjudged: session.unjudged_count,
         };
         Ok((None, progress, Some(summary)))
     } else {
@@ -763,12 +651,11 @@ fn get_next_and_progress(
 
         let next_content = bloom_content(next_bloom);
         let next_plan = compute_chunks(&next_content, chunk_threshold());
-        let next_chunk_idx = session.current_chunk_index;
 
         Ok((
             Some(build_prompt_for_chunk(
                 next_bloom,
-                next_chunk_idx,
+                session.current_chunk_index,
                 &next_plan,
                 &next_content,
             )),
@@ -778,136 +665,13 @@ fn get_next_and_progress(
     }
 }
 
-/// Generate progressive hints
-fn generate_hint(phrase: &str, attempt: u8) -> String {
-    match attempt {
-        1 => {
-            // Hint 1: starts with...
-            let words: Vec<&str> = phrase.split_whitespace().collect();
-            if let Some(first_word) = words.first() {
-                format!("starts with \"{}...\"", first_word)
-            } else {
-                "think carefully...".to_string()
-            }
-        }
-        2 => {
-            // Hint 2: blank out middle word
-            let words: Vec<&str> = phrase.split_whitespace().collect();
-            if words.len() >= 3 {
-                let middle_idx = words.len() / 2;
-                let hint_words: Vec<String> = words
-                    .iter()
-                    .enumerate()
-                    .map(|(i, w)| {
-                        if i == middle_idx {
-                            "___".to_string()
-                        } else {
-                            w.to_string()
-                        }
-                    })
-                    .collect();
-                format!("\"{}\"", hint_words.join(" "))
-            } else if words.len() == 2 {
-                format!("\"{} ___\"", words[0])
-            } else if !words.is_empty() {
-                let first_word = words[0];
-                if first_word.chars().count() > 3 {
-                    let prefix: String = first_word.chars().take(3).collect();
-                    format!("\"{}...\"", prefix)
-                } else {
-                    phrase.to_string()
-                }
-            } else {
-                "almost there...".to_string()
-            }
-        }
-        _ => "one more try...".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wake_chunk::PhraseMatch;
 
     // =====================================================================
-    // Regression tests for unicode boundary panic fix (PR #162)
-    //
-    // generate_hint() previously used `&first_word[..3]` (byte-index slicing)
-    // on single-word wake phrases. Multi-byte UTF-8 characters at the start
-    // of the word would cause a panic when byte index 3 landed inside a
-    // character. The fix uses `.chars().take(3).collect()` instead.
-    // =====================================================================
-
-    #[test]
-    fn test_generate_hint_single_emoji_word_would_panic() {
-        let phrase = "\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}\u{1F41F}";
-        assert_eq!(phrase.chars().count(), 5);
-        assert!(!phrase.is_char_boundary(3));
-
-        let result = generate_hint(phrase, 2);
-        let expected_prefix: String = phrase.chars().take(3).collect();
-        assert!(result.contains(&expected_prefix));
-        assert!(result.contains("..."));
-    }
-
-    #[test]
-    fn test_generate_hint_single_cjk_word_would_panic() {
-        let phrase = "\u{4E16}\u{754C}\u{4F60}\u{597D}\u{5417}";
-        assert_eq!(phrase.chars().count(), 5);
-
-        let result = generate_hint(phrase, 2);
-        let expected_prefix: String = phrase.chars().take(3).collect();
-        assert!(result.contains(&expected_prefix));
-    }
-
-    #[test]
-    fn test_generate_hint_single_mixed_multibyte_word_would_panic() {
-        let phrase = "\u{00E9}\u{00E9}\u{00E9}\u{00E9}";
-        assert_eq!(phrase.chars().count(), 4);
-        assert_eq!(phrase.len(), 8);
-        assert!(!phrase.is_char_boundary(3));
-
-        let result = generate_hint(phrase, 2);
-        let expected_prefix: String = phrase.chars().take(3).collect();
-        assert!(result.contains(&expected_prefix));
-    }
-
-    #[test]
-    fn test_generate_hint_attempt_1_first_word_with_emoji() {
-        let phrase = "\u{1F41F}\u{1F41F} hello world";
-        let result = generate_hint(phrase, 1);
-        assert!(result.contains("\u{1F41F}\u{1F41F}"));
-        assert!(result.starts_with("starts with"));
-    }
-
-    #[test]
-    fn test_generate_hint_attempt_2_multiword_with_emoji() {
-        let phrase = "\u{1F41F}\u{1F41F} middle \u{4E16}\u{754C}";
-        let result = generate_hint(phrase, 2);
-        assert!(result.contains("___"));
-        assert!(result.contains("\u{1F41F}\u{1F41F}"));
-        assert!(result.contains("\u{4E16}\u{754C}"));
-    }
-
-    #[test]
-    fn test_generate_hint_attempt_2_two_emoji_words() {
-        let phrase = "\u{1F41F}\u{1F41F} \u{4E16}\u{754C}";
-        let result = generate_hint(phrase, 2);
-        assert!(result.contains("\u{1F41F}\u{1F41F}"));
-        assert!(result.contains("___"));
-    }
-
-    #[test]
-    fn test_generate_hint_short_single_emoji_word() {
-        let phrase = "\u{1F41F}\u{1F41F}";
-        assert_eq!(phrase.chars().count(), 2);
-
-        let result = generate_hint(phrase, 2);
-        assert_eq!(result, phrase);
-    }
-
-    // =====================================================================
-    // phrase_for_chunk unit tests — authored-then-sampled selector logic
+    // Fixtures. Every bloom here is invented for the test.
     // =====================================================================
 
     fn test_entry() -> KnowledgeEntry {
@@ -926,190 +690,33 @@ mod tests {
         e
     }
 
-    #[test]
-    fn phrase_for_chunk_authored_within_count() {
-        let e = entry_with_phrases(vec!["alpha", "beta", "gamma"]);
-        let (p, src) = phrase_for_chunk(&e, 0, 5, "chunk 0 content").unwrap();
-        assert_eq!(p, "alpha");
-        assert_eq!(src, PhraseSource::Authored);
-
-        let (p, src) = phrase_for_chunk(&e, 2, 5, "chunk 2 content").unwrap();
-        assert_eq!(p, "gamma");
-        assert_eq!(src, PhraseSource::Authored);
-    }
-
-    #[test]
-    fn phrase_for_chunk_derived_beyond_count() {
-        let e = entry_with_phrases(vec!["alpha"]);
-        let chunk = "\n## Derived heading here\n\nbody text";
-        let (p, src) = phrase_for_chunk(&e, 3, 5, chunk).unwrap();
-        assert_eq!(p, "Derived heading here");
-        assert_eq!(src, PhraseSource::Derived);
-    }
-
-    #[test]
-    fn phrase_for_chunk_phraseless_returns_auto() {
-        // mx#218: P==0 blooms now get auto-generated phrases instead of None.
-        let e = entry_with_phrases(vec![]);
-        let (p0, src0) = phrase_for_chunk(&e, 0, 3, "content").unwrap();
-        assert!(!p0.is_empty());
-        assert_eq!(src0, PhraseSource::Auto);
-
-        let (p2, src2) = phrase_for_chunk(&e, 2, 3, "## A heading\n\nbody").unwrap();
-        assert_eq!(p2, "A heading");
-        assert_eq!(src2, PhraseSource::Auto);
-    }
-
-    #[test]
-    fn phrase_for_chunk_legacy_single_phrase() {
-        let mut e = test_entry();
-        e.wake_phrase = Some("legacy phrase".to_string());
-        let (p, src) = phrase_for_chunk(&e, 0, 1, "chunk").unwrap();
-        assert_eq!(p, "legacy phrase");
-        assert_eq!(src, PhraseSource::Authored);
-    }
-
-    // =====================================================================
-    // WakeSession state-machine tests (Risk 4 — off-by-one is the worst
-    // failure mode here; assert every transition).
-    // =====================================================================
-
     fn test_cascade(entries: Vec<KnowledgeEntry>) -> WakeCascade {
         WakeCascade {
             core: entries,
-            recent: Vec::new(),
-            bridges: Vec::new(),
+            ..Default::default()
         }
     }
 
-    #[test]
-    fn session_new_initializes_both_cursors_to_zero() {
-        let cascade = test_cascade(vec![test_entry()]);
-        let session = WakeSession::new(&cascade);
-        assert_eq!(session.current_index, 0);
-        assert_eq!(session.current_chunk_index, 0);
-        assert_eq!(session.step, 0);
-        assert_eq!(session.total_blooms(), 1);
+    fn meta() -> RitualMeta {
+        RitualMeta {
+            agent: "test-agent".to_string(),
+            wake: Some(7),
+            model_id: Some("test-model".to_string()),
+        }
     }
 
-    #[test]
-    fn session_advance_within_bloom_chunks_ticks_chunk_cursor() {
-        let mut session = WakeSession::new(&test_cascade(vec![test_entry()]));
-        session.advance_remembered(3, PhraseSourceTag::Authored); // 3-chunk bloom, chunk 0 → 1
-        assert_eq!(session.current_index, 0);
-        assert_eq!(session.current_chunk_index, 1);
-        assert_eq!(session.step, 1);
-        assert_eq!(session.remembered_count, 1);
-
-        session.advance_remembered(3, PhraseSourceTag::Authored); // chunk 1 → 2
-        assert_eq!(session.current_index, 0);
-        assert_eq!(session.current_chunk_index, 2);
-        assert_eq!(session.step, 2);
-
-        session.advance_remembered(3, PhraseSourceTag::Authored); // chunk 2 → next bloom
-        assert_eq!(session.current_index, 1);
-        assert_eq!(session.current_chunk_index, 0);
-        assert_eq!(session.step, 3);
-    }
-
-    #[test]
-    fn session_step_monotonic_across_bloom_and_chunk_advances() {
-        let mut session = WakeSession::new(&test_cascade(vec![
-            test_entry(),
-            test_entry(),
-            test_entry(),
-        ]));
-        // Bloom 0: 3 chunks
-        session.advance_remembered(3, PhraseSourceTag::Authored);
-        session.advance_remembered(3, PhraseSourceTag::Authored);
-        session.advance_remembered(3, PhraseSourceTag::Derived);
-        // Bloom 1: 1 chunk (not chunked)
-        session.advance_skipped(1);
-        // Bloom 2: 2 chunks
-        session.advance_helped(2, PhraseSourceTag::Authored);
-        session.advance_helped(2, PhraseSourceTag::Derived);
-        assert_eq!(session.step, 6);
-        assert_eq!(session.remembered_count, 3);
-        assert_eq!(session.needed_help_count, 2);
-        assert_eq!(session.skipped_count, 1);
-        assert!(session.is_complete());
-
-        // PR 3 observability: per-bloom counters populated during the walk.
-        assert_eq!(session.bloom_chunk_meta[0].remembered_chunks, 3);
-        assert_eq!(session.bloom_chunk_meta[0].authored_chunks, 2);
-        assert_eq!(session.bloom_chunk_meta[0].derived_chunks, 1);
-        assert_eq!(session.bloom_chunk_meta[1].skipped_chunks, 1);
-        assert_eq!(session.bloom_chunk_meta[2].helped_chunks, 2);
-        assert_eq!(session.bloom_chunk_meta[2].authored_chunks, 1);
-        assert_eq!(session.bloom_chunk_meta[2].derived_chunks, 1);
-    }
-
-    #[test]
-    fn session_non_chunked_bloom_advances_immediately() {
-        let mut session = WakeSession::new(&test_cascade(vec![test_entry(), test_entry()]));
-        session.advance_remembered(1, PhraseSourceTag::Authored); // single-chunk bloom
-        assert_eq!(session.current_index, 1);
-        assert_eq!(session.current_chunk_index, 0);
-    }
-
-    #[test]
-    fn session_clamp_advances_when_bloom_shrank() {
-        let mut session = WakeSession::new(&test_cascade(vec![test_entry(), test_entry()]));
-        session.current_chunk_index = 4; // pretend we were on chunk 4 of 5
-        let clamped = session.clamp_if_chunks_shrank(2); // bloom now has 2 chunks
-        assert!(clamped);
-        assert_eq!(session.current_index, 1);
-        assert_eq!(session.current_chunk_index, 0);
-    }
-
-    #[test]
-    fn session_clamp_noop_when_cursor_in_range() {
-        let mut session = WakeSession::new(&test_cascade(vec![test_entry()]));
-        session.current_chunk_index = 1;
-        let clamped = session.clamp_if_chunks_shrank(3);
-        assert!(!clamped);
-        assert_eq!(session.current_chunk_index, 1);
-        assert_eq!(session.current_index, 0);
-    }
-
-    #[test]
-    fn session_phraseless_bloom_meta() {
-        let cascade = test_cascade(vec![test_entry()]); // no wake_phrases
-        let session = WakeSession::new(&cascade);
-        let meta = session.current_meta().unwrap();
-        assert_eq!(meta.authored_phrase_count, 0);
-        assert!(meta.is_phraseless);
-    }
-
-    #[test]
-    fn session_authored_phrase_count_respects_wake_phrases() {
-        let mut e = test_entry();
-        e.wake_phrases = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let cascade = test_cascade(vec![e]);
-        let session = WakeSession::new(&cascade);
-        let meta = session.current_meta().unwrap();
-        assert_eq!(meta.authored_phrase_count, 3);
-        assert!(!meta.is_phraseless);
-    }
-
-    // =====================================================================
-    // End-to-end ritual walk with a >30KB bloom (realistic Ops scenario).
-    // Uses the actual compute_chunks + phrase_for_chunk + advance logic.
-    // =====================================================================
-
+    /// A bloom big enough to split into several chunks, with H2 sections so
+    /// the chunker has semantic break points.
     fn make_large_bloom(target_bytes: usize, phrases: Vec<&str>) -> KnowledgeEntry {
-        // Build realistic markdown content with H2 sections so the chunker
-        // has semantic break points to prefer over the UTF-8 fallback.
         let mut body = String::new();
         let mut section = 0;
         while body.len() < target_bytes {
             section += 1;
             body.push_str(&format!(
                 "\n## Section {section}\n\n\
-                 This is section {section} of the ops bloom. It contains \
+                 This is section {section} of the test bloom. It contains \
                  enough text that multiple sections will cross the chunking \
-                 threshold. The wake ritual should walk each chunk in turn \
-                 and verify phrases at each boundary.\n\n\
+                 threshold. The wake ritual should walk each chunk in turn.\n\n\
                  - bullet one for section {section}\n\
                  - bullet two for section {section}\n\
                  - bullet three for section {section}\n\n"
@@ -1122,152 +729,608 @@ mod tests {
         e
     }
 
+    /// A guess that matches nothing in any fixture here.
+    const MISS: &str = "zzz quibbling flugelhorn marmalade";
+
+    fn token_from_response(json: &serde_json::Value) -> String {
+        json.get("session")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn begin(store: &MockStore, cascade: &WakeCascade) -> serde_json::Value {
+        serde_json::from_str(&begin_ritual(store, cascade, meta()).unwrap()).unwrap()
+    }
+
+    /// Respond as the agent that `meta()` began the ritual with.
+    ///
+    /// Deliberately NOT an anonymous context: driving respond with no agent is
+    /// the one case the ownership guard lets through, and a helper that did it
+    /// by default would make every test here depend on that hole staying open.
+    fn respond(store: &MockStore, bloom_id: &str, guess: &str, token: &str) -> serde_json::Value {
+        let ctx = AgentContext::for_agent("test-agent");
+        serde_json::from_str(&respond_ritual(store, &ctx, bloom_id, guess, token).unwrap()).unwrap()
+    }
+
+    // =====================================================================
+    // phrases_for_chunk — which phrases a chunk is matched against
+    // =====================================================================
+
     #[test]
-    fn large_bloom_splits_into_multiple_chunks() {
-        let entry = make_large_bloom(69_000, vec!["alpha", "beta", "gamma"]);
-        let content = bloom_content(&entry);
-        let plan = compute_chunks(&content, 28_000);
-        assert!(
-            plan.total >= 3,
-            "expected ≥3 chunks for 69KB, got {}",
-            plan.total
-        );
-        // Every chunk must be under threshold (no oversized code blocks here).
-        for (_, chunk, oversized) in plan.iter(&content) {
-            if !oversized {
-                assert!(chunk.len() <= 28_000);
-            }
-        }
+    fn authored_chunk_is_matched_against_every_authored_phrase() {
+        let e = entry_with_phrases(vec!["alpha", "beta", "gamma"]);
+        let resolved = phrases_for_chunk(&e, 0, 5, "chunk 0 content");
+        assert_eq!(resolved.source, PhraseSource::Authored);
+        assert_eq!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
+
+        // Same set at a later authored index — the index picks the SOURCE,
+        // not a single phrase.
+        let resolved = phrases_for_chunk(&e, 2, 5, "chunk 2 content");
+        assert_eq!(resolved.source, PhraseSource::Authored);
+        assert_eq!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
     }
 
     #[test]
-    fn large_bloom_authored_then_derived_phrase_sequence() {
-        // P=3 authored phrases, K=5 chunks → chunks 0-2 authored, 3-4 derived.
-        let entry = make_large_bloom(110_000, vec!["alpha", "beta", "gamma"]);
-        let content = bloom_content(&entry);
-        let plan = compute_chunks(&content, 28_000);
-        assert!(
-            plan.total >= 4,
-            "need at least 4 chunks, got {}",
-            plan.total
-        );
-
-        // Authored chunks.
-        let (p0, src0) = phrase_for_chunk(&entry, 0, plan.total, plan.chunk(&content, 0)).unwrap();
-        assert_eq!(p0, "alpha");
-        assert_eq!(src0, PhraseSource::Authored);
-
-        let (p1, src1) = phrase_for_chunk(&entry, 1, plan.total, plan.chunk(&content, 1)).unwrap();
-        assert_eq!(p1, "beta");
-        assert_eq!(src1, PhraseSource::Authored);
-
-        let (p2, src2) = phrase_for_chunk(&entry, 2, plan.total, plan.chunk(&content, 2)).unwrap();
-        assert_eq!(p2, "gamma");
-        assert_eq!(src2, PhraseSource::Authored);
-
-        // Derived chunks — should extract from the chunk's own content
-        // (markdown heading or first sentence).
-        let chunk3 = plan.chunk(&content, 3);
-        let (p3, src3) = phrase_for_chunk(&entry, 3, plan.total, chunk3).unwrap();
-        assert!(!p3.is_empty());
-        assert_eq!(src3, PhraseSource::Derived);
+    fn chunk_beyond_authored_count_derives_one_phrase() {
+        let e = entry_with_phrases(vec!["alpha"]);
+        let resolved = phrases_for_chunk(&e, 3, 5, "\n## Derived heading here\n\nbody text");
+        assert_eq!(resolved.source, PhraseSource::Derived);
+        assert_eq!(resolved.phrases, vec!["Derived heading here"]);
     }
 
     #[test]
-    fn phraseless_large_bloom_returns_auto_for_every_chunk() {
-        // mx#218: P==0 blooms now get auto-generated phrases for every chunk.
-        let entry = make_large_bloom(90_000, vec![]);
-        let content = bloom_content(&entry);
-        let plan = compute_chunks(&content, 28_000);
-        assert!(plan.total >= 3);
-        for idx in 0..plan.total {
-            let chunk = plan.chunk(&content, idx);
-            let (phrase, source) = phrase_for_chunk(&entry, idx, plan.total, chunk)
-                .expect("P==0 bloom should have auto-phrase for every chunk");
+    fn phraseless_bloom_gets_one_auto_phrase() {
+        let e = entry_with_phrases(vec![]);
+        let resolved = phrases_for_chunk(&e, 2, 3, "## A heading\n\nbody");
+        assert_eq!(resolved.source, PhraseSource::Auto);
+        assert_eq!(resolved.phrases, vec!["A heading"]);
+    }
+
+    #[test]
+    fn legacy_single_wake_phrase_is_treated_as_authored() {
+        let mut e = test_entry();
+        e.wake_phrase = Some("legacy phrase".to_string());
+        let resolved = phrases_for_chunk(&e, 0, 1, "chunk");
+        assert_eq!(resolved.source, PhraseSource::Authored);
+        assert_eq!(resolved.phrases, vec!["legacy phrase"]);
+    }
+
+    // =====================================================================
+    // best_match — exact beats close, earliest phrase wins
+    // =====================================================================
+
+    #[test]
+    fn best_match_reports_the_index_of_the_matching_phrase() {
+        let phrases = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        assert_eq!(best_match("gamma", &phrases), (MatchKind::Exact, Some(2)));
+        assert_eq!(best_match("beta", &phrases), (MatchKind::Exact, Some(1)));
+        assert_eq!(best_match(MISS, &phrases), (MatchKind::None, None));
+    }
+
+    #[test]
+    fn best_match_prefers_an_exact_hit_over_an_earlier_close_one() {
+        let phrases = vec!["Alpha".to_string(), "beta".to_string()];
+        // "alpha" is a case-tolerant (close) hit on phrase 0; "beta" would be
+        // exact. Ask for the exact one and confirm it is not shadowed.
+        assert_eq!(compare_phrase("alpha", &phrases[0]), PhraseMatch::Tolerant);
+        assert_eq!(best_match("beta", &phrases), (MatchKind::Exact, Some(1)));
+        assert_eq!(best_match("alpha", &phrases), (MatchKind::Close, Some(0)));
+    }
+
+    // =====================================================================
+    // The one-guess flow
+    // =====================================================================
+
+    #[test]
+    fn a_matching_guess_is_unhinted_and_shows_the_bloom() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let token = token_from_response(&begin_json);
+        let resp = respond(&store, &bloom_id, "alpha", &token);
+
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(resp["bucket"], "unhinted");
+        assert_eq!(resp["guess"], "alpha");
+        assert_eq!(resp["match"]["kind"], "exact");
+        assert_eq!(resp["match"]["phrase_index"], 0);
+        assert_eq!(resp["bloom"]["content"], "body");
+        assert_eq!(resp["bloom"]["phrase_source"], "authored");
+    }
+
+    #[test]
+    fn a_missed_guess_is_revealed_and_still_shows_the_bloom() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let token = token_from_response(&begin_json);
+        let resp = respond(&store, &bloom_id, MISS, &token);
+
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(resp["bucket"], "revealed");
+        assert_eq!(resp["match"]["kind"], "none");
+        assert!(resp["match"]["phrase_index"].is_null());
+        // The bloom is shown on a miss too — there is no second attempt.
+        assert_eq!(resp["bloom"]["content"], "body");
+        assert_eq!(resp["bloom"]["phrases"][0], "alpha");
+    }
+
+    #[test]
+    fn one_guess_ends_the_bloom_so_a_second_respond_is_rejected() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+        let second = entry_with_phrases(vec!["bravo"]);
+        let mut second = second;
+        second.id = "kn-second".to_string();
+        store.seed(&second);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom, second]));
+        let token = token_from_response(&begin_json);
+
+        // First guess is judged and the session advances past the bloom.
+        let resp = respond(&store, &bloom_id, MISS, &token);
+        assert_eq!(resp["status"], "shown");
+
+        // Re-using the begin token replays a consumed step.
+        let ctx = AgentContext::for_agent("test-agent");
+        let err = respond_ritual(&store, &ctx, &bloom_id, "alpha", &token).unwrap_err();
+        assert!(
+            err.to_string().contains("Token out of sync"),
+            "expected a replay rejection, got: {err}"
+        );
+        assert_eq!(
+            store.guesses.borrow().len(),
+            1,
+            "no row for a rejected call"
+        );
+    }
+
+    #[test]
+    fn the_response_carries_no_hint_ladder_and_no_retired_vocabulary() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let raw = respond_ritual(
+            &store,
+            &AgentContext::for_agent("test-agent"),
+            &bloom_id,
+            MISS,
+            &token_from_response(&begin_json),
+        )
+        .unwrap();
+
+        for retired in [
+            "hint",
+            "attempt",
+            "remembered",
+            "needed_help",
+            "incorrect",
+            "skipped",
+            "match_type",
+            "derived_phrase_mismatch",
+            "wake_phrase_count",
+            "matched_phrase",
+            "all_phrases",
+            "blooms_complete",
+        ] {
+            let key = format!("\"{retired}\"");
             assert!(
-                !phrase.is_empty(),
-                "auto-phrase must not be empty (chunk {})",
-                idx
-            );
-            assert_eq!(
-                source,
-                PhraseSource::Auto,
-                "P==0 bloom should use Auto source (chunk {})",
-                idx
+                !raw.contains(&key),
+                "respond payload still carries {key}: {raw}"
             );
         }
     }
 
     #[test]
-    fn full_ritual_walk_through_large_bloom_advances_all_chunks() {
-        let entry = make_large_bloom(85_000, vec!["alpha", "beta"]);
-        let content = bloom_content(&entry);
-        let plan = compute_chunks(&content, 28_000);
-        let total_chunks = plan.total;
-        assert!(total_chunks >= 3);
+    fn a_guess_matching_the_second_or_third_authored_phrase_is_unhinted() {
+        // The old matcher compared chunk i against wake_phrases[i] only, so on
+        // a single-chunk bloom phrases 1 and 2 could never match (#450).
+        for (guess, expected_index) in [("beta", 1), ("gamma", 2)] {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha", "beta", "gamma"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
 
-        let mut session = WakeSession::new(&test_cascade(vec![entry]));
+            let begin_json = begin(&store, &test_cascade(vec![bloom]));
+            let resp = respond(&store, &bloom_id, guess, &token_from_response(&begin_json));
 
-        // Walk through every chunk as "remembered". Each advance_remembered
-        // call must stay on the bloom until we've walked all chunks, then
-        // roll over to the next (non-existent) bloom → ritual complete.
-        for expected_chunk in 0..total_chunks {
-            assert_eq!(session.current_chunk_index, expected_chunk);
-            assert_eq!(session.current_index, 0);
-            session.advance_remembered(total_chunks, PhraseSourceTag::Authored);
+            assert_eq!(resp["bucket"], "unhinted", "guess {guess:?}");
+            assert_eq!(resp["match"]["kind"], "exact", "guess {guess:?}");
+            assert_eq!(resp["match"]["phrase_index"], expected_index);
+            assert_eq!(store.guesses.borrow()[0].match_index, Some(expected_index));
         }
-        assert!(session.is_complete());
-        assert_eq!(session.step, total_chunks as u32);
-        assert_eq!(session.remembered_count, total_chunks as u32);
     }
 
     #[test]
-    fn derived_phrase_tolerant_match_accepts_case_and_punct_variants() {
-        use crate::wake_chunk::{PhraseMatch, PhraseMode, compare_phrase};
+    fn an_authored_phrase_matches_case_insensitively() {
+        // Authored phrases used to need a case-sensitive exact match.
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["The Long Way Round"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
 
-        let entry = make_large_bloom(85_000, vec!["alpha"]);
-        let content = bloom_content(&entry);
-        let plan = compute_chunks(&content, 28_000);
-        assert!(plan.total >= 2);
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let resp = respond(
+            &store,
+            &bloom_id,
+            "the long way round.",
+            &token_from_response(&begin_json),
+        );
+        assert_eq!(resp["bucket"], "unhinted");
+        assert_eq!(resp["match"]["kind"], "close");
+        assert_eq!(resp["match"]["phrase_index"], 0);
+    }
 
-        // Chunk 1 uses a derived phrase. Grab it.
-        let chunk1 = plan.chunk(&content, 1);
-        let (target, src) = phrase_for_chunk(&entry, 1, plan.total, chunk1).unwrap();
-        assert_eq!(src, PhraseSource::Derived);
+    // =====================================================================
+    // The guess log
+    // =====================================================================
 
-        // Same phrase, lowercased and with trailing period — should match.
-        let variant = format!("{}.", target.to_lowercase());
-        let result = compare_phrase(&variant, &target, PhraseMode::Derived);
+    #[test]
+    fn each_respond_writes_exactly_one_row_with_both_positions() {
+        let store = MockStore::new();
+        let mut first = entry_with_phrases(vec!["alpha"]);
+        first.id = "kn-first".to_string();
+        first.title = "First".to_string();
+        let mut second = entry_with_phrases(vec!["bravo"]);
+        second.id = "kn-second".to_string();
+        second.title = "Second".to_string();
+        store.seed(&first);
+        store.seed(&second);
+
+        let begin_json = begin(&store, &test_cascade(vec![first, second]));
+        let mut token = token_from_response(&begin_json);
+        for (bloom_id, guess) in [("kn-first", "alpha"), ("kn-second", MISS)] {
+            let resp = respond(&store, bloom_id, guess, &token);
+            token = token_from_response(&resp);
+        }
+
+        let rows = store.guesses.borrow();
+        assert_eq!(rows.len(), 2, "one row per respond");
+
+        assert_eq!(rows[0].bloom_id, "kn-first");
+        assert_eq!(rows[0].position, 0);
+        assert_eq!(rows[0].bloom_position, 1);
+        assert_eq!(rows[0].bloom_total, 2);
+        assert_eq!(rows[0].chunk_index, 0);
+        assert_eq!(rows[0].chunk_total, 1);
+        assert_eq!(rows[0].title_shown, "First");
+        assert_eq!(rows[0].bucket, "unhinted");
+        assert_eq!(rows[0].match_kind, "exact");
+        assert_eq!(rows[0].phrases, vec!["alpha"]);
+        assert_eq!(
+            rows[0].content_hash,
+            crate::wake_guess::content_hash("body")
+        );
+
+        assert_eq!(rows[1].bloom_id, "kn-second");
+        assert_eq!(rows[1].position, 1);
+        assert_eq!(rows[1].bloom_position, 2);
+        assert_eq!(rows[1].bucket, "revealed");
+        assert_eq!(rows[1].match_kind, "none");
+        assert_eq!(rows[1].match_index, None);
+        assert_eq!(rows[1].guess, MISS);
+    }
+
+    #[test]
+    fn the_wake_and_model_flags_land_on_every_row() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        respond(
+            &store,
+            &bloom_id,
+            "alpha",
+            &token_from_response(&begin_json),
+        );
+
+        let rows = store.guesses.borrow();
+        assert_eq!(rows[0].wake, Some(7));
+        assert_eq!(rows[0].model_id.as_deref(), Some("test-model"));
+        assert_eq!(rows[0].agent, "test-agent");
+    }
+
+    #[test]
+    fn an_omitted_wake_number_logs_as_absent() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json: serde_json::Value = serde_json::from_str(
+            &begin_ritual(
+                &store,
+                &test_cascade(vec![bloom]),
+                RitualMeta {
+                    agent: "test-agent".to_string(),
+                    wake: None,
+                    model_id: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        respond(
+            &store,
+            &bloom_id,
+            "alpha",
+            &token_from_response(&begin_json),
+        );
+
+        let rows = store.guesses.borrow();
+        assert_eq!(rows[0].wake, None);
+        assert_eq!(rows[0].model_id, None);
+    }
+
+    #[test]
+    fn a_chunked_bloom_advances_position_but_not_bloom_position() {
+        let store = MockStore::new();
+        let bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let total_chunks = begin_json["progress"]["total"].as_u64().unwrap();
+        assert!(total_chunks >= 3, "fixture must chunk; got {total_chunks}");
+
+        let mut token = token_from_response(&begin_json);
+        for _ in 0..total_chunks {
+            let resp = respond(&store, &bloom_id, MISS, &token);
+            token = token_from_response(&resp);
+        }
+
+        let rows = store.guesses.borrow();
+        assert_eq!(rows.len(), total_chunks as usize, "one row per chunk");
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(row.position, idx as u32, "position advances per chunk");
+            assert_eq!(row.bloom_position, 1, "still the same bloom");
+            assert_eq!(row.chunk_index, idx as u16);
+            assert!(
+                row.title_shown.contains(&format!("(Part {}/", idx + 1)),
+                "chunked title must carry its part suffix: {}",
+                row.title_shown
+            );
+        }
+    }
+
+    #[test]
+    fn a_chunk_truncated_response_writes_no_row() {
+        let store = MockStore::new();
+        let bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let mut token = token_from_response(&begin_json);
+
+        // Walk two chunks, then shrink the bloom under the cursor.
+        for _ in 0..2 {
+            let resp = respond(&store, &bloom_id, MISS, &token);
+            token = token_from_response(&resp);
+        }
+        assert_eq!(store.guesses.borrow().len(), 2);
+
+        store.mutate_bloom(&bloom_id, |entry| {
+            entry.body = Some("shrunk down to a single tiny chunk now.".to_string());
+        });
+
+        let resp = respond(&store, &bloom_id, "ignored", &token);
+        assert_eq!(resp["status"], "chunk_truncated");
         assert!(
-            matches!(result, PhraseMatch::Exact | PhraseMatch::Tolerant),
-            "derived compare should accept case+punct drift: {:?} vs {:?}",
-            variant,
-            target
+            resp.get("bucket").is_none(),
+            "no bucket without a judgement"
+        );
+        assert!(resp.get("guess").is_none());
+        assert_eq!(
+            store.guesses.borrow().len(),
+            2,
+            "a truncated chunk judges no guess, so it logs none"
+        );
+    }
+
+    #[test]
+    fn a_failed_row_write_fails_the_respond_and_leaves_the_session_put() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let token = token_from_response(&begin_json);
+
+        store.fail_guess_write.set(true);
+        let err = respond_ritual(
+            &store,
+            &AgentContext::for_agent("test-agent"),
+            &bloom_id,
+            "alpha",
+            &token,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("guess log unavailable"),
+            "the write failure must surface, got: {err}"
+        );
+
+        {
+            let sessions = store.sessions.borrow();
+            let session = sessions.values().next().expect("session must survive");
+            assert_eq!(
+                session.step, 0,
+                "session must not advance past a lost guess"
+            );
+            assert_eq!(session.current_index, 0);
+            assert_eq!(session.unhinted_count, 0);
+        }
+
+        // With the log back, the same token still works.
+        store.fail_guess_write.set(false);
+        let resp = respond(&store, &bloom_id, "alpha", &token);
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(store.guesses.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_bloom_deleted_while_it_is_on_the_table_is_stepped_over() {
+        // The brick case above covers an entry already walked past. This is the
+        // harder one: the entry the ritual is asking about right now.
+        let store = MockStore::new();
+        let mut first = entry_with_phrases(vec!["alpha"]);
+        first.id = "kn-first".to_string();
+        let mut second = entry_with_phrases(vec!["bravo"]);
+        second.id = "kn-second".to_string();
+        store.seed(&first);
+        store.seed(&second);
+
+        let begin_json = begin(&store, &test_cascade(vec![first, second]));
+        let token = token_from_response(&begin_json);
+        store.blooms.borrow_mut().remove("kn-first");
+
+        let resp = respond(&store, "kn-first", "alpha", &token);
+        assert_eq!(resp["status"], "bloom_missing");
+        assert!(resp.get("bloom").is_none(), "there is nothing to show");
+        assert!(resp.get("bucket").is_none(), "nothing was judged");
+        assert!(
+            store.guesses.borrow().is_empty(),
+            "a vanished bloom logs no guess"
+        );
+
+        // The ritual keeps going: the next entry is served and answerable.
+        assert_eq!(resp["next"]["id"], "kn-second");
+        let resp = respond(&store, "kn-second", "bravo", &token_from_response(&resp));
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(resp["bucket"], "unhinted");
+        // The skipped step is counted as walked but sits in no bucket.
+        assert_eq!(resp["summary"]["chunks"], 2);
+        assert_eq!(resp["summary"]["buckets"]["unhinted"]["authored"], 1);
+        assert_eq!(resp["summary"]["buckets"]["revealed"]["authored"], 0);
+    }
+
+    #[test]
+    fn a_bloom_deleted_further_down_the_sequence_is_never_prompted_for() {
+        // The `next` pointer must name an entry that still exists.
+        let store = MockStore::new();
+        let mut first = entry_with_phrases(vec!["alpha"]);
+        first.id = "kn-first".to_string();
+        let mut second = entry_with_phrases(vec!["bravo"]);
+        second.id = "kn-second".to_string();
+        let mut third = entry_with_phrases(vec!["charlie"]);
+        third.id = "kn-third".to_string();
+        store.seed(&first);
+        store.seed(&second);
+        store.seed(&third);
+
+        let begin_json = begin(&store, &test_cascade(vec![first, second, third]));
+        let token = token_from_response(&begin_json);
+        store.blooms.borrow_mut().remove("kn-second");
+
+        let resp = respond(&store, "kn-first", "alpha", &token);
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(
+            resp["next"]["id"], "kn-third",
+            "the deleted entry must be stepped over, not prompted for: {resp}"
         );
     }
 
     // =====================================================================
-    // Integration tests over the public begin/respond/skip API (Diffi's
-    // mx#213 review gaps 1 & 2). These exercise the full ritual flow
-    // against a minimal in-memory KnowledgeStore mock, so state-machine
-    // advancement + token progression + clamp-on-shrink + P==0 repeated-
-    // skip are covered end-to-end rather than via direct cursor pokes.
+    // Progress and summary
+    // =====================================================================
+
+    #[test]
+    fn the_summary_reports_bucket_counts_split_by_phrase_source() {
+        let store = MockStore::new();
+        let mut authored = entry_with_phrases(vec!["alpha"]);
+        authored.id = "kn-authored".to_string();
+        let mut auto = test_entry(); // no phrases at all
+        auto.id = "kn-auto".to_string();
+        auto.body = Some("## The Discovery\n\nBody text here.".to_string());
+        store.seed(&authored);
+        store.seed(&auto);
+
+        let begin_json = begin(&store, &test_cascade(vec![authored, auto]));
+        assert!(
+            begin_json["progress"].get("buckets").is_none(),
+            "nothing is guessed at begin time"
+        );
+
+        let mut token = token_from_response(&begin_json);
+        let resp = respond(&store, "kn-authored", "alpha", &token);
+        assert_eq!(resp["progress"]["buckets"]["unhinted"], 1);
+        assert_eq!(resp["progress"]["buckets"]["revealed"], 0);
+        token = token_from_response(&resp);
+
+        let resp = respond(&store, "kn-auto", MISS, &token);
+        let summary = &resp["summary"];
+        assert_eq!(summary["chunks"], 2);
+        assert_eq!(summary["blooms"], 2);
+        assert_eq!(summary["buckets"]["unhinted"]["authored"], 1);
+        assert_eq!(summary["buckets"]["unhinted"]["derived"], 0);
+        assert_eq!(summary["buckets"]["unhinted"]["auto"], 0);
+        assert_eq!(summary["buckets"]["revealed"]["auto"], 1);
+        assert_eq!(summary["buckets"]["revealed"]["authored"], 0);
+        assert!(
+            resp.get("next").is_none(),
+            "the last respond has no next prompt"
+        );
+        assert!(
+            store.sessions.borrow().is_empty(),
+            "session is deleted on completion"
+        );
+    }
+
+    #[test]
+    fn the_begin_response_reports_excluded_entries_per_tag() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        store.seed(&bloom);
+        let mut cascade = test_cascade(vec![bloom]);
+        cascade.excluded.insert("archive".to_string(), 2);
+        cascade.excluded.insert("wake-exclude".to_string(), 1);
+
+        let begin_json = begin(&store, &cascade);
+        assert_eq!(begin_json["excluded"]["archive"], 2);
+        assert_eq!(begin_json["excluded"]["wake-exclude"], 1);
+    }
+
+    #[test]
+    fn a_begin_with_nothing_excluded_reports_an_empty_object() {
+        // The key is always present, so a consumer reads one shape either way
+        // and never has to tell an absent key from a zero count.
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        store.seed(&bloom);
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        assert_eq!(
+            begin_json["excluded"],
+            serde_json::json!({}),
+            "excluded must be present and empty: {begin_json}"
+        );
+    }
+
+    // =====================================================================
+    // Minimal in-memory KnowledgeStore for the tests above. Implements the
+    // methods the ritual actually calls; every other trait method is
+    // `unreachable!()` because the ritual never touches them.
     // =====================================================================
 
     use mock_store::MockStore;
 
-    /// Minimal in-memory KnowledgeStore used only for the wake-ritual
-    /// integration tests in this module. Implements the five methods the
-    /// ritual actually calls (`create_wake_session`, `get_wake_session`,
-    /// `update_wake_session`, `delete_wake_session`, `get`) against
-    /// RefCell-backed HashMaps; every other trait method is `unreachable!()`
-    /// because the ritual code path doesn't touch them.
-    ///
-    /// Deliberately scoped inline to this test module — not shipped as a
-    /// reusable fixture — so the integration tests here don't bloat the PR
-    /// with a real mock harness that would need its own test surface.
     mod mock_store {
-        use std::cell::RefCell;
+        use std::cell::{Cell, RefCell};
         use std::collections::HashMap;
 
         use anyhow::Result;
@@ -1281,11 +1344,15 @@ mod tests {
             Agent, ApplicabilityType, Category, ContentType, EntryType, MemoryBackup, Project,
             Relationship, RelationshipType, Session, SessionType, SourceType,
         };
+        use crate::wake_guess::WakeGuessRow;
         use crate::wake_token::WakeSession;
 
         pub struct MockStore {
             pub blooms: RefCell<HashMap<String, KnowledgeEntry>>,
             pub sessions: RefCell<HashMap<String, WakeSession>>,
+            pub guesses: RefCell<Vec<WakeGuessRow>>,
+            /// Simulates a guess log that refuses writes.
+            pub fail_guess_write: Cell<bool>,
         }
 
         impl MockStore {
@@ -1293,13 +1360,18 @@ mod tests {
                 Self {
                     blooms: RefCell::new(HashMap::new()),
                     sessions: RefCell::new(HashMap::new()),
+                    guesses: RefCell::new(Vec::new()),
+                    fail_guess_write: Cell::new(false),
                 }
             }
 
+            pub fn seed(&self, entry: &KnowledgeEntry) {
+                self.blooms
+                    .borrow_mut()
+                    .insert(entry.id.clone(), entry.clone());
+            }
+
             /// Replace a bloom in place — simulates a mid-ritual content edit.
-            /// The wake flow re-reads blooms via `get()` on every respond/skip,
-            /// so mutating via this method between ritual calls exercises the
-            /// re-derive-on-every-call contract (§2.2).
             pub fn mutate_bloom(&self, id: &str, mutate: impl FnOnce(&mut KnowledgeEntry)) {
                 let mut blooms = self.blooms.borrow_mut();
                 let entry = blooms.get_mut(id).expect("bloom to mutate must exist");
@@ -1332,6 +1404,14 @@ mod tests {
 
             fn delete_wake_session(&self, session_id: &str) -> Result<()> {
                 self.sessions.borrow_mut().remove(session_id);
+                Ok(())
+            }
+
+            fn insert_wake_guess(&self, row: &WakeGuessRow) -> Result<()> {
+                if self.fail_guess_write.get() {
+                    anyhow::bail!("guess log unavailable");
+                }
+                self.guesses.borrow_mut().push(row.clone());
                 Ok(())
             }
 
@@ -1417,6 +1497,7 @@ mod tests {
                 _l: usize,
                 _r: Option<i32>,
                 _d: i64,
+                _include_excluded: bool,
             ) -> Result<WakeCascade> {
                 unreachable!()
             }
@@ -1633,828 +1714,732 @@ mod tests {
         }
     }
 
-    /// Parse the session-token string the ritual returns so the next call
-    /// can verify it round-trips through verify_token. Convenience for the
-    /// integration tests below.
-    fn token_from_response(json: &serde_json::Value) -> String {
-        json.get("session")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
-    }
-
-    /// Diffi's issue #1 (mx#213): end-to-end test for the `chunk_truncated`
-    /// clamp path. Begin ritual on a large (~4-chunk) bloom → respond on
-    /// chunks 0 and 1 → shrink the bloom content mid-ritual so its new
-    /// chunk count is below the current cursor → the next call must detect
-    /// the shrink via `clamp_if_chunks_shrank`, surface `chunk_truncated:
-    /// true`, and roll the session forward (in this case, to ritual
-    /// completion since we only have one bloom).
-    #[test]
-    fn integration_chunk_truncated_clamp_rolls_forward() {
-        let store = MockStore::new();
-        let bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom.clone()]);
-        let ctx = AgentContext::public_only();
-
-        // Step 1: begin ritual. Confirm chunk plan covers >=3 chunks.
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let total_chunks_start = begin_json["progress"]["total"].as_u64().unwrap() as u16;
-        assert!(
-            total_chunks_start >= 3,
-            "fixture must yield ≥3 chunks; got {}",
-            total_chunks_start
-        );
-        let mut token = token_from_response(&begin_json);
-
-        // Step 2: walk chunks 0 and 1 with correct authored phrases.
-        for expected_phrase in ["alpha", "beta"] {
-            let resp_json: serde_json::Value = serde_json::from_str(
-                &respond_ritual(&store, &ctx, &bloom_id, expected_phrase, &token).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(resp_json["status"], "remembered");
-            token = token_from_response(&resp_json);
-        }
-
-        // Confirm session cursor is now at chunk 2 (0-indexed), still mid-bloom.
-        {
-            let sessions = store.sessions.borrow();
-            let sess = sessions.values().next().unwrap();
-            assert_eq!(sess.current_index, 0);
-            assert_eq!(sess.current_chunk_index, 2);
-            assert!(!sess.is_complete());
-        }
-
-        // Step 3: shrink the bloom to well under the threshold so its new
-        // chunk plan has only 1 chunk. The cursor at chunk_index=2 is now
-        // past the new total — next respond must clamp forward.
-        store.mutate_bloom(&bloom_id, |entry| {
-            entry.body = Some("shrunk down to a single tiny chunk now.".to_string());
-        });
-
-        // Step 4: next respond triggers the clamp path. The phrase we send
-        // is irrelevant because clamp short-circuits before phrase compare.
-        let resp_json: serde_json::Value = serde_json::from_str(
-            &respond_ritual(&store, &ctx, &bloom_id, "ignored", &token).unwrap(),
-        )
-        .unwrap();
-
-        // Clamp surfaces as status=chunk_truncated and chunk_truncated=true
-        // on the returned bloom payload (§2.2).
-        assert_eq!(
-            resp_json["status"], "chunk_truncated",
-            "expected clamp status, got {:?}",
-            resp_json["status"]
-        );
-        assert_eq!(
-            resp_json["bloom"]["chunk_truncated"],
-            serde_json::Value::Bool(true),
-            "expected chunk_truncated flag on bloom payload"
-        );
-
-        // Step 5: ritual must have advanced — since we only had one bloom,
-        // clamp rolls us to completion. Summary should be present.
-        assert!(
-            resp_json.get("summary").is_some(),
-            "expected ritual completion summary after clamp; got {:?}",
-            resp_json
-        );
-        assert!(
-            store.sessions.borrow().is_empty(),
-            "session should have been deleted on completion"
-        );
-    }
-
-    /// mx#218: P==0 bloom with auto-phrases walks via the 3-attempt + reveal
-    /// flow. Builds a bloom large enough to split into >=3 chunks, with zero
-    /// authored phrases. After mx#218, every chunk gets an auto-generated
-    /// phrase. Walking through with wrong guesses must trigger the hint flow
-    /// and eventual reveal (3 failures).
-    ///
-    /// Asserts:
-    /// - `BloomPrompt.phrase_source` is `"auto"` on every prompt.
-    /// - `BloomPrompt.wake_phrase_count` is 1 on every prompt.
-    /// - --skip is rejected (auto-phrase means engagement is required).
-    /// - 3 wrong guesses reveals the content.
-    /// - Summary reports `needed_help == total_chunks`.
-    #[test]
-    fn integration_phraseless_bloom_walks_via_auto_phrase_engagement() {
-        let store = MockStore::new();
-        let bloom = make_large_bloom(72_000, vec![]);
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom.clone()]);
-        let ctx = AgentContext::public_only();
-
-        // Begin. Expect auto-phrase markers on the prompt.
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let total_chunks = begin_json["progress"]["total"].as_u64().unwrap() as u16;
-        assert!(total_chunks >= 3, "need >=3 chunks; got {}", total_chunks);
-        assert_eq!(
-            begin_json["prompt"]["wake_phrase_count"], 1,
-            "auto-phrased bloom must declare 1 phrase"
-        );
-        assert_eq!(
-            begin_json["prompt"]["phrase_source"], "auto",
-            "auto-phrased bloom must expose phrase_source='auto'"
-        );
-
-        // Attempt to skip — must be rejected (mx#218 + mx#216 combined).
-        let mut token = token_from_response(&begin_json);
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(skip_json["status"], "error");
-        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
-
-        // Walk every chunk via 3 wrong guesses → reveal.
-        for _chunk_walked in 0..total_chunks {
-            // 3 wrong guesses.
-            for attempt in 0..3 {
-                let resp_json: serde_json::Value = serde_json::from_str(
-                    &respond_ritual(&store, &ctx, &bloom_id, "totally wrong guess", &token)
-                        .unwrap(),
-                )
-                .unwrap();
-
-                if attempt < 2 {
-                    assert_eq!(resp_json["status"], "incorrect");
-                    assert!(resp_json.get("hint").is_some());
-                    token = token_from_response(&resp_json);
-                } else {
-                    // 3rd failure → revealed.
-                    assert_eq!(
-                        resp_json["status"], "revealed",
-                        "expected reveal after 3 failures; got {:?}",
-                        resp_json["status"]
-                    );
-                    assert_eq!(
-                        resp_json["bloom"]["phrase_source"], "auto",
-                        "revealed bloom should carry phrase_source='auto'"
-                    );
-                    token = token_from_response(&resp_json);
-                }
-            }
-        }
-
-        // After all chunks are revealed, ritual is complete.
-        assert!(
-            store.sessions.borrow().is_empty(),
-            "session should be deleted on completion; still present: {:?}",
-            store.sessions.borrow().keys().collect::<Vec<_>>()
-        );
-    }
-
     // =====================================================================
-    // PR 3 — summary roll-up & observability tests
+    // Adversarial cases. Each one asserts the behaviour the spec or the
+    // invariant asks for; the ones that fail are defects, not test bugs.
+    // Every fixture here is invented.
     // =====================================================================
+    mod adversarial {
+        use super::mock_store::MockStore;
+        use super::*;
 
-    #[test]
-    fn summary_rollup_all_remembered() {
-        let entry_a = {
-            let mut e = test_entry();
-            e.title = "Alpha".to_string();
-            e.id = "kn-a".to_string();
-            e
-        };
-        let entry_b = {
-            let mut e = test_entry();
-            e.title = "Beta".to_string();
-            e.id = "kn-b".to_string();
-            e
-        };
+        /// A guess with no alphanumeric content is not data: it is the absence
+        /// of the thing the ritual exists to collect. Such a guess is refused
+        /// with an error, writes no row, and does not advance the session.
+        ///
+        /// Refusing it also closes a matching hole. `fuzzy_match` strips every
+        /// non-alphanumeric character before comparing, so a blank guess and a
+        /// punctuation-only phrase both normalize to the empty string and
+        /// compare EQUAL — logged as `exact`, bucketed `unhinted`.
+        ///
+        /// Ruled during review: refuse, no row, no advance.
+        #[test]
+        fn a_guess_that_normalizes_to_nothing_is_refused() {
+            // The empty string, whitespace, and punctuation that survives a
+            // trim but carries no content.
+            for guess in ["", "   ", "\t\n", "\u{2014}", "...", "???"] {
+                let store = MockStore::new();
+                // An em-dash phrase normalizes to nothing too, which is what
+                // makes the blank guess an `exact` match today.
+                let bloom = entry_with_phrases(vec!["\u{2014}"]);
+                let bloom_id = bloom.id.clone();
+                store.seed(&bloom);
 
-        let cascade = test_cascade(vec![entry_a.clone(), entry_b.clone()]);
-        let mut session = WakeSession::new(&cascade);
-
-        // Bloom A: 3 chunks, all remembered, all authored phrases.
-        session.advance_remembered(3, PhraseSourceTag::Authored);
-        session.advance_remembered(3, PhraseSourceTag::Authored);
-        session.advance_remembered(3, PhraseSourceTag::Derived);
-        // Bloom B: 1 chunk, remembered.
-        session.advance_remembered(1, PhraseSourceTag::Authored);
-
-        let mut blooms = HashMap::new();
-        blooms.insert(entry_a.id.clone(), entry_a);
-        blooms.insert(entry_b.id.clone(), entry_b);
-
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups.len(), 2);
-
-        assert_eq!(rollups[0].title, "Alpha");
-        assert_eq!(rollups[0].total, 3);
-        assert_eq!(rollups[0].remembered, 3);
-        assert_eq!(rollups[0].authored_chunks, 2);
-        assert_eq!(rollups[0].derived_chunks, 1);
-        assert!(rollups[0].chunks.contains("3/3"));
-        assert!(rollups[0].chunks.contains("remembered"));
-
-        assert_eq!(rollups[1].title, "Beta");
-        assert_eq!(rollups[1].total, 1);
-        assert_eq!(rollups[1].remembered, 1);
-        assert_eq!(rollups[1].authored_chunks, 1);
-        assert_eq!(rollups[1].derived_chunks, 0);
-    }
-
-    #[test]
-    fn summary_rollup_all_skipped() {
-        let mut e = test_entry();
-        e.title = "Phraseless".to_string();
-        let cascade = test_cascade(vec![e.clone()]);
-        let mut session = WakeSession::new(&cascade);
-        session.advance_skipped(2);
-        session.advance_skipped(2);
-
-        let mut blooms = HashMap::new();
-        blooms.insert(e.id.clone(), e);
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups[0].total, 2);
-        assert_eq!(rollups[0].skipped, 2);
-        assert_eq!(rollups[0].authored_chunks, 0);
-        assert_eq!(rollups[0].derived_chunks, 0);
-        assert!(rollups[0].chunks.contains("skipped"));
-    }
-
-    #[test]
-    fn summary_rollup_mixed_outcomes() {
-        let e = test_entry();
-        let cascade = test_cascade(vec![e.clone()]);
-        let mut session = WakeSession::new(&cascade);
-        // 4 chunks: 2 remembered + 1 helped + 1 skipped.
-        session.advance_remembered(4, PhraseSourceTag::Authored);
-        session.advance_remembered(4, PhraseSourceTag::Derived);
-        session.advance_helped(4, PhraseSourceTag::Derived);
-        session.advance_skipped(4);
-
-        let mut blooms = HashMap::new();
-        blooms.insert(e.id.clone(), e);
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups[0].total, 4);
-        assert_eq!(rollups[0].remembered, 2);
-        assert_eq!(rollups[0].needed_help, 1);
-        assert_eq!(rollups[0].skipped, 1);
-        // authored+derived counts only count chunks that had a phrase.
-        assert_eq!(rollups[0].authored_chunks, 1);
-        assert_eq!(rollups[0].derived_chunks, 2);
-    }
-
-    #[test]
-    fn summary_rollup_not_reached_when_zero_events() {
-        let e = test_entry();
-        let cascade = test_cascade(vec![e.clone()]);
-        let session = WakeSession::new(&cascade);
-        let mut blooms = HashMap::new();
-        blooms.insert(e.id.clone(), e);
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups.len(), 1);
-        assert_eq!(rollups[0].total, 0);
-        assert!(rollups[0].chunks.contains("not reached"));
-    }
-
-    #[test]
-    fn summary_rollup_bloom_title_resolves_from_map() {
-        let mut e = test_entry();
-        e.id = "kn-ops".to_string();
-        e.title = "Ops".to_string();
-        let cascade = test_cascade(vec![e.clone()]);
-        let mut session = WakeSession::new(&cascade);
-        session.advance_remembered(1, PhraseSourceTag::Authored);
-
-        let mut blooms = HashMap::new();
-        blooms.insert("kn-ops".to_string(), e);
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups[0].title, "Ops");
-        assert_eq!(rollups[0].id, "kn-ops");
-    }
-
-    #[test]
-    fn summary_rollup_falls_back_to_id_when_bloom_missing() {
-        let e = test_entry();
-        let cascade = test_cascade(vec![e]);
-        let mut session = WakeSession::new(&cascade);
-        session.advance_remembered(1, PhraseSourceTag::Authored);
-
-        // Empty blooms map — title should fall back to the bloom_id.
-        let blooms = HashMap::new();
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups[0].title, rollups[0].id);
-    }
-
-    // =====================================================================
-    // mx#216 — skip guard: --skip restricted to phraseless blooms
-    // =====================================================================
-
-    #[test]
-    fn skip_rejects_bloom_with_wake_phrases_array() {
-        let store = MockStore::new();
-        let bloom = entry_with_phrases(vec!["alpha", "beta"]);
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
-
-        // Attempt to skip a bloom that has wake_phrases — must be rejected.
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(skip_json["status"], "error");
-        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
-        assert_eq!(skip_json["expected_id"], bloom_id);
-
-        // Session state must be unchanged — still at step 0, bloom 0, chunk 0.
-        let sessions = store.sessions.borrow();
-        let sess = sessions.values().next().unwrap();
-        assert_eq!(sess.step, 0);
-        assert_eq!(sess.current_index, 0);
-        assert_eq!(sess.current_chunk_index, 0);
-        assert_eq!(sess.skipped_count, 0);
-    }
-
-    #[test]
-    fn skip_rejects_bloom_with_legacy_wake_phrase() {
-        let store = MockStore::new();
-        let mut bloom = test_entry();
-        bloom.wake_phrase = Some("legacy secret".to_string());
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
-
-        // Legacy wake_phrase (singular) should also trigger the guard.
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(skip_json["status"], "error");
-        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
-
-        // Session state unchanged.
-        let sessions = store.sessions.borrow();
-        let sess = sessions.values().next().unwrap();
-        assert_eq!(sess.step, 0);
-        assert_eq!(sess.skipped_count, 0);
-    }
-
-    #[test]
-    fn skip_rejects_phraseless_bloom_with_auto_phrase() {
-        // mx#218: phraseless blooms now have auto-generated phrases and
-        // cannot be skipped. The consumer must use --respond instead.
-        let store = MockStore::new();
-        let bloom = test_entry(); // no wake_phrases, no wake_phrase
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
-
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(
-            skip_json["status"], "error",
-            "auto-phrased bloom should reject skip; got {:?}",
-            skip_json["status"]
-        );
-        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
-    }
-
-    #[test]
-    fn skip_rejection_does_not_rotate_token() {
-        // After a skip rejection, the same token must still work for --respond.
-        let store = MockStore::new();
-        let bloom = entry_with_phrases(vec!["alpha"]);
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
-
-        // Skip is rejected — no token rotation.
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(skip_json["status"], "error");
-
-        // Same token works for --respond with the correct phrase.
-        let resp_json: serde_json::Value = serde_json::from_str(
-            &respond_ritual(&store, &ctx, &bloom_id, "alpha", &token).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            resp_json["status"], "remembered",
-            "original token should still work after skip rejection; got {:?}",
-            resp_json["status"]
-        );
-    }
-
-    // =====================================================================
-    // mx#218 — auto-phrase integration tests
-    // =====================================================================
-
-    /// Test 9: begin_ritual on a phraseless bloom produces a prompt with
-    /// `wake_phrase_count: 1` and `phrase_source: "auto"`.
-    #[test]
-    fn begin_ritual_auto_phrases_for_phraseless_bloom() {
-        let store = MockStore::new();
-        let bloom = test_entry(); // no wake_phrases, no wake_phrase
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-
-        assert_eq!(
-            begin_json["prompt"]["wake_phrase_count"], 1,
-            "auto-phrased bloom must declare wake_phrase_count=1; got {:?}",
-            begin_json["prompt"]["wake_phrase_count"]
-        );
-        assert_eq!(
-            begin_json["prompt"]["phrase_source"], "auto",
-            "auto-phrased bloom must declare phrase_source='auto'; got {:?}",
-            begin_json["prompt"]["phrase_source"]
-        );
-    }
-
-    /// Test 10: correct guess against an auto-generated phrase returns
-    /// `status: "remembered"`.
-    #[test]
-    fn respond_ritual_accepts_auto_phrase() {
-        let store = MockStore::new();
-        let mut bloom = test_entry();
-        bloom.body = Some("## The Discovery\n\nBody text here.".to_string());
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
-
-        // The auto-phrase for this content should be "The Discovery" (heading tier).
-        let resp_json: serde_json::Value = serde_json::from_str(
-            &respond_ritual(&store, &ctx, &bloom_id, "The Discovery", &token).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            resp_json["status"], "remembered",
-            "correct auto-phrase guess should be accepted; got {:?}",
-            resp_json["status"]
-        );
-        assert_eq!(resp_json["bloom"]["phrase_source"], "auto");
-    }
-
-    /// Test 11: 3 wrong guesses against an auto-phrase → `status: "revealed"`.
-    #[test]
-    fn respond_ritual_reveals_auto_phrase_after_3_failures() {
-        let store = MockStore::new();
-        let mut bloom = test_entry();
-        bloom.body = Some("## Hidden Knowledge\n\nSecret content.".to_string());
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
-
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let mut token = token_from_response(&begin_json);
-
-        // 3 wrong guesses.
-        for attempt in 0..3 {
-            let resp_json: serde_json::Value = serde_json::from_str(
-                &respond_ritual(&store, &ctx, &bloom_id, "wrong guess", &token).unwrap(),
-            )
-            .unwrap();
-            if attempt < 2 {
-                assert_eq!(resp_json["status"], "incorrect");
-            } else {
-                assert_eq!(
-                    resp_json["status"], "revealed",
-                    "3rd failure should reveal; got {:?}",
-                    resp_json["status"]
+                let begin_json = begin(&store, &test_cascade(vec![bloom]));
+                let out = respond_ritual(
+                    &store,
+                    &AgentContext::for_agent("test-agent"),
+                    &bloom_id,
+                    guess,
+                    &token_from_response(&begin_json),
                 );
-                assert_eq!(resp_json["bloom"]["phrase_source"], "auto");
+
                 assert!(
-                    resp_json["bloom"]["matched_phrase"].is_string(),
-                    "revealed bloom should include the matched_phrase"
+                    out.is_err(),
+                    "guess {guess:?} was accepted instead of refused: {out:?}"
+                );
+                assert!(
+                    store.guesses.borrow().is_empty(),
+                    "guess {guess:?} reached the log"
+                );
+
+                let sessions = store.sessions.borrow();
+                let session = sessions.values().next().expect("session must survive");
+                assert_eq!(
+                    session.step, 0,
+                    "guess {guess:?} advanced the session it was refused from"
+                );
+                assert_eq!(session.current_index, 0, "guess {guess:?}");
+            }
+        }
+
+        /// `fuzzy_match` counts edit distance in CHARACTERS but divides by
+        /// `str::len()`, which is BYTES. For multibyte text the denominator is
+        /// inflated 3-4x, so the 0.8 tolerance silently widens to accept a
+        /// guess that is half wrong. Identical edit ratios must get identical
+        /// verdicts regardless of how the text happens to encode.
+        #[test]
+        fn the_match_tolerance_does_not_widen_for_multibyte_text() {
+            // Control: 5 of 10 ASCII characters differ -> not a match.
+            let ascii = vec!["abcdefghij".to_string()];
+            assert_eq!(
+                best_match("abcdeqrstu", &ascii),
+                (MatchKind::None, None),
+                "precondition: half-wrong ASCII is not a match"
+            );
+
+            // Same shape in hiragana: 5 of 10 characters differ.
+            let kana = vec![
+                "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{304B}\u{304D}\u{304F}\u{3051}\u{3053}"
+                    .to_string(),
+            ];
+            let half_wrong =
+                "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{3055}\u{3057}\u{3059}\u{305B}\u{305D}";
+            assert_eq!(
+                best_match(half_wrong, &kana),
+                (MatchKind::None, None),
+                "a half-wrong multibyte guess was accepted as a match"
+            );
+        }
+
+        /// Deleting an entry that the ritual has already walked past must not
+        /// break the rest of the ritual. `fetch_blooms_by_ids` re-fetches every
+        /// id in the session on every respond and hard-fails on the first one
+        /// that is gone, so removing an already-shown bloom bricks the session
+        /// with no way to finish it and no way to clear it.
+        #[test]
+        fn deleting_an_already_shown_bloom_does_not_brick_the_ritual() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut second = entry_with_phrases(vec!["bravo"]);
+            second.id = "kn-second".to_string();
+            store.seed(&first);
+            store.seed(&second);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, second]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
+
+            // The first bloom is done with. Remove it, as a `memory delete`
+            // from another shell would.
+            store.blooms.borrow_mut().remove("kn-first");
+
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("test-agent"),
+                "kn-second",
+                "bravo",
+                &token,
+            );
+            assert!(
+                out.is_ok(),
+                "a deleted, already-shown bloom killed the rest of the ritual: {:?}",
+                out.err()
+            );
+        }
+
+        /// A `chunk_truncated` response must retire the token it was handed.
+        /// The truncation path advances the bloom cursor but never ticks
+        /// `step`, so the token it returns is byte-identical to the one just
+        /// spent and that spent token still verifies against the session.
+        #[test]
+        fn a_chunk_truncated_response_retires_the_token_it_consumed() {
+            let store = MockStore::new();
+            let big = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+            let big_id = big.id.clone();
+            let mut tail = entry_with_phrases(vec!["bravo"]);
+            tail.id = "kn-tail".to_string();
+            tail.title = "Tail".to_string();
+            store.seed(&big);
+            store.seed(&tail);
+
+            let begin_json = begin(&store, &test_cascade(vec![big, tail]));
+            let mut token = token_from_response(&begin_json);
+            for _ in 0..2 {
+                let resp = respond(&store, &big_id, MISS, &token);
+                token = token_from_response(&resp);
+            }
+
+            store.mutate_bloom(&big_id, |entry| {
+                entry.body = Some("shrunk down to a single tiny chunk now.".to_string());
+            });
+
+            let spent = token.clone();
+            let resp = respond(&store, &big_id, "ignored", &spent);
+            assert_eq!(resp["status"], "chunk_truncated");
+            assert_ne!(
+                token_from_response(&resp),
+                spent,
+                "a truncation handed back the very token it consumed"
+            );
+        }
+
+        /// The token authorises the session, not the caller, and nothing
+        /// checks that the responder is the agent that began the ritual. A
+        /// foreign agent can drive someone else's ritual to completion, and
+        /// every row it writes is stamped with the OWNER's agent id — so the
+        /// owner's guess log silently fills with guesses they never made.
+        #[test]
+        fn a_respond_from_another_agent_is_refused() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
+
+            // `meta()` begins the ritual as "test-agent".
+            let begin_json = begin(&store, &test_cascade(vec![bloom]));
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("some-other-agent"),
+                &bloom_id,
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+
+            assert!(out.is_err(), "another agent walked this session: {out:?}");
+            assert!(
+                store.guesses.borrow().is_empty(),
+                "a foreign respond wrote a row stamped with the owner's agent: {:?}",
+                store.guesses.borrow().first().map(|r| r.agent.clone())
+            );
+        }
+
+        /// A session whose `agent` is empty cannot be one this binary began:
+        /// `--begin` always stamps `MX_CURRENT_AGENT`. It is a session written
+        /// by the pre-one-guess binary, whose row has no `agent` field at all
+        /// and which the loader silently defaults to "". Spec 9.1 says such a
+        /// session is treated as expired and the caller is told to run
+        /// `--begin`. Instead it walks, and every guess row it writes carries
+        /// `agent: ""` — unattributable, and invisible to every query in the
+        /// log, all of which filter on the agent.
+        #[test]
+        fn a_session_from_an_older_binary_is_refused_rather_than_walked() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
+
+            let mut legacy =
+                WakeSession::new(&test_cascade(vec![bloom]), String::new(), None, None);
+            legacy.agent = String::new();
+            let session_id = legacy.session_id.clone();
+            store.create_wake_session(&legacy).unwrap();
+            let token = create_token(&session_id, legacy.step);
+
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("test-agent"),
+                &bloom_id,
+                "alpha",
+                &token,
+            );
+
+            let refused = match out {
+                Err(ref e) => e.to_string().contains("--begin"),
+                Ok(_) => false,
+            };
+            assert!(
+                refused,
+                "an agent-less session was walked instead of refused: {out:?}"
+            );
+            assert!(
+                store
+                    .guesses
+                    .borrow()
+                    .iter()
+                    .all(|row| !row.agent.is_empty()),
+                "a guess row was written with an empty agent"
+            );
+        }
+
+        /// `progress.current` is `step + 1` — "the chunk we are on now" — but
+        /// after the LAST advance there is no chunk we are on, so the final
+        /// response of every ritual reports a position one past the end:
+        /// chunk 2 of 2 becomes `current: 3, total: 2`. This is in the payload
+        /// the model reads, next to the summary.
+        #[test]
+        fn the_final_response_does_not_report_a_position_past_the_end() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut second = entry_with_phrases(vec!["bravo"]);
+            second.id = "kn-second".to_string();
+            store.seed(&first);
+            store.seed(&second);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, second]));
+            let mut token = token_from_response(&begin_json);
+            let mut last = serde_json::Value::Null;
+            for (id, guess) in [("kn-first", "alpha"), ("kn-second", "bravo")] {
+                last = respond(&store, id, guess, &token);
+                token = token_from_response(&last);
+            }
+
+            let current = last["progress"]["current"].as_u64().unwrap();
+            let total = last["progress"]["total"].as_u64().unwrap();
+            assert!(
+                current <= total,
+                "final progress reads {current} of {total}: {}",
+                last["progress"]
+            );
+        }
+
+        /// The guess is model output written verbatim into the database with
+        /// no bound anywhere on the path. Ruled during review: a guess longer
+        /// than 2000 CHARACTERS is REFUSED — error, no row, no advance — not
+        /// truncated. A truncated guess is not what the model guessed, and the
+        /// log exists to be honest about guesses; better nothing than a row
+        /// that misstates one.
+        ///
+        /// The limit counts characters, so both boundaries are driven in two
+        /// encodings. A byte-based check would wrongly refuse the 2000-kana
+        /// guess (6000 bytes) that must be accepted, and a byte-based
+        /// truncation would panic on a boundary landing mid-character.
+        #[test]
+        fn a_guess_over_two_thousand_characters_is_refused() {
+            const LIMIT: usize = 2_000;
+
+            // A fresh session per case: an accepted guess advances one.
+            fn fixture(store: &MockStore) -> (String, String) {
+                let bloom = entry_with_phrases(vec!["alpha"]);
+                let bloom_id = bloom.id.clone();
+                store.seed(&bloom);
+                let begin_json = begin(store, &test_cascade(vec![bloom]));
+                (bloom_id, token_from_response(&begin_json))
+            }
+
+            // ASCII, and a 3-byte character. Both boundaries are driven in
+            // both encodings, and the two directions run as separate loops so
+            // a failure in one does not hide the other's cases.
+
+            // ---- exactly at the limit: accepted, and logged WHOLE ----
+            for filler in ["a", "\u{3042}"] {
+                let store = MockStore::new();
+                let (bloom_id, token) = fixture(&store);
+                let at_limit = filler.repeat(LIMIT);
+                let out = respond_ritual(
+                    &store,
+                    &AgentContext::for_agent("test-agent"),
+                    &bloom_id,
+                    &at_limit,
+                    &token,
+                );
+                assert!(
+                    out.is_ok(),
+                    "a guess of exactly {LIMIT} characters must be accepted \
+                     (filler {filler:?}): {out:?}"
+                );
+                let rows = store.guesses.borrow();
+                let row = rows.first().expect("an accepted guess is logged");
+                assert_eq!(
+                    row.guess, at_limit,
+                    "a guess at the limit must be logged whole, not trimmed \
+                     (filler {filler:?})"
                 );
             }
-            token = token_from_response(&resp_json);
+
+            // ---- one character over: refused, no row, no advance ----
+            for filler in ["a", "\u{3042}"] {
+                let store = MockStore::new();
+                let (bloom_id, token) = fixture(&store);
+                let over = filler.repeat(LIMIT + 1);
+                let out = respond_ritual(
+                    &store,
+                    &AgentContext::for_agent("test-agent"),
+                    &bloom_id,
+                    &over,
+                    &token,
+                );
+                assert!(
+                    out.is_err(),
+                    "a guess of {} characters was accepted (filler {filler:?}): {out:?}",
+                    LIMIT + 1
+                );
+                assert!(
+                    store.guesses.borrow().is_empty(),
+                    "an over-long guess reached the log (filler {filler:?})"
+                );
+
+                let sessions = store.sessions.borrow();
+                let session = sessions.values().next().expect("session must survive");
+                assert_eq!(
+                    session.step, 0,
+                    "an over-long guess advanced the session it was refused from \
+                     (filler {filler:?})"
+                );
+                assert_eq!(session.current_index, 0, "filler {filler:?}");
+            }
         }
-    }
 
-    /// Test 12: --skip on an auto-phrased bloom returns error (combines
-    /// mx#218 auto-phrase with mx#216 skip guard).
-    #[test]
-    fn skip_rejected_for_auto_phrase_bloom() {
-        let store = MockStore::new();
-        let bloom = test_entry(); // P==0, gets auto-phrase
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
+        /// Spec 9.1 reasons that "sessions live for one ritual, so at most one
+        /// is affected". Nothing enforces that: `created_at` is stored and then
+        /// never read, so a token minted a year ago still drives its session.
+        #[test]
+        #[ignore = "session lifecycle is follow-up work, not part of this change"]
+        fn a_stale_session_is_expired_by_age() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
 
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
+            let begin_json = begin(&store, &test_cascade(vec![bloom]));
+            let token = token_from_response(&begin_json);
 
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
+            // Backdate the session a year.
+            {
+                let mut sessions = store.sessions.borrow_mut();
+                let session = sessions.values_mut().next().expect("session exists");
+                session.created_at -= 365 * 24 * 60 * 60;
+            }
 
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
-        assert_eq!(
-            skip_json["status"], "error",
-            "auto-phrased bloom must not be skippable; got {:?}",
-            skip_json["status"]
-        );
-        assert_eq!(skip_json["error"], "skip_requires_phraseless_bloom");
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("test-agent"),
+                &bloom_id,
+                "alpha",
+                &token,
+            );
+            assert!(
+                out.is_err(),
+                "a year-old session token still walked the ritual: {out:?}"
+            );
+        }
 
-        // Session state must be unchanged — still at step 0.
-        let sessions = store.sessions.borrow();
-        let sess = sessions.values().next().unwrap();
-        assert_eq!(sess.step, 0);
-        assert_eq!(sess.skipped_count, 0);
-    }
+        /// A second `--begin` abandons the first session's row. Nothing deletes
+        /// it and nothing sweeps by age, so every interrupted ritual leaves a
+        /// permanent row behind — each one carrying a bloom id list.
+        #[test]
+        #[ignore = "session lifecycle is follow-up work, not part of this change"]
+        fn beginning_again_does_not_orphan_the_previous_session() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            store.seed(&bloom);
 
-    /// mx#218: auto-phrased blooms use tolerant matching (case-insensitive,
-    /// trailing punct stripped, whitespace collapsed) — same as derived.
-    #[test]
-    fn respond_ritual_auto_phrase_tolerant_match() {
-        let store = MockStore::new();
-        let mut bloom = test_entry();
-        bloom.body = Some("## The Discovery\n\nBody text here.".to_string());
-        let bloom_id = bloom.id.clone();
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
+            begin(&store, &test_cascade(vec![bloom.clone()]));
+            begin(&store, &test_cascade(vec![bloom]));
 
-        let cascade = test_cascade(vec![bloom]);
-        let ctx = AgentContext::public_only();
+            assert_eq!(
+                store.sessions.borrow().len(),
+                1,
+                "a second begin left the first ritual's session behind"
+            );
+        }
 
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let token = token_from_response(&begin_json);
+        // =================================================================
+        // Round two: the code added to close round one.
+        // =================================================================
 
-        // Case-insensitive guess should work (tolerant match).
-        let resp_json: serde_json::Value = serde_json::from_str(
-            &respond_ritual(&store, &ctx, &bloom_id, "the discovery", &token).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            resp_json["status"], "remembered",
-            "case-insensitive auto-phrase guess should be accepted; got {:?}",
-            resp_json["status"]
-        );
-    }
+        /// The ownership guard refuses a caller naming a DIFFERENT agent but
+        /// waves through a caller naming NO agent, on the reasoning that an
+        /// anonymous caller cannot be impersonating anyone and the CLI always
+        /// names one.
+        ///
+        /// Anonymity is not innocence here. The guard's job is to establish
+        /// that the caller IS the owner, and `None` fails to establish that
+        /// just as surely as a mismatch does. The exemption was needed because
+        /// this file's own tests drove respond anonymously; they no longer do,
+        /// so nothing depends on the hole staying open.
+        ///
+        /// It matters because of what an anonymous context does further down:
+        /// entries it cannot SEE come back from `fetch_blooms_by_ids` as
+        /// absent, and absent is now silently stepped over as `bloom_missing`.
+        /// An anonymous caller therefore does not merely walk another agent's
+        /// ritual — it walks it while skipping every entry it lacks the
+        /// visibility to read, logging no row for any of them, and the owner's
+        /// session is deleted at the end as though the ritual completed.
+        #[test]
+        fn a_respond_from_a_caller_with_no_agent_is_refused() {
+            let store = MockStore::new();
+            let bloom = entry_with_phrases(vec!["alpha"]);
+            let bloom_id = bloom.id.clone();
+            store.seed(&bloom);
 
-    /// mx#218: auto_chunks counter in the session rollup tracks auto-phrased
-    /// chunk outcomes.
-    #[test]
-    fn auto_phrase_bloom_rollup_tracks_auto_chunks() {
-        let e = test_entry();
-        let cascade = test_cascade(vec![e.clone()]);
-        let mut session = WakeSession::new(&cascade);
+            // `meta()` begins as "test-agent".
+            let begin_json = begin(&store, &test_cascade(vec![bloom]));
+            let out = respond_ritual(
+                &store,
+                &AgentContext::public_only(),
+                &bloom_id,
+                "alpha",
+                &token_from_response(&begin_json),
+            );
 
-        // Walk through as if it were auto-phrased (PhraseSourceTag::Auto).
-        session.advance_remembered(1, PhraseSourceTag::Auto);
+            assert!(
+                out.is_err(),
+                "an anonymous caller walked an owned ritual: {out:?}"
+            );
+            assert!(
+                store.guesses.borrow().is_empty(),
+                "an anonymous respond filed a row under the owner's agent: {:?}",
+                store.guesses.borrow().first().map(|r| r.agent.clone())
+            );
+        }
 
-        let mut blooms = HashMap::new();
-        blooms.insert(e.id.clone(), e);
-        let rollups = build_bloom_rollups(&session, &blooms);
-        assert_eq!(rollups[0].auto_chunks, 1);
-        assert_eq!(rollups[0].authored_chunks, 0);
-        assert_eq!(rollups[0].derived_chunks, 0);
-        assert_eq!(rollups[0].remembered, 1);
-    }
+        /// An entry that cannot be fetched is stepped over and never judged.
+        /// That much is unavoidable — there is nothing to put to the responder
+        /// — so what this pins is the other half: it must not happen SILENTLY.
+        /// The summary has to account for the step, so a reader is never left
+        /// to notice the shortfall by subtracting one number from another.
+        ///
+        /// Whether such an entry was deleted or has merely become unreadable
+        /// to this caller is a distinction this path cannot draw. Telling them
+        /// apart is open work, and is not what this test claims.
+        #[test]
+        fn an_unreadable_entry_is_accounted_for_in_the_summary() {
+            let store = MockStore::new();
+            let mut visible = entry_with_phrases(vec!["alpha"]);
+            visible.id = "kn-visible".to_string();
+            let mut hidden = entry_with_phrases(vec!["bravo"]);
+            hidden.id = "kn-hidden".to_string();
+            store.seed(&visible);
+            store.seed(&hidden);
 
-    // =====================================================================
-    // mx#220 — skip_ritual chunk_truncated early-return tests
-    //
-    // When chunks shrink mid-ritual during a skip, skip_ritual must
-    // early-return with a response reflecting the NEW cursor position,
-    // not continue processing with stale bloom/plan/content from the
-    // old position.
-    // =====================================================================
+            let begin_json = begin(&store, &test_cascade(vec![visible, hidden]));
 
-    /// mx#220 test 1: when chunks shrink mid-ritual during skip, the
-    /// response should reflect the new cursor position (next bloom's
-    /// prompt), not stale data from the old bloom.
-    #[test]
-    fn skip_chunk_truncated_returns_correct_next_bloom() {
-        let store = MockStore::new();
+            // Stand in for "still in the database, but this caller may not
+            // read it": the entry is gone from what the fetch can return,
+            // while never having been deleted.
+            store.blooms.borrow_mut().remove("kn-hidden");
 
-        // Bloom A: large, will be shrunk mid-ritual.
-        let mut bloom_a = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
-        bloom_a.id = "kn-a".to_string();
-        bloom_a.title = "Bloom A".to_string();
+            let resp = respond(
+                &store,
+                "kn-visible",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
 
-        // Bloom B: small, is the next bloom after A.
-        let mut bloom_b = test_entry();
-        bloom_b.id = "kn-b".to_string();
-        bloom_b.title = "Bloom B".to_string();
-        bloom_b.body = Some("## B Content\n\nThis is bloom B.".to_string());
-        bloom_b.wake_phrases = vec!["bravo".to_string()];
+            // An entry the fetch cannot return can never produce a guess row —
+            // there is nothing to put to the responder. What the summary must
+            // not do is let that pass unremarked, leaving a reader to notice
+            // the shortfall by subtracting one number from another.
+            let logged = store.guesses.borrow().len();
+            assert_eq!(
+                resp["summary"]["blooms"], 2,
+                "precondition: both entries were in the sequence: {resp}"
+            );
+            assert_eq!(logged, 1, "only the readable entry could be judged");
+            assert_eq!(
+                resp["summary"]["unjudged"], 1,
+                "an entry vanished from the log and the summary did not say so: \
+                 {} of 2 rows written, summary {}",
+                logged, resp["summary"]
+            );
+            assert_eq!(
+                resp["summary"]["chunks"].as_u64().unwrap(),
+                logged as u64 + resp["summary"]["unjudged"].as_u64().unwrap(),
+                "the chunk count must be fully explained by the two halves"
+            );
+        }
 
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_a.id.clone(), bloom_a.clone());
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_b.id.clone(), bloom_b.clone());
+        /// `summary.chunks` now counts steps where nothing was judged, while
+        /// the bucket totals do not. The model reads both in one object, so a
+        /// summary of 3 chunks over 2 bucketed guesses invites exactly the
+        /// "2 out of 3" the vocabulary section retired — and the one number
+        /// that would explain the gap is the one not reported.
+        ///
+        /// Either the two agree, or the summary names the difference. It must
+        /// not be left as a subtraction for the reader to perform.
+        #[test]
+        fn the_summary_does_not_leave_an_unexplained_gap_to_subtract() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut gone = entry_with_phrases(vec!["bravo"]);
+            gone.id = "kn-gone".to_string();
+            let mut last = entry_with_phrases(vec!["charlie"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&gone);
+            store.seed(&last);
 
-        let cascade = test_cascade(vec![bloom_a.clone(), bloom_b.clone()]);
-        let ctx = AgentContext::public_only();
+            let begin_json = begin(&store, &test_cascade(vec![first, gone, last]));
+            let mut token = token_from_response(&begin_json);
 
-        // Begin ritual. Walk chunks 0 and 1 of bloom A via respond.
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let total_chunks_start = begin_json["progress"]["total"].as_u64().unwrap() as u16;
-        assert!(total_chunks_start >= 3, "bloom A needs >=3 chunks");
-        let mut token = token_from_response(&begin_json);
-
-        for phrase in ["alpha", "beta"] {
-            let resp: serde_json::Value = serde_json::from_str(
-                &respond_ritual(&store, &ctx, "kn-a", phrase, &token).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(resp["status"], "remembered");
+            let resp = respond(&store, "kn-first", "alpha", &token);
             token = token_from_response(&resp);
+
+            store.blooms.borrow_mut().remove("kn-gone");
+
+            let resp = respond(&store, "kn-last", "charlie", &token);
+            let summary = &resp["summary"];
+
+            let chunks = summary["chunks"].as_u64().unwrap();
+            let bucketed = ["unhinted", "revealed"]
+                .iter()
+                .flat_map(|b| {
+                    ["authored", "derived", "auto"]
+                        .iter()
+                        .map(move |s| summary["buckets"][b][s].as_u64().unwrap_or(0))
+                })
+                .sum::<u64>();
+
+            assert!(
+                chunks == bucketed || summary.get("unjudged").is_some(),
+                "summary reports {chunks} chunks against {bucketed} bucketed \
+                 guesses and does not name the difference: {summary}"
+            );
         }
 
-        // Confirm cursor is at bloom A, chunk 2.
-        {
-            let sessions = store.sessions.borrow();
-            let sess = sessions.values().next().unwrap();
-            assert_eq!(sess.current_index, 0);
-            assert_eq!(sess.current_chunk_index, 2);
+        // =================================================================
+        // Round three: the sweep that answers about a vanished entry.
+        // =================================================================
+
+        /// Answering a caller about the entry it was just handed is right.
+        /// Answering it about an entry it never named is not.
+        ///
+        /// The completion arm of the sweep gate is `session.is_complete() &&
+        /// !vanished.is_empty()`, which does not mention `bloom_id` at all. So
+        /// once the sweep consumes the rest of the sequence, ANY id is
+        /// answered with `bloom_missing` — including one that was never in the
+        /// session. A caller that sends a wrong id at that moment is told the
+        /// ritual finished, and the session is deleted on the way out, so the
+        /// mistake is unrecoverable rather than correctable.
+        ///
+        /// `invalid_bloom_id` exists precisely to say "that is not what you
+        /// were asked about", and it must not stop applying because the
+        /// sequence happened to end.
+        #[test]
+        fn a_bogus_id_is_still_rejected_when_the_sweep_ends_the_ritual() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut last = entry_with_phrases(vec!["bravo"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&last);
+
+            let begin_json = begin(&store, &test_cascade(vec![first, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
+
+            // The entry the caller was just handed goes away.
+            store.blooms.borrow_mut().remove("kn-last");
+
+            // The caller names something that was never in this session.
+            let resp = respond(&store, "kn-never-in-this-session", "alpha", &token);
+
+            assert_eq!(
+                resp["status"], "error",
+                "an id that was never in the session must not be answered as \
+                 though it were the sequence: {resp}"
+            );
+            assert_eq!(resp["error"], "invalid_bloom_id");
+            assert!(
+                !store.sessions.borrow().is_empty(),
+                "a wrong id must not delete the session out from under the caller"
+            );
         }
 
-        // Shrink bloom A to 1 chunk — cursor at chunk 2 is now past new total.
-        store.mutate_bloom("kn-a", |entry| {
-            entry.body = Some("tiny content now".to_string());
-        });
+        /// The sweep runs before `validate_guess`? No — it runs after. So a
+        /// caller answering about an entry that has vanished is told its GUESS
+        /// was unusable, when the truth is there was nothing to guess about.
+        ///
+        /// Minor on its own, but it means the refusal a caller sees does not
+        /// describe the situation it is in, and a client that retries on a
+        /// guess error will retry forever against an entry that is gone.
+        #[test]
+        fn a_vanished_entry_is_reported_before_the_guess_is_judged_unusable() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut last = entry_with_phrases(vec!["bravo"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&last);
 
-        // The skip guard would normally reject this (bloom A has phrases), but
-        // chunk_truncated fires BEFORE the guard and early-returns. This is
-        // the mx#220 fix — skip_ritual's chunk_truncated path.
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, "kn-a", &token).unwrap()).unwrap();
+            let begin_json = begin(&store, &test_cascade(vec![first, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
 
-        // Must get chunk_truncated status (not "skipped" or "error").
-        assert_eq!(
-            skip_json["status"], "chunk_truncated",
-            "skip_ritual should early-return with chunk_truncated; got {:?}",
-            skip_json["status"]
-        );
-        assert_eq!(
-            skip_json["bloom"]["chunk_truncated"],
-            serde_json::Value::Bool(true),
-        );
+            store.blooms.borrow_mut().remove("kn-last");
 
-        // The `next` prompt must reference bloom B, not stale bloom A data.
-        let next_prompt = &skip_json["next"];
-        assert!(
-            next_prompt.is_object(),
-            "chunk_truncated should have a next prompt for bloom B"
-        );
-        assert!(
-            next_prompt["title"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Bloom B"),
-            "next prompt title should reference Bloom B; got {:?}",
-            next_prompt["title"]
-        );
+            // An empty guess for an entry that no longer exists. There is
+            // nothing to guess about; the guess is beside the point.
+            let out = respond_ritual(
+                &store,
+                &AgentContext::for_agent("test-agent"),
+                "kn-last",
+                "",
+                &token,
+            );
 
-        // Session should still be active (bloom B remains).
-        assert!(
-            !store.sessions.borrow().is_empty(),
-            "session should still exist — bloom B hasn't been walked"
-        );
-    }
-
-    /// mx#220 test 2: verify the response content/bloom data comes from
-    /// the NEW position, not the old bloom. Specifically, the bloom_full
-    /// in the chunk_truncated response should NOT contain stale chunk
-    /// content from the old (pre-shrink) position.
-    #[test]
-    fn skip_chunk_truncated_does_not_use_stale_content() {
-        let store = MockStore::new();
-
-        // Single-bloom scenario: bloom shrinks, ritual completes.
-        let mut bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
-        bloom.id = "kn-stale".to_string();
-        bloom.title = "Stale Test".to_string();
-        let bloom_id = bloom.id.clone();
-
-        store
-            .blooms
-            .borrow_mut()
-            .insert(bloom_id.clone(), bloom.clone());
-
-        let cascade = test_cascade(vec![bloom.clone()]);
-        let ctx = AgentContext::public_only();
-
-        // Begin + walk chunks 0 and 1.
-        let begin_json: serde_json::Value =
-            serde_json::from_str(&begin_ritual(&store, &cascade).unwrap()).unwrap();
-        let mut token = token_from_response(&begin_json);
-
-        for phrase in ["alpha", "beta"] {
-            let resp: serde_json::Value = serde_json::from_str(
-                &respond_ritual(&store, &ctx, &bloom_id, phrase, &token).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(resp["status"], "remembered");
-            token = token_from_response(&resp);
+            let reported_as_missing = match out {
+                Ok(ref json) => json.contains("\"status\":\"bloom_missing\""),
+                Err(_) => false,
+            };
+            assert!(
+                reported_as_missing,
+                "a vanished entry was reported as a bad guess instead: {out:?}"
+            );
         }
 
-        // Shrink the bloom. The NEW content is entirely different.
-        let new_body = "completely different content after shrink";
-        store.mutate_bloom(&bloom_id, |entry| {
-            entry.body = Some(new_body.to_string());
-        });
+        /// `Summary.unjudged` exists because, in its own words, "deriving it is
+        /// how an 'N out of M' score gets reinvented". That reasoning is not
+        /// applied to `progress`, which carries the same two numbers and is
+        /// read on EVERY respond rather than once at the end.
+        ///
+        /// After an unjudged step, `progress.current - 1` steps have completed
+        /// while `progress.buckets` accounts for fewer, and the difference is
+        /// again there to be subtracted — for the whole rest of the ritual, not
+        /// just at the close.
+        #[test]
+        #[ignore = "running progress has the same gap the summary now names; \
+                    reporting it there too is follow-up work, not part of this change"]
+        fn running_progress_accounts_for_every_completed_step() {
+            let store = MockStore::new();
+            let mut first = entry_with_phrases(vec!["alpha"]);
+            first.id = "kn-first".to_string();
+            let mut gone = entry_with_phrases(vec!["bravo"]);
+            gone.id = "kn-gone".to_string();
+            let mut last = entry_with_phrases(vec!["charlie"]);
+            last.id = "kn-last".to_string();
+            store.seed(&first);
+            store.seed(&gone);
+            store.seed(&last);
 
-        // skip_ritual triggers chunk_truncated.
-        let skip_json: serde_json::Value =
-            serde_json::from_str(&skip_ritual(&store, &ctx, &bloom_id, &token).unwrap()).unwrap();
+            let begin_json = begin(&store, &test_cascade(vec![first, gone, last]));
+            let resp = respond(
+                &store,
+                "kn-first",
+                "alpha",
+                &token_from_response(&begin_json),
+            );
+            let token = token_from_response(&resp);
 
-        assert_eq!(skip_json["status"], "chunk_truncated");
+            store.blooms.borrow_mut().remove("kn-gone");
 
-        // The bloom payload content should reflect the NEW (shrunk) content,
-        // not stale chunk data from the old large bloom.
-        let bloom_content_returned = skip_json["bloom"]["content"]
-            .as_str()
-            .expect("bloom should have content field");
-        assert_eq!(
-            bloom_content_returned, new_body,
-            "bloom content should be the NEW shrunk content, not stale data; got {:?}",
-            bloom_content_returned
-        );
+            // The step that walks over the deleted entry. The ritual is not
+            // finished, so this is `progress` without a `summary` beside it.
+            let resp = respond(&store, "kn-gone", "bravo", &token);
+            assert_eq!(resp["status"], "bloom_missing", "{resp}");
 
-        // Single bloom + clamp → ritual complete. Summary present, session deleted.
-        assert!(
-            skip_json.get("summary").is_some(),
-            "ritual should be complete after single bloom shrinks"
-        );
-        assert!(
-            store.sessions.borrow().is_empty(),
-            "session should be deleted on completion"
-        );
+            let progress = &resp["progress"];
+            let completed = progress["current"].as_u64().unwrap() - 1;
+            let bucketed = progress["buckets"]["unhinted"].as_u64().unwrap()
+                + progress["buckets"]["revealed"].as_u64().unwrap();
+
+            assert!(
+                completed == bucketed || progress.get("unjudged").is_some(),
+                "progress reports {completed} completed steps against \
+                 {bucketed} bucketed guesses and does not name the \
+                 difference: {progress}"
+            );
+        }
     }
 }
