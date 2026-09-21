@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use surrealdb::sql::Thing;
 
@@ -240,10 +240,28 @@ impl SurrealDatabase {
         // This ensures we get the most important blooms first
 
         // Layer 1: Core foundational/transformative blooms (resonance 8+).
-        // The core query returns its whole ordered set — truncating to `limit`
-        // happens here, after exclusion, so a dropped entry does not eat a slot.
-        let core = self.query_core_blooms(ctx).await?;
-        let mut core = keep_included(core, include_excluded, &mut dropped);
+        //
+        // Widen the SQL LIMIT by the number of excluded entries seen and fetch
+        // again, so an excluded entry never costs a kept one its slot. Each
+        // pass strictly widens the window, so this terminates: it stops once
+        // the window holds `limit` kept entries or the table is exhausted.
+        //
+        // Bounded rather than fetching the whole ordered set and truncating in
+        // Rust, because `knowledge_select_fields` carries `embedding` and an
+        // unbounded core query would drag a 768-float vector per row on every
+        // wake, growing with the graph.
+        let mut core;
+        let mut window = limit;
+        loop {
+            let fetched = self.query_core_blooms(ctx, window).await?;
+            let exhausted = fetched.len() < window;
+            let fetched_len = fetched.len();
+            core = keep_included(fetched, include_excluded, &mut dropped);
+            if core.len() >= limit || exhausted {
+                break;
+            }
+            window = limit + (fetched_len - core.len());
+        }
         core.truncate(limit);
         let remaining = limit.saturating_sub(core.len());
 
@@ -351,12 +369,13 @@ impl SurrealDatabase {
 
     /// Layer 1: Query core blooms (resonance 8+, excludes ephemeral).
     ///
-    /// Returns the whole ordered set. The caller applies tag exclusion and
-    /// then truncates to its limit, so an excluded entry cannot consume a slot
-    /// that a kept entry would otherwise have taken.
+    /// `limit` is the SQL window, which the caller widens by the number of
+    /// excluded entries it has seen so exclusion does not cost a kept entry
+    /// its slot.
     async fn query_core_blooms(
         &self,
         ctx: &crate::store::AgentContext,
+        limit: usize,
     ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
@@ -375,13 +394,14 @@ impl SurrealDatabase {
                 has_wake_order DESC,
                 effective_wake_order ASC,
                 resonance DESC,
-                id ASC",
+                id ASC
+            LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
         );
 
         let mut response = with_db!(self, db, {
-            let mut query = db.query(&sql);
+            let mut query = db.query(&sql).bind(("limit", limit as i64));
             if let Some(agent) = current_agent {
                 query = query.bind(("current_agent", agent));
             }
@@ -1792,10 +1812,24 @@ impl SurrealDatabase {
                 raw_chunk_idx
             )
         })?;
+        // A session row written before the one-guess ritual has no `agent`
+        // field at all. Every other new field defaults harmlessly, so without
+        // this check the old session would walk to completion and file every
+        // guess under an empty agent — unreachable from a log keyed by agent.
+        // Absent, not merely empty: the field is required on every row this
+        // binary writes.
+        let agent = match obj.get("agent").and_then(|v| v.as_str()) {
+            Some(agent) => agent.to_string(),
+            None => bail!(
+                "Wake session {} was created by an older version of mx and cannot be \
+                 continued. Run `mx memory wake --begin` to start a new ritual.",
+                session_id
+            ),
+        };
+
         let step = obj["step"].as_u64().unwrap_or(0) as u32;
         let unhinted_count = obj["unhinted_count"].as_u64().unwrap_or(0) as u32;
         let revealed_count = obj["revealed_count"].as_u64().unwrap_or(0) as u32;
-        let agent = obj["agent"].as_str().unwrap_or_default().to_string();
         let wake = obj["wake"].as_i64();
         let model_id = obj
             .get("model_id")

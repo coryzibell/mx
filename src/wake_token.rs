@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::knowledge::KnowledgeEntry;
 use crate::store::WakeCascade;
@@ -292,21 +292,39 @@ impl WakeSession {
         );
     }
 
-    /// Handle the "content shrank mid-ritual past the cursor" case (§2.2): if
-    /// the recomputed chunk plan has fewer chunks than `current_chunk_index`,
-    /// we clamp and advance to the next bloom. Flagged as `chunk_truncated`
-    /// in the response for observability.
+    /// Handle the "content shrank mid-ritual past the cursor" case: if the
+    /// recomputed chunk plan has fewer chunks than `current_chunk_index`, clamp
+    /// and advance to the next bloom. Surfaced as the `chunk_truncated` status.
     ///
-    /// Returns `true` if clamping occurred (caller should set the
-    /// `chunk_truncated` response field).
+    /// Returns `true` if clamping occurred.
     pub fn clamp_if_chunks_shrank(&mut self, bloom_total_chunks: u16) -> bool {
         let total = bloom_total_chunks.max(1) as usize;
         if (self.current_chunk_index as usize) >= total {
-            self.current_index += 1;
-            self.current_chunk_index = 0;
+            self.advance_unjudged();
             true
         } else {
             false
+        }
+    }
+
+    /// Advance past a step where no guess was judged: a chunk that vanished
+    /// under the cursor, or a bloom deleted mid-ritual.
+    ///
+    /// Ticks `step` like any other advance, so every respond retires the token
+    /// it consumed and the spent one stops verifying. No bucket is recorded —
+    /// nothing was guessed — so `summary.chunks` counts this step while the
+    /// bucket totals do not.
+    pub fn advance_unjudged(&mut self) {
+        self.step = self.step.saturating_add(1);
+        self.current_index += 1;
+        self.current_chunk_index = 0;
+    }
+
+    /// True when the bloom the cursor points at is not in `present`.
+    pub fn current_bloom_is_missing(&self, present: &HashMap<String, KnowledgeEntry>) -> bool {
+        match self.current_bloom_id() {
+            Some(id) => !present.contains_key(id),
+            None => false,
         }
     }
 }
@@ -345,17 +363,18 @@ pub struct WakeBeginResponse {
     pub session: String,
     pub prompt: BloomPrompt,
     pub progress: Progress,
-    /// Per-tag counts of entries that met the cascade's other criteria and
-    /// were dropped because they carry an excluded tag. Empty when nothing
-    /// was dropped.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    /// Per-tag counts of the entries that would have been in this wake set and
+    /// were dropped because they carry an excluded tag. Always present; an
+    /// empty object means nothing was dropped.
     pub excluded: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WakeRespondResponse {
-    /// `shown` after a guess was judged, or `chunk_truncated` when the bloom
-    /// shrank past the session's chunk cursor and no guess was judged.
+    /// `shown` after a guess was judged. `chunk_truncated` when the bloom
+    /// shrank past the session's chunk cursor, and `bloom_missing` when the
+    /// bloom was deleted mid-ritual — in both of those no guess was judged,
+    /// so `bucket`, `guess` and `match` are absent and no row is logged.
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
@@ -363,7 +382,10 @@ pub struct WakeRespondResponse {
     pub guess: Option<String>,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_info: Option<MatchInfo>,
-    pub bloom: BloomFull,
+    /// Always present on `shown` and `chunk_truncated`. Absent only on
+    /// `bloom_missing`, where there is no entry left to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<BloomFull>,
     pub session: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<BloomPrompt>,

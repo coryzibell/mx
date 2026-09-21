@@ -1132,8 +1132,12 @@ pub enum MemoryCommands {
     /// Wake up with resonant identity cascade
     Wake {
         /// Number of blooms to return (default: 20)
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+        ///
+        /// Optional rather than defaulted so `conflicts_with` can tell an
+        /// explicit value from an absent one: a wake-set flag on a `--respond`
+        /// call is a mistake, and clap treats a defaulted argument as present.
+        #[arg(short, long, conflicts_with = "respond")]
+        limit: Option<usize>,
 
         /// Minimum resonance threshold - get ALL blooms >= this value (overrides --limit)
         ///
@@ -1143,15 +1147,15 @@ pub enum MemoryCommands {
         /// here that `list`/`search` would exclude after decay. Intentional for
         /// now; a `--resonance-basis raw|decayed` flag in #404 will make the
         /// basis explicit.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "respond")]
         min_resonance: Option<i32>,
 
         /// Include memories activated in last N days (default: 7)
-        #[arg(short, long, default_value = "7")]
-        days: i64,
+        #[arg(short, long, conflicts_with = "respond")]
+        days: Option<i64>,
 
         /// Don't update activation counts
-        #[arg(long)]
+        #[arg(long, conflicts_with = "respond")]
         no_activate: bool,
 
         /// Start token-based wake ritual (returns first bloom and session token)
@@ -1162,7 +1166,7 @@ pub enum MemoryCommands {
         #[arg(long)]
         bloom_id: Option<String>,
 
-        /// Submit your one guess for this bloom
+        /// Submit your one guess for this bloom (2000 characters maximum)
         #[arg(long, conflicts_with = "begin")]
         respond: Option<String>,
 
@@ -1182,7 +1186,7 @@ pub enum MemoryCommands {
 
         /// Include entries tagged `archive` or `wake-exclude`, which are kept
         /// out of the wake set by default
-        #[arg(long)]
+        #[arg(long, conflicts_with = "respond")]
         include_excluded: bool,
     },
 

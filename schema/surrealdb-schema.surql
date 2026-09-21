@@ -452,6 +452,10 @@ DEFINE FIELD IF NOT EXISTS scored_at        ON wake_guess TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS wake_guess_bloom   ON wake_guess FIELDS agent, bloom_id, chunk_index;
 DEFINE INDEX IF NOT EXISTS wake_guess_wake    ON wake_guess FIELDS agent, wake;
 DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
+-- One row per step, enforced by the database rather than by convention: if the
+-- row write succeeds and the session update then fails, the client retries the
+-- same step and would otherwise log the guess twice.
+DEFINE INDEX IF NOT EXISTS wake_guess_step ON wake_guess FIELDS session_id, position UNIQUE;
 
 -- =============================================================================
 -- SEED DATA

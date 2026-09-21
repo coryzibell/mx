@@ -182,7 +182,7 @@ fn one_guess_ritual_end_to_end() {
             "9",
             "--begin",
             "--wake",
-            "463",
+            "7",
             "--model",
             "test-model",
         ],
@@ -357,6 +357,351 @@ fn one_guess_ritual_end_to_end() {
         !md_text.contains(guess_text) && !md_text.contains("wake_guess"),
         "md export leaked the guess log"
     );
+}
+
+// =========================================================================
+// Yeet's admitted gaps 2 and 3: the DEFAULT three-layer cascade and
+// `--include-excluded` driven through the real binary rather than the
+// min-resonance path and the query layer.
+// =========================================================================
+
+/// The default cascade (no `--min-resonance`) is the path every real wake
+/// takes, and until now only the min-resonance path was driven end to end.
+#[test]
+#[serial]
+fn the_default_cascade_opens_a_ritual_and_honours_the_exclusion() {
+    let dir = TempDir::new().unwrap();
+    add_bloom(&dir, "Cascade Alpha", "Alpha body text.", "alpha cue", None);
+    add_bloom(&dir, "Cascade Beta", "Beta body text.", "beta cue", None);
+    add_bloom(
+        &dir,
+        "Cascade Shelved",
+        "Shelved body text.",
+        "shelved cue",
+        Some("wake-exclude"),
+    );
+
+    let out = mx(
+        &dir,
+        &["memory", "wake", "--begin", "--model", "test-model"],
+    );
+    assert!(
+        out.status.success(),
+        "the default cascade must open a ritual; stderr: {}",
+        stderr_of(&out)
+    );
+    let begin = json_of(&out);
+    assert_eq!(begin["status"], "ritual_started");
+    assert_eq!(
+        begin["progress"]["bloom_total"], 2,
+        "the excluded entry must not be in the default cascade: {begin}"
+    );
+    assert_eq!(begin["excluded"]["wake-exclude"], 1);
+
+    // And the override brings it back through --begin, not just through the
+    // listing and the query layer.
+    let out = mx(&dir, &["memory", "wake", "--begin", "--include-excluded"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    assert_eq!(
+        begin["progress"]["bloom_total"], 3,
+        "--include-excluded must restore the entry through --begin: {begin}"
+    );
+    // The key is always present, so this reads as an empty object rather than
+    // an absent key — one shape for the consumer either way.
+    assert_eq!(
+        begin["excluded"],
+        serde_json::json!({}),
+        "nothing is excluded when the override is on: {begin}"
+    );
+}
+
+/// Two `--begin` calls over unchanged data must produce the same sequence.
+#[test]
+#[serial]
+fn two_begins_over_the_same_data_produce_the_same_sequence() {
+    let dir = TempDir::new().unwrap();
+    for (title, cue) in [
+        ("Order One", "one cue"),
+        ("Order Two", "two cue"),
+        ("Order Three", "three cue"),
+    ] {
+        add_bloom(&dir, title, "Body text.", cue, None);
+    }
+
+    let sequence = |dir: &TempDir| -> Vec<String> {
+        let mut titles = Vec::new();
+        let out = mx(dir, &["memory", "wake", "--begin"]);
+        assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+        let mut node = json_of(&out);
+        let mut token = node["session"].as_str().unwrap().to_string();
+        let mut id = node["prompt"]["id"].as_str().unwrap().to_string();
+        titles.push(node["prompt"]["title"].as_str().unwrap().to_string());
+        loop {
+            let out = mx(
+                dir,
+                &[
+                    "memory",
+                    "wake",
+                    "--bloom-id",
+                    &id,
+                    "--respond",
+                    "no match at all",
+                    "--session",
+                    &token,
+                ],
+            );
+            assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+            node = json_of(&out);
+            let Some(next) = node.get("next").filter(|n| !n.is_null()) else {
+                break;
+            };
+            titles.push(next["title"].as_str().unwrap().to_string());
+            id = next["id"].as_str().unwrap().to_string();
+            token = node["session"].as_str().unwrap().to_string();
+        }
+        titles
+    };
+
+    let first = sequence(&dir);
+    let second = sequence(&dir);
+    assert_eq!(first.len(), 3, "precondition: all three blooms walked");
+    assert_eq!(
+        first, second,
+        "the wake sequence is not stable across begins"
+    );
+}
+
+/// Gap 4: `chunk_truncated` was only ever driven against the mock store. This
+/// walks it through the real binary and a real store: a chunked bloom is
+/// shrunk under the session's cursor mid-ritual, and the ritual must report
+/// the truncation and keep going.
+#[test]
+#[serial]
+fn a_bloom_shrunk_mid_ritual_reports_chunk_truncated_end_to_end() {
+    /// `mx` with a small chunk threshold, so a modest fixture chunks.
+    fn mx_chunked(dir: &TempDir, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new(MX);
+        common::isolate(&mut cmd, dir.path());
+        cmd.args(args)
+            .env("MX_CURRENT_AGENT", AGENT)
+            .env("MX_WAKE_CHUNK_BYTES", "300")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("failed to spawn mx");
+        drop(child.stdin.take());
+        child.wait_with_output().expect("failed to wait on mx")
+    }
+
+    let dir = TempDir::new().unwrap();
+    let mut body = String::new();
+    for section in 1..=6 {
+        body.push_str(&format!(
+            "\n## Section {section}\n\nThis is section {section} of the fixture, \
+             long enough that the sections cross the chunking threshold.\n\n"
+        ));
+    }
+    add_bloom(&dir, "Chunky Note", &body, "chunky cue", None);
+    add_bloom(&dir, "Tail Note", "Tail body text.", "tail cue", None);
+
+    let out = mx_chunked(&dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    let total = begin["progress"]["total"].as_u64().unwrap();
+    assert!(
+        total > 2,
+        "precondition: the fixture must chunk, got {total}"
+    );
+
+    // The sequence is ordered by the cascade, not by insertion, so walk
+    // forward until the chunked bloom is the one on the table, then take one
+    // more chunk of it so the cursor sits past chunk 0.
+    let mut id = begin["prompt"]["id"].as_str().unwrap().to_string();
+    let mut title = begin["prompt"]["title"].as_str().unwrap().to_string();
+    let mut token = begin["session"].as_str().unwrap().to_string();
+    let mut chunky_id = String::new();
+
+    for _ in 0..total + 1 {
+        let out = mx_chunked(
+            &dir,
+            &[
+                "memory",
+                "wake",
+                "--bloom-id",
+                &id,
+                "--respond",
+                "no match",
+                "--session",
+                &token,
+            ],
+        );
+        assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+        let node = json_of(&out);
+        token = node["session"].as_str().unwrap().to_string();
+        if title.starts_with("Chunky") {
+            chunky_id = id.clone();
+            break;
+        }
+        let next = node.get("next").expect("more blooms to walk");
+        id = next["id"].as_str().unwrap().to_string();
+        title = next["title"].as_str().unwrap().to_string();
+    }
+    assert!(
+        !chunky_id.is_empty(),
+        "precondition: the chunked bloom must be reachable"
+    );
+
+    let out = mx_chunked(
+        &dir,
+        &["memory", "update", &chunky_id, "--content", "tiny now."],
+    );
+    assert!(out.status.success(), "update; stderr: {}", stderr_of(&out));
+
+    let out = mx_chunked(
+        &dir,
+        &[
+            "memory",
+            "wake",
+            "--bloom-id",
+            &chunky_id,
+            "--respond",
+            "ignored",
+            "--session",
+            &token,
+        ],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let trunc = json_of(&out);
+    assert_eq!(
+        trunc["status"], "chunk_truncated",
+        "a bloom shrunk under the cursor must report the truncation: {trunc}"
+    );
+    assert!(
+        trunc.get("bucket").is_none() && trunc.get("guess").is_none(),
+        "no guess was judged, so neither is reported: {trunc}"
+    );
+    assert!(
+        trunc.get("next").is_some() || trunc.get("summary").is_some(),
+        "a truncation must still hand back a next prompt or a summary: {trunc}"
+    );
+}
+
+// =========================================================================
+// Adversarial: flags and error surfaces.
+// =========================================================================
+
+/// `--wake` and `--model` are declared `requires = "begin"`, but
+/// `--include-excluded` is not, so a respond call accepts a wake-set flag it
+/// cannot act on and silently ignores it. The same is true of `--limit`,
+/// `--min-resonance`, `--days` and `--no-activate`: the respond branch never
+/// reads any of them.
+#[test]
+#[serial]
+fn wake_set_flags_are_rejected_on_a_respond_call() {
+    let dir = TempDir::new().unwrap();
+    add_bloom(&dir, "Flag Alpha", "Alpha body text.", "alpha cue", None);
+
+    let out = mx(&dir, &["memory", "wake", "--begin"]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    let token = begin["session"].as_str().unwrap().to_string();
+    let id = begin["prompt"]["id"].as_str().unwrap().to_string();
+
+    for flag in [
+        vec!["--include-excluded"],
+        vec!["--min-resonance", "9"],
+        vec!["--limit", "5"],
+    ] {
+        let mut args = vec![
+            "memory",
+            "wake",
+            "--bloom-id",
+            &id,
+            "--respond",
+            "alpha cue",
+            "--session",
+            &token,
+        ];
+        args.extend(flag.iter().copied());
+        let out = mx(&dir, &args);
+        assert!(
+            !out.status.success(),
+            "{flag:?} was accepted and silently ignored on a respond call; stdout: {}",
+            stdout_of(&out)
+        );
+    }
+}
+
+/// With the exclusion on by default, tagging the wrong thing empties the wake
+/// set. The failure a user meets then is a bare "No blooms to wake", which
+/// names neither the exclusion nor the flag that turns it off — and the
+/// entries are sitting right there in the graph.
+#[test]
+#[serial]
+fn an_all_excluded_wake_set_says_why_it_is_empty() {
+    let dir = TempDir::new().unwrap();
+    add_bloom(
+        &dir,
+        "Shelved One",
+        "Body text.",
+        "one cue",
+        Some("archive"),
+    );
+    add_bloom(
+        &dir,
+        "Shelved Two",
+        "Body text.",
+        "two cue",
+        Some("wake-exclude"),
+    );
+
+    let out = mx(&dir, &["memory", "wake", "--begin"]);
+    assert!(!out.status.success(), "an empty wake set must fail");
+
+    // Precondition: the entries are there, and the override finds them.
+    let check = mx(&dir, &["memory", "wake", "--begin", "--include-excluded"]);
+    assert!(
+        check.status.success(),
+        "precondition: the entries exist; stderr: {}",
+        stderr_of(&check)
+    );
+
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("exclude") || err.contains("archive"),
+        "the error must name the exclusion that emptied the set, got: {err}"
+    );
+}
+
+/// Section 3 retires this vocabulary from tool output, help text and error
+/// messages alike.
+#[test]
+#[serial]
+fn no_retired_vocabulary_survives_in_the_wake_help_text() {
+    let dir = TempDir::new().unwrap();
+    let mut seen = String::new();
+    for args in [
+        vec!["memory", "wake", "--help"],
+        vec!["memory", "add", "--help"],
+        vec!["memory", "update", "--help"],
+        vec!["memory", "--help"],
+    ] {
+        seen.push_str(&stdout_of(&mx(&dir, &args)));
+    }
+    for retired in [
+        "remembered",
+        "needed_help",
+        "needed help",
+        "incorrect",
+        "prove",
+        "verification",
+    ] {
+        assert!(
+            !seen.to_lowercase().contains(retired),
+            "help text still carries the retired word {retired:?}"
+        );
+    }
 }
 
 /// Every file under `dir`, recursively. Returns nothing if `dir` is missing.

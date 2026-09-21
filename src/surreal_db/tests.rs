@@ -4473,6 +4473,35 @@ fn wake_cascade_counts_a_doubly_qualifying_excluded_entry_once() {
 }
 
 #[test]
+fn wake_cascade_counts_an_entry_carrying_both_excluded_tags_once() {
+    // One entry, both tags. It is one dropped entry, and it is attributed to
+    // the first tag in WAKE_EXCLUDED_TAGS — `archive` — rather than counted
+    // under each. Pinning the tie-break so a reordering of the constant is a
+    // test failure rather than a silent change to what `--begin` reports.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry(
+        "kn-both-tags",
+        &["archive", "wake-exclude"],
+    ))
+    .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    assert_eq!(cascade_ids(&cascade), vec!["kn-keep".to_string()]);
+    assert_eq!(
+        cascade.excluded.len(),
+        1,
+        "one entry is one drop, not one per tag: {:?}",
+        cascade.excluded
+    );
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+    assert_eq!(cascade.excluded.get("wake-exclude"), None);
+}
+
+#[test]
 fn wake_cascade_entries_carry_their_tags_in_every_layer() {
     // The exclusion filters on `KnowledgeEntry::tags`. If any cascade query
     // returned entries with empty tags, the filter would silently pass
@@ -4659,7 +4688,7 @@ fn wake_guess_row_round_trips_through_the_schema() {
 
     let row = crate::wake_guess::WakeGuessRow {
         agent: "test-agent".to_string(),
-        wake: Some(463),
+        wake: Some(7),
         session_id: "session-1".to_string(),
         bloom_id: "kn-sample".to_string(),
         chunk_index: 1,
@@ -4684,7 +4713,7 @@ fn wake_guess_row_round_trips_through_the_schema() {
     let got = &stored[0];
 
     assert_eq!(got["agent"], "test-agent");
-    assert_eq!(got["wake"], 463);
+    assert_eq!(got["wake"], 7);
     assert_eq!(got["session_id"], "session-1");
     assert_eq!(got["bloom_id"], "kn-sample");
     assert_eq!(got["chunk_index"], 1);
@@ -4769,14 +4798,14 @@ fn a_wake_session_round_trips_its_agent_wake_and_model() {
     let mut session = crate::wake_token::WakeSession::new(
         &cascade,
         "test-agent".to_string(),
-        Some(463),
+        Some(7),
         Some("test-model".to_string()),
     );
     let session_id = db.create_wake_session(&session).unwrap();
 
     let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
     assert_eq!(loaded.agent, "test-agent");
-    assert_eq!(loaded.wake, Some(463));
+    assert_eq!(loaded.wake, Some(7));
     assert_eq!(loaded.model_id.as_deref(), Some("test-model"));
     assert_eq!(loaded.bloom_ids.len(), 2);
 
@@ -4793,4 +4822,94 @@ fn a_wake_session_round_trips_its_agent_wake_and_model() {
     assert_eq!(loaded.unhinted_count, 1);
     assert_eq!(loaded.revealed_count, 0);
     assert_eq!(loaded.bucket_totals().unhinted.authored, 1);
+}
+
+#[test]
+fn a_session_row_without_an_agent_field_is_refused_by_the_loader() {
+    // A session written before the one-guess ritual has no `agent` field at
+    // all. Simulate that shape faithfully by removing the field definition
+    // first — the current schema requires it, which is why a row like this
+    // can only pre-date the schema.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.query_json_for_test("REMOVE FIELD agent ON wake_session")
+        .unwrap();
+    db.query_json_for_test(
+        "CREATE type::thing('wake_session', 'legacy-session') SET
+            bloom_ids = ['kn-a'],
+            current_index = 0,
+            current_chunk_index = 0,
+            step = 0,
+            created_at = time::now(),
+            bloom_chunk_meta = []
+        RETURN NONE",
+    )
+    .unwrap();
+
+    let err = db
+        .get_wake_session("legacy-session")
+        .expect_err("an agent-less session row must not load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("older version") && msg.contains("--begin"),
+        "the refusal must name the cause and the way forward, got: {msg}"
+    );
+}
+
+#[test]
+fn a_session_row_with_an_agent_still_loads() {
+    // The guard above must key on the field being ABSENT, not on any value.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let cascade = crate::store::WakeCascade {
+        core: vec![make_test_entry("kn-a", 9, 0.0)],
+        ..Default::default()
+    };
+    let session =
+        crate::wake_token::WakeSession::new(&cascade, "test-agent".to_string(), None, None);
+    let id = db.create_wake_session(&session).unwrap();
+
+    let loaded = db.get_wake_session(&id).unwrap().unwrap();
+    assert_eq!(loaded.agent, "test-agent");
+}
+
+#[test]
+fn one_guess_row_per_session_step_is_enforced_by_the_database() {
+    // Spec 4.3 states one row per chunk per wake. If the row write succeeds
+    // and the session update then fails, the client retries the same step —
+    // so the invariant needs an index behind it, not just a convention.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let row = |position: u32| crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: Some(7),
+        session_id: "session-1".to_string(),
+        bloom_id: "kn-sample".to_string(),
+        chunk_index: 0,
+        chunk_total: 1,
+        position,
+        bloom_position: 1,
+        bloom_total: 1,
+        title_shown: "Sample Title".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: None,
+        phrase_source: "authored".to_string(),
+        phrases: vec!["first phrase".to_string()],
+        match_kind: "none".to_string(),
+        match_index: None,
+        bucket: "revealed".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    };
+
+    db.insert_wake_guess(&row(0)).unwrap();
+    db.insert_wake_guess(&row(0))
+        .expect_err("a second row at the same session step must be rejected");
+    // A different step in the same session is fine, as is the same step in a
+    // different session.
+    db.insert_wake_guess(&row(1)).unwrap();
+
+    let mut other = row(0);
+    other.session_id = "session-2".to_string();
+    db.insert_wake_guess(&other).unwrap();
+
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(stored.len(), 3, "exactly the three accepted rows survive");
 }

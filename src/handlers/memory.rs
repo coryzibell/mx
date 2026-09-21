@@ -3557,8 +3557,13 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &guess, &session_token)?;
                 println!("{}", output);
             } else {
-                let cascade =
-                    db.wake_cascade(&ctx, limit, min_resonance, days, include_excluded)?;
+                let cascade = db.wake_cascade(
+                    &ctx,
+                    limit.unwrap_or(20),
+                    min_resonance,
+                    days.unwrap_or(7),
+                    include_excluded,
+                )?;
 
                 // Increment activation counts for wake cascade entries.
                 // We do NOT reset last_activated here — wake surfacing is passive, not

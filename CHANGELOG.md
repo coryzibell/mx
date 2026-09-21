@@ -23,23 +23,50 @@ JSON must be updated; the shapes below are the whole contract.
   knew: entries shown earlier in a ritual leak into later guesses, and the tool
   cannot see that — which is why every logged row records its position.
 - **Respond payload** gains `bucket`, `guess` and
-  `match: {kind: exact|close|none, phrase_index}`, and always carries `bloom`
-  with `{id, title, phrases, phrase_source, content, chunk?}`. `progress` gains
-  `buckets: {unhinted, revealed}`.
+  `match: {kind: exact|close|none, phrase_index}`, and carries `bloom` with
+  `{id, title, phrases, phrase_source, content, chunk?}`. `progress` gains
+  `buckets: {unhinted, revealed}`. Two statuses judge no guess and so omit
+  `bucket`, `guess` and `match`: `chunk_truncated`, where the entry shrank past
+  the session's chunk cursor, and `bloom_missing`, where it was deleted
+  mid-ritual — the latter omits `bloom` too, there being nothing left to show.
+  Both still advance the step, so the token the caller spent stops verifying.
 - **Final summary** is `{chunks, blooms, buckets: {unhinted: {authored,
   derived, auto}, revealed: {...}}}` and nothing else. No total, no ratio, no
-  per-entry roll-up string. `BloomRollup` is removed.
+  per-entry roll-up string; `summary.blooms_complete` and the `BloomRollup`
+  type behind it are both removed. `chunks` counts every step the ritual
+  walked, including the ones where no guess was judged, so the bucket totals
+  can legitimately sum to less than it.
 - **Prompt payload** is `{id, title, phrase_source, chunk?}`. `resonance`,
   `resonance_type` and `wake_phrase_count` are dropped — the last existed only
   to tell a consumer whether `--skip` was legal.
 - **`--skip` is removed** and clap rejects it as an unknown flag (#452). It had
   been unreachable since every chunk gained a phrase: it always returned
   `skip_requires_phraseless_bloom`.
-- **A session created by an older binary** does not load; the call errors and
-  asks for a fresh `--begin`. Sessions live for one ritual, so at most one is
-  affected per deployment.
-- Help text: `--respond` is "Submit your one guess for this bloom", and
-  `--wake-phrase` is "a cue the title is meant to evoke".
+- **A session created by an older binary** does not load: such a row has no
+  `agent` field, and the loader refuses it and asks for a fresh `--begin`
+  rather than walking it and filing every guess under an empty agent. Sessions
+  live for one ritual, so at most one is affected per deployment.
+- **A `--respond` from a different agent than the one that began the ritual is
+  refused**, and writes no row. The session token authorises the session, not
+  whoever holds it; without this a foreign caller could drive someone else's
+  ritual to completion and every row it wrote would be stamped with the
+  owner's agent.
+- **A guess is refused, rather than logged, when it is not usable data.** Over
+  2000 characters (counted in characters, not bytes, and never truncated), or
+  carrying no alphanumeric content at all — an empty, whitespace-only or
+  punctuation-only guess. A refusal writes no row and does not advance the
+  session, so the caller can simply guess again.
+- **Wake-set flags are rejected on a `--respond` call** instead of being
+  silently ignored: `--limit`, `--min-resonance`, `--days`, `--no-activate` and
+  `--include-excluded` now conflict with `--respond`, as `--wake` and `--model`
+  already did. `--limit` and `--days` became optional arguments (defaults
+  unchanged, 20 and 7) so an explicit value can be told from an absent one.
+- **An empty wake set caused entirely by the tag exclusion now says so**,
+  naming the per-tag counts and `--include-excluded`, instead of reporting a
+  bare "No blooms to wake" while the entries sit in the graph.
+- Help text: `--respond` is "Submit your one guess for this bloom (2000
+  characters maximum)", and `--wake-phrase` is "a cue the title is meant to
+  evoke".
 
 ### Added
 - **`wake_guess` table and a row per guess (#448).** Every `--respond` that
@@ -49,11 +76,13 @@ JSON must be updated; the shapes below are the whole contract.
   against, the match kind and index, the bucket, and the SHA-256 of the chunk
   text. **A failed row write fails the respond call** and leaves the session
   where it was: the guess is the data the ritual exists to collect, so it is
-  not best-effort. A `chunk_truncated` response judges no guess and writes no
-  row. The similarity columns are defined but left null — a row with a null
-  `scored_at` is pending for the scoring pass that lands with #449. The table
-  is not reachable from `mx memory export`, which reads the knowledge table
-  only.
+  not best-effort. A response that judges no guess writes no row. One row per
+  session step is enforced by a unique index on (`session_id`, `position`), so
+  a client that retries a step after a failed session update cannot log the
+  same guess twice. The similarity columns are defined but left null — a row
+  with a null `scored_at` is pending for the scoring pass that lands with
+  #449. The table is not reachable from `mx memory export`, which reads the
+  knowledge table only.
 - **`mx memory wake --wake N` and `--model ID`** (with `--begin`) record the
   wake number and the answering model on every guess row. Both are optional
   because agents other than the one that counts wakes also run the ritual, and
@@ -62,8 +91,13 @@ JSON must be updated; the shapes below are the whole contract.
 - **Default tag exclusion, and `--include-excluded` to turn it off (#448).**
   Entries tagged `archive` or `wake-exclude` are kept out of every layer of the
   wake cascade — core, recent, bridges and the `--min-resonance` path — and
-  `--begin` reports per-tag counts in `excluded`. The two tags are separate
-  because a live entry merely kept out of the wake set is not an archived copy.
+  `--begin` reports per-tag counts in `excluded`, a key that is always present
+  and empty when nothing was dropped. The count means *entries that would have
+  been in this wake set*: the core layer widens its query by the number of
+  excluded entries it has seen and fetches again, so exclusion never costs a
+  kept entry its slot and never reports entries ranked below the limit that
+  would not have appeared anyway. The two tags are separate because a live
+  entry merely kept out of the wake set is not an archived copy.
   The match is **exact**: a tag that starts with `archive`, such as
   `archive/2026`, is not excluded. Applying the policy in mx rather than in
   caller-side text keeps it from being dropped in a rewrite.
@@ -72,6 +106,34 @@ JSON must be updated; the shapes below are the whole contract.
   existing rows keep validating, and are no longer read or written.
 
 ### Fixed
+- **Match tolerance is measured in characters on both sides.** `fuzzy_match`
+  counted edit distance in characters and divided by a byte length, so for
+  3-byte text the denominator was three times too large and the 0.8 tolerance
+  widened until a guess with half its characters wrong came back as a close
+  match. The same edit ratio now gets the same verdict whatever the text is
+  written in. Pre-existing; it starts to matter here because every authored
+  phrase is compared and the verdict is written to a log meant to be read back.
+- **Nothing matches nothing.** `fuzzy_match` strips every non-alphanumeric
+  character before comparing, so a blank guess and a punctuation-only phrase
+  both collapsed to the empty string and compared *exactly equal* — logged as
+  an exact match in the `unhinted` bucket. An empty normalization on either
+  side is now no match.
+- **A deleted entry no longer bricks an open ritual.** Every `--respond`
+  re-fetches all the session's entries and used to fail on the first one
+  missing, so deleting an entry the ritual had already walked past left a
+  session that could be neither finished nor cleared. Entries that are gone are
+  stepped over; if it is the entry on the table, the response says
+  `bloom_missing` and the ritual continues.
+- **A `chunk_truncated` response no longer hands back the token it just
+  consumed.** The truncation path advanced the entry cursor without ticking the
+  step, so the spent token still verified and `summary.chunks` undercounted by
+  one per truncation.
+- **The final response no longer reports a position past the end.** `progress`
+  read "chunk 3 of 2" on the last response of every ritual, in the payload the
+  model reads, next to a summary saying otherwise.
+- **The core cascade query is bounded again.** It had dropped its SQL `LIMIT`
+  and truncated in Rust; since the projection carries `embedding`, that dragged
+  a 768-float vector for every high-resonance entry in the graph on every wake.
 - **A `wake_order` of zero is no longer read as unset (#456).** Every read path
   selected the field with a truthiness test, and SurrealQL treats `0` as falsy,
   so a stored order of `0` came back as null. The cascade queries derive
