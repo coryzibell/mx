@@ -568,15 +568,17 @@ cascade; a token-based ritual flow is available for programmatic use.
     ([`-d, --days`],    [`int`],    [Include memories activated in last N days. Default: `7`.]),
     ([`--no-activate`], [`flag`],   [Do not update activation counts.]),
     ([`--begin`],       [`flag`],   [Start token-based wake ritual. Returns first bloom and session token.]),
-    ([`--bloom-id`],    [`string`], [Bloom ID for `--respond` or `--skip` operations.]),
-    ([`--respond`],     [`string`], [Submit wake phrase response for a bloom.]),
-    ([`--skip`],        [`flag`],   [Skip a bloom without wake phrase.]),
-    ([`--session`],     [`string`], [Session token for chained ritual (required with `--respond` or `--skip`).]),
+    ([`--bloom-id`],    [`string`], [Bloom ID for `--respond`.]),
+    ([`--respond`],     [`string`], [Submit your one guess for this bloom.]),
+    ([`--session`],     [`string`], [Session token for chained ritual (required with `--respond`).]),
+    ([`--wake`],        [`int`],    [Wake number recorded on every guess row (with `--begin`). Optional; mx keeps no counter of its own.]),
+    ([`--model`],       [`string`], [Model identifier recorded on every guess row (with `--begin`). Optional; mx cannot discover it.]),
+    ([`--include-excluded`], [`flag`], [Include entries tagged `archive` or `wake-exclude`, which are kept out of the wake set by default.]),
   ),
   examples: (
     "# Default wake -- top 20 blooms, text output\nmx memory wake",
     "# All blooms with resonance >= 7\nmx memory wake --min-resonance 7",
-    "# Token-based ritual (for non-TTY / programmatic use)\nmx memory wake --begin\nmx memory wake --bloom-id kn-abc --respond \"the phrase\" --session tok-xyz\nmx memory wake --bloom-id kn-def --skip --session tok-xyz",
+    "# Token-based ritual (for non-TTY / programmatic use)\nmx memory wake --begin --wake 463 --model some-model-id\nmx memory wake --bloom-id kn-abc --respond \"your guess\" --session tok-xyz",
   ),
 )
 
@@ -586,7 +588,39 @@ reads blooms ordered by resonance and wake order.]
 === Wake modes
 
 - *Default* (`mx memory wake`): plain text cascade output, blooms listed with titles and content.
-- *Token-based* (`--begin`, `--respond`, `--skip`): stateless chained ritual for non-interactive environments. Start with `--begin`, then loop with `--respond` or `--skip` using the returned session token and bloom ID.
+- *Token-based* (`--begin`, `--respond`): stateless chained ritual for non-interactive environments. Start with `--begin`, then loop with `--respond` using the returned session token and bloom ID.
+
+=== The ritual flow
+
+Each chunk gets exactly one guess, made from the title alone, after which the
+entry is shown. There is no hint ladder and no second attempt.
+
+`--respond` returns `status: "shown"` with a `bucket` of either `unhinted` (the
+guess string-matched one of the chunk's phrases, and the tool had given no
+hint) or `revealed` (it did not). `match` carries the mechanical facts:
+`kind` is `exact`, `close` or `none`, and `phrase_index` says which phrase
+matched. The bucket names what the tool did, not what the responder knew.
+
+The final response carries a summary of bucket counts split by phrase source
+(`authored`, `derived`, `auto`) and nothing else.
+
+=== The guess log
+
+Every `--respond` that judges a guess writes one `wake_guess` row before the
+session advances: the agent, wake number, model, entry, chunk, both positions
+in the sequence, the title as shown, the guess, the phrases it was matched
+against, the match, the bucket, and the SHA-256 of the chunk text. If that
+write fails, the respond call fails and the session does not advance.
+
+Guess rows are scoped to the writing agent and are not reachable through
+`mx memory export`, which reads the knowledge table only.
+
+=== Wake set exclusion
+
+Entries tagged `archive` or `wake-exclude` are kept out of every cascade layer
+by default, and `--begin` reports per-tag counts in its `excluded` field. The
+match is exact, so a tag that merely starts with `archive` is unaffected.
+`--include-excluded` turns the exclusion off.
 
 #command(
   "mx memory wake-fetch",

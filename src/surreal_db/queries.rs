@@ -1,13 +1,53 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use surrealdb::sql::Thing;
 
 use crate::knowledge::KnowledgeEntry;
+use crate::store::WAKE_EXCLUDED_TAGS;
 
 use super::connection::normalize_datetime;
 use super::{SurrealConnection, SurrealDatabase};
+
+/// The first excluded tag this entry carries, by EXACT match. Prefix matching
+/// would catch any future tag that merely starts with `archive`.
+fn excluded_tag_of(entry: &KnowledgeEntry) -> Option<&'static str> {
+    WAKE_EXCLUDED_TAGS
+        .into_iter()
+        .find(|excluded| entry.tags.iter().any(|tag| tag == excluded))
+}
+
+/// Drop entries carrying an excluded tag, recording each dropped id once.
+/// With `include_excluded` the entries pass through and nothing is recorded.
+fn keep_included(
+    entries: Vec<KnowledgeEntry>,
+    include_excluded: bool,
+    dropped: &mut HashMap<String, &'static str>,
+) -> Vec<KnowledgeEntry> {
+    if include_excluded {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .filter(|entry| match excluded_tag_of(entry) {
+            Some(tag) => {
+                dropped.insert(entry.id.clone(), tag);
+                false
+            }
+            None => true,
+        })
+        .collect()
+}
+
+/// Per-tag counts of the distinct entries that were dropped.
+fn tally_excluded(dropped: &HashMap<String, &'static str>) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for tag in dropped.values() {
+        *counts.entry((*tag).to_string()).or_insert(0) += 1;
+    }
+    counts
+}
 
 // =========================================================================
 // BACKUP OPERATIONS (Issue #206)
@@ -158,8 +198,15 @@ impl SurrealDatabase {
         limit: usize,
         min_resonance: Option<i32>,
         days: i64,
+        include_excluded: bool,
     ) -> Result<crate::store::WakeCascade> {
-        Self::runtime().block_on(self.wake_cascade_async(ctx, limit, min_resonance, days))
+        Self::runtime().block_on(self.wake_cascade_async(
+            ctx,
+            limit,
+            min_resonance,
+            days,
+            include_excluded,
+        ))
     }
 
     async fn wake_cascade_async(
@@ -168,23 +215,36 @@ impl SurrealDatabase {
         limit: usize,
         min_resonance: Option<i32>,
         days: i64,
+        include_excluded: bool,
     ) -> Result<crate::store::WakeCascade> {
+        // Tag exclusion runs in Rust, on the `tags` field every cascade query
+        // populates via `value_to_knowledge_entry`. It is applied to each layer
+        // BEFORE that layer's `take(...)`, so an excluded entry never occupies
+        // a slot. `dropped` tracks distinct ids so an entry that both the core
+        // and recent queries return is counted once.
+        let mut dropped: HashMap<String, &'static str> = HashMap::new();
+
         // If min_resonance is set, use simple query for all blooms >= threshold
         if let Some(threshold) = min_resonance {
             let blooms = self.query_blooms_by_resonance(ctx, threshold).await?;
+            let core = keep_included(blooms, include_excluded, &mut dropped);
             return Ok(crate::store::WakeCascade {
-                core: blooms,
+                core,
                 recent: Vec::new(),
                 bridges: Vec::new(),
+                excluded: tally_excluded(&dropped),
             });
         }
 
         // Sequential filling: core first, then recent, then bridges
         // This ensures we get the most important blooms first
 
-        // Layer 1: Core foundational/transformative blooms (resonance 8+)
-        // Use full limit for core - we'll subtract what we get
-        let core = self.query_core_blooms(ctx, limit).await?;
+        // Layer 1: Core foundational/transformative blooms (resonance 8+).
+        // The core query returns its whole ordered set — truncating to `limit`
+        // happens here, after exclusion, so a dropped entry does not eat a slot.
+        let core = self.query_core_blooms(ctx).await?;
+        let mut core = keep_included(core, include_excluded, &mut dropped);
+        core.truncate(limit);
         let remaining = limit.saturating_sub(core.len());
 
         // Layer 2: Recent blooms (last N days)
@@ -192,15 +252,16 @@ impl SurrealDatabase {
         let core_ids: HashSet<String> = core.iter().map(|e| e.id.clone()).collect();
 
         let all_recent = self.query_recent_blooms(ctx, remaining * 2, days).await?;
-        let recent: Vec<_> = all_recent
+        let recent: Vec<_> = keep_included(all_recent, include_excluded, &mut dropped)
             .into_iter()
             .filter(|e| !core_ids.contains(&e.id))
             .take(remaining)
             .collect();
         let remaining = remaining.saturating_sub(recent.len());
 
-        // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+)
-        // Use final remaining quota
+        // Layer 3: Bridge blooms (anchored to core/recent, resonance 5+).
+        // An excluded entry anchored to a core entry would otherwise come back
+        // here after being dropped from its own layer.
         let mut anchor_ids: Vec<String> = core
             .iter()
             .chain(recent.iter())
@@ -221,7 +282,7 @@ impl SurrealDatabase {
             let all_bridges = self
                 .query_bridge_blooms(ctx, remaining * 2, &anchor_ids)
                 .await?;
-            all_bridges
+            keep_included(all_bridges, include_excluded, &mut dropped)
                 .into_iter()
                 .filter(|e| !existing_ids.contains(&e.id))
                 .take(remaining)
@@ -232,10 +293,14 @@ impl SurrealDatabase {
             core,
             recent,
             bridges,
+            excluded: tally_excluded(&dropped),
         })
     }
 
-    /// Query all blooms with resonance >= threshold (for --min-resonance flag)
+    /// Query all blooms with resonance >= threshold (for --min-resonance flag).
+    ///
+    /// Shares the core query's ordering so the sequence is stable across wakes
+    /// and `wake_order` decides which bloom opens the ritual.
     async fn query_blooms_by_resonance(
         &self,
         ctx: &crate::store::AgentContext,
@@ -244,12 +309,21 @@ impl SurrealDatabase {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
         let sql = format!(
-            "SELECT {}
-            FROM knowledge
-            WHERE resonance >= $threshold
-            AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
-            {}
-            ORDER BY resonance DESC",
+            "SELECT *,
+                (wake_order IS NOT NULL) AS has_wake_order,
+                wake_order ?? 999999 AS effective_wake_order
+            FROM (
+                SELECT {}
+                FROM knowledge
+                WHERE resonance >= $threshold
+                AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
+                {}
+            )
+            ORDER BY
+                has_wake_order DESC,
+                effective_wake_order ASC,
+                resonance DESC,
+                id ASC",
             Self::knowledge_select_fields(),
             visibility_clause
         );
@@ -271,11 +345,14 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// Layer 1: Query core blooms (resonance 8+, excludes ephemeral)
+    /// Layer 1: Query core blooms (resonance 8+, excludes ephemeral).
+    ///
+    /// Returns the whole ordered set. The caller applies tag exclusion and
+    /// then truncates to its limit, so an excluded entry cannot consume a slot
+    /// that a kept entry would otherwise have taken.
     async fn query_core_blooms(
         &self,
         ctx: &crate::store::AgentContext,
-        limit: usize,
     ) -> Result<Vec<crate::knowledge::KnowledgeEntry>> {
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
 
@@ -293,14 +370,14 @@ impl SurrealDatabase {
             ORDER BY
                 has_wake_order DESC,
                 effective_wake_order ASC,
-                resonance DESC
-            LIMIT $limit",
+                resonance DESC,
+                id ASC",
             Self::knowledge_select_fields(),
             visibility_clause
         );
 
         let mut response = with_db!(self, db, {
-            let mut query = db.query(&sql).bind(("limit", limit as i64));
+            let mut query = db.query(&sql);
             if let Some(agent) = current_agent {
                 query = query.bind(("current_agent", agent));
             }
@@ -343,7 +420,8 @@ impl SurrealDatabase {
             ORDER BY
                 has_wake_order DESC,
                 effective_wake_order ASC,
-                resonance DESC
+                resonance DESC,
+                id ASC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -394,7 +472,8 @@ impl SurrealDatabase {
             ORDER BY
                 has_wake_order DESC,
                 effective_wake_order ASC,
-                resonance DESC
+                resonance DESC,
+                id ASC
             LIMIT $limit",
             Self::knowledge_select_fields(),
             visibility_clause
@@ -1606,27 +1685,29 @@ impl SurrealDatabase {
         let mut response = with_db!(self, db, {
             db.query(
                 "CREATE type::thing('wake_session', $session_id) SET
+                    agent = $agent,
+                    wake = $wake,
+                    model_id = $model_id,
                     bloom_ids = $bloom_ids,
                     current_index = $current_index,
                     current_chunk_index = $current_chunk_index,
                     step = $step,
-                    attempts_on_current = $attempts_on_current,
-                    remembered_count = $remembered_count,
-                    needed_help_count = $needed_help_count,
-                    skipped_count = $skipped_count,
+                    unhinted_count = $unhinted_count,
+                    revealed_count = $revealed_count,
                     created_at = <datetime>$created_at,
                     bloom_chunk_meta = $bloom_chunk_meta
                 ",
             )
             .bind(("session_id", session.session_id.clone()))
+            .bind(("agent", session.agent.clone()))
+            .bind(("wake", session.wake))
+            .bind(("model_id", session.model_id.clone()))
             .bind(("bloom_ids", session.bloom_ids.clone()))
             .bind(("current_index", session.current_index as i64))
             .bind(("current_chunk_index", session.current_chunk_index as i64))
             .bind(("step", session.step as i64))
-            .bind(("attempts_on_current", session.attempts_on_current as i64))
-            .bind(("remembered_count", session.remembered_count as i64))
-            .bind(("needed_help_count", session.needed_help_count as i64))
-            .bind(("skipped_count", session.skipped_count as i64))
+            .bind(("unhinted_count", session.unhinted_count as i64))
+            .bind(("revealed_count", session.revealed_count as i64))
             .bind(("created_at", normalize_datetime(&created_at)))
             .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
@@ -1660,14 +1741,15 @@ impl SurrealDatabase {
             db.query(
                 "SELECT
                     meta::id(id) AS session_id,
+                    agent,
+                    wake,
+                    model_id,
                     bloom_ids,
                     current_index,
                     current_chunk_index,
                     step,
-                    attempts_on_current,
-                    remembered_count,
-                    needed_help_count,
-                    skipped_count,
+                    unhinted_count,
+                    revealed_count,
                     <int>time::unix(<datetime>created_at) AS created_at,
                     bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
@@ -1707,17 +1789,22 @@ impl SurrealDatabase {
             )
         })?;
         let step = obj["step"].as_u64().unwrap_or(0) as u32;
-        let attempts_on_current = obj["attempts_on_current"].as_u64().unwrap_or(0) as u8;
-        let remembered_count = obj["remembered_count"].as_u64().unwrap_or(0) as u32;
-        let needed_help_count = obj["needed_help_count"].as_u64().unwrap_or(0) as u32;
-        let skipped_count = obj["skipped_count"].as_u64().unwrap_or(0) as u32;
+        let unhinted_count = obj["unhinted_count"].as_u64().unwrap_or(0) as u32;
+        let revealed_count = obj["revealed_count"].as_u64().unwrap_or(0) as u32;
+        let agent = obj["agent"].as_str().unwrap_or_default().to_string();
+        let wake = obj["wake"].as_i64();
+        let model_id = obj
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let created_at = obj["created_at"]
             .as_i64()
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-        // Deserialize bloom_chunk_meta via serde_json. Absent/empty → default
-        // to one meta per bloom_id marking every bloom as phraseless (safe
-        // fallback that keeps the session walkable via skips).
+        // Deserialize bloom_chunk_meta via serde_json. A session written by an
+        // older binary has a different shape and deserializes to nothing; a
+        // length mismatch means the same. Either way the outcome counters
+        // restart at zero rather than blocking the walk.
         let bloom_chunk_meta: Vec<crate::wake_token::BloomChunkMeta> =
             match obj.get("bloom_chunk_meta") {
                 Some(v) if !v.is_null() => serde_json::from_value(v.clone()).unwrap_or_default(),
@@ -1726,28 +1813,20 @@ impl SurrealDatabase {
         let bloom_chunk_meta = if bloom_chunk_meta.len() == bloom_ids.len() {
             bloom_chunk_meta
         } else {
-            // Length mismatch — rebuild default metadata so the session can
-            // at least walk (all phraseless, will drop through skip path).
-            bloom_ids
-                .iter()
-                .map(|_| crate::wake_token::BloomChunkMeta {
-                    authored_phrase_count: 0,
-                    is_phraseless: true,
-                    ..Default::default()
-                })
-                .collect()
+            vec![crate::wake_token::BloomChunkMeta::default(); bloom_ids.len()]
         };
 
         Ok(Some(crate::wake_token::WakeSession {
             session_id: session_id_str,
+            agent,
+            wake,
+            model_id,
             bloom_ids,
             current_index,
             current_chunk_index,
             step,
-            attempts_on_current,
-            remembered_count,
-            needed_help_count,
-            skipped_count,
+            unhinted_count,
+            revealed_count,
             created_at,
             bloom_chunk_meta,
         }))
@@ -1770,10 +1849,8 @@ impl SurrealDatabase {
                     current_index = $current_index,
                     current_chunk_index = $current_chunk_index,
                     step = $step,
-                    attempts_on_current = $attempts_on_current,
-                    remembered_count = $remembered_count,
-                    needed_help_count = $needed_help_count,
-                    skipped_count = $skipped_count,
+                    unhinted_count = $unhinted_count,
+                    revealed_count = $revealed_count,
                     bloom_chunk_meta = $bloom_chunk_meta
                 ",
             )
@@ -1781,10 +1858,8 @@ impl SurrealDatabase {
             .bind(("current_index", session.current_index as i64))
             .bind(("current_chunk_index", session.current_chunk_index as i64))
             .bind(("step", session.step as i64))
-            .bind(("attempts_on_current", session.attempts_on_current as i64))
-            .bind(("remembered_count", session.remembered_count as i64))
-            .bind(("needed_help_count", session.needed_help_count as i64))
-            .bind(("skipped_count", session.skipped_count as i64))
+            .bind(("unhinted_count", session.unhinted_count as i64))
+            .bind(("revealed_count", session.revealed_count as i64))
             .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
             .await
             .context("Failed to update wake session")
@@ -1823,6 +1898,93 @@ impl SurrealDatabase {
         }
 
         Ok(())
+    }
+
+    // =========================================================================
+    // WAKE GUESS LOG
+    // =========================================================================
+
+    /// Append one row to the guess log.
+    ///
+    /// The scoring columns (`embedding`, `sim_*`, `scored_at`) are left unset:
+    /// a row with a null `scored_at` is pending.
+    pub fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+        Self::runtime().block_on(self.insert_wake_guess_async(row))
+    }
+
+    async fn insert_wake_guess_async(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "CREATE wake_guess SET
+                    agent = $agent,
+                    wake = $wake,
+                    session_id = $session_id,
+                    bloom_id = $bloom_id,
+                    chunk_index = $chunk_index,
+                    chunk_total = $chunk_total,
+                    position = $position,
+                    bloom_position = $bloom_position,
+                    bloom_total = $bloom_total,
+                    title_shown = $title_shown,
+                    guess = $guess,
+                    model_id = $model_id,
+                    phrase_source = $phrase_source,
+                    phrases = $phrases,
+                    match_kind = $match_kind,
+                    match_index = $match_index,
+                    bucket = $bucket,
+                    content_hash = $content_hash
+                ",
+            )
+            .bind(("agent", row.agent.clone()))
+            .bind(("wake", row.wake))
+            .bind(("session_id", row.session_id.clone()))
+            .bind(("bloom_id", row.bloom_id.clone()))
+            .bind(("chunk_index", row.chunk_index as i64))
+            .bind(("chunk_total", row.chunk_total as i64))
+            .bind(("position", row.position as i64))
+            .bind(("bloom_position", row.bloom_position as i64))
+            .bind(("bloom_total", row.bloom_total as i64))
+            .bind(("title_shown", row.title_shown.clone()))
+            .bind(("guess", row.guess.clone()))
+            .bind(("model_id", row.model_id.clone()))
+            .bind(("phrase_source", row.phrase_source.clone()))
+            .bind(("phrases", row.phrases.clone()))
+            .bind(("match_kind", row.match_kind.clone()))
+            .bind(("match_index", row.match_index.map(|i| i as i64)))
+            .bind(("bucket", row.bucket.clone()))
+            .bind(("content_hash", row.content_hash.clone()))
+            .await
+            .context("Failed to write wake guess row")
+        })?;
+
+        let errors = response.take_errors();
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "SurrealDB error writing wake guess row: {:?}",
+                errors
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Run a raw read query and return the rows as JSON.
+    ///
+    /// Test-only: the tables without a typed reader (currently `wake_guess`,
+    /// whose reader lands with the scoring commands) still need their
+    /// SCHEMAFULL definitions pinned by a round-trip test.
+    #[cfg(test)]
+    pub(crate) fn query_json_for_test(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        Self::runtime().block_on(self.query_json_for_test_async(sql))
+    }
+
+    #[cfg(test)]
+    async fn query_json_for_test_async(&self, sql: &str) -> Result<Vec<serde_json::Value>> {
+        let mut response = with_db!(self, db, {
+            db.query(sql).await.context("Failed to run test query")
+        })?;
+        Ok(response.take(0)?)
     }
 
     // =========================================================================

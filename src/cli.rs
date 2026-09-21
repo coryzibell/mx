@@ -631,7 +631,7 @@ pub enum MemoryCommands {
         #[arg(long)]
         resonance_type: Option<String>,
 
-        /// Wake phrase for memory ritual verification
+        /// Wake phrase: a cue the title is meant to evoke
         #[arg(long)]
         wake_phrase: Option<String>,
 
@@ -781,7 +781,7 @@ pub enum MemoryCommands {
         #[arg(long, conflicts_with = "anchors")]
         remove_anchor: Option<String>,
 
-        /// Update wake phrase for memory ritual verification
+        /// Update wake phrase: a cue the title is meant to evoke
         #[arg(long)]
         wake_phrase: Option<String>,
 
@@ -1155,24 +1155,35 @@ pub enum MemoryCommands {
         no_activate: bool,
 
         /// Start token-based wake ritual (returns first bloom and session token)
-        #[arg(long, conflicts_with_all = &["skip"])]
+        #[arg(long)]
         begin: bool,
 
-        /// Bloom ID for --respond or --skip operations
+        /// Bloom ID for --respond
         #[arg(long)]
         bloom_id: Option<String>,
 
-        /// Submit wake phrase response
-        #[arg(long, conflicts_with_all = &["begin", "skip"])]
+        /// Submit your one guess for this bloom
+        #[arg(long, conflicts_with = "begin")]
         respond: Option<String>,
 
-        /// Skip a bloom without wake phrase
-        #[arg(long, conflicts_with_all = &["begin", "respond"])]
-        skip: bool,
-
-        /// Session token for chained ritual (required with --respond or --skip)
+        /// Session token for chained ritual (required with --respond)
         #[arg(long)]
         session: Option<String>,
+
+        /// Wake number recorded on every guess row. mx keeps no counter of its
+        /// own; rows written without it are still reachable by bloom and date.
+        #[arg(long, requires = "begin")]
+        wake: Option<i64>,
+
+        /// Model identifier recorded on every guess row (e.g. the model that
+        /// answers the ritual). mx has no way to discover it.
+        #[arg(long, requires = "begin")]
+        model: Option<String>,
+
+        /// Include entries tagged `archive` or `wake-exclude`, which are kept
+        /// out of the wake set by default
+        #[arg(long)]
+        include_excluded: bool,
     },
 
     /// List recent ephemeral facts with decay

@@ -763,7 +763,7 @@ fn test_wake_cascade_empty_anchors() {
     db.upsert_knowledge(&entry).unwrap();
 
     // Query wake cascade
-    let cascade = db.wake_cascade(&ctx, 50, Some(7), 7).unwrap();
+    let cascade = db.wake_cascade(&ctx, 50, Some(7), 7, false).unwrap();
 
     // Should still include the entry in core (high resonance)
     assert!(!cascade.core.is_empty(), "Should find core bloom");
@@ -791,7 +791,7 @@ fn test_wake_cascade_circular_anchors() {
 
     // Query wake cascade
     let ctx = crate::store::AgentContext::public_only();
-    let result = db.wake_cascade(&ctx, 50, Some(7), 7);
+    let result = db.wake_cascade(&ctx, 50, Some(7), 7, false);
 
     // Should handle circular references without infinite loop
     assert!(
@@ -4273,4 +4273,471 @@ fn semantic_search_returns_chunked_entries_with_their_tags_hydrated() {
          batch hydration dropped them and every tag assertion downstream is \
          vacuous"
     );
+}
+
+// =============================================================================
+// Wake set selection: tag exclusion, stable order, and the guess log.
+//
+// All fixtures here are invented. `open_in_memory` gives each test its own
+// hermetic store, so nothing reaches a real graph.
+// =============================================================================
+
+/// An entry that qualifies for the CORE layer only: resonance 8+, a
+/// non-ephemeral resonance type, last activated long enough ago that the
+/// recent layer will not also pick it up.
+fn core_layer_entry(id: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 9, 0.0);
+    e.resonance_type = Some("foundational".to_string());
+    e.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339());
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+/// An entry that qualifies for the RECENT layer only: activated today, but
+/// resonance below both the core threshold (8) and the bridge threshold (5).
+fn recent_layer_entry(id: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 3, 0.0);
+    e.resonance_type = Some("operational".to_string());
+    e.last_activated = Some(chrono::Utc::now().to_rfc3339());
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+/// An entry that qualifies for the BRIDGE layer only: resonance 5-7 (below
+/// core), stale, and anchored to something already in the set.
+fn bridge_layer_entry(id: &str, anchor: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 6, 0.0);
+    e.resonance_type = Some("relational".to_string());
+    e.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339());
+    e.anchors = vec![anchor.to_string()];
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+fn cascade_ids(cascade: &crate::store::WakeCascade) -> Vec<String> {
+    cascade.all_ids()
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_core_layer() {
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&core_layer_entry("kn-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert!(ids.contains(&"kn-keep".to_string()), "tag {tag}: {ids:?}");
+        assert!(!ids.contains(&"kn-drop".to_string()), "tag {tag}: {ids:?}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        // The override brings it back and reports nothing as excluded.
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert!(ids.contains(&"kn-drop".to_string()), "tag {tag}: {ids:?}");
+        assert!(cascade.excluded.is_empty(), "tag {tag}");
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_recent_layer() {
+    // A newly created archive copy is "recent" for days, so the recent layer
+    // has to enforce the exclusion too.
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-core", &[]))
+            .unwrap();
+        db.upsert_knowledge(&recent_layer_entry("kn-recent-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&recent_layer_entry("kn-recent-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let recent: Vec<&str> = cascade.recent.iter().map(|e| e.id.as_str()).collect();
+        assert!(recent.contains(&"kn-recent-keep"), "tag {tag}: {recent:?}");
+        assert!(!recent.contains(&"kn-recent-drop"), "tag {tag}: {recent:?}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let recent: Vec<&str> = cascade.recent.iter().map(|e| e.id.as_str()).collect();
+        assert!(recent.contains(&"kn-recent-drop"), "tag {tag}: {recent:?}");
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_bridge_layer() {
+    // An excluded entry anchored to a core entry would otherwise come back as
+    // a bridge after being dropped from its own layer.
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-anchor", &[]))
+            .unwrap();
+        db.upsert_knowledge(&bridge_layer_entry("kn-bridge-keep", "kn-anchor", &[]))
+            .unwrap();
+        db.upsert_knowledge(&bridge_layer_entry("kn-bridge-drop", "kn-anchor", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let bridges: Vec<&str> = cascade.bridges.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            bridges.contains(&"kn-bridge-keep"),
+            "precondition: the bridge layer must fire at all; tag {tag}: {bridges:?}"
+        );
+        assert!(
+            !bridges.contains(&"kn-bridge-drop"),
+            "tag {tag}: {bridges:?}"
+        );
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let bridges: Vec<&str> = cascade.bridges.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            bridges.contains(&"kn-bridge-drop"),
+            "tag {tag}: {bridges:?}"
+        );
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_on_the_min_resonance_path() {
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&core_layer_entry("kn-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert_eq!(ids, vec!["kn-keep".to_string()], "tag {tag}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, true).unwrap();
+        assert_eq!(cascade_ids(&cascade).len(), 2, "tag {tag}");
+    }
+}
+
+#[test]
+fn wake_cascade_matches_excluded_tags_exactly_not_by_prefix() {
+    // `archived` and `archive/2026` merely START with an excluded tag. A
+    // prefix match would silently swallow every future tag in that space.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-archived", &["archived"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-archive-slash", &["archive/2026"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-wake-exclude-ish", &["wake-excluded"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-exact", &["archive"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    let ids = cascade_ids(&cascade);
+    for near_miss in ["kn-archived", "kn-archive-slash", "kn-wake-exclude-ish"] {
+        assert!(
+            ids.contains(&near_miss.to_string()),
+            "{near_miss} is not tagged with an excluded tag and must stay: {ids:?}"
+        );
+    }
+    assert!(!ids.contains(&"kn-exact".to_string()), "{ids:?}");
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+}
+
+#[test]
+fn wake_cascade_counts_a_doubly_qualifying_excluded_entry_once() {
+    // An entry that both the core and recent queries return is one dropped
+    // entry, not two.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-core", &[]))
+        .unwrap();
+    let mut both = core_layer_entry("kn-both", &["archive"]);
+    both.last_activated = Some(chrono::Utc::now().to_rfc3339());
+    db.upsert_knowledge(&both).unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+}
+
+#[test]
+fn wake_cascade_entries_carry_their_tags_in_every_layer() {
+    // The exclusion filters on `KnowledgeEntry::tags`. If any cascade query
+    // returned entries with empty tags, the filter would silently pass
+    // everything — so pin the field on all four paths.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-core", &["core-tag"]))
+        .unwrap();
+    db.upsert_knowledge(&recent_layer_entry("kn-recent", &["recent-tag"]))
+        .unwrap();
+    db.upsert_knowledge(&bridge_layer_entry("kn-bridge", "kn-core", &["bridge-tag"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    let tags_of = |layer: &[crate::knowledge::KnowledgeEntry], id: &str| -> Vec<String> {
+        layer
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from its layer"))
+            .tags
+            .clone()
+    };
+    assert_eq!(tags_of(&cascade.core, "kn-core"), vec!["core-tag"]);
+    assert_eq!(tags_of(&cascade.recent, "kn-recent"), vec!["recent-tag"]);
+    assert_eq!(tags_of(&cascade.bridges, "kn-bridge"), vec!["bridge-tag"]);
+
+    // And the --min-resonance path, which does not go through the layers.
+    let by_resonance = db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap();
+    assert_eq!(tags_of(&by_resonance.core, "kn-core"), vec!["core-tag"]);
+}
+
+#[test]
+fn min_resonance_order_is_stable_and_wake_order_opens_the_ritual() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Same resonance for all three, so only the tiebreak can order them.
+    for id in ["kn-mid", "kn-last", "kn-first"] {
+        db.upsert_knowledge(&core_layer_entry(id, &[])).unwrap();
+    }
+
+    let first_run: Vec<String> =
+        cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    let second_run: Vec<String> =
+        cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    assert_eq!(
+        first_run, second_run,
+        "two begins over the same data must produce the same sequence"
+    );
+    assert_eq!(
+        first_run,
+        vec![
+            "kn-first".to_string(),
+            "kn-last".to_string(),
+            "kn-mid".to_string()
+        ],
+        "equal resonance falls back to the id tiebreak"
+    );
+
+    // An entry with wake_order set opens the sequence regardless of id.
+    let mut opener = core_layer_entry("kn-mid", &[]);
+    opener.wake_order = Some(1);
+    db.upsert_knowledge(&opener).unwrap();
+
+    let ordered = cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    assert_eq!(
+        ordered.first().map(String::as_str),
+        Some("kn-mid"),
+        "wake_order decides the opening bloom: {ordered:?}"
+    );
+}
+
+#[test]
+fn core_layer_order_is_stable_across_runs() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    for id in ["kn-c", "kn-a", "kn-b"] {
+        db.upsert_knowledge(&core_layer_entry(id, &[])).unwrap();
+    }
+
+    let run = |db: &SurrealDatabase| -> Vec<String> {
+        db.wake_cascade(&ctx, 50, None, 7, false)
+            .unwrap()
+            .core
+            .iter()
+            .map(|e| e.id.clone())
+            .collect()
+    };
+    assert_eq!(run(&db), run(&db));
+    assert_eq!(
+        run(&db),
+        vec!["kn-a".to_string(), "kn-b".to_string(), "kn-c".to_string()]
+    );
+}
+
+#[test]
+fn core_layer_limit_counts_kept_entries_not_excluded_ones() {
+    // The limit applies after exclusion, so a dropped entry does not consume
+    // a slot that a kept entry would otherwise have taken.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-a", &["archive"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-b", &["archive"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-c", &[])).unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-d", &[])).unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    let core: Vec<&str> = cascade.core.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(core, vec!["kn-c", "kn-d"], "{core:?}");
+    assert_eq!(cascade.excluded.get("archive"), Some(&2));
+}
+
+/// `SELECT *` cannot round-trip a record id through JSON, so name the columns.
+const WAKE_GUESS_SELECT: &str = "SELECT agent, wake, session_id, <string>ts AS ts, bloom_id,
+    chunk_index, chunk_total, position, bloom_position, bloom_total, title_shown, guess,
+    model_id, phrase_source, phrases, match_kind, match_index, bucket, content_hash,
+    embedding, embedding_model, sim_phrase, sim_content, sim_title, sim_prior,
+    sim_prior_null, prior_n, scored_at
+    FROM wake_guess";
+
+#[test]
+fn wake_guess_row_round_trips_through_the_schema() {
+    // The wake_guess table is SCHEMAFULL: this is the test that a field the
+    // writer sets is actually defined, and that the scoring columns start null.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let row = crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: Some(463),
+        session_id: "session-1".to_string(),
+        bloom_id: "kn-sample".to_string(),
+        chunk_index: 1,
+        chunk_total: 3,
+        position: 7,
+        bloom_position: 4,
+        bloom_total: 12,
+        title_shown: "Sample Title (Part 2/3)".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: Some("test-model".to_string()),
+        phrase_source: "authored".to_string(),
+        phrases: vec!["first phrase".to_string(), "second phrase".to_string()],
+        match_kind: "close".to_string(),
+        match_index: Some(1),
+        bucket: "unhinted".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    };
+    db.insert_wake_guess(&row).unwrap();
+
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(stored.len(), 1, "exactly one row was written");
+    let got = &stored[0];
+
+    assert_eq!(got["agent"], "test-agent");
+    assert_eq!(got["wake"], 463);
+    assert_eq!(got["session_id"], "session-1");
+    assert_eq!(got["bloom_id"], "kn-sample");
+    assert_eq!(got["chunk_index"], 1);
+    assert_eq!(got["chunk_total"], 3);
+    assert_eq!(got["position"], 7);
+    assert_eq!(got["bloom_position"], 4);
+    assert_eq!(got["bloom_total"], 12);
+    assert_eq!(got["title_shown"], "Sample Title (Part 2/3)");
+    assert_eq!(got["guess"], "a synthetic guess");
+    assert_eq!(got["model_id"], "test-model");
+    assert_eq!(got["phrase_source"], "authored");
+    assert_eq!(got["phrases"][1], "second phrase");
+    assert_eq!(got["match_kind"], "close");
+    assert_eq!(got["match_index"], 1);
+    assert_eq!(got["bucket"], "unhinted");
+    assert_eq!(got["content_hash"], row.content_hash);
+    assert!(!got["ts"].is_null(), "ts defaults to write time");
+
+    // Scoring columns are pending until a later pass fills them.
+    for pending in [
+        "embedding",
+        "embedding_model",
+        "sim_phrase",
+        "sim_content",
+        "sim_title",
+        "sim_prior",
+        "sim_prior_null",
+        "prior_n",
+        "scored_at",
+    ] {
+        assert!(
+            got[pending].is_null(),
+            "{pending} must be null on a freshly written row, got {:?}",
+            got[pending]
+        );
+    }
+}
+
+#[test]
+fn wake_guess_rows_accept_an_absent_wake_number_and_model() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let row = crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: None,
+        session_id: "session-1".to_string(),
+        bloom_id: "kn-sample".to_string(),
+        chunk_index: 0,
+        chunk_total: 1,
+        position: 0,
+        bloom_position: 1,
+        bloom_total: 1,
+        title_shown: "Sample Title".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: None,
+        phrase_source: "auto".to_string(),
+        phrases: vec!["generated phrase".to_string()],
+        match_kind: "none".to_string(),
+        match_index: None,
+        bucket: "revealed".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    };
+    db.insert_wake_guess(&row).unwrap();
+
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert!(stored[0]["wake"].is_null());
+    assert!(stored[0]["model_id"].is_null());
+    assert!(stored[0]["match_index"].is_null());
+}
+
+#[test]
+fn a_wake_session_round_trips_its_agent_wake_and_model() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let cascade = crate::store::WakeCascade {
+        core: vec![
+            make_test_entry("kn-a", 9, 0.0),
+            make_test_entry("kn-b", 9, 0.0),
+        ],
+        ..Default::default()
+    };
+    let mut session = crate::wake_token::WakeSession::new(
+        &cascade,
+        "test-agent".to_string(),
+        Some(463),
+        Some("test-model".to_string()),
+    );
+    let session_id = db.create_wake_session(&session).unwrap();
+
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.agent, "test-agent");
+    assert_eq!(loaded.wake, Some(463));
+    assert_eq!(loaded.model_id.as_deref(), Some("test-model"));
+    assert_eq!(loaded.bloom_ids.len(), 2);
+
+    // Outcome counters survive an update round trip.
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Unhinted,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    db.update_wake_session(&session).unwrap();
+
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.step, 1);
+    assert_eq!(loaded.unhinted_count, 1);
+    assert_eq!(loaded.revealed_count, 0);
+    assert_eq!(loaded.bucket_totals().unhinted.authored, 1);
 }

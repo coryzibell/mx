@@ -1337,8 +1337,10 @@ mod auto_anchor_tests {
             limit: usize,
             min_resonance: Option<i32>,
             days: i64,
+            include_excluded: bool,
         ) -> Result<store::WakeCascade> {
-            self.inner.wake_cascade(ctx, limit, min_resonance, days)
+            self.inner
+                .wake_cascade(ctx, limit, min_resonance, days, include_excluded)
         }
         fn update_activations(&self, ids: &[String]) -> Result<()> {
             self.inner.update_activations(ids)
@@ -1566,6 +1568,9 @@ mod auto_anchor_tests {
         }
         fn delete_wake_session(&self, session_id: &str) -> Result<()> {
             self.inner.delete_wake_session(session_id)
+        }
+        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+            self.inner.insert_wake_guess(row)
         }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)

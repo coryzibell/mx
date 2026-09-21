@@ -605,55 +605,43 @@ fn cap_chars(s: &str, max: usize) -> String {
 }
 
 // ============================================================================
-// compare_phrase — exact for authored, tolerant for derived
+// compare_phrase — tolerant comparison for every phrase source
 // ============================================================================
 
-/// Which comparison mode to use. Authored phrases are short, human-curated
-/// distillations and stay exact-match (modulo existing fuzzy_match). Derived
-/// phrases are longer content samples and get softened comparisons (§5.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PhraseMode {
-    Authored,
-    Derived,
-}
-
 /// Comparison outcome. `Exact` and `Tolerant` both mean "accept"; the caller
-/// may log which path matched. `Mismatch` means reject (possibly with hints).
+/// may log which path matched. `Mismatch` means reject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhraseMatch {
     /// Inputs match exactly (after trimming whitespace).
     Exact,
-    /// Inputs match only after mode-specific normalization (Derived mode only).
+    /// Inputs match only after normalization.
     Tolerant,
     /// No match.
     Mismatch,
 }
 
-/// Compare a user-typed `input` against a `target` phrase under the given mode.
+/// Compare a guess against a phrase: whitespace-trimmed exact compare first,
+/// then lowercase, strip trailing sentence punctuation, collapse internal
+/// whitespace runs, normalize smart quotes to straight quotes. These
+/// softenings apply to both sides.
 ///
-/// - `Authored`: case-sensitive, whitespace-trimmed exact compare.
-/// - `Derived`: additionally lowercase, strip trailing sentence punctuation,
-///   collapse internal whitespace runs, normalize smart quotes to straight
-///   quotes. These softenings apply to both sides.
+/// The tolerance is the same for authored, derived and auto phrases. Authored
+/// phrases used to require a case-sensitive exact match; the result is a
+/// recorded fact now, not a gate, so the stricter rule bought nothing.
 ///
 /// Note: this does NOT replace the existing `engage::fuzzy_match` Levenshtein/
 /// word-overlap path. It's the first-pass decision. Callers should still fall
-/// through to `fuzzy_match` on `Mismatch` so Partial/Close tiers keep working.
-pub fn compare_phrase(input: &str, target: &str, mode: PhraseMode) -> PhraseMatch {
+/// through to `fuzzy_match` on `Mismatch` so the Close tier keeps working.
+pub fn compare_phrase(input: &str, target: &str) -> PhraseMatch {
     let i = input.trim();
     let t = target.trim();
     if i == t {
         return PhraseMatch::Exact;
     }
-    match mode {
-        PhraseMode::Authored => PhraseMatch::Mismatch,
-        PhraseMode::Derived => {
-            if normalize_derived(i) == normalize_derived(t) {
-                PhraseMatch::Tolerant
-            } else {
-                PhraseMatch::Mismatch
-            }
-        }
+    if normalize_derived(i) == normalize_derived(t) {
+        PhraseMatch::Tolerant
+    } else {
+        PhraseMatch::Mismatch
     }
 }
 
@@ -1379,60 +1367,41 @@ Real tilde sentence.";
     // --- compare_phrase unit tests --------------------------------------------
 
     #[test]
-    fn compare_authored_exact_match() {
-        let r = compare_phrase(
-            "Rust is memory-safe",
-            "Rust is memory-safe",
-            PhraseMode::Authored,
-        );
+    fn compare_exact_match() {
+        let r = compare_phrase("Rust is memory-safe", "Rust is memory-safe");
         assert_eq!(r, PhraseMatch::Exact);
     }
 
     #[test]
-    fn compare_authored_case_mismatch_is_reject() {
-        let r = compare_phrase(
-            "rust is memory-safe",
-            "Rust is memory-safe",
-            PhraseMode::Authored,
-        );
-        assert_eq!(r, PhraseMatch::Mismatch);
-    }
-
-    #[test]
-    fn compare_derived_case_tolerant() {
-        let r = compare_phrase("Token semantics", "token semantics", PhraseMode::Derived);
+    fn compare_case_tolerant() {
+        let r = compare_phrase("Token semantics", "token semantics");
         assert_eq!(r, PhraseMatch::Tolerant);
     }
 
     #[test]
-    fn compare_derived_trailing_punct_stripped() {
+    fn compare_trailing_punct_stripped() {
         let r = compare_phrase(
             "The wake ritual walks a cascade",
             "The wake ritual walks a cascade.",
-            PhraseMode::Derived,
         );
         assert_eq!(r, PhraseMatch::Tolerant);
     }
 
     #[test]
-    fn compare_derived_whitespace_collapsed() {
-        let r = compare_phrase("token   semantics", "token semantics", PhraseMode::Derived);
+    fn compare_whitespace_collapsed() {
+        let r = compare_phrase("token   semantics", "token semantics");
         assert_eq!(r, PhraseMatch::Tolerant);
     }
 
     #[test]
-    fn compare_derived_smart_quotes_normalized() {
-        let r = compare_phrase(
-            "it's \u{201C}alive\u{201D}",
-            "it\u{2019}s \"alive\"",
-            PhraseMode::Derived,
-        );
+    fn compare_smart_quotes_normalized() {
+        let r = compare_phrase("it's \u{201C}alive\u{201D}", "it\u{2019}s \"alive\"");
         assert_eq!(r, PhraseMatch::Tolerant);
     }
 
     #[test]
-    fn compare_derived_mismatch_still_mismatches() {
-        let r = compare_phrase("totally different", "token semantics", PhraseMode::Derived);
+    fn compare_mismatch_still_mismatches() {
+        let r = compare_phrase("totally different", "token semantics");
         assert_eq!(r, PhraseMatch::Mismatch);
     }
 
@@ -1540,16 +1509,16 @@ Real tilde sentence.";
         }
 
         #[test]
-        fn prop_compare_derived_tolerant_to_case_and_trailing_punct(
+        fn prop_compare_tolerant_to_case_and_trailing_punct(
             word1 in "[a-zA-Z]{2,20}",
             word2 in "[a-zA-Z]{2,20}",
         ) {
             let base = format!("{} {}", word1, word2);
             let variant = format!("{} {}.", base.to_lowercase(), ""); // lowercase + trailing period
             let variant = variant.trim().to_string();
-            let r = compare_phrase(&variant, &base, PhraseMode::Derived);
+            let r = compare_phrase(&variant, &base);
             prop_assert!(matches!(r, PhraseMatch::Exact | PhraseMatch::Tolerant),
-                "derived compare rejected trivial variant: {:?} vs {:?}", variant, base);
+                "compare rejected trivial variant: {:?} vs {:?}", variant, base);
         }
 
         #[test]
@@ -1557,11 +1526,7 @@ Real tilde sentence.";
             let trimmed = s.trim().to_string();
             prop_assume!(!trimmed.is_empty());
             prop_assert_eq!(
-                compare_phrase(&trimmed, &trimmed, PhraseMode::Authored),
-                PhraseMatch::Exact
-            );
-            prop_assert_eq!(
-                compare_phrase(&trimmed, &trimmed, PhraseMode::Derived),
+                compare_phrase(&trimmed, &trimmed),
                 PhraseMatch::Exact
             );
         }

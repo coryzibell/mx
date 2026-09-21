@@ -6,7 +6,94 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed — BREAKING: `mx memory wake` ritual JSON (#448)
+
+The wake ritual is now **one guess per chunk, made from the title alone, after
+which the entry is shown**. There is no hint ladder, no second attempt, and no
+status that claims the responder knew anything. Every consumer of the ritual's
+JSON must be updated; the shapes below are the whole contract.
+
+- **Statuses.** `--respond` returns `shown` or, when the entry shrank past the
+  session's chunk cursor mid-ritual, `chunk_truncated`. The old `remembered`,
+  `incorrect` and `revealed` statuses are gone, as are `attempt`, `hint`,
+  `match_type` and `derived_phrase_mismatch`.
+- **Buckets.** Each judged chunk lands in `unhinted` (the guess string-matched
+  a phrase, and the tool had given no hint) or `revealed` (it did not). These
+  are the only two values. They name what the tool did, not what the responder
+  knew: entries shown earlier in a ritual leak into later guesses, and the tool
+  cannot see that — which is why every logged row records its position.
+- **Respond payload** gains `bucket`, `guess` and
+  `match: {kind: exact|close|none, phrase_index}`, and always carries `bloom`
+  with `{id, title, phrases, phrase_source, content, chunk?}`. `progress` gains
+  `buckets: {unhinted, revealed}`.
+- **Final summary** is `{chunks, blooms, buckets: {unhinted: {authored,
+  derived, auto}, revealed: {...}}}` and nothing else. No total, no ratio, no
+  per-entry roll-up string. `BloomRollup` is removed.
+- **Prompt payload** is `{id, title, phrase_source, chunk?}`. `resonance`,
+  `resonance_type` and `wake_phrase_count` are dropped — the last existed only
+  to tell a consumer whether `--skip` was legal.
+- **`--skip` is removed** and clap rejects it as an unknown flag (#452). It had
+  been unreachable since every chunk gained a phrase: it always returned
+  `skip_requires_phraseless_bloom`.
+- **A session created by an older binary** does not load; the call errors and
+  asks for a fresh `--begin`. Sessions live for one ritual, so at most one is
+  affected per deployment.
+- Help text: `--respond` is "Submit your one guess for this bloom", and
+  `--wake-phrase` is "a cue the title is meant to evoke".
+
 ### Added
+- **`wake_guess` table and a row per guess (#448).** Every `--respond` that
+  judges a guess writes exactly one row before the session advances, carrying
+  the agent, wake number, model, entry and chunk, both positions in the
+  sequence, the title as shown, the guess, the phrase snapshot it was matched
+  against, the match kind and index, the bucket, and the SHA-256 of the chunk
+  text. **A failed row write fails the respond call** and leaves the session
+  where it was: the guess is the data the ritual exists to collect, so it is
+  not best-effort. A `chunk_truncated` response judges no guess and writes no
+  row. The similarity columns are defined but left null — a row with a null
+  `scored_at` is pending for the scoring pass that lands with #449. The table
+  is not reachable from `mx memory export`, which reads the knowledge table
+  only.
+- **`mx memory wake --wake N` and `--model ID`** (with `--begin`) record the
+  wake number and the answering model on every guess row. Both are optional
+  because agents other than the one that counts wakes also run the ritual, and
+  mx has no way to discover either; rows written without them stay reachable by
+  entry and by date. mx does not read a wake counter of its own.
+- **Default tag exclusion, and `--include-excluded` to turn it off (#448).**
+  Entries tagged `archive` or `wake-exclude` are kept out of every layer of the
+  wake cascade — core, recent, bridges and the `--min-resonance` path — and
+  `--begin` reports per-tag counts in `excluded`. The two tags are separate
+  because a live entry merely kept out of the wake set is not an archived copy.
+  The match is **exact**: a tag that starts with `archive`, such as
+  `archive/2026`, is not excluded. Applying the policy in mx rather than in
+  caller-side text keeps it from being dropped in a rewrite.
+- `wake_session` rows record `agent`, `wake`, `model_id`, `unhinted_count` and
+  `revealed_count`. The superseded counter fields stay defined in the schema so
+  existing rows keep validating, and are no longer read or written.
+
+### Fixed
+- **`mx memory wake --respond` no longer re-runs the cascade (#451).** The
+  cascade query and `increment_activation_count` ran before the command
+  branched, so every guess incremented the activation count of all ~20 cascade
+  entries — a 95-call ritual added about 95 to each. Only `--begin` and the
+  plain listing touch activation counts now. Existing inflated values are not
+  repaired by this change.
+- **Every authored phrase is now matched, not just the first (#450).** Phrases
+  were indexed by chunk — chunk *i* was compared against `wake_phrases[i]` only
+  — so a single-chunk entry with three phrases could only ever match phrase 0.
+  A guess is now compared against every authored phrase, `exact` beating
+  `close`, and `match.phrase_index` records which one matched. Authored phrases
+  also use the tolerant comparison (case, quotes, whitespace, trailing
+  punctuation) that derived phrases already used; the strict rule existed to
+  make a game harder, and the match is a recorded fact now, not a gate.
+- **The `--min-resonance` wake query has a stable order (#448).** It sorted by
+  `resonance DESC` alone, leaving entries of equal resonance in whatever order
+  the database returned. It now shares the core query's ordering
+  (`has_wake_order DESC, effective_wake_order ASC, resonance DESC`), and all
+  four cascade queries gained a final `id ASC` tiebreak. Two rituals over
+  unchanged data now produce the same sequence, and `wake_order` decides which
+  entry opens it. The core layer's limit is applied after tag exclusion, so a
+  dropped entry no longer consumes a slot.
 - `mx doors` — trigger-based ambient memory, intended as a Claude Code
   `UserPromptSubmit` hook. Any history/list entry carrying `triggers` becomes a
   *door*: when one of its phrases appears in a prompt, `mx doors hook` prints one

@@ -404,7 +404,54 @@ DEFINE FIELD IF NOT EXISTS bloom_chunk_meta ON wake_session FLEXIBLE TYPE array<
 -- will keep any existing values but new sessions leave this empty.
 DEFINE FIELD IF NOT EXISTS selected_phrase_indices ON wake_session TYPE array<int> DEFAULT [];
 DEFINE FIELD OVERWRITE selected_phrase_indices ON wake_session TYPE array<int> DEFAULT [];
+-- One-guess ritual: the session records who ran it, which wake number the
+-- caller passed, and which model answered. All three are carried onto every
+-- wake_guess row written during the session.
+DEFINE FIELD IF NOT EXISTS agent ON wake_session TYPE string DEFAULT '';
+DEFINE FIELD IF NOT EXISTS wake ON wake_session TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS model_id ON wake_session TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS unhinted_count ON wake_session TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS revealed_count ON wake_session TYPE int DEFAULT 0;
+-- remembered_count, needed_help_count, skipped_count and attempts_on_current
+-- above are no longer read or written. The definitions stay so existing rows
+-- keep validating under SCHEMAFULL.
 DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
+
+-- Wake ritual guess log. One row per chunk per wake, written by --respond
+-- before the session advances. The sim_* / embedding / scored_at columns are
+-- null at write time and filled later by the scoring pass.
+DEFINE TABLE IF NOT EXISTS wake_guess SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS agent            ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS wake             ON wake_guess TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS session_id       ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS ts               ON wake_guess TYPE datetime DEFAULT time::now();
+DEFINE FIELD IF NOT EXISTS bloom_id         ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS chunk_index      ON wake_guess TYPE int;
+DEFINE FIELD IF NOT EXISTS chunk_total      ON wake_guess TYPE int;
+DEFINE FIELD IF NOT EXISTS position         ON wake_guess TYPE int;
+DEFINE FIELD IF NOT EXISTS bloom_position   ON wake_guess TYPE int;
+DEFINE FIELD IF NOT EXISTS bloom_total      ON wake_guess TYPE int;
+DEFINE FIELD IF NOT EXISTS title_shown      ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS guess            ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS model_id         ON wake_guess TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS phrase_source    ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS phrases          ON wake_guess TYPE array<string>;
+DEFINE FIELD IF NOT EXISTS match_kind       ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS match_index      ON wake_guess TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS bucket           ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS content_hash     ON wake_guess TYPE string;
+DEFINE FIELD IF NOT EXISTS embedding        ON wake_guess TYPE option<array<float>>;
+DEFINE FIELD IF NOT EXISTS embedding_model  ON wake_guess TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS sim_phrase       ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_content      ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_title        ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior        ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior_null   ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS prior_n          ON wake_guess TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS scored_at        ON wake_guess TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS wake_guess_bloom   ON wake_guess FIELDS agent, bloom_id, chunk_index;
+DEFINE INDEX IF NOT EXISTS wake_guess_wake    ON wake_guess FIELDS agent, wake;
+DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
 
 -- =============================================================================
 -- SEED DATA
