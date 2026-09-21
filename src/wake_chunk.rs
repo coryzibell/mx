@@ -769,8 +769,8 @@ fn extract_sentences(content: &str) -> Vec<String> {
             continue;
         }
 
-        // Strip markdown list-item prefixes so warmth-brick lines like
-        // "- kautau noticed the pattern" don't keep the `- ` artifact.
+        // Strip markdown list-item prefixes so bullet lines like
+        // "- first observation" don't keep the `- ` artifact.
         let mut cleaned = line.trim();
         if let Some(rest) = cleaned.strip_prefix("- ") {
             cleaned = rest;
@@ -1544,11 +1544,11 @@ Real tilde sentence.";
     #[test]
     fn auto_phrase_from_sentence() {
         // No heading — should fall through to sentence selection.
-        let content = "The warmth accumulator stores relational bricks. Each brick records a moment of connection.";
-        let p = extract_auto_phrase(content, "Warmth Accumulator");
+        let content = "The counter stores sample records. Each record holds one measurement.";
+        let p = extract_auto_phrase(content, "Sample Counter");
         // Must be one of the two sentences, deterministically selected.
         assert!(
-            p.contains("warmth accumulator") || p.contains("brick records"),
+            p.contains("counter stores") || p.contains("record holds"),
             "expected a sentence from the content, got {:?}",
             p
         );
@@ -1558,10 +1558,10 @@ Real tilde sentence.";
     #[test]
     fn auto_phrase_from_line() {
         // No headings, no sentence terminators — falls to first non-empty line.
-        let content = "- brick one: kautau noticed the pattern\n- brick two: something else";
+        let content = "- item one: the first observation\n- item two: something else";
         let p = extract_auto_phrase(content, "Fallback");
         assert!(
-            p.contains("brick one"),
+            p.contains("item one"),
             "expected first line as phrase, got {:?}",
             p
         );
@@ -1570,8 +1570,8 @@ Real tilde sentence.";
     #[test]
     fn auto_phrase_from_title_fallback() {
         // Empty content — must fall back to title.
-        let p = extract_auto_phrase("", "Warmth Accumulator");
-        assert_eq!(p, "Warmth Accumulator");
+        let p = extract_auto_phrase("", "Sample Counter");
+        assert_eq!(p, "Sample Counter");
     }
 
     #[test]
@@ -1605,14 +1605,16 @@ Real tilde sentence.";
     }
 
     #[test]
-    fn auto_phrase_warmth_bricks() {
-        // A list of `- ` prefixed bricks with no heading or sentence boundaries.
-        let content = "- kautau noticed the pattern and said so\n- Q remembered the first wake\n- Semvii brought coffee";
-        let p = extract_auto_phrase(content, "Warmth Accumulator");
-        // Should pick a brick line (first non-empty line tier or sentence tier).
+    fn auto_phrase_bullet_list_without_headings() {
+        // A list of `- ` prefixed lines with no heading or sentence boundaries.
+        let content = "- the first observation was recorded\n- the second run finished\n- the third was skipped";
+        let p = extract_auto_phrase(content, "Sample Counter");
+        // Should pick a bullet line (first non-empty line tier or sentence tier).
         assert!(
-            p.contains("kautau") || p.contains("Q remembered") || p.contains("Semvii"),
-            "expected a brick line, got {:?}",
+            p.contains("first observation")
+                || p.contains("second run")
+                || p.contains("third was skipped"),
+            "expected a bullet line, got {:?}",
             p
         );
         assert!(!p.is_empty());

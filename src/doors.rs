@@ -90,8 +90,8 @@ pub struct Selection {
 /// the body text between them.
 ///
 /// Matrix messages reach the hook wrapped in a channel block whose ATTRIBUTES
-/// carry the sender's identity: `user="carmel"`, `room_name="delta"`. Left in
-/// place, a `carmel` door would fire on every message in that room regardless of
+/// carry the sender's identity: `user="tester"`, `room_name="delta"`. Left in
+/// place, a `tester` door would fire on every message in that room regardless of
 /// what was said. The body is what a person actually wrote, so it is the only
 /// part that may open a door.
 ///
@@ -307,9 +307,9 @@ mod tests {
     use super::*;
 
     const CHANNEL: &str = concat!(
-        r#"<channel source="matrix" chat_id="!r:s" message_id="$e" user="carmel" "#,
+        r#"<channel source="matrix" chat_id="!r:s" message_id="$e" user="tester" "#,
         r#"user_id="@j:s" room_name="delta">"#,
-        "\ngood morning konkon\n</channel>"
+        "\ngood morning widget\n</channel>"
     );
 
     fn cand<'a>(
@@ -335,9 +335,9 @@ mod tests {
     #[test]
     fn strip_channel_removes_tag_and_keeps_body() {
         let out = strip_channel_tags(CHANNEL);
-        assert!(out.contains("good morning konkon"));
+        assert!(out.contains("good morning widget"));
         assert!(
-            !out.contains("carmel"),
+            !out.contains("tester"),
             "attributes must not survive: {out}"
         );
         assert!(!out.contains("delta"));
@@ -346,12 +346,12 @@ mod tests {
 
     #[test]
     fn strip_channel_attribute_alone_does_not_fire_a_door() {
-        let trig = vec!["carmel".to_string()];
+        let trig = vec!["tester".to_string()];
         let cands = [cand("facts", "aaa", "x", "2026-01-01T00:00:00Z", &trig)];
         let sel = select(CHANNEL, &cands, &HashSet::new(), &HashMap::new(), 2);
         assert!(
             sel.fired.is_empty(),
-            "user=\"carmel\" must not open a carmel door"
+            "user=\"tester\" must not open a tester door"
         );
     }
 
@@ -365,20 +365,20 @@ mod tests {
     fn unterminated_channel_tag_does_not_swallow_the_turn() {
         // A stray "<channel" with no closing bracket must not eat the rest of
         // the prompt -- that would cost every door for the turn.
-        let out = strip_channel_tags("<channel source=\"matrix\" oops konkon is here");
-        assert!(out.contains("konkon"), "body survived: {out}");
+        let out = strip_channel_tags("<channel source=\"matrix\" oops widget is here");
+        assert!(out.contains("widget"), "body survived: {out}");
 
         // Same with an unbalanced quote, which is how the scan runs off the end.
-        let out = strip_channel_tags("<channel user=\"unclosed konkon");
-        assert!(out.contains("konkon"), "body survived: {out}");
+        let out = strip_channel_tags("<channel user=\"unclosed widget");
+        assert!(out.contains("widget"), "body survived: {out}");
     }
 
     #[test]
     fn unterminated_channel_tag_still_fires_doors() {
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [cand("facts", "aaa", "v", "2026-01-01T00:00:00Z", &trig)];
         let sel = select(
-            "<channel user=\"unclosed good morning konkon",
+            "<channel user=\"unclosed good morning widget",
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -439,9 +439,9 @@ mod tests {
     #[test]
     fn ordinary_triggers_are_fine_and_report_what_they_match() {
         assert_eq!(
-            inspect_trigger("konkon"),
+            inspect_trigger("widget"),
             TriggerVerdict::Fine {
-                matched_as: "konkon".to_string()
+                matched_as: "widget".to_string()
             }
         );
         // Fine, but the matched form differs from the stored text -- the caller
@@ -461,9 +461,9 @@ mod tests {
         // A strict String field would reject the whole payload and the hook
         // would go silent for that prompt.
         let input: HookInput =
-            serde_json::from_str(r#"{"session_id": 12345, "prompt": "hi konkon"}"#).unwrap();
+            serde_json::from_str(r#"{"session_id": 12345, "prompt": "hi widget"}"#).unwrap();
         assert_eq!(input.session_id, "12345");
-        assert_eq!(input.prompt, "hi konkon");
+        assert_eq!(input.prompt, "hi widget");
     }
 
     #[test]
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn specificity_prefers_more_tokens_then_more_characters() {
-        assert!(specificity("kon kon") > specificity("konkon"));
+        assert!(specificity("kon kon") > specificity("widget"));
         assert!(specificity("gerf_slips") > specificity("gerf"));
         // Equal triggers tie, so stored order decides and output stays stable.
         assert_eq!(specificity("alpha"), specificity("bravo"));
@@ -540,33 +540,33 @@ mod tests {
     // ---- matching ----
 
     #[test]
-    fn konkon_fires_from_inside_a_channel_block() {
-        let trig = vec!["konkon".to_string()];
+    fn widget_fires_from_inside_a_channel_block() {
+        let trig = vec!["widget".to_string()];
         let cands = [cand(
             "facts",
             "3gtR1J",
-            "Carmel's everyday word for Q, the fox-sound.",
+            "A sample fragment for the widget door.",
             "2026-01-01T00:00:00Z",
             &trig,
         )];
         let sel = select(CHANNEL, &cands, &HashSet::new(), &HashMap::new(), 2);
         assert_eq!(sel.fired.len(), 1);
-        assert_eq!(sel.fired[0].trigger, "konkon");
+        assert_eq!(sel.fired[0].trigger, "widget");
         assert_eq!(sel.fired[0].dig, "facts/kv-3gtR1J");
         assert_eq!(
             sel.fired[0].render(),
-            "\u{1f6aa} konkon \u{2192} Carmel's everyday word for Q, the fox-sound. (dig: facts/kv-3gtR1J)"
+            "\u{1f6aa} widget \u{2192} A sample fragment for the widget door. (dig: facts/kv-3gtR1J)"
         );
     }
 
     #[test]
     fn already_fired_entry_is_skipped() {
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [cand("facts", "aaa", "v", "2026-01-01T00:00:00Z", &trig)];
         let fired: HashSet<(String, String)> = [("facts".to_string(), "aaa".to_string())]
             .into_iter()
             .collect();
-        let sel = select("hi konkon", &cands, &fired, &HashMap::new(), 2);
+        let sel = select("hi widget", &cands, &fired, &HashMap::new(), 2);
         assert!(sel.fired.is_empty());
         assert_eq!(
             sel.deferred, 0,
@@ -578,7 +578,7 @@ mod tests {
     fn dedup_tuple_includes_the_key() {
         // Two entries in DIFFERENT keys sharing one 6-char id. Firing one must
         // not suppress the other.
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [
             cand("facts", "same01", "a", "2026-01-01T00:00:00Z", &trig),
             cand("doors", "same01", "b", "2026-01-02T00:00:00Z", &trig),
@@ -586,14 +586,14 @@ mod tests {
         let fired: HashSet<(String, String)> = [("facts".to_string(), "same01".to_string())]
             .into_iter()
             .collect();
-        let sel = select("konkon", &cands, &fired, &HashMap::new(), 2);
+        let sel = select("widget", &cands, &fired, &HashMap::new(), 2);
         assert_eq!(sel.fired.len(), 1);
         assert_eq!(sel.fired[0].key, "doors");
     }
 
     #[test]
     fn budget_overflow_defers_the_most_fired() {
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [
             cand("d", "aaa", "a", "2026-01-01T00:00:00Z", &trig),
             cand("d", "bbb", "b", "2026-01-01T00:00:00Z", &trig),
@@ -606,7 +606,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let sel = select("konkon", &cands, &HashSet::new(), &counts, 2);
+        let sel = select("widget", &cands, &HashSet::new(), &counts, 2);
         assert_eq!(sel.deferred, 1);
         let ids: Vec<&str> = sel.fired.iter().map(|f| f.id.as_str()).collect();
         assert_eq!(ids, vec!["ccc", "bbb"], "least-fired first");
@@ -614,19 +614,19 @@ mod tests {
 
     #[test]
     fn tie_on_fire_count_breaks_to_oldest_ts() {
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [
             cand("d", "new", "n", "2026-06-01T00:00:00Z", &trig),
             cand("d", "old", "o", "2020-01-01T00:00:00Z", &trig),
         ];
-        let sel = select("konkon", &cands, &HashSet::new(), &HashMap::new(), 1);
+        let sel = select("widget", &cands, &HashSet::new(), &HashMap::new(), 1);
         assert_eq!(sel.fired.len(), 1);
         assert_eq!(sel.fired[0].id, "old");
     }
 
     #[test]
     fn no_match_is_an_empty_selection() {
-        let trig = vec!["konkon".to_string()];
+        let trig = vec!["widget".to_string()];
         let cands = [cand("d", "aaa", "a", "2026-01-01T00:00:00Z", &trig)];
         let sel = select("hello there", &cands, &HashSet::new(), &HashMap::new(), 2);
         assert!(sel.fired.is_empty());
