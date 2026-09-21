@@ -231,14 +231,27 @@ pub fn fuzzy_match(input: &str, expected: &str) -> MatchResult {
     let input_norm = normalize(input);
     let expected_norm = normalize(expected);
 
+    // `normalize` strips every non-alphanumeric character, so a blank input
+    // and a punctuation-only phrase both collapse to "" and would otherwise
+    // compare Exact. Nothing meaningful can match nothing.
+    if input_norm.is_empty() || expected_norm.is_empty() {
+        return MatchResult::Wrong;
+    }
+
     // Exact match
     if input_norm == expected_norm {
         return MatchResult::Exact;
     }
 
-    // Levenshtein distance (close enough)
+    // Levenshtein distance (close enough). Both sides are measured in
+    // CHARACTERS: `levenshtein` counts character edits, so dividing by a byte
+    // length would inflate the denominator 2-4x for non-ASCII text and widen
+    // the 0.8 tolerance until a half-wrong guess counted as close.
     let distance = levenshtein(&input_norm, &expected_norm);
-    let max_len = input_norm.len().max(expected_norm.len());
+    let max_len = input_norm
+        .chars()
+        .count()
+        .max(expected_norm.chars().count());
     let similarity = 1.0 - (distance as f64 / max_len as f64);
 
     if similarity >= 0.8 {
@@ -554,6 +567,71 @@ mod tests {
         match fuzzy_match(phrase, phrase) {
             MatchResult::Exact => {} // expected
             _ => panic!("Expected exact match for identical CJK strings"),
+        }
+    }
+
+    // =====================================================================
+    // The tolerance is measured in characters on both sides.
+    //
+    // `levenshtein` counts character edits; `max_len` used to count bytes.
+    // For 3-byte text the denominator was 3x too large, so the 0.8 threshold
+    // silently widened until a guess with half its characters wrong scored
+    // 0.83 and came back Close. Every authored phrase is compared now and the
+    // verdict is written to the guess log, so the encoding of a phrase must
+    // not change what counts as a match.
+    // =====================================================================
+
+    /// Same edit ratio, different encodings, same verdict.
+    #[test]
+    fn tolerance_does_not_widen_for_multibyte_text() {
+        // 5 of 10 characters differ: half wrong in any encoding.
+        let ascii = fuzzy_match("abcdeqrstu", "abcdefghij");
+        let kana = fuzzy_match(
+            "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{3055}\u{3057}\u{3059}\u{305B}\u{305D}",
+            "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{304B}\u{304D}\u{304F}\u{3051}\u{3053}",
+        );
+        assert!(
+            matches!(ascii, MatchResult::Partial | MatchResult::Wrong),
+            "precondition: half-wrong ASCII is not Close"
+        );
+        assert!(
+            matches!(kana, MatchResult::Partial | MatchResult::Wrong),
+            "a half-wrong multibyte guess was scored Close"
+        );
+    }
+
+    /// One edit in ten characters is Close whatever the encoding.
+    #[test]
+    fn a_near_miss_is_close_in_either_encoding() {
+        assert!(matches!(
+            fuzzy_match("abcdefghix", "abcdefghij"),
+            MatchResult::Close
+        ));
+        assert!(matches!(
+            fuzzy_match(
+                "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{304B}\u{304D}\u{304F}\u{3051}\u{3055}",
+                "\u{3042}\u{3044}\u{3046}\u{3048}\u{304A}\u{304B}\u{304D}\u{304F}\u{3051}\u{3053}",
+            ),
+            MatchResult::Close
+        ));
+    }
+
+    /// Text that carries no alphanumeric content normalizes to the empty
+    /// string. Two of those used to compare Exact.
+    #[test]
+    fn nothing_never_matches_nothing() {
+        for (input, expected) in [
+            ("", ""),
+            ("   ", "\u{2014}"),
+            ("\u{2014}", "   "),
+            ("...", "???"),
+            ("", "alpha"),
+            ("alpha", "---"),
+        ] {
+            assert!(
+                matches!(fuzzy_match(input, expected), MatchResult::Wrong),
+                "{input:?} vs {expected:?} was scored as a match"
+            );
         }
     }
 }
