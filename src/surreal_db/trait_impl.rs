@@ -401,16 +401,33 @@ impl KnowledgeStore for SurrealDatabase {
         self.get_wake_session(session_id)
     }
 
-    fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
-        self.update_wake_session(session)
+    fn update_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()> {
+        self.update_wake_session(session, expected_step)
     }
 
-    fn delete_wake_session(&self, session_id: &str) -> Result<()> {
-        self.delete_wake_session(session_id)
+    fn record_wake_guess(
+        &self,
+        row: &crate::wake_guess::WakeGuessRow,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()> {
+        self.record_wake_guess(row, session, expected_step)
     }
 
-    fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
-        self.insert_wake_guess(row)
+    fn get_wake_guess(
+        &self,
+        session_id: &str,
+        position: u32,
+    ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+        self.get_wake_guess(session_id, position)
+    }
+
+    fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+        self.wake_history(agent, wake)
     }
 
     fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<crate::store::GhostSweepResult> {

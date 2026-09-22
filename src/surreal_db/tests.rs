@@ -4837,6 +4837,62 @@ const WAKE_GUESS_SELECT: &str = "SELECT agent, wake, session_id, <string>ts AS t
     sim_prior_null, prior_n, scored_at
     FROM wake_guess";
 
+/// Open a session positioned at `step`, under a chosen id.
+fn wake_session_at(
+    db: &SurrealDatabase,
+    session_id: &str,
+    step: u32,
+) -> crate::wake_token::WakeSession {
+    let cascade = crate::store::WakeCascade {
+        core: vec![
+            make_test_entry("kn-a", 9, 0.0),
+            make_test_entry("kn-b", 9, 0.0),
+        ],
+        ..Default::default()
+    };
+    let mut session =
+        crate::wake_token::WakeSession::new(&cascade, "test-agent".to_string(), Some(7), None);
+    session.session_id = session_id.to_string();
+    session.step = step;
+    db.create_wake_session(&session).unwrap();
+    session
+}
+
+/// Log `row` the way a respond call does: with its session advance, in one
+/// transaction, from a session opened at the row's step.
+fn log_guess(db: &SurrealDatabase, row: &crate::wake_guess::WakeGuessRow) {
+    let mut session = wake_session_at(db, &row.session_id, row.position);
+    session.step += 1;
+    db.record_wake_guess(row, &session, row.position).unwrap();
+}
+
+fn sample_guess_row(session_id: &str, position: u32) -> crate::wake_guess::WakeGuessRow {
+    crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: Some(7),
+        session_id: session_id.to_string(),
+        bloom_id: "kn-a".to_string(),
+        chunk_index: 0,
+        chunk_total: 1,
+        position,
+        bloom_position: 1,
+        bloom_total: 2,
+        title_shown: "Sample Title".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: None,
+        phrase_source: "authored".to_string(),
+        phrases: vec!["first phrase".to_string()],
+        match_kind: "none".to_string(),
+        match_index: None,
+        bucket: "revealed".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    }
+}
+
+fn stored_step(db: &SurrealDatabase, session_id: &str) -> u32 {
+    db.get_wake_session(session_id).unwrap().unwrap().step
+}
+
 #[test]
 fn wake_guess_row_round_trips_through_the_schema() {
     // The wake_guess table is SCHEMAFULL: this is the test that a field the
@@ -4863,7 +4919,7 @@ fn wake_guess_row_round_trips_through_the_schema() {
         bucket: "unhinted".to_string(),
         content_hash: crate::wake_guess::content_hash("chunk text"),
     };
-    db.insert_wake_guess(&row).unwrap();
+    log_guess(&db, &row);
 
     let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
     assert_eq!(stored.len(), 1, "exactly one row was written");
@@ -4933,7 +4989,7 @@ fn wake_guess_rows_accept_an_absent_wake_number_and_model() {
         bucket: "revealed".to_string(),
         content_hash: crate::wake_guess::content_hash("chunk text"),
     };
-    db.insert_wake_guess(&row).unwrap();
+    log_guess(&db, &row);
 
     let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
     assert!(stored[0]["wake"].is_null());
@@ -4972,7 +5028,7 @@ fn a_wake_session_round_trips_its_agent_wake_and_model() {
         crate::wake_guess::Bucket::Unhinted,
         crate::wake_token::PhraseSource::Authored,
     );
-    db.update_wake_session(&session).unwrap();
+    db.update_wake_session(&session, 0).unwrap();
 
     let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
     assert_eq!(loaded.step, 1);
@@ -5029,44 +5085,253 @@ fn a_session_row_with_an_agent_still_loads() {
 }
 
 #[test]
-fn one_guess_row_per_session_step_is_enforced_by_the_database() {
-    // Spec 4.3 states one row per chunk per wake. If the row write succeeds
-    // and the session update then fails, the client retries the same step —
-    // so the invariant needs an index behind it, not just a convention.
+fn a_guess_and_its_session_advance_land_together() {
     let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 1;
 
-    let row = |position: u32| crate::wake_guess::WakeGuessRow {
-        agent: "test-agent".to_string(),
-        wake: Some(7),
-        session_id: "session-1".to_string(),
-        bloom_id: "kn-sample".to_string(),
-        chunk_index: 0,
-        chunk_total: 1,
-        position,
-        bloom_position: 1,
-        bloom_total: 1,
-        title_shown: "Sample Title".to_string(),
-        guess: "a synthetic guess".to_string(),
-        model_id: None,
-        phrase_source: "authored".to_string(),
-        phrases: vec!["first phrase".to_string()],
-        match_kind: "none".to_string(),
-        match_index: None,
-        bucket: "revealed".to_string(),
-        content_hash: crate::wake_guess::content_hash("chunk text"),
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &session, 0)
+        .unwrap();
+
+    assert_eq!(stored_step(&db, "session-1"), 1);
+    let ids = db
+        .query_json_for_test("SELECT <string>id AS id FROM wake_guess")
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert!(
+        ids[0]["id"].as_str().unwrap().contains("session-1"),
+        "the row id is keyed by (session_id, position): {ids:?}"
+    );
+}
+
+#[test]
+fn a_session_that_has_moved_rolls_the_row_back() {
+    // Compare-and-swap: the session is at step 0, the caller thinks step 5.
+    // The session write must refuse, and the row written in the same
+    // transaction must go with it.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 6;
+
+    db.record_wake_guess(&sample_guess_row("session-1", 5), &session, 5)
+        .expect_err("a session no longer at the expected step must refuse the write");
+
+    assert_eq!(stored_step(&db, "session-1"), 0, "the session did not move");
+    assert!(
+        db.query_json_for_test(WAKE_GUESS_SELECT)
+            .unwrap()
+            .is_empty(),
+        "the row must roll back with the refused session write"
+    );
+}
+
+#[test]
+fn a_second_row_at_one_step_is_refused_and_the_session_stays_put() {
+    // The session write alone would land here (expected step matches), so this
+    // pins that the row collision cancels the whole transaction.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 1;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &session, 0)
+        .unwrap();
+
+    let mut again = session.clone();
+    again.step = 2;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &again, 1)
+        .expect_err("a second row at the same session step must be rejected");
+
+    assert_eq!(stored_step(&db, "session-1"), 1, "the session did not move");
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(stored.len(), 1);
+
+    // The same step in a different session is fine.
+    log_guess(&db, &sample_guess_row("session-2", 0));
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
+}
+
+#[test]
+fn a_row_an_older_binary_wrote_under_a_random_id_is_found_and_still_blocks() {
+    // The released binary wrote `CREATE wake_guess` with a random id, then
+    // the session in a second call. Its half-written steps must be visible to
+    // the replay lookup, and the unique index must still refuse a second row.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let session = wake_session_at(&db, "session-1", 0);
+    db.query_json_for_test(
+        "CREATE wake_guess SET agent = 'test-agent', wake = 7, session_id = 'session-1',
+            bloom_id = 'kn-a', chunk_index = 0, chunk_total = 1, position = 0,
+            bloom_position = 1, bloom_total = 2, title_shown = 'Sample Title',
+            guess = 'the logged guess', model_id = NONE, phrase_source = 'authored',
+            phrases = ['first phrase'], match_kind = 'none', match_index = NONE,
+            bucket = 'revealed', content_hash = 'abc' RETURN NONE",
+    )
+    .unwrap();
+
+    let logged = db
+        .get_wake_guess("session-1", 0)
+        .unwrap()
+        .expect("a legacy row is found by (session_id, position)");
+    assert_eq!(logged.guess, "the logged guess");
+    assert_eq!(logged.bucket, "revealed");
+    assert_eq!(logged.match_index, None);
+    assert!(db.get_wake_guess("session-1", 1).unwrap().is_none());
+
+    let mut advanced = session.clone();
+    advanced.step = 1;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &advanced, 0)
+        .expect_err("the unique index refuses a second row at a logged step");
+    assert_eq!(stored_step(&db, "session-1"), 0);
+}
+
+#[test]
+fn a_session_update_is_a_compare_and_swap_and_stamps_completion() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Revealed,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    db.update_wake_session(&session, 3)
+        .expect_err("a stale expected step is refused");
+    assert_eq!(stored_step(&db, "session-1"), 0);
+
+    db.update_wake_session(&session, 0).unwrap();
+    let loaded = db.get_wake_session("session-1").unwrap().unwrap();
+    assert_eq!(loaded.step, 1);
+    assert_eq!(loaded.completed_at, None, "one of two blooms walked");
+
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Unhinted,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    assert!(session.is_complete());
+    db.update_wake_session(&session, 1).unwrap();
+    let loaded = db
+        .get_wake_session("session-1")
+        .unwrap()
+        .expect("a completed session is kept, not deleted");
+    assert!(
+        loaded.completed_at.is_some(),
+        "the write that walks the last step stamps completed_at"
+    );
+}
+
+#[test]
+fn wake_history_reports_sessions_at_a_wake_and_the_highest_wake() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let row = |session: &str, position: u32, agent: &str, wake: i64| {
+        let mut r = sample_guess_row(session, position);
+        r.agent = agent.to_string();
+        r.wake = Some(wake);
+        r
+    };
+    log_guess(&db, &row("s1", 0, "test-agent", 7));
+    log_guess(&db, &row("s1b", 0, "test-agent", 7));
+    log_guess(&db, &row("s3", 0, "test-agent", 9));
+    log_guess(&db, &row("s4", 0, "other-agent", 12));
+    let mut unnumbered = sample_guess_row("s5", 0);
+    unnumbered.wake = None;
+    log_guess(&db, &unnumbered);
+
+    let mut history = db.wake_history("test-agent", 7).unwrap();
+    history.sessions_at_wake.sort();
+    assert_eq!(history.sessions_at_wake, vec!["s1", "s1b"]);
+    assert_eq!(
+        history.highest_wake,
+        Some(9),
+        "another agent's wake 12 is not ours"
+    );
+
+    let history = db.wake_history("test-agent", 8).unwrap();
+    assert!(history.sessions_at_wake.is_empty());
+
+    let history = db.wake_history("new-agent", 1).unwrap();
+    assert_eq!(history, crate::wake_guess::WakeHistory::default());
+}
+
+/// Blocker 1 end to end against the real store: a step whose row landed and
+/// whose session write did not. The released binary wrote the two in separate
+/// calls, so a dropped connection between them left exactly this state, and
+/// the unique index then refused every retry. A retry must now replay the
+/// logged guess, advance the session, and leave one row.
+#[test]
+fn a_retry_after_a_half_written_step_replays_the_logged_guess() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::for_agent("test-agent");
+
+    let mut first = make_test_entry("kn-first", 9, 0.0);
+    first.wake_phrases = vec!["alpha cue".to_string()];
+    let mut second = make_test_entry("kn-second", 9, 0.0);
+    second.wake_phrases = vec!["bravo cue".to_string()];
+    db.upsert_knowledge(&first).unwrap();
+    db.upsert_knowledge(&second).unwrap();
+    let cascade = crate::store::WakeCascade {
+        core: vec![first, second],
+        ..Default::default()
     };
 
-    db.insert_wake_guess(&row(0)).unwrap();
-    db.insert_wake_guess(&row(0))
-        .expect_err("a second row at the same session step must be rejected");
-    // A different step in the same session is fine, as is the same step in a
-    // different session.
-    db.insert_wake_guess(&row(1)).unwrap();
+    let begin: serde_json::Value = serde_json::from_str(
+        &crate::wake_ritual::begin_ritual(
+            &db,
+            &cascade,
+            crate::wake_ritual::RitualMeta {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                model_id: None,
+            },
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let token = begin["session"].as_str().unwrap().to_string();
+    let session_id = token.split('.').next().unwrap().to_string();
 
-    let mut other = row(0);
-    other.session_id = "session-2".to_string();
-    db.insert_wake_guess(&other).unwrap();
+    // The half-written step, as the released binary left it: the row is
+    // there under a random id, and the session never advanced.
+    db.query_json_for_test(&format!(
+        "CREATE wake_guess SET agent = 'test-agent', wake = 7, session_id = '{session_id}',
+            bloom_id = 'kn-first', chunk_index = 0, chunk_total = 1, position = 0,
+            bloom_position = 1, bloom_total = 2, title_shown = 'Test Entry kn-first',
+            guess = 'the first guess', model_id = NONE, phrase_source = 'authored',
+            phrases = ['alpha cue'], match_kind = 'exact', match_index = 0,
+            bucket = 'unhinted', content_hash = 'abc' RETURN NONE"
+    ))
+    .unwrap();
+    assert_eq!(stored_step(&db, &session_id), 0);
 
-    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
-    assert_eq!(stored.len(), 3, "exactly the three accepted rows survive");
+    // The retry types a different guess. The first one counts.
+    let out = crate::wake_ritual::respond_ritual(&db, &ctx, "kn-first", "a retyped miss", &token)
+        .expect("the retry must be answered, not refused by the index");
+    let resp: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp["replayed"], true);
+    assert_eq!(resp["guess"], "the first guess");
+    assert_eq!(resp["bucket"], "unhinted");
+    assert_eq!(resp["match"]["kind"], "exact");
+    assert_eq!(resp["next"]["id"], "kn-second");
+    assert_eq!(resp["wake"], 7);
+    assert_eq!(stored_step(&db, &session_id), 1, "the session advanced");
+    let rows = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(rows.len(), 1, "still exactly one row");
+
+    // The logged judgment is what the session counted.
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.bucket_totals().unhinted.authored, 1);
+
+    // And the ritual carries on with the token the replay handed back.
+    let next_token = resp["session"].as_str().unwrap();
+    let out = crate::wake_ritual::respond_ritual(&db, &ctx, "kn-second", "bravo cue", next_token)
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp["status"], "shown");
+    assert!(resp.get("replayed").is_none());
+    assert_eq!(resp["summary"]["buckets"]["unhinted"]["authored"], 2);
+    let loaded = db
+        .get_wake_session(&session_id)
+        .unwrap()
+        .expect("a completed session is kept");
+    assert!(loaded.completed_at.is_some());
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
 }

@@ -1167,7 +1167,7 @@ pub enum MemoryCommands {
         bloom_id: Option<String>,
 
         /// Submit your one guess for this bloom (2000 characters maximum)
-        #[arg(long, conflicts_with = "begin")]
+        #[arg(long, conflicts_with = "begin", allow_hyphen_values = true)]
         respond: Option<String>,
 
         /// Session token for chained ritual (required with --respond)
@@ -1176,8 +1176,15 @@ pub enum MemoryCommands {
 
         /// Wake number recorded on every guess row. mx keeps no counter of its
         /// own; rows written without it are still reachable by bloom and date.
+        /// Must be positive. Refused when another ritual already logged guesses
+        /// under it, unless --force-wake.
         #[arg(long, requires = "begin")]
         wake: Option<i64>,
+
+        /// Begin a ritual under a --wake number that already has guesses logged
+        /// by another ritual session
+        #[arg(long, requires = "wake")]
+        force_wake: bool,
 
         /// Model identifier recorded on every guess row (e.g. the model that
         /// answers the ritual). mx has no way to discover it.

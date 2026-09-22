@@ -3530,6 +3530,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             session,
             wake,
             model,
+            force_wake,
             include_excluded,
         } => {
             let db = store::create_store(&config.db_path)?;
@@ -3553,9 +3554,16 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let id = bloom_id
                     .ok_or_else(|| anyhow::anyhow!("--bloom-id required with --respond"))?;
 
-                let output =
-                    wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &guess, &session_token)?;
-                println!("{}", output);
+                match wake_ritual::respond_ritual(db.as_ref(), &ctx, &id, &guess, &session_token) {
+                    Ok(output) => println!("{}", output),
+                    Err(err) => {
+                        // A structured refusal is printed as-is; any other
+                        // error propagates unchanged.
+                        let rejection = err.downcast::<crate::wake_token::WakeRejection>()?;
+                        eprintln!("{}", rejection);
+                        std::process::exit(1);
+                    }
+                }
             } else {
                 let cascade = db.wake_cascade(
                     &ctx,
@@ -3564,6 +3572,23 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     days.unwrap_or(7),
                     include_excluded,
                 )?;
+
+                // A refused --begin (a wake number already logged, say) must
+                // not count as surfacing the entries, so the ritual opens first.
+                let begun = if begin {
+                    Some(wake_ritual::begin_ritual(
+                        db.as_ref(),
+                        &cascade,
+                        wake_ritual::RitualMeta {
+                            agent: current_agent,
+                            wake,
+                            model_id: model,
+                        },
+                        force_wake,
+                    )?)
+                } else {
+                    None
+                };
 
                 // Increment activation counts for wake cascade entries.
                 // We do NOT reset last_activated here — wake surfacing is passive, not
@@ -3576,20 +3601,9 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     }
                 }
 
-                if begin {
-                    // Start session-based ritual (state stored in DB)
-                    let output = wake_ritual::begin_ritual(
-                        db.as_ref(),
-                        &cascade,
-                        wake_ritual::RitualMeta {
-                            agent: current_agent,
-                            wake,
-                            model_id: model,
-                        },
-                    )?;
-                    println!("{}", output);
-                } else {
-                    print_wake_cascade(&cascade);
+                match begun {
+                    Some(output) => println!("{}", output),
+                    None => print_wake_cascade(&cascade),
                 }
             }
         }
@@ -4675,14 +4689,30 @@ mod dedup_gate_tests {
         ) -> Result<Option<crate::wake_token::WakeSession>> {
             self.inner.get_wake_session(session_id)
         }
-        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
-            self.inner.update_wake_session(session)
+        fn update_wake_session(
+            &self,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.update_wake_session(session, expected_step)
         }
-        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
-            self.inner.delete_wake_session(session_id)
+        fn record_wake_guess(
+            &self,
+            row: &crate::wake_guess::WakeGuessRow,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.record_wake_guess(row, session, expected_step)
         }
-        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
-            self.inner.insert_wake_guess(row)
+        fn get_wake_guess(
+            &self,
+            session_id: &str,
+            position: u32,
+        ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+            self.inner.get_wake_guess(session_id, position)
+        }
+        fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+            self.inner.wake_history(agent, wake)
         }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)
@@ -5020,14 +5050,30 @@ mod dedup_gate_tests {
         ) -> Result<Option<crate::wake_token::WakeSession>> {
             self.inner.get_wake_session(session_id)
         }
-        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
-            self.inner.update_wake_session(session)
+        fn update_wake_session(
+            &self,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.update_wake_session(session, expected_step)
         }
-        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
-            self.inner.delete_wake_session(session_id)
+        fn record_wake_guess(
+            &self,
+            row: &crate::wake_guess::WakeGuessRow,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.record_wake_guess(row, session, expected_step)
         }
-        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
-            self.inner.insert_wake_guess(row)
+        fn get_wake_guess(
+            &self,
+            session_id: &str,
+            position: u32,
+        ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+            self.inner.get_wake_guess(session_id, position)
+        }
+        fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+            self.inner.wake_history(agent, wake)
         }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)
@@ -5374,14 +5420,30 @@ mod dedup_gate_tests {
         ) -> Result<Option<crate::wake_token::WakeSession>> {
             self.inner.get_wake_session(session_id)
         }
-        fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
-            self.inner.update_wake_session(session)
+        fn update_wake_session(
+            &self,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.update_wake_session(session, expected_step)
         }
-        fn delete_wake_session(&self, session_id: &str) -> Result<()> {
-            self.inner.delete_wake_session(session_id)
+        fn record_wake_guess(
+            &self,
+            row: &crate::wake_guess::WakeGuessRow,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.record_wake_guess(row, session, expected_step)
         }
-        fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
-            self.inner.insert_wake_guess(row)
+        fn get_wake_guess(
+            &self,
+            session_id: &str,
+            position: u32,
+        ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+            self.inner.get_wake_guess(session_id, position)
+        }
+        fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+            self.inner.wake_history(agent, wake)
         }
         fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
             self.inner.sweep_ghost_anchors(dry_run)

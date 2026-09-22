@@ -76,6 +76,15 @@ impl PhraseSource {
             PhraseSource::Auto => "auto",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "authored" => Some(PhraseSource::Authored),
+            "derived" => Some(PhraseSource::Derived),
+            "auto" => Some(PhraseSource::Auto),
+            _ => None,
+        }
+    }
 }
 
 /// Bucket counts split by phrase source. A string match against an `auto`
@@ -175,6 +184,10 @@ pub struct WakeSession {
     /// the reader has to perform.
     pub unjudged_count: u32,
     pub created_at: i64,
+    /// Set by the write that walks the last step. Completed sessions are kept,
+    /// not deleted, so the log can tell a finished ritual from an abandoned one
+    /// and a caller whose final response was lost can still be answered.
+    pub completed_at: Option<i64>,
     /// Per-bloom outcome counters (1:1 with `bloom_ids`).
     pub bloom_chunk_meta: Vec<BloomChunkMeta>,
 }
@@ -210,6 +223,7 @@ impl WakeSession {
             revealed_count: 0,
             unjudged_count: 0,
             created_at: chrono::Utc::now().timestamp(),
+            completed_at: None,
             bloom_chunk_meta,
         }
     }
@@ -382,6 +396,14 @@ pub struct WakeBeginResponse {
     /// Tightening it means comparing against the untagged ordering, which for
     /// the core layer is the prefix already in hand.
     pub excluded: BTreeMap<String, usize>,
+    /// The `--wake` and `--model` this ritual files every row under, echoed so
+    /// a wrong number is visible before the first guess rather than after.
+    pub wake: Option<i64>,
+    pub model: Option<String>,
+    /// Things worth a second look that did not stop the ritual, such as a wake
+    /// number lower than one already logged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,6 +413,12 @@ pub struct WakeRespondResponse {
     /// bloom was deleted mid-ritual — in both of those no guess was judged,
     /// so `bucket`, `guess` and `match` are absent and no row is logged.
     pub status: String,
+    /// True when this step was already logged and the answer is the logged
+    /// one: a retry after a lost response, or a second submit on one token.
+    /// The first guess is the one that counts; `guess` is what was logged, not
+    /// what the retry sent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replayed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -408,6 +436,8 @@ pub struct WakeRespondResponse {
     pub progress: Option<Progress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
+    pub wake: Option<i64>,
+    pub model: Option<String>,
 }
 
 /// A mechanical string-match fact. `kind` is `exact`, `close` or `none`.
@@ -426,6 +456,21 @@ pub struct WakeErrorResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_id: Option<String>,
 }
+
+/// A respond call refused with a structured payload. It is an error like any
+/// other — the caller prints the JSON to stderr and exits non-zero — so a
+/// wrapper that checks exit codes cannot read a mistyped id as success.
+#[derive(Debug)]
+pub struct WakeRejection(pub WakeErrorResponse);
+
+impl std::fmt::Display for WakeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let json = serde_json::to_string(&self.0).map_err(|_| std::fmt::Error)?;
+        f.write_str(&json)
+    }
+}
+
+impl std::error::Error for WakeRejection {}
 
 #[derive(Debug, Serialize)]
 pub struct BloomPrompt {
