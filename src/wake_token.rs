@@ -76,6 +76,15 @@ impl PhraseSource {
             PhraseSource::Auto => "auto",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "authored" => Some(PhraseSource::Authored),
+            "derived" => Some(PhraseSource::Derived),
+            "auto" => Some(PhraseSource::Auto),
+            _ => None,
+        }
+    }
 }
 
 /// Bucket counts split by phrase source. A string match against an `auto`
@@ -175,6 +184,18 @@ pub struct WakeSession {
     /// the reader has to perform.
     pub unjudged_count: u32,
     pub created_at: i64,
+    /// Set by the write that walks the last step. Completed sessions are kept,
+    /// not deleted, so the log can tell a finished ritual from an abandoned one
+    /// and a caller whose final response was lost can still be answered.
+    pub completed_at: Option<i64>,
+    /// The step the last successful write started from — the token that call
+    /// spent. Set by the store on every write, so a caller whose response was
+    /// lost can present that token and be answered, however far the call moved
+    /// `step` (a judged guess plus deleted entries stepped over is more than one).
+    pub prev_step: Option<u32>,
+    /// The status of the last successful write (`shown`, `bloom_missing`,
+    /// `chunk_truncated`), so a resumed call that judged nothing echoes it.
+    pub last_status: Option<String>,
     /// Per-bloom outcome counters (1:1 with `bloom_ids`).
     pub bloom_chunk_meta: Vec<BloomChunkMeta>,
 }
@@ -210,6 +231,9 @@ impl WakeSession {
             revealed_count: 0,
             unjudged_count: 0,
             created_at: chrono::Utc::now().timestamp(),
+            completed_at: None,
+            prev_step: None,
+            last_status: None,
             bloom_chunk_meta,
         }
     }
@@ -279,7 +303,7 @@ impl WakeSession {
     }
 
     /// Core cursor advance. Pure function of the two cursors + the chunk
-    /// total. Called by the three `advance_*` wrappers above.
+    /// total. Called by `advance` above.
     fn advance_chunk_or_bloom(&mut self, bloom_total_chunks: u16) {
         let next_chunk = self.current_chunk_index.saturating_add(1);
         if (next_chunk as usize) < bloom_total_chunks.max(1) as usize {
@@ -336,18 +360,6 @@ impl WakeSession {
     }
 }
 
-/// Count of authored wake phrases on an entry (wake_phrases takes priority
-/// over the legacy single `wake_phrase`).
-pub fn authored_phrase_count(entry: &KnowledgeEntry) -> u16 {
-    if !entry.wake_phrases.is_empty() {
-        u16::try_from(entry.wake_phrases.len()).unwrap_or(u16::MAX)
-    } else if entry.wake_phrase.is_some() {
-        1
-    } else {
-        0
-    }
-}
-
 /// Every authored phrase on an entry, in author order. `wake_phrases` takes
 /// priority over the legacy single `wake_phrase`.
 pub fn authored_phrases(entry: &KnowledgeEntry) -> Vec<String> {
@@ -382,6 +394,14 @@ pub struct WakeBeginResponse {
     /// Tightening it means comparing against the untagged ordering, which for
     /// the core layer is the prefix already in hand.
     pub excluded: BTreeMap<String, usize>,
+    /// The `--wake` and `--model` this ritual files every row under, echoed so
+    /// a wrong number is visible before the first guess rather than after.
+    pub wake: Option<i64>,
+    pub model: Option<String>,
+    /// Things worth a second look that did not stop the ritual, such as a wake
+    /// number lower than one already logged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -391,14 +411,21 @@ pub struct WakeRespondResponse {
     /// bloom was deleted mid-ritual — in both of those no guess was judged,
     /// so `bucket`, `guess` and `match` are absent and no row is logged.
     pub status: String,
+    /// True when this step was already logged and the answer is the logged
+    /// one: a retry after a lost response, or a second submit on one token.
+    /// The first guess is the one that counts; `guess` is what was logged, not
+    /// what the retry sent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replayed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bucket: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guess: Option<String>,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
     pub match_info: Option<MatchInfo>,
-    /// Always present on `shown` and `chunk_truncated`. Absent only on
-    /// `bloom_missing`, where there is no entry left to show.
+    /// Present on `shown` and `chunk_truncated`. Absent on `bloom_missing`,
+    /// where there is no entry left to show, and on a replayed
+    /// `chunk_truncated`, whose shrunk entry is not recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bloom: Option<BloomFull>,
     pub session: String,
@@ -408,6 +435,8 @@ pub struct WakeRespondResponse {
     pub progress: Option<Progress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Summary>,
+    pub wake: Option<i64>,
+    pub model: Option<String>,
 }
 
 /// A mechanical string-match fact. `kind` is `exact`, `close` or `none`.
@@ -426,6 +455,21 @@ pub struct WakeErrorResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_id: Option<String>,
 }
+
+/// A respond call refused with a structured payload. It is an error like any
+/// other — the caller prints the JSON to stderr and exits non-zero — so a
+/// wrapper that checks exit codes cannot read a mistyped id as success.
+#[derive(Debug)]
+pub struct WakeRejection(pub WakeErrorResponse);
+
+impl std::fmt::Display for WakeRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let json = serde_json::to_string(&self.0).map_err(|_| std::fmt::Error)?;
+        f.write_str(&json)
+    }
+}
+
+impl std::error::Error for WakeRejection {}
 
 #[derive(Debug, Serialize)]
 pub struct BloomPrompt {

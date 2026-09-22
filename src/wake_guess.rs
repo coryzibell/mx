@@ -31,6 +31,14 @@ impl Bucket {
             Bucket::Revealed => "revealed",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "unhinted" => Some(Bucket::Unhinted),
+            "revealed" => Some(Bucket::Revealed),
+            _ => None,
+        }
+    }
 }
 
 /// A mechanical string-match fact about one guess. Not a verdict.
@@ -83,6 +91,16 @@ pub struct WakeGuessRow {
     pub bucket: String,
     /// SHA-256 of the chunk text the guess was made against.
     pub content_hash: String,
+}
+
+/// What the guess log already holds for an agent, read at `--begin` so a wrong
+/// `--wake` number is caught before it files a whole ritual under it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WakeHistory {
+    /// Sessions that already logged rows under the requested wake number.
+    pub sessions_at_wake: Vec<String>,
+    /// The highest wake number the agent has logged rows under.
+    pub highest_wake: Option<i64>,
 }
 
 /// SHA-256 of `text`, lowercase hex.

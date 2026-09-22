@@ -415,6 +415,15 @@ DEFINE FIELD IF NOT EXISTS revealed_count ON wake_session TYPE int DEFAULT 0;
 -- Steps walked where no guess was judged, reported in the final summary so the
 -- gap between the chunk count and the bucket totals is never left to be derived.
 DEFINE FIELD IF NOT EXISTS unjudged_count ON wake_session TYPE int DEFAULT 0;
+-- Stamped by the write that walks the last step. Completed sessions are kept,
+-- so the log can tell a finished ritual from an abandoned one, and a caller
+-- whose final response was lost can still be answered from it.
+DEFINE FIELD IF NOT EXISTS completed_at ON wake_session TYPE option<datetime>;
+-- The step the last successful write started from (the token that call spent)
+-- and its status, so a caller whose response was lost can be answered however
+-- far that call moved `step`.
+DEFINE FIELD IF NOT EXISTS prev_step ON wake_session TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS last_status ON wake_session TYPE option<string>;
 -- remembered_count, needed_help_count, skipped_count and attempts_on_current
 -- above are no longer read or written. The definitions stay so existing rows
 -- keep validating under SCHEMAFULL.
@@ -455,9 +464,10 @@ DEFINE FIELD IF NOT EXISTS scored_at        ON wake_guess TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS wake_guess_bloom   ON wake_guess FIELDS agent, bloom_id, chunk_index;
 DEFINE INDEX IF NOT EXISTS wake_guess_wake    ON wake_guess FIELDS agent, wake;
 DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
--- One row per step, enforced by the database rather than by convention: if the
--- row write succeeds and the session update then fails, the client retries the
--- same step and would otherwise log the guess twice.
+-- One row per step, enforced by the database rather than by convention. Rows
+-- are written as wake_guess:[session_id, position] in the same transaction as
+-- the session advance; the index also covers rows older binaries wrote under
+-- random ids. A retry that finds the step already logged replays that row.
 DEFINE INDEX IF NOT EXISTS wake_guess_step ON wake_guess FIELDS session_id, position UNIQUE;
 
 -- =============================================================================

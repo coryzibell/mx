@@ -705,6 +705,136 @@ fn no_retired_vocabulary_survives_in_the_wake_help_text() {
 }
 
 // =========================================================================
+// Failure paths from the Wake 464 review, through the real binary: a guess
+// starting with `-`, a refused id exits non-zero, `--wake` is echoed and
+// checked against the log, and a retried token is answered from the log.
+// =========================================================================
+
+fn respond_args<'a>(bloom_id: &'a str, guess: &'a str, token: &'a str) -> Vec<&'a str> {
+    vec![
+        "memory",
+        "wake",
+        "--bloom-id",
+        bloom_id,
+        "--respond",
+        guess,
+        "--session",
+        token,
+    ]
+}
+
+#[test]
+#[serial]
+fn failure_paths_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    add_bloom(&dir, "Alpha Note", "Alpha body text.", "alpha cue", None);
+    add_bloom(&dir, "Beta Note", "Beta body text.", "beta cue", None);
+
+    // ---- --wake must be positive; a refused begin surfaces nothing --------
+    let before = activation_counts(&dir);
+    let out = mx(&dir, &["memory", "wake", "--begin", "--wake", "0"]);
+    assert!(!out.status.success(), "--wake 0 must be refused");
+    assert!(stderr_of(&out).contains("positive"), "{}", stderr_of(&out));
+    assert_eq!(
+        before,
+        activation_counts(&dir),
+        "a refused --begin must not count as surfacing the entries"
+    );
+
+    // ---- begin echoes wake and model ---------------------------------------
+    let out = mx(
+        &dir,
+        &["memory", "wake", "--begin", "--wake", "7", "--model", "m-1"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let begin = json_of(&out);
+    assert_eq!(begin["wake"], 7);
+    assert_eq!(begin["model"], "m-1");
+    let token = begin["session"].as_str().unwrap().to_string();
+    let first_id = begin["prompt"]["id"].as_str().unwrap().to_string();
+
+    // ---- a wrong id is an error: JSON on stderr, non-zero exit -------------
+    let out = mx(&dir, &respond_args("kn-not-this-one", "alpha cue", &token));
+    assert!(!out.status.success(), "a refused id must exit non-zero");
+    assert!(stdout_of(&out).trim().is_empty(), "nothing on stdout");
+    let refusal: serde_json::Value = serde_json::from_str(stderr_of(&out).trim())
+        .unwrap_or_else(|e| panic!("expected JSON on stderr ({e}): {}", stderr_of(&out)));
+    assert_eq!(refusal["status"], "error");
+    assert_eq!(refusal["error"], "invalid_bloom_id");
+    assert_eq!(refusal["expected_id"], first_id.as_str());
+
+    // ---- a guess that starts with a hyphen parses --------------------------
+    let hyphen_guess = "-ish, something about the cue";
+    let out = mx(&dir, &respond_args(&first_id, hyphen_guess, &token));
+    assert!(
+        out.status.success(),
+        "a guess starting with '-' must parse; stderr: {}",
+        stderr_of(&out)
+    );
+    let first = json_of(&out);
+    assert_eq!(first["guess"], hyphen_guess);
+    assert_eq!(first["wake"], 7, "every respond echoes the wake");
+    assert_eq!(first["model"], "m-1");
+
+    // ---- the response is lost; the retry is answered from the log ----------
+    let out = mx(&dir, &respond_args(&first_id, "alpha cue", &token));
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let resumed = json_of(&out);
+    assert_eq!(resumed["replayed"], true);
+    assert_eq!(resumed["guess"], hyphen_guess, "the first guess counts");
+    assert_eq!(resumed["session"], first["session"]);
+    assert_eq!(resumed["next"], first["next"]);
+
+    // ---- finish the ritual --------------------------------------------------
+    let next_token = first["session"].as_str().unwrap();
+    let next_id = first["next"]["id"].as_str().unwrap();
+    let out = mx(&dir, &respond_args(next_id, "beta cue", next_token));
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let last = json_of(&out);
+    assert!(last["summary"].is_object());
+
+    // A stale token two steps back names the recovery.
+    let out = mx(&dir, &respond_args(&first_id, "alpha cue", &token));
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("token from your last successful response"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    // ---- the same wake number again is refused, unless forced --------------
+    let out = mx(&dir, &["memory", "wake", "--begin", "--wake", "7"]);
+    assert!(
+        !out.status.success(),
+        "a logged wake number must be refused"
+    );
+    assert!(
+        stderr_of(&out).contains("--force-wake"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    let out = mx(
+        &dir,
+        &["memory", "wake", "--begin", "--wake", "7", "--force-wake"],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let forced = json_of(&out);
+    assert_eq!(forced["wake"], 7);
+    assert!(
+        forced["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("--force-wake"),
+        "{forced}"
+    );
+
+    // --force-wake means nothing without --wake.
+    let out = mx(&dir, &["memory", "wake", "--begin", "--force-wake"]);
+    assert!(!out.status.success(), "--force-wake requires --wake");
+}
+
+// =========================================================================
 // The deleted-entry path, driven through the real binary and a real store.
 // It was covered only against the mock, whose `get` ignores the caller's
 // context and never round-trips a session.

@@ -6,6 +6,40 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — wake ritual failure paths (Wake 464 review)
+
+- **A half-written step no longer wedges a ritual.** The guess row and the
+  session advance are written in one transaction; the session write is a
+  compare-and-swap on `step`, and rows are keyed `wake_guess:[session_id,
+  position]`. A step already logged is answered from the log instead of
+  judged again — `replayed: true`, with the LOGGED `guess`, `bucket` and
+  `match`, the current token and `next`. The first guess counts. This covers
+  a retry after a lost response, the loser of a double submit (previously a raw
+  index error), and rows the previous binary wrote without advancing — even
+  when the entry that row judged has since been deleted.
+- **A lost response can be resumed.** The session records the step its last
+  write started from (`prev_step`) and that write's status (`last_status`).
+  Retrying with that token returns the same answer with `replayed: true` and
+  the token the caller never received, however far the call moved `step`; a
+  lost `bloom_missing` / `chunk_truncated` echoes its status (without `bloom`).
+  **Token out of sync** now means the token really is stale, and says to retry
+  with the token from the last successful response.
+- **`match.kind` is monotonic.** `exact` means identical after trimming;
+  anything that needed normalizing or fuzzing is `close`. A guess wrapped in
+  quotes was previously logged `exact` while the bare guess was `close`. Rows
+  logged before this fix can be re-derived from their snapshotted guess and
+  phrases.
+- **`--wake`** is echoed as `wake` (with `model`) on the begin response and
+  every respond payload. It must be positive. `--begin` refuses a wake number
+  another session already logged guesses under unless `--force-wake`, and
+  warns (`warnings`) when it is below the agent's highest logged wake or more
+  than one above it. A
+  refused begin no longer bumps activation counts.
+- **Completed sessions are kept** with `completed_at` set, not deleted.
+- **`--respond` accepts a guess starting with `-`.**
+- **`invalid_bloom_id` exits 1** with its JSON on stderr, like every other
+  error.
+
 ### Changed — BREAKING: `mx memory wake` ritual JSON (#448)
 
 The wake ritual is now **one guess per chunk, made from the title alone, after

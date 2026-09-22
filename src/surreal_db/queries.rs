@@ -1841,6 +1841,9 @@ impl SurrealDatabase {
                     revealed_count,
                     unjudged_count,
                     <int>time::unix(<datetime>created_at) AS created_at,
+                    IF completed_at != NONE THEN <int>time::unix(completed_at) END AS completed_at,
+                    prev_step,
+                    last_status,
                     bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
             )
@@ -1934,43 +1937,42 @@ impl SurrealDatabase {
             revealed_count,
             unjudged_count,
             created_at,
+            completed_at: obj["completed_at"].as_i64(),
+            prev_step: obj["prev_step"].as_u64().map(u32::try_from).transpose()?,
+            last_status: obj["last_status"].as_str().map(str::to_string),
             bloom_chunk_meta,
         }))
     }
 
-    /// Update an existing wake session
-    pub fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()> {
-        Self::runtime().block_on(self.update_wake_session_async(session))
+    /// Save a mutated session as a compare-and-swap on `step`.
+    pub fn update_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()> {
+        Self::runtime().block_on(self.update_wake_session_async(session, expected_step))
     }
 
     async fn update_wake_session_async(
         &self,
         session: &crate::wake_token::WakeSession,
+        expected_step: u32,
     ) -> Result<()> {
-        let bloom_chunk_meta_json = serde_json::to_value(&session.bloom_chunk_meta)?;
+        let fields = wake_session_fields(session)?;
+        let sql = format!(
+            "{WAKE_SESSION_CAS}
+            IF array::len($moved) = 0 {{ THROW $moved_error }};"
+        );
 
         let mut response = with_db!(self, db, {
-            db.query(
-                "UPDATE type::thing('wake_session', $session_id) SET
-                    current_index = $current_index,
-                    current_chunk_index = $current_chunk_index,
-                    step = $step,
-                    unhinted_count = $unhinted_count,
-                    revealed_count = $revealed_count,
-                    unjudged_count = $unjudged_count,
-                    bloom_chunk_meta = $bloom_chunk_meta
-                ",
-            )
-            .bind(("session_id", session.session_id.clone()))
-            .bind(("current_index", session.current_index as i64))
-            .bind(("current_chunk_index", session.current_chunk_index as i64))
-            .bind(("step", session.step as i64))
-            .bind(("unhinted_count", session.unhinted_count as i64))
-            .bind(("revealed_count", session.revealed_count as i64))
-            .bind(("unjudged_count", session.unjudged_count as i64))
-            .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
-            .await
-            .context("Failed to update wake session")
+            db.query(sql)
+                .bind(("session_id", session.session_id.clone()))
+                .bind(("s", fields))
+                .bind(("complete", session.is_complete()))
+                .bind(("expected_step", expected_step as i64))
+                .bind(("moved_error", wake_session_moved_error(expected_step)))
+                .await
+                .context("Failed to update wake session")
         })?;
 
         let errors = response.take_errors();
@@ -1984,86 +1986,90 @@ impl SurrealDatabase {
         Ok(())
     }
 
-    /// Delete a wake session
-    pub fn delete_wake_session(&self, session_id: &str) -> Result<()> {
-        Self::runtime().block_on(self.delete_wake_session_async(session_id))
-    }
-
-    async fn delete_wake_session_async(&self, session_id: &str) -> Result<()> {
-        let mut response = with_db!(self, db, {
-            db.query("DELETE type::thing('wake_session', $session_id)")
-                .bind(("session_id", session_id.to_string()))
-                .await
-                .context("Failed to delete wake session")
-        })?;
-
-        let errors = response.take_errors();
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!(
-                "SurrealDB error deleting wake session: {:?}",
-                errors
-            ));
-        }
-
-        Ok(())
-    }
-
     // =========================================================================
     // WAKE GUESS LOG
     // =========================================================================
 
-    /// Append one row to the guess log.
+    /// Log one guess and advance its session in one transaction.
+    ///
+    /// The row id is `wake_guess:[session_id, position]`, so a second write for
+    /// the same step collides on the id as well as on the `wake_guess_step`
+    /// index (which also catches rows older binaries wrote under random ids).
+    /// The session write is a compare-and-swap on `step`. If either fails the
+    /// transaction is cancelled and neither lands.
     ///
     /// The scoring columns (`embedding`, `sim_*`, `scored_at`) are left unset:
     /// a row with a null `scored_at` is pending.
-    pub fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
-        Self::runtime().block_on(self.insert_wake_guess_async(row))
+    pub fn record_wake_guess(
+        &self,
+        row: &crate::wake_guess::WakeGuessRow,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()> {
+        Self::runtime().block_on(self.record_wake_guess_async(row, session, expected_step))
     }
 
-    async fn insert_wake_guess_async(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()> {
+    async fn record_wake_guess_async(
+        &self,
+        row: &crate::wake_guess::WakeGuessRow,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()> {
+        let fields = wake_session_fields(session)?;
+        let sql = format!(
+            "BEGIN TRANSACTION;
+            CREATE type::thing('wake_guess', [$row_session_id, $position]) SET
+                agent = $agent,
+                wake = $wake,
+                session_id = $row_session_id,
+                bloom_id = $bloom_id,
+                chunk_index = $chunk_index,
+                chunk_total = $chunk_total,
+                position = $position,
+                bloom_position = $bloom_position,
+                bloom_total = $bloom_total,
+                title_shown = $title_shown,
+                guess = $guess,
+                model_id = $model_id,
+                phrase_source = $phrase_source,
+                phrases = $phrases,
+                match_kind = $match_kind,
+                match_index = $match_index,
+                bucket = $bucket,
+                content_hash = $content_hash
+            RETURN NONE;
+            {WAKE_SESSION_CAS}
+            IF array::len($moved) = 0 {{ THROW $moved_error }};
+            COMMIT TRANSACTION;"
+        );
+
         let mut response = with_db!(self, db, {
-            db.query(
-                "CREATE wake_guess SET
-                    agent = $agent,
-                    wake = $wake,
-                    session_id = $session_id,
-                    bloom_id = $bloom_id,
-                    chunk_index = $chunk_index,
-                    chunk_total = $chunk_total,
-                    position = $position,
-                    bloom_position = $bloom_position,
-                    bloom_total = $bloom_total,
-                    title_shown = $title_shown,
-                    guess = $guess,
-                    model_id = $model_id,
-                    phrase_source = $phrase_source,
-                    phrases = $phrases,
-                    match_kind = $match_kind,
-                    match_index = $match_index,
-                    bucket = $bucket,
-                    content_hash = $content_hash
-                ",
-            )
-            .bind(("agent", row.agent.clone()))
-            .bind(("wake", row.wake))
-            .bind(("session_id", row.session_id.clone()))
-            .bind(("bloom_id", row.bloom_id.clone()))
-            .bind(("chunk_index", row.chunk_index as i64))
-            .bind(("chunk_total", row.chunk_total as i64))
-            .bind(("position", row.position as i64))
-            .bind(("bloom_position", row.bloom_position as i64))
-            .bind(("bloom_total", row.bloom_total as i64))
-            .bind(("title_shown", row.title_shown.clone()))
-            .bind(("guess", row.guess.clone()))
-            .bind(("model_id", row.model_id.clone()))
-            .bind(("phrase_source", row.phrase_source.clone()))
-            .bind(("phrases", row.phrases.clone()))
-            .bind(("match_kind", row.match_kind.clone()))
-            .bind(("match_index", row.match_index.map(|i| i as i64)))
-            .bind(("bucket", row.bucket.clone()))
-            .bind(("content_hash", row.content_hash.clone()))
-            .await
-            .context("Failed to write wake guess row")
+            db.query(sql)
+                .bind(("agent", row.agent.clone()))
+                .bind(("wake", row.wake))
+                .bind(("row_session_id", row.session_id.clone()))
+                .bind(("bloom_id", row.bloom_id.clone()))
+                .bind(("chunk_index", row.chunk_index as i64))
+                .bind(("chunk_total", row.chunk_total as i64))
+                .bind(("position", row.position as i64))
+                .bind(("bloom_position", row.bloom_position as i64))
+                .bind(("bloom_total", row.bloom_total as i64))
+                .bind(("title_shown", row.title_shown.clone()))
+                .bind(("guess", row.guess.clone()))
+                .bind(("model_id", row.model_id.clone()))
+                .bind(("phrase_source", row.phrase_source.clone()))
+                .bind(("phrases", row.phrases.clone()))
+                .bind(("match_kind", row.match_kind.clone()))
+                .bind(("match_index", row.match_index.map(|i| i as i64)))
+                .bind(("bucket", row.bucket.clone()))
+                .bind(("content_hash", row.content_hash.clone()))
+                .bind(("session_id", session.session_id.clone()))
+                .bind(("s", fields))
+                .bind(("complete", session.is_complete()))
+                .bind(("expected_step", expected_step as i64))
+                .bind(("moved_error", wake_session_moved_error(expected_step)))
+                .await
+                .context("Failed to write wake guess row")
         })?;
 
         let errors = response.take_errors();
@@ -2075,6 +2081,112 @@ impl SurrealDatabase {
         }
 
         Ok(())
+    }
+
+    /// The guess logged at one step of a session. Looked up by the
+    /// `(session_id, position)` pair rather than by record id, so a row an
+    /// older binary wrote under a random id is found too.
+    pub fn get_wake_guess(
+        &self,
+        session_id: &str,
+        position: u32,
+    ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+        Self::runtime().block_on(self.get_wake_guess_async(session_id, position))
+    }
+
+    async fn get_wake_guess_async(
+        &self,
+        session_id: &str,
+        position: u32,
+    ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT agent, wake, session_id, bloom_id, chunk_index, chunk_total,
+                    position, bloom_position, bloom_total, title_shown, guess, model_id,
+                    phrase_source, phrases, match_kind, match_index, bucket, content_hash
+                FROM wake_guess
+                WHERE session_id = $session_id AND position = $position
+                LIMIT 1",
+            )
+            .bind(("session_id", session_id.to_string()))
+            .bind(("position", position as i64))
+            .await
+            .context("Failed to read wake guess row")
+        })?;
+
+        let results: Vec<serde_json::Value> = response.take(0)?;
+        let Some(obj) = results.first() else {
+            return Ok(None);
+        };
+
+        let int = |key: &str| obj[key].as_i64().unwrap_or(0);
+        let text = |key: &str| obj[key].as_str().unwrap_or_default().to_string();
+        Ok(Some(crate::wake_guess::WakeGuessRow {
+            agent: text("agent"),
+            wake: obj["wake"].as_i64(),
+            session_id: text("session_id"),
+            bloom_id: text("bloom_id"),
+            chunk_index: u16::try_from(int("chunk_index"))?,
+            chunk_total: u16::try_from(int("chunk_total"))?,
+            position: u32::try_from(int("position"))?,
+            bloom_position: usize::try_from(int("bloom_position"))?,
+            bloom_total: usize::try_from(int("bloom_total"))?,
+            title_shown: text("title_shown"),
+            guess: text("guess"),
+            model_id: obj["model_id"].as_str().map(str::to_string),
+            phrase_source: text("phrase_source"),
+            phrases: obj["phrases"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            match_kind: text("match_kind"),
+            match_index: obj["match_index"]
+                .as_i64()
+                .map(usize::try_from)
+                .transpose()?,
+            bucket: text("bucket"),
+            content_hash: text("content_hash"),
+        }))
+    }
+
+    /// Which sessions already logged rows under `wake` for `agent`, and the
+    /// highest wake number the agent has logged. Both read the
+    /// `wake_guess_wake` index.
+    pub fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+        Self::runtime().block_on(self.wake_history_async(agent, wake))
+    }
+
+    async fn wake_history_async(
+        &self,
+        agent: &str,
+        wake: i64,
+    ) -> Result<crate::wake_guess::WakeHistory> {
+        let mut response = with_db!(self, db, {
+            db.query(
+                "SELECT session_id FROM wake_guess
+                    WHERE agent = $agent AND wake = $wake GROUP BY session_id;
+                SELECT wake FROM wake_guess
+                    WHERE agent = $agent AND wake != NONE ORDER BY wake DESC LIMIT 1;",
+            )
+            .bind(("agent", agent.to_string()))
+            .bind(("wake", wake))
+            .await
+            .context("Failed to read wake guess history")
+        })?;
+
+        let sessions: Vec<serde_json::Value> = response.take(0)?;
+        let highest: Vec<serde_json::Value> = response.take(1)?;
+        Ok(crate::wake_guess::WakeHistory {
+            sessions_at_wake: sessions
+                .iter()
+                .filter_map(|v| v["session_id"].as_str().map(str::to_string))
+                .collect(),
+            highest_wake: highest.first().and_then(|v| v["wake"].as_i64()),
+        })
     }
 
     /// Run a raw read query and return the rows as JSON.
@@ -2341,4 +2453,45 @@ pub(crate) fn detect_ghosts(anchors: &[String], live_ids: &HashSet<String>) -> V
         })
         .cloned()
         .collect()
+}
+
+/// The session write shared by `update_wake_session` and `record_wake_guess`:
+/// a compare-and-swap on `step`, leaving what it updated in `$moved`.
+const WAKE_SESSION_CAS: &str = "LET $moved = (UPDATE type::thing('wake_session', $session_id) SET
+        current_index = $s.current_index,
+        current_chunk_index = $s.current_chunk_index,
+        step = $s.step,
+        unhinted_count = $s.unhinted_count,
+        revealed_count = $s.revealed_count,
+        unjudged_count = $s.unjudged_count,
+        bloom_chunk_meta = $s.bloom_chunk_meta,
+        completed_at = IF $complete THEN time::now() END,
+        prev_step = $expected_step,
+        last_status = $s.last_status
+    WHERE step = $expected_step
+    RETURN AFTER);";
+
+fn wake_session_fields(session: &crate::wake_token::WakeSession) -> Result<serde_json::Value> {
+    // `last_status` is left out when unset: a JSON null would reach the
+    // SCHEMAFULL `option<string>` field as NULL, which it rejects.
+    let mut fields = serde_json::json!({
+        "current_index": session.current_index as i64,
+        "current_chunk_index": session.current_chunk_index as i64,
+        "step": session.step as i64,
+        "unhinted_count": session.unhinted_count as i64,
+        "revealed_count": session.revealed_count as i64,
+        "unjudged_count": session.unjudged_count as i64,
+        "bloom_chunk_meta": serde_json::to_value(&session.bloom_chunk_meta)?,
+    });
+    if let Some(status) = &session.last_status {
+        fields["last_status"] = serde_json::Value::String(status.clone());
+    }
+    Ok(fields)
+}
+
+fn wake_session_moved_error(expected_step: u32) -> String {
+    format!(
+        "wake session is no longer at step {}; another call advanced it",
+        expected_step
+    )
 }

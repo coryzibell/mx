@@ -1896,7 +1896,8 @@ and presents them in the requested format.
   `--bloom-id`           `string`   Bloom ID for `--respond`.
   `--respond`            `string`   Submit your one guess for this bloom. Maximum 2000 characters.
   `--session`            `string`   Session token for chained ritual (required with `--respond`).
-  `--wake`               `int`      Wake number recorded on every guess row (with `--begin`). Optional; mx keeps no counter of its own.
+  `--wake`               `int`      Wake number recorded on every guess row (with `--begin`). Optional; mx keeps no counter of its own. Must be positive. Refused when another ritual already logged guesses under it.
+  `--force-wake`         `flag`     Begin under a `--wake` number another ritual already logged guesses under.
   `--model`              `string`   Model identifier recorded on every guess row (with `--begin`). Optional; mx cannot discover it.
   `--include-excluded`   `flag`     Include entries tagged `archive` or `wake-exclude`, which are kept out of the wake set by default.
 
@@ -1940,9 +1941,30 @@ which the entry is shown. There is no hint ladder and no second attempt.
 `--respond` returns `status: "shown"` with a `bucket` of either
 `unhinted` (the guess string-matched one of the chunk's phrases, and the
 tool had given no hint) or `revealed` (it did not). `match` carries the
-mechanical facts: `kind` is `exact`, `close` or `none`, and
-`phrase_index` says which phrase matched. The bucket names what the tool
-did, not what the responder knew.
+mechanical facts: `kind` is `exact` (identical to a phrase after
+trimming), `close` (matched only after normalizing case, punctuation or
+spelling) or `none`, and `phrase_index` says which phrase matched. The
+bucket names what the tool did, not what the responder knew.
+
+The begin response and every respond payload echo `wake` and `model`.
+`--begin` refuses a wake number another session already logged guesses
+under (pass `--force-wake` to proceed anyway) and adds a `warnings`
+entry when the number is below the highest the agent has logged, or more
+than one above it.
+
+A step that is already logged is answered from the log rather than
+judged again: the response carries `replayed: true`, the **logged**
+`guess`, `bucket` and `match`, and the current token and `next`. The
+first guess counts.
+
+A caller whose response was lost retries with the token it spent and
+gets that response again, with `replayed: true` and the token it never
+received --- however far the lost call moved the ritual, including when
+it judged nothing: a lost `bloom_missing` or `chunk_truncated` is
+answered with the same status (without `bloom`). Only the last call can
+be resumed this way. A token older than that is refused with a pointer
+to the last one that worked, and the pointer is true: the token from the
+last successful response is always either current or resumable.
 
 The final response carries a summary of bucket counts split by phrase
 source (`authored`, `derived`, `auto`), the number of chunks walked, and
@@ -1966,16 +1988,21 @@ truncated) or carries no alphanumeric content at all. A refused call can
 simply be retried with the same session token.
 
 A session created by a version of mx older than the one-guess ritual is
-refused rather than continued.
+refused rather than continued. A completed session is kept, with
+`completed_at` set.
+
+Naming the wrong entry is refused with `{status: "error", error:
+"invalid_bloom_id", message, expected_id?}` on stderr and exit code 1,
+like every other error.
 
 ### The guess log
 
-Every `--respond` that judges a guess writes one `wake_guess` row before
-the session advances: the agent, wake number, model, entry, chunk, both
-positions in the sequence, the title as shown, the guess, the phrases it
-was matched against, the match, the bucket, and the SHA-256 of the chunk
-text. If that write fails, the respond call fails and the session does
-not advance.
+Every `--respond` that judges a guess writes one `wake_guess` row, keyed
+by session and step, in the same transaction as the session advance: the
+agent, wake number, model, entry, chunk, both positions in the sequence,
+the title as shown, the guess, the phrases it was matched against, the
+match, the bucket, and the SHA-256 of the chunk text. If the transaction
+fails, the respond call fails and neither the row nor the advance lands.
 
 Guess rows are scoped to the writing agent and are not reachable through
 `mx memory export`, which reads the knowledge table only.

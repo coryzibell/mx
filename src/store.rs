@@ -597,15 +597,37 @@ pub trait KnowledgeStore {
     /// Get a wake session by ID
     fn get_wake_session(&self, session_id: &str) -> Result<Option<crate::wake_token::WakeSession>>;
 
-    /// Update an existing wake session (save mutated state)
-    fn update_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<()>;
+    /// Save a mutated session, as a compare-and-swap: the write lands only if
+    /// the stored session is still at `expected_step`, and fails otherwise.
+    /// A session whose last step is walked is stamped `completed_at`, not
+    /// deleted.
+    fn update_wake_session(
+        &self,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()>;
 
-    /// Delete a wake session (cleanup after ritual completes)
-    fn delete_wake_session(&self, session_id: &str) -> Result<()>;
+    /// Log one guess and advance the session in ONE transaction. The row is
+    /// keyed by `(session_id, position)`; the session write is the same
+    /// compare-and-swap as `update_wake_session`. Either both land or neither
+    /// does, so a failure leaves nothing for a retry to trip over.
+    fn record_wake_guess(
+        &self,
+        row: &crate::wake_guess::WakeGuessRow,
+        session: &crate::wake_token::WakeSession,
+        expected_step: u32,
+    ) -> Result<()>;
 
-    /// Append one row to the wake guess log. A failure here fails the respond
-    /// call that produced the guess.
-    fn insert_wake_guess(&self, row: &crate::wake_guess::WakeGuessRow) -> Result<()>;
+    /// The guess logged at one step of a session, if any.
+    fn get_wake_guess(
+        &self,
+        session_id: &str,
+        position: u32,
+    ) -> Result<Option<crate::wake_guess::WakeGuessRow>>;
+
+    /// What the guess log already holds for `agent`, for the `--begin` check
+    /// on the wake number.
+    fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory>;
 
     // =========================================================================
     // GHOST EDGE REPAIR
