@@ -1842,6 +1842,8 @@ impl SurrealDatabase {
                     unjudged_count,
                     <int>time::unix(<datetime>created_at) AS created_at,
                     IF completed_at != NONE THEN <int>time::unix(completed_at) END AS completed_at,
+                    prev_step,
+                    last_status,
                     bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
             )
@@ -1936,6 +1938,8 @@ impl SurrealDatabase {
             unjudged_count,
             created_at,
             completed_at: obj["completed_at"].as_i64(),
+            prev_step: obj["prev_step"].as_u64().map(u32::try_from).transpose()?,
+            last_status: obj["last_status"].as_str().map(str::to_string),
             bloom_chunk_meta,
         }))
     }
@@ -2461,12 +2465,16 @@ const WAKE_SESSION_CAS: &str = "LET $moved = (UPDATE type::thing('wake_session',
         revealed_count = $s.revealed_count,
         unjudged_count = $s.unjudged_count,
         bloom_chunk_meta = $s.bloom_chunk_meta,
-        completed_at = IF $complete THEN time::now() END
+        completed_at = IF $complete THEN time::now() END,
+        prev_step = $expected_step,
+        last_status = $s.last_status
     WHERE step = $expected_step
     RETURN AFTER);";
 
 fn wake_session_fields(session: &crate::wake_token::WakeSession) -> Result<serde_json::Value> {
-    Ok(serde_json::json!({
+    // `last_status` is left out when unset: a JSON null would reach the
+    // SCHEMAFULL `option<string>` field as NULL, which it rejects.
+    let mut fields = serde_json::json!({
         "current_index": session.current_index as i64,
         "current_chunk_index": session.current_chunk_index as i64,
         "step": session.step as i64,
@@ -2474,7 +2482,11 @@ fn wake_session_fields(session: &crate::wake_token::WakeSession) -> Result<serde
         "revealed_count": session.revealed_count as i64,
         "unjudged_count": session.unjudged_count as i64,
         "bloom_chunk_meta": serde_json::to_value(&session.bloom_chunk_meta)?,
-    }))
+    });
+    if let Some(status) = &session.last_status {
+        fields["last_status"] = serde_json::Value::String(status.clone());
+    }
+    Ok(fields)
 }
 
 fn wake_session_moved_error(expected_step: u32) -> String {

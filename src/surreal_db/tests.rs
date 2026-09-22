@@ -5196,10 +5196,18 @@ fn a_session_update_is_a_compare_and_swap_and_stamps_completion() {
         .expect_err("a stale expected step is refused");
     assert_eq!(stored_step(&db, "session-1"), 0);
 
+    assert_eq!(
+        db.get_wake_session("session-1").unwrap().unwrap().prev_step,
+        None,
+        "nothing written yet"
+    );
+    session.last_status = Some("bloom_missing".to_string());
     db.update_wake_session(&session, 0).unwrap();
     let loaded = db.get_wake_session("session-1").unwrap().unwrap();
     assert_eq!(loaded.step, 1);
     assert_eq!(loaded.completed_at, None, "one of two blooms walked");
+    assert_eq!(loaded.prev_step, Some(0), "the step the write started from");
+    assert_eq!(loaded.last_status.as_deref(), Some("bloom_missing"));
 
     session.advance(
         1,
@@ -5249,6 +5257,84 @@ fn wake_history_reports_sessions_at_a_wake_and_the_highest_wake() {
 
     let history = db.wake_history("new-agent", 1).unwrap();
     assert_eq!(history, crate::wake_guess::WakeHistory::default());
+}
+
+/// Blocker 2 against the real store: a call that moves `step` by more than
+/// one (a judged guess, then a deleted entry stepped over), and an unjudged
+/// step, both with their responses lost. Each must resume from its token.
+#[test]
+fn a_lost_response_resumes_however_far_the_call_moved_step() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::for_agent("test-agent");
+    let mut entries = Vec::new();
+    for (id, phrase) in [
+        ("kn-1", "one"),
+        ("kn-2", "two"),
+        ("kn-3", "three"),
+        ("kn-4", "four"),
+    ] {
+        let mut e = make_test_entry(id, 9, 0.0);
+        e.wake_phrases = vec![phrase.to_string()];
+        db.upsert_knowledge(&e).unwrap();
+        entries.push(e);
+    }
+    let cascade = crate::store::WakeCascade {
+        core: entries,
+        ..Default::default()
+    };
+    let begin: serde_json::Value = serde_json::from_str(
+        &crate::wake_ritual::begin_ritual(
+            &db,
+            &cascade,
+            crate::wake_ritual::RitualMeta {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                model_id: None,
+            },
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let respond = |id: &str, guess: &str, token: &str| -> serde_json::Value {
+        let out = crate::wake_ritual::respond_ritual(&db, &ctx, id, guess, token)
+            .unwrap_or_else(|e| panic!("respond {id} failed: {e}"));
+        serde_json::from_str(&out).unwrap()
+    };
+    let token0 = begin["session"].as_str().unwrap().to_string();
+    let first_id = begin["prompt"]["id"].as_str().unwrap().to_string();
+    let order: Vec<String> = cascade.core.iter().map(|e| e.id.clone()).collect();
+    let pos = order.iter().position(|id| *id == first_id).unwrap();
+    let (second_id, third_id) = (order[pos + 1].clone(), order[pos + 2].clone());
+
+    // Judge the first entry; the second is deleted, so the same call steps
+    // over it too.
+    db.delete(&second_id, &ctx).unwrap();
+    let phrase = |id: &str| match id {
+        "kn-1" => "one",
+        "kn-2" => "two",
+        "kn-3" => "three",
+        _ => "four",
+    };
+    let first = respond(&first_id, phrase(&first_id), &token0);
+    assert_eq!(first["next"]["id"], third_id.as_str());
+    let resumed = respond(&first_id, "retyped", &token0);
+    assert_eq!(resumed["replayed"], true);
+    assert_eq!(resumed["guess"], phrase(&first_id));
+    assert_eq!(resumed["session"], first["session"]);
+
+    // An unjudged step: the third entry goes, and the call reports it.
+    db.delete(&third_id, &ctx).unwrap();
+    let token1 = first["session"].as_str().unwrap().to_string();
+    let missing = respond(&third_id, "anything", &token1);
+    assert_eq!(missing["status"], "bloom_missing");
+    let resumed = respond(&third_id, "anything", &token1);
+    assert_eq!(resumed["status"], "bloom_missing");
+    assert_eq!(resumed["replayed"], true);
+    assert_eq!(resumed["session"], missing["session"]);
+    assert_eq!(resumed["next"], missing["next"]);
+
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 1);
 }
 
 /// Blocker 1 end to end against the real store: a step whose row landed and

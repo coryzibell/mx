@@ -15,9 +15,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   judged again — `replayed: true`, with the LOGGED `guess`, `bucket` and
   `match`, the current token and `next`. The first guess counts. This covers
   a retry after a lost response, the loser of a double submit (previously a raw
-  index error), and rows the previous binary wrote without advancing.
-- **Token out of sync** now says to retry with the token from the last
-  successful response.
+  index error), and rows the previous binary wrote without advancing — even
+  when the entry that row judged has since been deleted.
+- **A lost response can be resumed.** The session records the step its last
+  write started from (`prev_step`) and that write's status (`last_status`).
+  Retrying with that token returns the same answer with `replayed: true` and
+  the token the caller never received, however far the call moved `step`; a
+  lost `bloom_missing` / `chunk_truncated` echoes its status (without `bloom`).
+  **Token out of sync** now means the token really is stale, and says to retry
+  with the token from the last successful response.
 - **`match.kind` is monotonic.** `exact` means identical after trimming;
   anything that needed normalizing or fuzzing is `close`. A guess wrapped in
   quotes was previously logged `exact` while the bare guess was `close`. Rows
@@ -26,7 +32,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **`--wake`** is echoed as `wake` (with `model`) on the begin response and
   every respond payload. It must be positive. `--begin` refuses a wake number
   another session already logged guesses under unless `--force-wake`, and
-  warns (`warnings`) when it is below the agent's highest logged wake. A
+  warns (`warnings`) when it is below the agent's highest logged wake or more
+  than one above it. A
   refused begin no longer bumps activation counts.
 - **Completed sessions are kept** with `completed_at` set, not deleted.
 - **`--respond` accepts a guess starting with `-`.**

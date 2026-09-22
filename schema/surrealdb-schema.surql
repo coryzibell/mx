@@ -419,6 +419,11 @@ DEFINE FIELD IF NOT EXISTS unjudged_count ON wake_session TYPE int DEFAULT 0;
 -- so the log can tell a finished ritual from an abandoned one, and a caller
 -- whose final response was lost can still be answered from it.
 DEFINE FIELD IF NOT EXISTS completed_at ON wake_session TYPE option<datetime>;
+-- The step the last successful write started from (the token that call spent)
+-- and its status, so a caller whose response was lost can be answered however
+-- far that call moved `step`.
+DEFINE FIELD IF NOT EXISTS prev_step ON wake_session TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS last_status ON wake_session TYPE option<string>;
 -- remembered_count, needed_help_count, skipped_count and attempts_on_current
 -- above are no longer read or written. The definitions stay so existing rows
 -- keep validating under SCHEMAFULL.

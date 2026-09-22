@@ -607,14 +607,19 @@ not what the responder knew.
 The begin response and every respond payload echo `wake` and `model`. `--begin`
 refuses a wake number another session already logged guesses under (pass
 `--force-wake` to proceed anyway) and adds a `warnings` entry when the number is
-below the highest the agent has logged.
+below the highest the agent has logged, or more than one above it.
 
 A step that is already logged is answered from the log rather than judged
 again: the response carries `replayed: true`, the *logged* `guess`, `bucket`
-and `match`, and the current token and `next`. The first guess counts. So a
-caller whose response was lost retries with the same token and picks up where
-it left off; a token older than that is refused with a pointer to the last one
-that worked.
+and `match`, and the current token and `next`. The first guess counts.
+
+A caller whose response was lost retries with the token it spent and gets that
+response again, with `replayed: true` and the token it never received — however
+far the lost call moved the ritual, including when it judged nothing: a lost
+`bloom_missing` or `chunk_truncated` is answered with the same status (without
+`bloom`). Only the last call can be resumed this way. A token older than that is
+refused with a pointer to the last one that worked, and the pointer is true: the
+token from the last successful response is always either current or resumable.
 
 The final response carries a summary of bucket counts split by phrase source
 (`authored`, `derived`, `auto`), the number of chunks walked, and `unjudged` —

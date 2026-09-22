@@ -267,13 +267,21 @@ fn check_wake_number(
              logging this one under it too (--force-wake)."
         ));
     }
-    if let Some(highest) = history.highest_wake
-        && wake < highest
-    {
-        warnings.push(format!(
-            "Wake {wake} is lower than wake {highest}, the highest this agent has logged. \
-             If that is a typo, start again with the right --wake before answering."
-        ));
+    if let Some(highest) = history.highest_wake {
+        if wake < highest {
+            warnings.push(format!(
+                "Wake {wake} is lower than wake {highest}, the highest this agent has logged. \
+                 If that is a typo, start again with the right --wake before answering."
+            ));
+        } else if wake > highest.saturating_add(1) {
+            // Caught now, because once a typo like 4640 is logged it becomes
+            // the highest, and every correct wake after it warns as "lower".
+            warnings.push(format!(
+                "Wake {wake} skips ahead of wake {highest}, the highest this agent has \
+                 logged. If that is a typo, start again with the right --wake before \
+                 answering."
+            ));
+        }
     }
     Ok(warnings)
 }
@@ -418,27 +426,19 @@ pub fn respond_ritual(
         );
     }
 
-    // The call made with this token was judged and advanced the session, but
-    // its response never reached the caller. Answer from the log with the
-    // token the caller never received. Only a step that logged a guess can be
-    // resumed; one that stepped over a vanished entry has nothing to replay.
-    if token_step.checked_add(1) == Some(session.step)
-        && let Some(logged) = db.get_wake_guess(&session_id, token_step)?
-    {
+    // The last successful write spent this token, and its response never
+    // reached the caller. Answer it again with the token the caller never
+    // received. Keyed on the step that write STARTED from, not on `step - 1`:
+    // one call can move `step` further than one, by judging a guess and then
+    // stepping over deleted entries.
+    if session.prev_step == Some(token_step) && token_step < session.step {
         let all_blooms = fetch_blooms_by_ids(db, ctx, &session.bloom_ids)?;
-        return replay(
-            db,
-            session,
-            &session_id,
-            token_step,
-            &all_blooms,
-            logged,
-            bloom_id,
-        );
+        return resume(db, session, &session_id, token_step, &all_blooms, bloom_id);
     }
 
     // Anti-replay: token step must match server-side state. Every respond
-    // advances the step, so a spent token lands here.
+    // advances the step, so a spent token lands here — and since the last
+    // spent token is resumed above, one that lands here really is stale.
     if session.step != token_step {
         bail!(
             "Token out of sync: token step {} but session at step {}. Retry with the \
@@ -469,8 +469,28 @@ pub fn respond_ritual(
     // that no longer exists should be told the entry is gone, not that its
     // guess was unusable. The second answer does not describe the situation,
     // and a client that retries on a guess error would retry forever.
+    //
+    // At every step the sweep stands on, a logged row wins over any other
+    // answer: an older binary wrote the row and the session in two calls, and
+    // when the second failed the session was left behind its log. Finish that
+    // advance with the logged judgment — even when the entry it judged has
+    // been deleted since, which is why the lookup is here and not later.
     let mut vanished: Vec<String> = Vec::new();
-    while !session.is_complete() && session.current_bloom_is_missing(&all_blooms) {
+    loop {
+        if let Some(logged) = db.get_wake_guess(&session_id, session.step)? {
+            return replay(
+                db,
+                session,
+                &session_id,
+                token_step,
+                &all_blooms,
+                logged,
+                bloom_id,
+            );
+        }
+        if session.is_complete() || !session.current_bloom_is_missing(&all_blooms) {
+            break;
+        }
         if let Some(id) = session.current_bloom_id() {
             vanished.push(id.to_string());
         }
@@ -542,21 +562,6 @@ pub fn respond_ritual(
         )?)?);
     }
 
-    // A row already at this step whose session never advanced: an older
-    // binary wrote the row and the session in two calls, and the second one
-    // failed. Finish that advance with the logged judgment.
-    if let Some(logged) = db.get_wake_guess(&session_id, session.step)? {
-        return replay(
-            db,
-            session,
-            &session_id,
-            token_step,
-            &all_blooms,
-            logged,
-            bloom_id,
-        );
-    }
-
     let chunk_idx = session.current_chunk_index;
     let chunk_content = chunk_text(&plan, &content, chunk_idx);
     let resolved = phrases_for_chunk(bloom, chunk_idx, plan.total, chunk_content);
@@ -598,6 +603,7 @@ pub fn respond_ritual(
     );
 
     let before_advance = session.clone();
+    session.last_status = Some("shown".to_string());
     session.advance(plan.total, bucket, resolved.source);
     skip_missing_blooms(&mut session, &all_blooms);
 
@@ -645,6 +651,50 @@ pub fn respond_ritual(
     Ok(serde_json::to_string(&response)?)
 }
 
+/// Answer again the last successful call, whose response was lost.
+///
+/// If that call judged a guess, its row sits somewhere in `[token_step,
+/// step)` — after any entries it stepped over first — and is replayed. If it
+/// judged nothing (`bloom_missing`, `chunk_truncated`), its recorded status is
+/// echoed with the current token and `next` or summary; there is no row and
+/// no `bloom` to show.
+fn resume(
+    db: &dyn KnowledgeStore,
+    session: WakeSession,
+    session_id: &str,
+    token_step: u32,
+    all_blooms: &HashMap<String, KnowledgeEntry>,
+    bloom_id: &str,
+) -> Result<String> {
+    for position in token_step..session.step {
+        if let Some(logged) = db.get_wake_guess(session_id, position)? {
+            return replay(
+                db, session, session_id, token_step, all_blooms, logged, bloom_id,
+            );
+        }
+    }
+
+    let status = session.last_status.clone().ok_or_else(|| {
+        anyhow::anyhow!("Wake session {} has no record of its last step", session_id)
+    })?;
+    let (next, progress, summary) = get_next_and_progress(&session, all_blooms)?;
+    let response = WakeRespondResponse {
+        status,
+        replayed: true,
+        bucket: None,
+        guess: None,
+        match_info: None,
+        bloom: None,
+        session: create_token(session_id, session.step),
+        next,
+        progress: Some(progress),
+        summary,
+        wake: session.wake,
+        model: session.model_id.clone(),
+    };
+    Ok(serde_json::to_string(&response)?)
+}
+
 /// Answer a step from its logged row instead of judging the guess just sent.
 ///
 /// `session` is either still AT the logged step — the row landed and the
@@ -682,6 +732,7 @@ fn replay(
         })?;
         session.advance(logged.chunk_total, bucket, source);
         skip_missing_blooms(&mut session, all_blooms);
+        session.last_status = Some("shown".to_string());
         db.update_wake_session(&session, expected_step)?;
     }
 
@@ -743,6 +794,7 @@ fn unjudged_response(
     skip_missing_blooms(session, all_blooms);
 
     let (next, progress, summary) = get_next_and_progress(session, all_blooms)?;
+    session.last_status = Some(status.to_string());
     db.update_wake_session(session, expected_step)?;
 
     Ok(WakeRespondResponse {
@@ -1336,6 +1388,154 @@ mod tests {
         assert_eq!(resp["match"]["phrase_index"], 0);
     }
 
+    fn seed_ids(store: &MockStore, ids: &[(&str, &str)]) -> Vec<KnowledgeEntry> {
+        ids.iter()
+            .map(|(id, phrase)| {
+                let mut b = entry_with_phrases(vec![phrase]);
+                b.id = id.to_string();
+                store.seed(&b);
+                b
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_judged_step_that_also_stepped_over_a_deleted_entry_resumes() {
+        // One call judges kn-1 and then steps over the deleted kn-2, moving
+        // step 0 -> 2. A `step - 1` resume check could not see token 0.
+        let store = MockStore::new();
+        let blooms = seed_ids(
+            &store,
+            &[("kn-1", "one"), ("kn-2", "two"), ("kn-3", "three")],
+        );
+        let begin_json = begin(&store, &test_cascade(blooms));
+        let token0 = token_from_response(&begin_json);
+        store.blooms.borrow_mut().remove("kn-2");
+
+        let first = respond(&store, "kn-1", "one", &token0);
+        assert_eq!(first["next"]["id"], "kn-3");
+        assert_eq!(store.sessions.borrow().values().next().unwrap().step, 2);
+
+        let resumed = respond(&store, "kn-1", "one", &token0);
+        assert_eq!(resumed["replayed"], true);
+        assert_eq!(resumed["status"], "shown");
+        assert_eq!(resumed["guess"], "one");
+        assert_eq!(resumed["session"], first["session"]);
+        assert_eq!(resumed["next"]["id"], "kn-3");
+        assert_eq!(store.guesses.borrow().len(), 1);
+
+        // Once the caller walks on, token 0 is genuinely stale.
+        respond(&store, "kn-3", "three", &token_from_response(&first));
+        let err = respond_ritual(
+            &store,
+            &AgentContext::for_agent("test-agent"),
+            "kn-1",
+            "one",
+            &token0,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Token out of sync"), "{err}");
+    }
+
+    #[test]
+    fn a_lost_bloom_missing_response_resumes_with_its_status() {
+        let store = MockStore::new();
+        let blooms = seed_ids(&store, &[("kn-1", "one"), ("kn-2", "two")]);
+        let begin_json = begin(&store, &test_cascade(blooms));
+        let token0 = token_from_response(&begin_json);
+        store.blooms.borrow_mut().remove("kn-1");
+
+        let first = respond(&store, "kn-1", "one", &token0);
+        assert_eq!(first["status"], "bloom_missing");
+
+        let resumed = respond(&store, "kn-1", "one", &token0);
+        assert_eq!(resumed["status"], "bloom_missing");
+        assert_eq!(resumed["replayed"], true);
+        assert!(resumed.get("bucket").is_none() && resumed.get("guess").is_none());
+        assert_eq!(resumed["session"], first["session"]);
+        assert_eq!(resumed["next"]["id"], "kn-2");
+        assert!(store.guesses.borrow().is_empty(), "nothing was judged");
+
+        // The resumed token walks on.
+        let resp = respond(&store, "kn-2", "two", &token_from_response(&resumed));
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(resp["summary"]["unjudged"], 1);
+    }
+
+    #[test]
+    fn a_lost_chunk_truncated_response_resumes_with_its_status() {
+        let store = MockStore::new();
+        let big = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let big_id = big.id.clone();
+        store.seed(&big);
+        let mut small = entry_with_phrases(vec!["bravo"]);
+        small.id = "kn-small".to_string();
+        store.seed(&small);
+
+        let begin_json = begin(&store, &test_cascade(vec![big, small]));
+        let mut token = token_from_response(&begin_json);
+        for _ in 0..2 {
+            token = token_from_response(&respond(&store, &big_id, MISS, &token));
+        }
+        store.mutate_bloom(&big_id, |e| {
+            e.body = Some("shrunk to one chunk.".to_string())
+        });
+
+        let first = respond(&store, &big_id, "ignored", &token);
+        assert_eq!(first["status"], "chunk_truncated");
+
+        let resumed = respond(&store, &big_id, "ignored", &token);
+        assert_eq!(resumed["status"], "chunk_truncated");
+        assert_eq!(resumed["replayed"], true);
+        assert_eq!(resumed["session"], first["session"]);
+        assert_eq!(resumed["next"]["id"], "kn-small");
+        assert_eq!(store.guesses.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_half_written_step_whose_entry_was_since_deleted_still_replays() {
+        // The logged row wins over the bloom_missing answer: the guess was
+        // made and logged, and it is what the step counts.
+        let store = MockStore::new();
+        let blooms = seed_ids(&store, &[("kn-1", "one"), ("kn-2", "two")]);
+        let begin_json = begin(&store, &test_cascade(blooms));
+        let token0 = token_from_response(&begin_json);
+        let session_id = store.sessions.borrow().keys().next().unwrap().clone();
+        store.guesses.borrow_mut().push(WakeGuessRow {
+            agent: "test-agent".to_string(),
+            wake: Some(7),
+            session_id: session_id.clone(),
+            bloom_id: "kn-1".to_string(),
+            chunk_index: 0,
+            chunk_total: 1,
+            position: 0,
+            bloom_position: 1,
+            bloom_total: 2,
+            title_shown: "Test".to_string(),
+            guess: "one".to_string(),
+            model_id: None,
+            phrase_source: "authored".to_string(),
+            phrases: vec!["one".to_string()],
+            match_kind: "exact".to_string(),
+            match_index: Some(0),
+            bucket: "unhinted".to_string(),
+            content_hash: content_hash("body"),
+        });
+        store.blooms.borrow_mut().remove("kn-1");
+
+        let resp = respond(&store, "kn-1", MISS, &token0);
+        assert_eq!(resp["status"], "shown");
+        assert_eq!(resp["replayed"], true);
+        assert_eq!(resp["guess"], "one");
+        assert!(resp.get("bloom").is_none(), "the entry is gone");
+        assert_eq!(resp["next"]["id"], "kn-2");
+        let sessions = store.sessions.borrow();
+        assert_eq!(sessions[&session_id].step, 1);
+        assert_eq!(sessions[&session_id].unhinted_count, 1);
+        assert_eq!(sessions[&session_id].unjudged_count, 0);
+    }
+
     #[test]
     fn the_loser_of_a_double_submit_gets_the_winners_answer() {
         // Two calls on one token: the other one lands its row and advance
@@ -1555,6 +1755,23 @@ mod tests {
         // The next wake up is not warned about.
         let begin_json = begin_at(&store, Some(464), false).unwrap();
         assert!(begin_json.get("warnings").is_none());
+    }
+
+    #[test]
+    fn a_wake_number_that_skips_ahead_of_the_highest_logged_is_warned_about() {
+        let store = MockStore::new();
+        walk_at(&store, 463, false);
+
+        let begin_json = begin_at(&store, Some(4640), false).unwrap();
+        let warnings = begin_json["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0]
+                .as_str()
+                .unwrap()
+                .contains("skips ahead of wake 463"),
+            "{warnings:?}"
+        );
     }
 
     #[test]
@@ -1993,6 +2210,7 @@ mod tests {
                 stored.completed_at = session
                     .is_complete()
                     .then(|| chrono::Utc::now().timestamp());
+                stored.prev_step = Some(expected_step);
                 self.sessions
                     .borrow_mut()
                     .insert(session.session_id.clone(), stored);
