@@ -6,6 +6,25 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed — batched tag/applicability hydration for list/search (#415)
+
+- **Every list/search path that hydrates a full row set now batches its
+  tag and applicability lookups** instead of firing two serial queries per
+  row. Output is unchanged in content; only the query shape changed.
+  Single-row reads (e.g. `show`) keep their existing query shape, but now
+  sort their result the same way the batch path does (see below).
+- **BREAKING for anything reading tag/applicability order:** tags are now
+  sorted by name and applicability by id, on both the single-row and batch
+  paths. The previous order was an artifact of an unindexed table scan, not
+  a documented contract, and it did not agree between `show` and `list`
+  before this change.
+- **A row-level tag failure now fails the whole call.** A tag statement
+  that fails to execute or deserialize on the batch path previously could
+  not happen without also failing every other row in the same call; that
+  is unchanged. What is new: because tags are now read via one query across
+  the whole row set, a single bad row can fail that whole `list`/`search`/
+  `wake` call rather than only that row's tags coming back empty.
+
 ### Fixed — wake ritual failure paths (Wake 464 review)
 
 - **A half-written step no longer wedges a ritual.** The guess row and the

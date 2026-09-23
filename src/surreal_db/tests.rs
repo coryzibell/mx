@@ -3511,9 +3511,10 @@ fn test_get_entries_for_session_owner_scope_excludes_other_owners_public_entry()
 
 #[test]
 fn test_search_knowledge_returns_applicability() {
-    // Regression (twin of the single-entry read): `value_to_knowledge_entry`, which
-    // every list/search path funnels through, ran the same `SELECT VALUE meta::id(out)`
-    // string query into a Vec<Thing> and swallowed the deserialization error, so
+    // Regression (twin of the single-entry read): `value_to_knowledge_entry`
+    // (now `hydrate_entries_batch_async`), which every list/search path
+    // funnels through, ran the same `SELECT VALUE meta::id(out)` string
+    // query into a Vec<Thing> and swallowed the deserialization error, so
     // entries came back from list/search with empty applicability.
     let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -5445,17 +5446,16 @@ fn batch_hydration_entry(
     entry
 }
 
-/// Order ruling (issue #415): the per-row query has no ORDER BY.
-/// Measured directly (see `test_tag_order_is_sorted_by_name_not_insertion_order`
-/// below): what it returns is driven by the `tagged_with_unique` index on
-/// (in, out) — sorted by `out`, i.e. by tag record id, which equals tag NAME
-/// — not by insertion order. That's an index-scan artifact, not a documented
-/// or depended-on order, so both paths now sort explicitly instead of
-/// relying on it: tags by name (`get_tags_for_entry_async` /
-/// `get_tags_for_entries_async`, relationships.rs), applicability by id
-/// (`get_applicability_for_entry_async` / `get_applicability_for_entries_async`).
-/// `show` and `list` therefore agree on order, and this test checks exact
-/// equality, not just set membership.
+/// Ordering (issue #415): the per-row query has no ORDER BY. The underlying
+/// order is an index-scan artifact — driven by the `tagged_with_unique`
+/// index on (in, out), sorted by `out`, i.e. by tag record id, which equals
+/// tag NAME — not a documented or depended-on order, so both paths now sort
+/// explicitly instead of relying on it: tags by name
+/// (`get_tags_for_entry_async` / `get_tags_for_entries_async`,
+/// relationships.rs), applicability by id (`get_applicability_for_entry_async`
+/// / `get_applicability_for_entries_async`). `show` and `list` therefore
+/// agree on order, and this test checks exact equality, not just set
+/// membership.
 #[test]
 fn test_batch_hydration_tag_order_matches_single_row_path() {
     let db = SurrealDatabase::open_in_memory().unwrap();
@@ -5485,24 +5485,6 @@ fn test_batch_hydration_tag_order_matches_single_row_path() {
         single.tags, batch.tags,
         "single-row and batch hydration must return tags in the SAME order"
     );
-}
-
-/// Direct evidence for the order ruling above: tags inserted out of
-/// alphabetical order still come back alphabetical, which is the signature
-/// of an index-driven scan (tagged_with_unique on (in, out), sorted by
-/// `out` == tag id == tag name), not insertion order.
-#[test]
-fn test_tag_order_is_sorted_by_name_not_insertion_order() {
-    let db = SurrealDatabase::open_in_memory().unwrap();
-    let entry = batch_hydration_entry(
-        "kn-order-determinant",
-        &["delta", "bravo", "charlie", "alpha"],
-        &[],
-    );
-    db.upsert_knowledge(&entry).unwrap();
-    let ctx = crate::store::AgentContext::public_only();
-    let single = db.get("kn-order-determinant", &ctx).unwrap().unwrap();
-    assert_eq!(single.tags, vec!["alpha", "bravo", "charlie", "delta"]);
 }
 
 #[test]
@@ -5589,15 +5571,10 @@ fn test_batch_hydration_private_row_carries_tags_and_applicability() {
 }
 
 #[test]
-fn test_batch_hydration_preserves_list_order_with_duplicate_ids_deduped() {
-    // Trap 3 (Library): the batch primitives `.extend` their per-id tag
-    // list, so if the id list handed to them carries a duplicate, that
-    // entry's tags double. `hydrate_entries_batch_async` must dedupe the id
-    // list it sends to the batch primitives even though the ROW list (and
-    // therefore the returned entry list) can legitimately be longer than
-    // the unique-id count for other callers. This test seeds three entries
-    // and checks each one's tag count is exactly what was written, not
-    // doubled, and that output order matches DB order (`ORDER BY id`).
+fn test_batch_hydration_preserves_list_order() {
+    // Seeds three entries and checks output order matches DB order
+    // (`ORDER BY id`) and each entry's tag/applicability count is exactly
+    // what was written.
     let db = SurrealDatabase::open_in_memory().unwrap();
     db.upsert_knowledge(&batch_hydration_entry("kn-order-a", &["t1", "t2"], &[]))
         .unwrap();
@@ -5625,4 +5602,81 @@ fn test_batch_hydration_preserves_list_order_with_duplicate_ids_deduped() {
         1,
         "kn-order-c applicability must not be doubled"
     );
+}
+
+#[test]
+fn test_batch_hydration_duplicate_row_ids_do_not_double_tags() {
+    // The batch primitives `.extend` each id's list, so a duplicated id in
+    // the bound list would double that entry's tags. Feed the driver a row
+    // set that genuinely contains the same id twice.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.upsert_knowledge(&batch_hydration_entry(
+        "kn-dup",
+        &["t2", "t1"],
+        &["backend"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-solo", &["t3"], &[]))
+        .unwrap();
+
+    let sql = format!(
+        "SELECT {} FROM knowledge WHERE category = category:`batch-hydration` ORDER BY id",
+        SurrealDatabase::knowledge_select_fields()
+    );
+    let rows = db.query_json_for_test(&sql).unwrap();
+    assert_eq!(rows.len(), 2);
+    // [dup, solo, dup]: duplicate id, interleaved, so order preservation is checked too.
+    let input = vec![rows[0].clone(), rows[1].clone(), rows[0].clone()];
+
+    let out = SurrealDatabase::runtime()
+        .block_on(db.hydrate_entries_batch_async(input))
+        .unwrap();
+
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["kn-dup", "kn-solo", "kn-dup"]);
+    assert_eq!(out[0].tags, vec!["t1", "t2"]);
+    assert_eq!(out[2].tags, vec!["t1", "t2"]);
+    assert_eq!(out[0].applicability, vec!["backend"]);
+    assert_eq!(out[2].applicability, vec!["backend"]);
+    assert_eq!(out[1].tags, vec!["t3"]);
+}
+
+#[test]
+fn test_batch_hydration_duplicate_row_ids_do_not_double_tags_at_chunk_size_one() {
+    // Same fixture and assertions as the test above, but driven through
+    // hydrate_entries_batch_chunked_async at chunk_size = 1 instead of the
+    // production 1000. Forces every id through its own chunk and its own
+    // pair of batch queries, so a merge bug (e.g. `=` instead of `.extend()`
+    // across chunks, which would drop everything but the last chunk) fails
+    // here even though the fixture is far too small to reach a real chunk
+    // boundary at the production size.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.upsert_knowledge(&batch_hydration_entry(
+        "kn-dup",
+        &["t2", "t1"],
+        &["backend"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-solo", &["t3"], &[]))
+        .unwrap();
+
+    let sql = format!(
+        "SELECT {} FROM knowledge WHERE category = category:`batch-hydration` ORDER BY id",
+        SurrealDatabase::knowledge_select_fields()
+    );
+    let rows = db.query_json_for_test(&sql).unwrap();
+    assert_eq!(rows.len(), 2);
+    let input = vec![rows[0].clone(), rows[1].clone(), rows[0].clone()];
+
+    let out = SurrealDatabase::runtime()
+        .block_on(db.hydrate_entries_batch_chunked_async(input, 1))
+        .unwrap();
+
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["kn-dup", "kn-solo", "kn-dup"]);
+    assert_eq!(out[0].tags, vec!["t1", "t2"]);
+    assert_eq!(out[2].tags, vec!["t1", "t2"]);
+    assert_eq!(out[0].applicability, vec!["backend"]);
+    assert_eq!(out[2].applicability, vec!["backend"]);
+    assert_eq!(out[1].tags, vec!["t3"]);
 }

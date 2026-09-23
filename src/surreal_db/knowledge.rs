@@ -1505,21 +1505,38 @@ impl SurrealDatabase {
     ///   see the comment on those two functions).
     /// - Ids are chunked at `BATCH_HYDRATE_CHUNK_SIZE` per query: the batch
     ///   primitives' `FROM $knowledge` traversal is only measured up to
-    ///   1,000 record ids in one query (node z5plw1vhxp5l4vqknhoq); a
-    ///   category can carry 3-8k ids, so this stays inside measured ground
-    ///   rather than assuming the untested range holds.
-    /// - Ruling (issue #415): both batch primitives already propagate
-    ///   query/deserialize failures via `.context(...)?` instead of
-    ///   swallowing them, so this driver inherits throwing behavior even
-    ///   though the single-row `value_to_knowledge_entry` above still
+    ///   1,000 record ids in one query; a category can carry several
+    ///   thousand ids, so this stays inside measured ground rather than
+    ///   assuming the untested range holds.
+    /// - Error handling (issue #415): both batch primitives already
+    ///   propagate query/deserialize failures via `.context(...)?` instead
+    ///   of swallowing them, so this driver inherits throwing behavior,
+    ///   though the single-row path (`get_tags_for_entry_async`) still
     ///   swallows a failed *tags* query (unchanged, pre-existing behavior
-    ///   for `show` and other single-row callers).
+    ///   for `show`).
     pub(super) async fn hydrate_entries_batch_async(
         &self,
         rows: Vec<serde_json::Value>,
     ) -> Result<Vec<KnowledgeEntry>> {
-        const BATCH_HYDRATE_CHUNK_SIZE: usize = 1000;
+        self.hydrate_entries_batch_chunked_async(rows, Self::BATCH_HYDRATE_CHUNK_SIZE)
+            .await
+    }
 
+    /// Chunk size for [`hydrate_entries_batch_async`]. A module-level
+    /// constant so the production call site and the chunk-boundary test
+    /// (which drives [`hydrate_entries_batch_chunked_async`] at a
+    /// different, smaller size) can't drift apart.
+    const BATCH_HYDRATE_CHUNK_SIZE: usize = 1000;
+
+    /// Same as [`hydrate_entries_batch_async`], parameterized on chunk size.
+    /// Split out so tests can exercise the cross-chunk merge at a size the
+    /// production path never uses (e.g. 1, to force many chunks from a
+    /// handful of rows) without needing thousands of fixture rows.
+    pub(super) async fn hydrate_entries_batch_chunked_async(
+        &self,
+        rows: Vec<serde_json::Value>,
+        chunk_size: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -1540,7 +1557,7 @@ impl SurrealDatabase {
         let mut applicability_by_id: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
 
-        for chunk in unique_ids.chunks(BATCH_HYDRATE_CHUNK_SIZE) {
+        for chunk in unique_ids.chunks(chunk_size.max(1)) {
             let chunk_tags = self.get_tags_for_entries_async(chunk).await?;
             tags_by_id.extend(chunk_tags);
             let chunk_applicability = self.get_applicability_for_entries_async(chunk).await?;
@@ -1561,10 +1578,13 @@ impl SurrealDatabase {
             .collect())
     }
 
-    /// Pure field mapping shared by [`value_to_knowledge_entry`] (single-row)
-    /// and [`hydrate_entries_batch_async`] (batch): turns one materialized
-    /// row plus its already-fetched tags/applicability into a `KnowledgeEntry`.
-    /// No DB access here — that's the caller's job.
+    /// Pure field mapping shared by [`value_to_knowledge_entry`] and
+    /// [`hydrate_entries_batch_async`] (batch): turns one materialized row
+    /// plus its already-fetched tags/applicability into a `KnowledgeEntry`.
+    /// No DB access here — that's the caller's job. `show` reads through
+    /// `get_knowledge_async`, which calls the single-entry primitives
+    /// directly rather than through `value_to_knowledge_entry`; that
+    /// function has no production caller left after this change.
     fn row_to_knowledge_entry(
         obj: serde_json::Value,
         tags: Vec<String>,
