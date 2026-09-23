@@ -40,6 +40,114 @@ pub(crate) fn keep_after_exclude(tags: &[String], exclude_prefixes: &[String]) -
     })
 }
 
+/// Whether `mx memory list`'s `--limit` can be pushed down into the SQL
+/// query (`KnowledgeStore::list_by_category_limited`) rather than
+/// fetched in full per category and truncated by `apply_entry_filters`
+/// afterward.
+///
+/// Pushdown is safe ONLY when none of `apply_entry_filters`'s eight
+/// client-side-only closures are active. Those filters run AFTER hydration;
+/// a per-category SQL `LIMIT` has already committed to a specific N rows by
+/// the time they'd run, so if any of them could still drop a row, the
+/// pushed-down result silently comes back short of what a full fetch +
+/// filter would have returned.
+///
+/// Destructured with NO `..` rest pattern on purpose: `EntryFilter` gaining
+/// a new field (`--resonance-basis`, the pending #404 flag, is the next one
+/// due) fails to compile here until someone classifies it push-safe or
+/// client-only. Do NOT replace this with a non-exhaustive check — an
+/// enumeration that can silently miss a new field is the exact defect this
+/// guard exists to prevent.
+pub(crate) fn list_pushdown_eligible(filter: &EntryFilter) -> bool {
+    let EntryFilter {
+        // Push-safe: already applied in the SQL WHERE clause
+        // (`build_resonance_filter`), or don't filter rows at all.
+        category: _,
+        json: _,
+        mine: _,
+        include_private: _,
+        min_resonance: _,
+        max_resonance: _,
+        limit: _,
+        // Client-side-only: applied by `apply_entry_filters` after
+        // hydration. Any of these being active forces the full-fetch
+        // fallback.
+        has_wake_phrase,
+        missing_wake_phrase,
+        has_anchors,
+        missing_anchors,
+        has_resonance_type,
+        missing_resonance_type,
+        tags,
+        exclude_tags,
+    } = filter;
+
+    // `--tags ""` parses to `Some([""])`, which matches no entry's tags and
+    // must return zero rows — `is_none()`, NOT "none or empty".
+    let tags_active = tags.is_some();
+    // `--exclude-tags " , "` parses (via `parse_exclude_prefixes`) to an
+    // empty prefix list and is genuinely inactive — check the PARSED list,
+    // not the raw `Option<String>`, or a whitespace/comma-only value would
+    // wrongly disable pushdown.
+    let exclude_active = !parse_exclude_prefixes(exclude_tags.as_deref()).is_empty();
+
+    !*has_wake_phrase
+        && !*missing_wake_phrase
+        && !*has_anchors
+        && !*missing_anchors
+        && !*has_resonance_type
+        && !*missing_resonance_type
+        && !tags_active
+        && !exclude_active
+}
+
+/// Fetch entries across a run of categories, in the order given, budgeting a
+/// pushed-down `--limit` across the whole run rather than per category.
+///
+/// Exactly order-preserving and strictly O(N) when `push_limit` is `Some`:
+/// today's (pre-pushdown) output is `prefix_N(cat[0] ++ cat[1] ++ ...)` with
+/// no sort after concatenation, so a running budget that stops fetching once
+/// `N` rows are collected reproduces that output byte-identically, fetching
+/// at most `N` rows total. NEVER pass a single global LIMIT to the DB layer
+/// instead of this per-category budget — that breaks ordering across a
+/// category boundary. NEVER dedupe `cat_ids` — `--category insight,insight`
+/// must reproduce duplicates, and a `HashSet`/`dedup()` pass here would
+/// silently drop the repeat.
+///
+/// `push_limit: None` (either `--limit` was absent, or
+/// `list_pushdown_eligible` ruled it unsafe) falls back to the unbounded
+/// `list_by_category` per category — identical to the behavior before this
+/// pushdown existed; the caller's `apply_entry_filters` does the filtering
+/// and truncation.
+pub(crate) fn fetch_by_categories_budgeted<'a>(
+    db: &dyn store::KnowledgeStore,
+    ctx: &store::AgentContext,
+    db_filter: &store::KnowledgeFilter,
+    cat_ids: impl Iterator<Item = &'a str>,
+    push_limit: Option<usize>,
+) -> Result<Vec<knowledge::KnowledgeEntry>> {
+    let mut all = Vec::new();
+    for cat in cat_ids {
+        match push_limit {
+            Some(n) => {
+                if all.len() >= n {
+                    break;
+                }
+                all.extend(db.list_by_category_limited(
+                    cat,
+                    ctx,
+                    db_filter,
+                    Some(n - all.len()),
+                )?);
+            }
+            None => {
+                all.extend(db.list_by_category(cat, ctx, db_filter)?);
+            }
+        }
+    }
+    Ok(all)
+}
+
 /// Apply in-memory field presence filters to a list of entries
 pub(crate) fn apply_entry_filters(
     entries: Vec<knowledge::KnowledgeEntry>,
@@ -1308,6 +1416,16 @@ mod auto_anchor_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_limited(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: Option<usize>,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner
+                .list_by_category_limited(category, ctx, filter, limit)
         }
         fn count_by_category(
             &self,
@@ -2609,5 +2727,690 @@ mod entry_exclude_tests {
         let kept = apply_entry_filters(entries, &filter);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "kn-2");
+    }
+}
+
+#[cfg(test)]
+mod list_pushdown_eligibility_tests {
+    //! `list_pushdown_eligible`'s classification of every
+    //! `EntryFilter` field. Complements the CLI-level pushdown tests in
+    //! `tests/list_limit_pushdown.rs`, which prove the BEHAVIOR is correct
+    //! either way (pushdown and fallback must return identical rows) and so
+    //! cannot, by themselves, prove which path actually ran — only this
+    //! pure function's classification can be pinned directly.
+    //!
+    //! The thing this guards against: someone "fixing" a false positive by
+    //! testing `filter != EntryFilter::default()` instead of naming the
+    //! eight client-side-only fields. That reads as more conservative, but
+    //! it wrongly disables pushdown for `--min-resonance`, `--max-resonance`,
+    //! `--mine`, `--include-private`, `--json`, and `--category` too — none
+    //! of which `apply_entry_filters` ever touches.
+
+    use super::*;
+
+    #[test]
+    fn default_filter_is_eligible() {
+        assert!(list_pushdown_eligible(&EntryFilter::default()));
+    }
+
+    #[test]
+    fn push_safe_fields_being_non_default_does_not_disable_pushdown() {
+        // Every one of these is either already applied in the SQL WHERE
+        // clause (resonance) or doesn't filter rows at all (mine,
+        // include_private, json, category, limit itself). A naive
+        // `filter != EntryFilter::default()` check would wrongly flip ALL
+        // of these to ineligible -- pin that it does not.
+        let cases = [
+            EntryFilter {
+                min_resonance: Some(5),
+                ..Default::default()
+            },
+            EntryFilter {
+                max_resonance: Some(9),
+                ..Default::default()
+            },
+            EntryFilter {
+                mine: true,
+                ..Default::default()
+            },
+            EntryFilter {
+                include_private: true,
+                ..Default::default()
+            },
+            EntryFilter {
+                json: true,
+                ..Default::default()
+            },
+            EntryFilter {
+                category: Some(vec!["insight".to_string()]),
+                ..Default::default()
+            },
+            EntryFilter {
+                limit: Some(20),
+                ..Default::default()
+            },
+        ];
+        for (i, filter) in cases.into_iter().enumerate() {
+            assert!(
+                list_pushdown_eligible(&filter),
+                "case {i}: a push-safe field alone must not disable pushdown: {filter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_client_side_only_filter_disables_pushdown_alone() {
+        let cases: Vec<(&str, EntryFilter)> = vec![
+            (
+                "has_wake_phrase",
+                EntryFilter {
+                    has_wake_phrase: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "missing_wake_phrase",
+                EntryFilter {
+                    missing_wake_phrase: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "has_anchors",
+                EntryFilter {
+                    has_anchors: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "missing_anchors",
+                EntryFilter {
+                    missing_anchors: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "has_resonance_type",
+                EntryFilter {
+                    has_resonance_type: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "missing_resonance_type",
+                EntryFilter {
+                    missing_resonance_type: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "tags",
+                EntryFilter {
+                    tags: Some(vec!["focus".to_string()]),
+                    ..Default::default()
+                },
+            ),
+            (
+                "exclude_tags",
+                EntryFilter {
+                    exclude_tags: Some("tier/".to_string()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        for (name, filter) in cases {
+            assert!(
+                !list_pushdown_eligible(&filter),
+                "{name} alone must disable pushdown"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_tags_option_disables_pushdown_even_though_it_matches_nothing() {
+        // `--tags ""` parses to `Some([""])`, not `None` -- it must force the
+        // full-fetch fallback (which then correctly returns zero rows via
+        // `apply_entry_filters`), not be treated as "no filter" via
+        // `is_none_or(Vec::is_empty)` or similar.
+        let filter = EntryFilter {
+            tags: Some(vec!["".to_string()]),
+            ..Default::default()
+        };
+        assert!(!list_pushdown_eligible(&filter));
+    }
+
+    #[test]
+    fn whitespace_and_comma_only_exclude_tags_is_pushdown_eligible() {
+        // `--exclude-tags " , "` parses via `parse_exclude_prefixes` to an
+        // empty prefix list -- genuinely inactive. Checking the raw
+        // `Option<String>` instead (`is_some()`) would wrongly disable
+        // pushdown here.
+        let filter = EntryFilter {
+            exclude_tags: Some(" , ".to_string()),
+            ..Default::default()
+        };
+        assert!(list_pushdown_eligible(&filter));
+    }
+}
+
+#[cfg(test)]
+mod list_pushdown_budget_tests {
+    //! The nine CLI tests in
+    //! `tests/list_limit_pushdown.rs` pass byte-identically against a
+    //! binary with NO pushdown at all -- they pin the
+    //! observable RESULT, which pushdown and the full-fetch fallback must
+    //! (and do) produce identically, but nothing before this module pinned
+    //! that `fetch_by_categories_budgeted` actually calls
+    //! `list_by_category_limited` with the right per-category budget, or
+    //! that it stops calling it once satisfied. A `Some(n)` where
+    //! `Some(n - all.len())` belongs would still pass every CLI test (the
+    //! DB layer would just do more work and truncate) while failing this
+    //! module immediately.
+    //!
+    //! `RecordingLimitStore` is a `KnowledgeStore` that answers
+    //! `list_by_category`/`list_by_category_limited` from a FIXED,
+    //! caller-specified row count per category (not a real database) and
+    //! records every `list_by_category_limited` call's `(category, limit)`
+    //! pair — every other trait method delegates to a real (empty, never
+    //! exercised) embedded `SurrealDatabase`, mirroring this file's existing
+    //! `FailingScoredStore` wrapper pattern.
+
+    use super::*;
+    use crate::knowledge::KnowledgeEntry;
+    use crate::store::{AgentContext, KnowledgeStore};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    struct RecordingLimitStore {
+        inner: Box<dyn KnowledgeStore>,
+        calls: RefCell<Vec<(String, Option<usize>)>>,
+        row_counts: HashMap<String, usize>,
+    }
+
+    impl RecordingLimitStore {
+        fn new(row_counts: &[(&str, usize)]) -> Self {
+            Self {
+                inner: Box::new(SurrealDatabase::open_in_memory().unwrap()),
+                calls: RefCell::new(Vec::new()),
+                row_counts: row_counts
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), *v))
+                    .collect(),
+            }
+        }
+
+        fn row_count(&self, category: &str) -> usize {
+            self.row_counts.get(category).copied().unwrap_or(0)
+        }
+
+        /// `min(want, total)` synthetic entries for `category`, each with a
+        /// distinct id -- the exact row CONTENT is irrelevant to what this
+        /// module tests (call sequence / budget arithmetic), only the COUNT
+        /// returned matters, so a minimal fixture is deliberate.
+        fn synthetic_rows(&self, category: &str, want: usize) -> Vec<KnowledgeEntry> {
+            let total = self.row_count(category);
+            let now = chrono::Utc::now().to_rfc3339();
+            (0..want.min(total))
+                .map(|i| KnowledgeEntry {
+                    id: format!("{category}-{i}"),
+                    category_id: category.to_string(),
+                    title: format!("{category} row {i}"),
+                    body: Some("body".to_string()),
+                    summary: None,
+                    applicability: vec![],
+                    source_project_id: None,
+                    source_agent_id: None,
+                    file_path: None,
+                    tags: vec![],
+                    created_at: Some(now.clone()),
+                    updated_at: Some(now.clone()),
+                    content_hash: Some(format!("hash-{category}-{i}")),
+                    source_type_id: Some("manual".to_string()),
+                    entry_type_id: Some("primary".to_string()),
+                    session_id: None,
+                    ephemeral: false,
+                    content_type_id: Some("text".to_string()),
+                    owner: None,
+                    visibility: "public".to_string(),
+                    resonance: 5,
+                    resonance_type: None,
+                    last_activated: Some(now.clone()),
+                    activation_count: 0,
+                    decay_rate: 0.0,
+                    anchors: vec![],
+                    wake_phrases: vec![],
+                    triggers: vec![],
+                    wake_order: None,
+                    wake_phrase: None,
+                    embedding: None,
+                    embedding_model: None,
+                    embedded_at: None,
+                    chunk_count: 0,
+                    format: "markdown".to_string(),
+                    effective_resonance: None,
+                })
+                .collect()
+        }
+    }
+
+    impl KnowledgeStore for RecordingLimitStore {
+        fn upsert_knowledge(&self, entry: &KnowledgeEntry) -> Result<()> {
+            self.inner.upsert_knowledge(entry)
+        }
+        fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+            self.inner.get(id, ctx)
+        }
+        fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.delete(id, ctx)
+        }
+        fn search(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.search(query, ctx, filter)
+        }
+        fn semantic_search(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner
+                .semantic_search(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+            limit: usize,
+        ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_scored(query_embedding, ctx, filter, limit)
+        }
+        fn semantic_search_entries_scored(
+            &self,
+            query_embedding: &[f32],
+            ctx: &AgentContext,
+            limit: usize,
+        ) -> Result<Vec<(KnowledgeEntry, f32)>> {
+            self.inner
+                .semantic_search_entries_scored(query_embedding, ctx, limit)
+        }
+        fn list_by_category(
+            &self,
+            category: &str,
+            _ctx: &AgentContext,
+            _filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            // Not recorded: `fetch_by_categories_budgeted` only calls this
+            // when `push_limit` is `None`, and the test using this path
+            // asserts on `list_by_category_limited`'s call log being empty,
+            // not on this method at all.
+            let total = self.row_count(category);
+            Ok(self.synthetic_rows(category, total))
+        }
+        fn list_by_category_limited(
+            &self,
+            category: &str,
+            _ctx: &AgentContext,
+            _filter: &store::KnowledgeFilter,
+            limit: Option<usize>,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.calls.borrow_mut().push((category.to_string(), limit));
+            let total = self.row_count(category);
+            let want = limit.unwrap_or(total);
+            Ok(self.synthetic_rows(category, want))
+        }
+        fn count_by_category(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<usize> {
+            self.inner.count_by_category(category, ctx, filter)
+        }
+        fn owned_private_matching(
+            &self,
+            agent: &str,
+            query: Option<&str>,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.owned_private_matching(agent, query, filter)
+        }
+        fn list_all(&self, ctx: &AgentContext) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.list_all(ctx)
+        }
+        fn count(&self) -> Result<usize> {
+            self.inner.count()
+        }
+        fn wake_cascade(
+            &self,
+            ctx: &AgentContext,
+            limit: usize,
+            min_resonance: Option<i32>,
+            days: i64,
+            include_excluded: bool,
+        ) -> Result<store::WakeCascade> {
+            self.inner
+                .wake_cascade(ctx, limit, min_resonance, days, include_excluded)
+        }
+        fn update_activations(&self, ids: &[String]) -> Result<()> {
+            self.inner.update_activations(ids)
+        }
+        fn update_summary(&self, id: &str, summary: &str, ctx: &AgentContext) -> Result<bool> {
+            self.inner.update_summary(id, summary, ctx)
+        }
+        fn apply_update(
+            &self,
+            id: &str,
+            spec: &crate::store_update::UpdateSpec,
+            ctx: &AgentContext,
+        ) -> Result<crate::store_update::UpdateOutcome> {
+            self.inner.apply_update(id, spec, ctx)
+        }
+        fn increment_activation_count(&self, ids: &[String]) -> Result<()> {
+            self.inner.increment_activation_count(ids)
+        }
+        fn query_recent_facts(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.query_recent_facts(days)
+        }
+        fn query_recent_facts_all_types(&self, days: i32) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.query_recent_facts_all_types(days)
+        }
+        fn reinforce(
+            &self,
+            id: &str,
+            amount: i32,
+            cap: Option<i32>,
+            ctx: &AgentContext,
+        ) -> Result<Option<store::ReinforcementResult>> {
+            self.inner.reinforce(id, amount, cap, ctx)
+        }
+        fn delete_embedding_chunks(&self, entry_id: &str) -> Result<()> {
+            self.inner.delete_embedding_chunks(entry_id)
+        }
+        fn insert_embedding_chunk(
+            &self,
+            entry_id: &str,
+            chunk_index: usize,
+            chunk_text: &str,
+            token_offset: usize,
+            token_count: usize,
+            embedding: &[f32],
+            model_id: &str,
+        ) -> Result<()> {
+            self.inner.insert_embedding_chunk(
+                entry_id,
+                chunk_index,
+                chunk_text,
+                token_offset,
+                token_count,
+                embedding,
+                model_id,
+            )
+        }
+        fn semantic_search_chunks(
+            &self,
+            query_embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<(String, f32)>> {
+            self.inner.semantic_search_chunks(query_embedding, limit)
+        }
+        fn edit_content(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+            old_text: &str,
+            new_text: &str,
+            replace_all: bool,
+            nth: Option<usize>,
+        ) -> Result<store::EditResult> {
+            self.inner
+                .edit_content(id, ctx, old_text, new_text, replace_all, nth)
+        }
+        fn append_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.append_content(id, ctx, content)
+        }
+        fn prepend_content(&self, id: &str, ctx: &AgentContext, content: &str) -> Result<()> {
+            self.inner.prepend_content(id, ctx, content)
+        }
+        fn backup_content(
+            &self,
+            entry: &KnowledgeEntry,
+            operation: &str,
+            agent: Option<&str>,
+        ) -> Result<String> {
+            self.inner.backup_content(entry, operation, agent)
+        }
+        fn list_backups(&self, entry_id: &str) -> Result<Vec<crate::types::MemoryBackup>> {
+            self.inner.list_backups(entry_id)
+        }
+        fn latest_backup(&self, entry_id: &str) -> Result<Option<crate::types::MemoryBackup>> {
+            self.inner.latest_backup(entry_id)
+        }
+        fn purge_backups(&self, entry_id: &str, keep: usize) -> Result<()> {
+            self.inner.purge_backups(entry_id, keep)
+        }
+        fn get_tags_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_entry(entry_id)
+        }
+        fn set_tags_for_entry(&self, entry_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_entry(entry_id, tags)
+        }
+        fn list_all_tags(&self, category: Option<&str>) -> Result<Vec<String>> {
+            self.inner.list_all_tags(category)
+        }
+        fn get_applicability_for_entry(&self, entry_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_entry(entry_id)
+        }
+        fn set_applicability_for_entry(&self, entry_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_entry(entry_id, ids)
+        }
+        fn list_applicability_types(&self) -> Result<Vec<crate::types::ApplicabilityType>> {
+            self.inner.list_applicability_types()
+        }
+        fn upsert_applicability_type(&self, atype: &crate::types::ApplicabilityType) -> Result<()> {
+            self.inner.upsert_applicability_type(atype)
+        }
+        fn list_categories(&self) -> Result<Vec<crate::types::Category>> {
+            self.inner.list_categories()
+        }
+        fn get_category(&self, id: &str) -> Result<Option<crate::types::Category>> {
+            self.inner.get_category(id)
+        }
+        fn upsert_category(&self, category: &crate::types::Category) -> Result<()> {
+            self.inner.upsert_category(category)
+        }
+        fn delete_category(&self, id: &str) -> Result<bool> {
+            self.inner.delete_category(id)
+        }
+        fn list_projects(&self, active_only: bool) -> Result<Vec<crate::types::Project>> {
+            self.inner.list_projects(active_only)
+        }
+        fn get_project(&self, id: &str) -> Result<Option<crate::types::Project>> {
+            self.inner.get_project(id)
+        }
+        fn upsert_project(&self, project: &crate::types::Project) -> Result<()> {
+            self.inner.upsert_project(project)
+        }
+        fn get_tags_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_tags_for_project(project_id)
+        }
+        fn set_tags_for_project(&self, project_id: &str, tags: &[String]) -> Result<()> {
+            self.inner.set_tags_for_project(project_id, tags)
+        }
+        fn get_applicability_for_project(&self, project_id: &str) -> Result<Vec<String>> {
+            self.inner.get_applicability_for_project(project_id)
+        }
+        fn set_applicability_for_project(&self, project_id: &str, ids: &[String]) -> Result<()> {
+            self.inner.set_applicability_for_project(project_id, ids)
+        }
+        fn list_agents(&self) -> Result<Vec<crate::types::Agent>> {
+            self.inner.list_agents()
+        }
+        fn get_agent(&self, id: &str) -> Result<Option<crate::types::Agent>> {
+            self.inner.get_agent(id)
+        }
+        fn upsert_agent(&self, agent: &crate::types::Agent) -> Result<()> {
+            self.inner.upsert_agent(agent)
+        }
+        fn list_relationships_for_entry(
+            &self,
+            entry_id: &str,
+        ) -> Result<Vec<crate::types::Relationship>> {
+            self.inner.list_relationships_for_entry(entry_id)
+        }
+        fn add_relationship(&self, from: &str, to: &str, rel_type: &str) -> Result<String> {
+            self.inner.add_relationship(from, to, rel_type)
+        }
+        fn delete_relationship(&self, id: &str) -> Result<bool> {
+            self.inner.delete_relationship(id)
+        }
+        fn get_facts_for_session(&self, session_id: &str) -> Result<Vec<String>> {
+            self.inner.get_facts_for_session(session_id)
+        }
+        fn get_entries_for_session(
+            &self,
+            session_id: &str,
+            owner: Option<&str>,
+            category: &str,
+            ctx: &AgentContext,
+        ) -> Result<Vec<store::DedupCandidate>> {
+            self.inner
+                .get_entries_for_session(session_id, owner, category, ctx)
+        }
+        fn get_session_for_fact(&self, fact_id: &str) -> Result<Option<String>> {
+            self.inner.get_session_for_fact(fact_id)
+        }
+        fn list_sessions(&self, project_id: Option<&str>) -> Result<Vec<crate::types::Session>> {
+            self.inner.list_sessions(project_id)
+        }
+        fn get_session(&self, id: &str) -> Result<Option<crate::types::Session>> {
+            self.inner.get_session(id)
+        }
+        fn upsert_session(&self, session: &crate::types::Session) -> Result<()> {
+            self.inner.upsert_session(session)
+        }
+        fn list_source_types(&self) -> Result<Vec<crate::types::SourceType>> {
+            self.inner.list_source_types()
+        }
+        fn list_entry_types(&self) -> Result<Vec<crate::types::EntryType>> {
+            self.inner.list_entry_types()
+        }
+        fn list_content_types(&self) -> Result<Vec<crate::types::ContentType>> {
+            self.inner.list_content_types()
+        }
+        fn list_session_types(&self) -> Result<Vec<crate::types::SessionType>> {
+            self.inner.list_session_types()
+        }
+        fn list_relationship_types(&self) -> Result<Vec<crate::types::RelationshipType>> {
+            self.inner.list_relationship_types()
+        }
+        fn create_wake_session(&self, session: &crate::wake_token::WakeSession) -> Result<String> {
+            self.inner.create_wake_session(session)
+        }
+        fn get_wake_session(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<crate::wake_token::WakeSession>> {
+            self.inner.get_wake_session(session_id)
+        }
+        fn update_wake_session(
+            &self,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.update_wake_session(session, expected_step)
+        }
+        fn record_wake_guess(
+            &self,
+            row: &crate::wake_guess::WakeGuessRow,
+            session: &crate::wake_token::WakeSession,
+            expected_step: u32,
+        ) -> Result<()> {
+            self.inner.record_wake_guess(row, session, expected_step)
+        }
+        fn get_wake_guess(
+            &self,
+            session_id: &str,
+            position: u32,
+        ) -> Result<Option<crate::wake_guess::WakeGuessRow>> {
+            self.inner.get_wake_guess(session_id, position)
+        }
+        fn wake_history(&self, agent: &str, wake: i64) -> Result<crate::wake_guess::WakeHistory> {
+            self.inner.wake_history(agent, wake)
+        }
+        fn sweep_ghost_anchors(&self, dry_run: bool) -> Result<store::GhostSweepResult> {
+            self.inner.sweep_ghost_anchors(dry_run)
+        }
+        fn list_tables(&self) -> Result<Vec<String>> {
+            self.inner.list_tables()
+        }
+    }
+
+    #[test]
+    fn budget_calls_list_by_category_limited_with_exact_remaining_budget() {
+        // pattern has 2 rows, gotcha has 4; budget of 5 must call
+        // list_by_category_limited EXACTLY [("pattern", Some(5)),
+        // ("gotcha", Some(3))] -- 5 for pattern (the full remaining budget,
+        // even though only 2 exist), then 5-2=3 for gotcha once pattern's 2
+        // rows come back -- and stop there. A THIRD call, or a limit that
+        // doesn't subtract what pattern actually returned, both fail this.
+        let store = RecordingLimitStore::new(&[("pattern", 2), ("gotcha", 4)]);
+        let ctx = AgentContext::public_only();
+        let db_filter = store::KnowledgeFilter::default();
+
+        let entries = fetch_by_categories_budgeted(
+            &store,
+            &ctx,
+            &db_filter,
+            ["pattern", "gotcha"].into_iter(),
+            Some(5),
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.calls.borrow().as_slice(),
+            [
+                ("pattern".to_string(), Some(5)),
+                ("gotcha".to_string(), Some(3)),
+            ],
+            "expected exactly two calls with the remaining budget at each step, no third call once the budget of 5 is satisfied"
+        );
+        assert_eq!(
+            entries.len(),
+            5,
+            "pattern's 2 rows + gotcha's first 3 (of 4) = 5"
+        );
+    }
+
+    #[test]
+    fn no_limit_never_calls_list_by_category_limited() {
+        let store = RecordingLimitStore::new(&[("pattern", 2), ("gotcha", 4)]);
+        let ctx = AgentContext::public_only();
+        let db_filter = store::KnowledgeFilter::default();
+
+        let entries = fetch_by_categories_budgeted(
+            &store,
+            &ctx,
+            &db_filter,
+            ["pattern", "gotcha"].into_iter(),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            store.calls.borrow().is_empty(),
+            "push_limit = None must NEVER call list_by_category_limited -- it must fall back to the unbounded list_by_category entirely"
+        );
+        assert_eq!(
+            entries.len(),
+            6,
+            "unbounded fetch must return every row from both categories"
+        );
     }
 }
