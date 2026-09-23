@@ -212,6 +212,14 @@ impl SurrealKnowledgeRecord {
 
 impl SurrealDatabase {
     /// Build standard knowledge entry SELECT fields
+    /// The projection every read path selects.
+    ///
+    /// `wake_order` is read with a presence test, not a truthiness test:
+    /// SurrealQL treats 0 as falsy, so `IF wake_order THEN ...` turned a
+    /// stored order of 0 into null and sorted that entry behind every other
+    /// ordered one (#456). The other numeric fields here coalesce to their own
+    /// zero, so the same idiom is harmless for them; `wake_order` is the one
+    /// whose fallback is null and therefore means "unset".
     pub(super) fn knowledge_select_fields() -> &'static str {
         "meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
         owner, visibility,
@@ -231,7 +239,7 @@ impl SurrealDatabase {
         IF anchors THEN anchors ELSE [] END AS anchors,
         IF wake_phrases THEN wake_phrases ELSE [] END AS wake_phrases,
         IF triggers THEN triggers ELSE [] END AS triggers,
-        IF wake_order THEN wake_order ELSE null END AS wake_order,
+        IF wake_order IS NOT NONE THEN wake_order ELSE null END AS wake_order,
         IF wake_phrase THEN wake_phrase ELSE null END AS wake_phrase,
         IF embedding THEN embedding ELSE null END AS embedding,
         IF embedding_model THEN embedding_model ELSE null END AS embedding_model,

@@ -631,7 +631,7 @@ pub enum MemoryCommands {
         #[arg(long)]
         resonance_type: Option<String>,
 
-        /// Wake phrase for memory ritual verification
+        /// Wake phrase: a cue the title is meant to evoke
         #[arg(long)]
         wake_phrase: Option<String>,
 
@@ -781,7 +781,7 @@ pub enum MemoryCommands {
         #[arg(long, conflicts_with = "anchors")]
         remove_anchor: Option<String>,
 
-        /// Update wake phrase for memory ritual verification
+        /// Update wake phrase: a cue the title is meant to evoke
         #[arg(long)]
         wake_phrase: Option<String>,
 
@@ -1132,8 +1132,12 @@ pub enum MemoryCommands {
     /// Wake up with resonant identity cascade
     Wake {
         /// Number of blooms to return (default: 20)
-        #[arg(short, long, default_value = "20")]
-        limit: usize,
+        ///
+        /// Optional rather than defaulted so `conflicts_with` can tell an
+        /// explicit value from an absent one: a wake-set flag on a `--respond`
+        /// call is a mistake, and clap treats a defaulted argument as present.
+        #[arg(short, long, conflicts_with = "respond")]
+        limit: Option<usize>,
 
         /// Minimum resonance threshold - get ALL blooms >= this value (overrides --limit)
         ///
@@ -1143,36 +1147,54 @@ pub enum MemoryCommands {
         /// here that `list`/`search` would exclude after decay. Intentional for
         /// now; a `--resonance-basis raw|decayed` flag in #404 will make the
         /// basis explicit.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "respond")]
         min_resonance: Option<i32>,
 
         /// Include memories activated in last N days (default: 7)
-        #[arg(short, long, default_value = "7")]
-        days: i64,
+        #[arg(short, long, conflicts_with = "respond")]
+        days: Option<i64>,
 
         /// Don't update activation counts
-        #[arg(long)]
+        #[arg(long, conflicts_with = "respond")]
         no_activate: bool,
 
         /// Start token-based wake ritual (returns first bloom and session token)
-        #[arg(long, conflicts_with_all = &["skip"])]
+        #[arg(long)]
         begin: bool,
 
-        /// Bloom ID for --respond or --skip operations
+        /// Bloom ID for --respond
         #[arg(long)]
         bloom_id: Option<String>,
 
-        /// Submit wake phrase response
-        #[arg(long, conflicts_with_all = &["begin", "skip"])]
+        /// Submit your one guess for this bloom (2000 characters maximum)
+        #[arg(long, conflicts_with = "begin", allow_hyphen_values = true)]
         respond: Option<String>,
 
-        /// Skip a bloom without wake phrase
-        #[arg(long, conflicts_with_all = &["begin", "respond"])]
-        skip: bool,
-
-        /// Session token for chained ritual (required with --respond or --skip)
+        /// Session token for chained ritual (required with --respond)
         #[arg(long)]
         session: Option<String>,
+
+        /// Wake number recorded on every guess row. mx keeps no counter of its
+        /// own; rows written without it are still reachable by bloom and date.
+        /// Must be positive. Refused when another ritual already logged guesses
+        /// under it, unless --force-wake.
+        #[arg(long, requires = "begin")]
+        wake: Option<i64>,
+
+        /// Begin a ritual under a --wake number that already has guesses logged
+        /// by another ritual session
+        #[arg(long, requires = "wake")]
+        force_wake: bool,
+
+        /// Model identifier recorded on every guess row (e.g. the model that
+        /// answers the ritual). mx has no way to discover it.
+        #[arg(long, requires = "begin")]
+        model: Option<String>,
+
+        /// Include entries tagged `archive` or `wake-exclude`, which are kept
+        /// out of the wake set by default
+        #[arg(long, conflicts_with = "respond")]
+        include_excluded: bool,
     },
 
     /// List recent ephemeral facts with decay

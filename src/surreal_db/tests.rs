@@ -763,7 +763,7 @@ fn test_wake_cascade_empty_anchors() {
     db.upsert_knowledge(&entry).unwrap();
 
     // Query wake cascade
-    let cascade = db.wake_cascade(&ctx, 50, Some(7), 7).unwrap();
+    let cascade = db.wake_cascade(&ctx, 50, Some(7), 7, false).unwrap();
 
     // Should still include the entry in core (high resonance)
     assert!(!cascade.core.is_empty(), "Should find core bloom");
@@ -791,7 +791,7 @@ fn test_wake_cascade_circular_anchors() {
 
     // Query wake cascade
     let ctx = crate::store::AgentContext::public_only();
-    let result = db.wake_cascade(&ctx, 50, Some(7), 7);
+    let result = db.wake_cascade(&ctx, 50, Some(7), 7, false);
 
     // Should handle circular references without infinite loop
     assert!(
@@ -4274,4 +4274,1151 @@ fn semantic_search_returns_chunked_entries_with_their_tags_hydrated() {
          batch hydration dropped them and every tag assertion downstream is \
          vacuous"
     );
+}
+
+// =============================================================================
+// Wake set selection: tag exclusion, stable order, and the guess log.
+//
+// All fixtures here are invented. `open_in_memory` gives each test its own
+// hermetic store, so nothing reaches a real graph.
+// =============================================================================
+
+/// An entry that qualifies for the CORE layer only: resonance 8+, a
+/// non-ephemeral resonance type, last activated long enough ago that the
+/// recent layer will not also pick it up.
+fn core_layer_entry(id: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 9, 0.0);
+    e.resonance_type = Some("foundational".to_string());
+    e.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339());
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+/// An entry that qualifies for the RECENT layer only: activated today, but
+/// resonance below both the core threshold (8) and the bridge threshold (5).
+fn recent_layer_entry(id: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 3, 0.0);
+    e.resonance_type = Some("operational".to_string());
+    e.last_activated = Some(chrono::Utc::now().to_rfc3339());
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+/// An entry that qualifies for the BRIDGE layer only: resonance 5-7 (below
+/// core), stale, and anchored to something already in the set.
+fn bridge_layer_entry(id: &str, anchor: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 6, 0.0);
+    e.resonance_type = Some("relational".to_string());
+    e.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339());
+    e.anchors = vec![anchor.to_string()];
+    e.tags = tags.iter().map(|t| t.to_string()).collect();
+    e
+}
+
+fn cascade_ids(cascade: &crate::store::WakeCascade) -> Vec<String> {
+    cascade.all_ids()
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_core_layer() {
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&core_layer_entry("kn-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert!(ids.contains(&"kn-keep".to_string()), "tag {tag}: {ids:?}");
+        assert!(!ids.contains(&"kn-drop".to_string()), "tag {tag}: {ids:?}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        // The override brings it back and reports nothing as excluded.
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert!(ids.contains(&"kn-drop".to_string()), "tag {tag}: {ids:?}");
+        assert!(cascade.excluded.is_empty(), "tag {tag}");
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_recent_layer() {
+    // A newly created archive copy is "recent" for days, so the recent layer
+    // has to enforce the exclusion too.
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-core", &[]))
+            .unwrap();
+        db.upsert_knowledge(&recent_layer_entry("kn-recent-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&recent_layer_entry("kn-recent-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let recent: Vec<&str> = cascade.recent.iter().map(|e| e.id.as_str()).collect();
+        assert!(recent.contains(&"kn-recent-keep"), "tag {tag}: {recent:?}");
+        assert!(!recent.contains(&"kn-recent-drop"), "tag {tag}: {recent:?}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let recent: Vec<&str> = cascade.recent.iter().map(|e| e.id.as_str()).collect();
+        assert!(recent.contains(&"kn-recent-drop"), "tag {tag}: {recent:?}");
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_from_the_bridge_layer() {
+    // An excluded entry anchored to a core entry would otherwise come back as
+    // a bridge after being dropped from its own layer.
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-anchor", &[]))
+            .unwrap();
+        db.upsert_knowledge(&bridge_layer_entry("kn-bridge-keep", "kn-anchor", &[]))
+            .unwrap();
+        db.upsert_knowledge(&bridge_layer_entry("kn-bridge-drop", "kn-anchor", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+        let bridges: Vec<&str> = cascade.bridges.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            bridges.contains(&"kn-bridge-keep"),
+            "precondition: the bridge layer must fire at all; tag {tag}: {bridges:?}"
+        );
+        assert!(
+            !bridges.contains(&"kn-bridge-drop"),
+            "tag {tag}: {bridges:?}"
+        );
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, None, 7, true).unwrap();
+        let bridges: Vec<&str> = cascade.bridges.iter().map(|e| e.id.as_str()).collect();
+        assert!(
+            bridges.contains(&"kn-bridge-drop"),
+            "tag {tag}: {bridges:?}"
+        );
+    }
+}
+
+#[test]
+fn wake_cascade_excludes_tagged_entries_on_the_min_resonance_path() {
+    for tag in crate::store::WAKE_EXCLUDED_TAGS {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+            .unwrap();
+        db.upsert_knowledge(&core_layer_entry("kn-drop", &[tag]))
+            .unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap();
+        let ids = cascade_ids(&cascade);
+        assert_eq!(ids, vec!["kn-keep".to_string()], "tag {tag}");
+        assert_eq!(cascade.excluded.get(tag), Some(&1), "tag {tag}");
+
+        let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, true).unwrap();
+        assert_eq!(cascade_ids(&cascade).len(), 2, "tag {tag}");
+    }
+}
+
+#[test]
+fn wake_cascade_matches_excluded_tags_exactly_not_by_prefix() {
+    // `archived` and `archive/2026` merely START with an excluded tag. A
+    // prefix match would silently swallow every future tag in that space.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-archived", &["archived"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-archive-slash", &["archive/2026"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-wake-exclude-ish", &["wake-excluded"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-exact", &["archive"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    let ids = cascade_ids(&cascade);
+    for near_miss in ["kn-archived", "kn-archive-slash", "kn-wake-exclude-ish"] {
+        assert!(
+            ids.contains(&near_miss.to_string()),
+            "{near_miss} is not tagged with an excluded tag and must stay: {ids:?}"
+        );
+    }
+    assert!(!ids.contains(&"kn-exact".to_string()), "{ids:?}");
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+}
+
+#[test]
+fn wake_cascade_counts_a_doubly_qualifying_excluded_entry_once() {
+    // An entry that both the core and recent queries return is one dropped
+    // entry, not two.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-core", &[]))
+        .unwrap();
+    let mut both = core_layer_entry("kn-both", &["archive"]);
+    both.last_activated = Some(chrono::Utc::now().to_rfc3339());
+    db.upsert_knowledge(&both).unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+}
+
+/// The bounded core query widens its window by the number of excluded entries
+/// it saw and fetches again. One widening is only enough when the widened
+/// window holds no further excluded entries; interleaving them forces the loop
+/// to run several passes, which is the case the single-pass tests never reach.
+///
+/// Layout, pinned by `wake_order`: X X K X X K, limit 2. The window has to
+/// widen more than once before it holds two kept entries. The exact sizes are
+/// deliberately not asserted — they are a function of the growth rule, and the
+/// result must not be.
+#[test]
+fn the_core_query_widens_its_window_repeatedly_until_the_limit_is_filled() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-x0", true),
+        ("kn-x1", true),
+        ("kn-k2", false),
+        ("kn-x3", true),
+        ("kn-x4", true),
+        ("kn-k5", false),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k2".to_string(), "kn-k5".to_string()],
+        "an excluded entry must not cost a kept one its slot, however many \
+         passes that takes"
+    );
+    assert_eq!(cascade.excluded.get("archive"), Some(&4));
+}
+
+/// The widening loop stops as soon as the window holds `limit` kept entries,
+/// so an excluded entry ranked BELOW the last entry of the wake set is never
+/// scanned — and must not be counted, because it would not have been in the
+/// wake set even if it carried no tag. This is what keeps `excluded` meaning
+/// "kept out of your wake set" rather than "tagged somewhere in the graph".
+#[test]
+fn the_excluded_count_ignores_entries_ranked_below_the_wake_set() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-k0", false),
+        ("kn-x1", true),
+        ("kn-k2", false),
+        // Ranked below the whole wake set: out of contention on order alone.
+        ("kn-x3", true),
+        ("kn-x4", true),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k0".to_string(), "kn-k2".to_string()]
+    );
+    assert_eq!(
+        cascade.excluded.get("archive"),
+        Some(&1),
+        "only the excluded entry that displaced a slot counts: {:?}",
+        cascade.excluded
+    );
+}
+
+/// The excluded count is an UPPER BOUND on the entries the exclusion kept out
+/// of the wake set, not an exact one, and this is the shape that separates the
+/// two.
+///
+/// Layout X K X K with limit 2. Filling two slots means walking past both
+/// excluded entries, so both are counted. But untag them and the top two would
+/// be X@1 and K@2 — only the first would have been in the wake set. The second
+/// is counted because the first displaced everything after it, not because it
+/// would have made the cut on its own.
+///
+/// Reporting two here is the honest-but-loose answer, and the count is
+/// documented as an upper bound rather than quietly corrected: the tighter
+/// number would have to re-rank the untagged set, which is a second query to
+/// sharpen a diagnostic.
+#[test]
+fn the_excluded_count_is_an_upper_bound_when_exclusions_interleave() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let layout = [
+        ("kn-x0", true),
+        ("kn-k1", false),
+        ("kn-x2", true),
+        ("kn-k3", false),
+    ];
+    for (order, (id, excluded)) in layout.iter().enumerate() {
+        let tags: &[&str] = if *excluded { &["archive"] } else { &[] };
+        let mut entry = core_layer_entry(id, tags);
+        entry.wake_order = Some(order as i32);
+        db.upsert_knowledge(&entry).unwrap();
+    }
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    assert_eq!(
+        cascade_ids(&cascade),
+        vec!["kn-k1".to_string(), "kn-k3".to_string()],
+        "the wake set itself is exact: the two kept entries, in order"
+    );
+    assert_eq!(
+        cascade.excluded.get("archive"),
+        Some(&2),
+        "both excluded entries were walked past while filling two slots"
+    );
+
+    // The tighter number, for the record: untagged, the top two are kn-x0 and
+    // kn-k1, so exactly one excluded entry would have been in the wake set.
+    let untagged = db.wake_cascade(&ctx, 2, None, 7, true).unwrap();
+    assert_eq!(
+        cascade_ids(&untagged),
+        vec!["kn-x0".to_string(), "kn-k1".to_string()],
+        "only one of the two would have made the cut untagged, which is why \
+         the reported count is an upper bound and is described as one"
+    );
+}
+
+/// `--limit 0` asks for nothing and must return nothing, promptly.
+///
+/// The widening loop breaks on `kept >= limit`, which at `limit == 0` is
+/// `0 >= 0` — true on the first pass, because `LIMIT 0` returns no rows and so
+/// never sets `exhausted`. Tightening that comparison to `>` would spin
+/// forever on this input.
+#[test]
+fn a_limit_of_zero_returns_an_empty_cascade_without_spinning() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-drop", &["archive"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 0, None, 7, false).unwrap();
+    assert!(cascade_ids(&cascade).is_empty(), "nothing was asked for");
+    assert!(
+        cascade.excluded.is_empty(),
+        "no slot was contested, so nothing was kept out of anything: {:?}",
+        cascade.excluded
+    );
+}
+
+#[test]
+fn wake_cascade_counts_an_entry_carrying_both_excluded_tags_once() {
+    // One entry, both tags. It is one dropped entry, and it is attributed to
+    // the first tag in WAKE_EXCLUDED_TAGS — `archive` — rather than counted
+    // under each. Pinning the tie-break so a reordering of the constant is a
+    // test failure rather than a silent change to what `--begin` reports.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-keep", &[]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry(
+        "kn-both-tags",
+        &["archive", "wake-exclude"],
+    ))
+    .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    assert_eq!(cascade_ids(&cascade), vec!["kn-keep".to_string()]);
+    assert_eq!(
+        cascade.excluded.len(),
+        1,
+        "one entry is one drop, not one per tag: {:?}",
+        cascade.excluded
+    );
+    assert_eq!(cascade.excluded.get("archive"), Some(&1));
+    assert_eq!(cascade.excluded.get("wake-exclude"), None);
+}
+
+#[test]
+fn wake_cascade_entries_carry_their_tags_in_every_layer() {
+    // The exclusion filters on `KnowledgeEntry::tags`. If any cascade query
+    // returned entries with empty tags, the filter would silently pass
+    // everything — so pin the field on all four paths.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-core", &["core-tag"]))
+        .unwrap();
+    db.upsert_knowledge(&recent_layer_entry("kn-recent", &["recent-tag"]))
+        .unwrap();
+    db.upsert_knowledge(&bridge_layer_entry("kn-bridge", "kn-core", &["bridge-tag"]))
+        .unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 50, None, 7, false).unwrap();
+    let tags_of = |layer: &[crate::knowledge::KnowledgeEntry], id: &str| -> Vec<String> {
+        layer
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{id} missing from its layer"))
+            .tags
+            .clone()
+    };
+    assert_eq!(tags_of(&cascade.core, "kn-core"), vec!["core-tag"]);
+    assert_eq!(tags_of(&cascade.recent, "kn-recent"), vec!["recent-tag"]);
+    assert_eq!(tags_of(&cascade.bridges, "kn-bridge"), vec!["bridge-tag"]);
+
+    // And the --min-resonance path, which does not go through the layers.
+    let by_resonance = db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap();
+    assert_eq!(tags_of(&by_resonance.core, "kn-core"), vec!["core-tag"]);
+}
+
+#[test]
+fn a_wake_order_of_zero_round_trips_as_zero() {
+    // SurrealQL treats 0 as falsy, so reading wake_order with a truthiness
+    // test turned a stored 0 into null — indistinguishable from unset (#456).
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut zero = core_layer_entry("kn-zero", &[]);
+    zero.wake_order = Some(0);
+    db.upsert_knowledge(&zero).unwrap();
+    let mut unset = core_layer_entry("kn-unset", &[]);
+    unset.wake_order = None;
+    db.upsert_knowledge(&unset).unwrap();
+
+    assert_eq!(
+        db.get("kn-zero", &ctx).unwrap().unwrap().wake_order,
+        Some(0),
+        "a stored wake_order of 0 must read back as 0, not as unset"
+    );
+    assert_eq!(db.get("kn-unset", &ctx).unwrap().unwrap().wake_order, None);
+}
+
+#[test]
+fn an_entry_with_wake_order_zero_opens_the_ritual() {
+    // The lowest order opens the sequence, and 0 is a legitimate lowest.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // "kn-aaa" would win the id tiebreak if wake_order were lost.
+    db.upsert_knowledge(&core_layer_entry("kn-aaa", &[]))
+        .unwrap();
+    let mut opener = core_layer_entry("kn-zzz", &[]);
+    opener.wake_order = Some(0);
+    db.upsert_knowledge(&opener).unwrap();
+    let mut later = core_layer_entry("kn-mmm", &[]);
+    later.wake_order = Some(5);
+    db.upsert_knowledge(&later).unwrap();
+
+    for min_resonance in [None, Some(9)] {
+        let ordered = cascade_ids(&db.wake_cascade(&ctx, 50, min_resonance, 7, false).unwrap());
+        assert_eq!(
+            ordered.first().map(String::as_str),
+            Some("kn-zzz"),
+            "wake_order 0 must sort first (min_resonance {min_resonance:?}): {ordered:?}"
+        );
+        assert_eq!(
+            ordered.get(1).map(String::as_str),
+            Some("kn-mmm"),
+            "wake_order 5 sorts after 0 and before the unordered entries: {ordered:?}"
+        );
+    }
+}
+
+#[test]
+fn min_resonance_order_is_stable_and_wake_order_opens_the_ritual() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    // Same resonance for all three, so only the tiebreak can order them.
+    for id in ["kn-mid", "kn-last", "kn-first"] {
+        db.upsert_knowledge(&core_layer_entry(id, &[])).unwrap();
+    }
+
+    let first_run: Vec<String> =
+        cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    let second_run: Vec<String> =
+        cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    assert_eq!(
+        first_run, second_run,
+        "two begins over the same data must produce the same sequence"
+    );
+    assert_eq!(
+        first_run,
+        vec![
+            "kn-first".to_string(),
+            "kn-last".to_string(),
+            "kn-mid".to_string()
+        ],
+        "equal resonance falls back to the id tiebreak"
+    );
+
+    // An entry with wake_order set opens the sequence regardless of id.
+    let mut opener = core_layer_entry("kn-mid", &[]);
+    opener.wake_order = Some(1);
+    db.upsert_knowledge(&opener).unwrap();
+
+    let ordered = cascade_ids(&db.wake_cascade(&ctx, 50, Some(9), 7, false).unwrap());
+    assert_eq!(
+        ordered.first().map(String::as_str),
+        Some("kn-mid"),
+        "wake_order decides the opening bloom: {ordered:?}"
+    );
+}
+
+#[test]
+fn core_layer_order_is_stable_across_runs() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    for id in ["kn-c", "kn-a", "kn-b"] {
+        db.upsert_knowledge(&core_layer_entry(id, &[])).unwrap();
+    }
+
+    let run = |db: &SurrealDatabase| -> Vec<String> {
+        db.wake_cascade(&ctx, 50, None, 7, false)
+            .unwrap()
+            .core
+            .iter()
+            .map(|e| e.id.clone())
+            .collect()
+    };
+    assert_eq!(run(&db), run(&db));
+    assert_eq!(
+        run(&db),
+        vec!["kn-a".to_string(), "kn-b".to_string(), "kn-c".to_string()]
+    );
+}
+
+#[test]
+fn core_layer_limit_counts_kept_entries_not_excluded_ones() {
+    // The limit applies after exclusion, so a dropped entry does not consume
+    // a slot that a kept entry would otherwise have taken.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    db.upsert_knowledge(&core_layer_entry("kn-a", &["archive"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-b", &["archive"]))
+        .unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-c", &[])).unwrap();
+    db.upsert_knowledge(&core_layer_entry("kn-d", &[])).unwrap();
+
+    let cascade = db.wake_cascade(&ctx, 2, None, 7, false).unwrap();
+    let core: Vec<&str> = cascade.core.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(core, vec!["kn-c", "kn-d"], "{core:?}");
+    assert_eq!(cascade.excluded.get("archive"), Some(&2));
+}
+
+/// `SELECT *` cannot round-trip a record id through JSON, so name the columns.
+const WAKE_GUESS_SELECT: &str = "SELECT agent, wake, session_id, <string>ts AS ts, bloom_id,
+    chunk_index, chunk_total, position, bloom_position, bloom_total, title_shown, guess,
+    model_id, phrase_source, phrases, match_kind, match_index, bucket, content_hash,
+    embedding, embedding_model, sim_phrase, sim_content, sim_title, sim_prior,
+    sim_prior_null, prior_n, scored_at
+    FROM wake_guess";
+
+/// Open a session positioned at `step`, under a chosen id.
+fn wake_session_at(
+    db: &SurrealDatabase,
+    session_id: &str,
+    step: u32,
+) -> crate::wake_token::WakeSession {
+    let cascade = crate::store::WakeCascade {
+        core: vec![
+            make_test_entry("kn-a", 9, 0.0),
+            make_test_entry("kn-b", 9, 0.0),
+        ],
+        ..Default::default()
+    };
+    let mut session =
+        crate::wake_token::WakeSession::new(&cascade, "test-agent".to_string(), Some(7), None);
+    session.session_id = session_id.to_string();
+    session.step = step;
+    db.create_wake_session(&session).unwrap();
+    session
+}
+
+/// Log `row` the way a respond call does: with its session advance, in one
+/// transaction, from a session opened at the row's step.
+fn log_guess(db: &SurrealDatabase, row: &crate::wake_guess::WakeGuessRow) {
+    let mut session = wake_session_at(db, &row.session_id, row.position);
+    session.step += 1;
+    db.record_wake_guess(row, &session, row.position).unwrap();
+}
+
+fn sample_guess_row(session_id: &str, position: u32) -> crate::wake_guess::WakeGuessRow {
+    crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: Some(7),
+        session_id: session_id.to_string(),
+        bloom_id: "kn-a".to_string(),
+        chunk_index: 0,
+        chunk_total: 1,
+        position,
+        bloom_position: 1,
+        bloom_total: 2,
+        title_shown: "Sample Title".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: None,
+        phrase_source: "authored".to_string(),
+        phrases: vec!["first phrase".to_string()],
+        match_kind: "none".to_string(),
+        match_index: None,
+        bucket: "revealed".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    }
+}
+
+fn stored_step(db: &SurrealDatabase, session_id: &str) -> u32 {
+    db.get_wake_session(session_id).unwrap().unwrap().step
+}
+
+#[test]
+fn wake_guess_row_round_trips_through_the_schema() {
+    // The wake_guess table is SCHEMAFULL: this is the test that a field the
+    // writer sets is actually defined, and that the scoring columns start null.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let row = crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: Some(7),
+        session_id: "session-1".to_string(),
+        bloom_id: "kn-sample".to_string(),
+        chunk_index: 1,
+        chunk_total: 3,
+        position: 7,
+        bloom_position: 4,
+        bloom_total: 12,
+        title_shown: "Sample Title (Part 2/3)".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: Some("test-model".to_string()),
+        phrase_source: "authored".to_string(),
+        phrases: vec!["first phrase".to_string(), "second phrase".to_string()],
+        match_kind: "close".to_string(),
+        match_index: Some(1),
+        bucket: "unhinted".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    };
+    log_guess(&db, &row);
+
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(stored.len(), 1, "exactly one row was written");
+    let got = &stored[0];
+
+    assert_eq!(got["agent"], "test-agent");
+    assert_eq!(got["wake"], 7);
+    assert_eq!(got["session_id"], "session-1");
+    assert_eq!(got["bloom_id"], "kn-sample");
+    assert_eq!(got["chunk_index"], 1);
+    assert_eq!(got["chunk_total"], 3);
+    assert_eq!(got["position"], 7);
+    assert_eq!(got["bloom_position"], 4);
+    assert_eq!(got["bloom_total"], 12);
+    assert_eq!(got["title_shown"], "Sample Title (Part 2/3)");
+    assert_eq!(got["guess"], "a synthetic guess");
+    assert_eq!(got["model_id"], "test-model");
+    assert_eq!(got["phrase_source"], "authored");
+    assert_eq!(got["phrases"][1], "second phrase");
+    assert_eq!(got["match_kind"], "close");
+    assert_eq!(got["match_index"], 1);
+    assert_eq!(got["bucket"], "unhinted");
+    assert_eq!(got["content_hash"], row.content_hash);
+    assert!(!got["ts"].is_null(), "ts defaults to write time");
+
+    // Scoring columns are pending until a later pass fills them.
+    for pending in [
+        "embedding",
+        "embedding_model",
+        "sim_phrase",
+        "sim_content",
+        "sim_title",
+        "sim_prior",
+        "sim_prior_null",
+        "prior_n",
+        "scored_at",
+    ] {
+        assert!(
+            got[pending].is_null(),
+            "{pending} must be null on a freshly written row, got {:?}",
+            got[pending]
+        );
+    }
+}
+
+#[test]
+fn wake_guess_rows_accept_an_absent_wake_number_and_model() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let row = crate::wake_guess::WakeGuessRow {
+        agent: "test-agent".to_string(),
+        wake: None,
+        session_id: "session-1".to_string(),
+        bloom_id: "kn-sample".to_string(),
+        chunk_index: 0,
+        chunk_total: 1,
+        position: 0,
+        bloom_position: 1,
+        bloom_total: 1,
+        title_shown: "Sample Title".to_string(),
+        guess: "a synthetic guess".to_string(),
+        model_id: None,
+        phrase_source: "auto".to_string(),
+        phrases: vec!["generated phrase".to_string()],
+        match_kind: "none".to_string(),
+        match_index: None,
+        bucket: "revealed".to_string(),
+        content_hash: crate::wake_guess::content_hash("chunk text"),
+    };
+    log_guess(&db, &row);
+
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert!(stored[0]["wake"].is_null());
+    assert!(stored[0]["model_id"].is_null());
+    assert!(stored[0]["match_index"].is_null());
+}
+
+#[test]
+fn a_wake_session_round_trips_its_agent_wake_and_model() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+
+    let cascade = crate::store::WakeCascade {
+        core: vec![
+            make_test_entry("kn-a", 9, 0.0),
+            make_test_entry("kn-b", 9, 0.0),
+        ],
+        ..Default::default()
+    };
+    let mut session = crate::wake_token::WakeSession::new(
+        &cascade,
+        "test-agent".to_string(),
+        Some(7),
+        Some("test-model".to_string()),
+    );
+    let session_id = db.create_wake_session(&session).unwrap();
+
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.agent, "test-agent");
+    assert_eq!(loaded.wake, Some(7));
+    assert_eq!(loaded.model_id.as_deref(), Some("test-model"));
+    assert_eq!(loaded.bloom_ids.len(), 2);
+
+    // Outcome counters survive an update round trip.
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Unhinted,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    db.update_wake_session(&session, 0).unwrap();
+
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.step, 1);
+    assert_eq!(loaded.unhinted_count, 1);
+    assert_eq!(loaded.revealed_count, 0);
+    assert_eq!(loaded.bucket_totals().unhinted.authored, 1);
+}
+
+#[test]
+fn a_session_row_without_an_agent_field_is_refused_by_the_loader() {
+    // A session written before the one-guess ritual has no `agent` field at
+    // all. Simulate that shape faithfully by removing the field definition
+    // first — the current schema requires it, which is why a row like this
+    // can only pre-date the schema.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.query_json_for_test("REMOVE FIELD agent ON wake_session")
+        .unwrap();
+    db.query_json_for_test(
+        "CREATE type::thing('wake_session', 'legacy-session') SET
+            bloom_ids = ['kn-a'],
+            current_index = 0,
+            current_chunk_index = 0,
+            step = 0,
+            created_at = time::now(),
+            bloom_chunk_meta = []
+        RETURN NONE",
+    )
+    .unwrap();
+
+    let err = db
+        .get_wake_session("legacy-session")
+        .expect_err("an agent-less session row must not load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("older version") && msg.contains("--begin"),
+        "the refusal must name the cause and the way forward, got: {msg}"
+    );
+}
+
+#[test]
+fn a_session_row_with_an_agent_still_loads() {
+    // The guard above must key on the field being ABSENT, not on any value.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let cascade = crate::store::WakeCascade {
+        core: vec![make_test_entry("kn-a", 9, 0.0)],
+        ..Default::default()
+    };
+    let session =
+        crate::wake_token::WakeSession::new(&cascade, "test-agent".to_string(), None, None);
+    let id = db.create_wake_session(&session).unwrap();
+
+    let loaded = db.get_wake_session(&id).unwrap().unwrap();
+    assert_eq!(loaded.agent, "test-agent");
+}
+
+#[test]
+fn a_guess_and_its_session_advance_land_together() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 1;
+
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &session, 0)
+        .unwrap();
+
+    assert_eq!(stored_step(&db, "session-1"), 1);
+    let ids = db
+        .query_json_for_test("SELECT <string>id AS id FROM wake_guess")
+        .unwrap();
+    assert_eq!(ids.len(), 1);
+    assert!(
+        ids[0]["id"].as_str().unwrap().contains("session-1"),
+        "the row id is keyed by (session_id, position): {ids:?}"
+    );
+}
+
+#[test]
+fn a_session_that_has_moved_rolls_the_row_back() {
+    // Compare-and-swap: the session is at step 0, the caller thinks step 5.
+    // The session write must refuse, and the row written in the same
+    // transaction must go with it.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 6;
+
+    db.record_wake_guess(&sample_guess_row("session-1", 5), &session, 5)
+        .expect_err("a session no longer at the expected step must refuse the write");
+
+    assert_eq!(stored_step(&db, "session-1"), 0, "the session did not move");
+    assert!(
+        db.query_json_for_test(WAKE_GUESS_SELECT)
+            .unwrap()
+            .is_empty(),
+        "the row must roll back with the refused session write"
+    );
+}
+
+#[test]
+fn a_second_row_at_one_step_is_refused_and_the_session_stays_put() {
+    // The session write alone would land here (expected step matches), so this
+    // pins that the row collision cancels the whole transaction.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    session.step = 1;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &session, 0)
+        .unwrap();
+
+    let mut again = session.clone();
+    again.step = 2;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &again, 1)
+        .expect_err("a second row at the same session step must be rejected");
+
+    assert_eq!(stored_step(&db, "session-1"), 1, "the session did not move");
+    let stored = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(stored.len(), 1);
+
+    // The same step in a different session is fine.
+    log_guess(&db, &sample_guess_row("session-2", 0));
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
+}
+
+#[test]
+fn a_row_an_older_binary_wrote_under_a_random_id_is_found_and_still_blocks() {
+    // The released binary wrote `CREATE wake_guess` with a random id, then
+    // the session in a second call. Its half-written steps must be visible to
+    // the replay lookup, and the unique index must still refuse a second row.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let session = wake_session_at(&db, "session-1", 0);
+    db.query_json_for_test(
+        "CREATE wake_guess SET agent = 'test-agent', wake = 7, session_id = 'session-1',
+            bloom_id = 'kn-a', chunk_index = 0, chunk_total = 1, position = 0,
+            bloom_position = 1, bloom_total = 2, title_shown = 'Sample Title',
+            guess = 'the logged guess', model_id = NONE, phrase_source = 'authored',
+            phrases = ['first phrase'], match_kind = 'none', match_index = NONE,
+            bucket = 'revealed', content_hash = 'abc' RETURN NONE",
+    )
+    .unwrap();
+
+    let logged = db
+        .get_wake_guess("session-1", 0)
+        .unwrap()
+        .expect("a legacy row is found by (session_id, position)");
+    assert_eq!(logged.guess, "the logged guess");
+    assert_eq!(logged.bucket, "revealed");
+    assert_eq!(logged.match_index, None);
+    assert!(db.get_wake_guess("session-1", 1).unwrap().is_none());
+
+    let mut advanced = session.clone();
+    advanced.step = 1;
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &advanced, 0)
+        .expect_err("the unique index refuses a second row at a logged step");
+    assert_eq!(stored_step(&db, "session-1"), 0);
+}
+
+#[test]
+fn a_session_update_is_a_compare_and_swap_and_stamps_completion() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Revealed,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    db.update_wake_session(&session, 3)
+        .expect_err("a stale expected step is refused");
+    assert_eq!(stored_step(&db, "session-1"), 0);
+
+    assert_eq!(
+        db.get_wake_session("session-1").unwrap().unwrap().prev_step,
+        None,
+        "nothing written yet"
+    );
+    session.last_status = Some("bloom_missing".to_string());
+    db.update_wake_session(&session, 0).unwrap();
+    let loaded = db.get_wake_session("session-1").unwrap().unwrap();
+    assert_eq!(loaded.step, 1);
+    assert_eq!(loaded.completed_at, None, "one of two blooms walked");
+    assert_eq!(loaded.prev_step, Some(0), "the step the write started from");
+    assert_eq!(loaded.last_status.as_deref(), Some("bloom_missing"));
+
+    session.advance(
+        1,
+        crate::wake_guess::Bucket::Unhinted,
+        crate::wake_token::PhraseSource::Authored,
+    );
+    assert!(session.is_complete());
+    db.update_wake_session(&session, 1).unwrap();
+    let loaded = db
+        .get_wake_session("session-1")
+        .unwrap()
+        .expect("a completed session is kept, not deleted");
+    assert!(
+        loaded.completed_at.is_some(),
+        "the write that walks the last step stamps completed_at"
+    );
+}
+
+#[test]
+fn wake_history_reports_sessions_at_a_wake_and_the_highest_wake() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let row = |session: &str, position: u32, agent: &str, wake: i64| {
+        let mut r = sample_guess_row(session, position);
+        r.agent = agent.to_string();
+        r.wake = Some(wake);
+        r
+    };
+    log_guess(&db, &row("s1", 0, "test-agent", 7));
+    log_guess(&db, &row("s1b", 0, "test-agent", 7));
+    log_guess(&db, &row("s3", 0, "test-agent", 9));
+    log_guess(&db, &row("s4", 0, "other-agent", 12));
+    let mut unnumbered = sample_guess_row("s5", 0);
+    unnumbered.wake = None;
+    log_guess(&db, &unnumbered);
+
+    let mut history = db.wake_history("test-agent", 7).unwrap();
+    history.sessions_at_wake.sort();
+    assert_eq!(history.sessions_at_wake, vec!["s1", "s1b"]);
+    assert_eq!(
+        history.highest_wake,
+        Some(9),
+        "another agent's wake 12 is not ours"
+    );
+
+    let history = db.wake_history("test-agent", 8).unwrap();
+    assert!(history.sessions_at_wake.is_empty());
+
+    let history = db.wake_history("new-agent", 1).unwrap();
+    assert_eq!(history, crate::wake_guess::WakeHistory::default());
+}
+
+/// Blocker 2 against the real store: a call that moves `step` by more than
+/// one (a judged guess, then a deleted entry stepped over), and an unjudged
+/// step, both with their responses lost. Each must resume from its token.
+#[test]
+fn a_lost_response_resumes_however_far_the_call_moved_step() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::for_agent("test-agent");
+    let mut entries = Vec::new();
+    for (id, phrase) in [
+        ("kn-1", "one"),
+        ("kn-2", "two"),
+        ("kn-3", "three"),
+        ("kn-4", "four"),
+    ] {
+        let mut e = make_test_entry(id, 9, 0.0);
+        e.wake_phrases = vec![phrase.to_string()];
+        db.upsert_knowledge(&e).unwrap();
+        entries.push(e);
+    }
+    let cascade = crate::store::WakeCascade {
+        core: entries,
+        ..Default::default()
+    };
+    let begin: serde_json::Value = serde_json::from_str(
+        &crate::wake_ritual::begin_ritual(
+            &db,
+            &cascade,
+            crate::wake_ritual::RitualMeta {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                model_id: None,
+            },
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let respond = |id: &str, guess: &str, token: &str| -> serde_json::Value {
+        let out = crate::wake_ritual::respond_ritual(&db, &ctx, id, guess, token)
+            .unwrap_or_else(|e| panic!("respond {id} failed: {e}"));
+        serde_json::from_str(&out).unwrap()
+    };
+    let token0 = begin["session"].as_str().unwrap().to_string();
+    let first_id = begin["prompt"]["id"].as_str().unwrap().to_string();
+    let order: Vec<String> = cascade.core.iter().map(|e| e.id.clone()).collect();
+    let pos = order.iter().position(|id| *id == first_id).unwrap();
+    let (second_id, third_id) = (order[pos + 1].clone(), order[pos + 2].clone());
+
+    // Judge the first entry; the second is deleted, so the same call steps
+    // over it too.
+    db.delete(&second_id, &ctx).unwrap();
+    let phrase = |id: &str| match id {
+        "kn-1" => "one",
+        "kn-2" => "two",
+        "kn-3" => "three",
+        _ => "four",
+    };
+    let first = respond(&first_id, phrase(&first_id), &token0);
+    assert_eq!(first["next"]["id"], third_id.as_str());
+    let resumed = respond(&first_id, "retyped", &token0);
+    assert_eq!(resumed["replayed"], true);
+    assert_eq!(resumed["guess"], phrase(&first_id));
+    assert_eq!(resumed["session"], first["session"]);
+
+    // An unjudged step: the third entry goes, and the call reports it.
+    db.delete(&third_id, &ctx).unwrap();
+    let token1 = first["session"].as_str().unwrap().to_string();
+    let missing = respond(&third_id, "anything", &token1);
+    assert_eq!(missing["status"], "bloom_missing");
+    let resumed = respond(&third_id, "anything", &token1);
+    assert_eq!(resumed["status"], "bloom_missing");
+    assert_eq!(resumed["replayed"], true);
+    assert_eq!(resumed["session"], missing["session"]);
+    assert_eq!(resumed["next"], missing["next"]);
+
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 1);
+}
+
+/// Blocker 1 end to end against the real store: a step whose row landed and
+/// whose session write did not. The released binary wrote the two in separate
+/// calls, so a dropped connection between them left exactly this state, and
+/// the unique index then refused every retry. A retry must now replay the
+/// logged guess, advance the session, and leave one row.
+#[test]
+fn a_retry_after_a_half_written_step_replays_the_logged_guess() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::for_agent("test-agent");
+
+    let mut first = make_test_entry("kn-first", 9, 0.0);
+    first.wake_phrases = vec!["alpha cue".to_string()];
+    let mut second = make_test_entry("kn-second", 9, 0.0);
+    second.wake_phrases = vec!["bravo cue".to_string()];
+    db.upsert_knowledge(&first).unwrap();
+    db.upsert_knowledge(&second).unwrap();
+    let cascade = crate::store::WakeCascade {
+        core: vec![first, second],
+        ..Default::default()
+    };
+
+    let begin: serde_json::Value = serde_json::from_str(
+        &crate::wake_ritual::begin_ritual(
+            &db,
+            &cascade,
+            crate::wake_ritual::RitualMeta {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                model_id: None,
+            },
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let token = begin["session"].as_str().unwrap().to_string();
+    let session_id = token.split('.').next().unwrap().to_string();
+
+    // The half-written step, as the released binary left it: the row is
+    // there under a random id, and the session never advanced.
+    db.query_json_for_test(&format!(
+        "CREATE wake_guess SET agent = 'test-agent', wake = 7, session_id = '{session_id}',
+            bloom_id = 'kn-first', chunk_index = 0, chunk_total = 1, position = 0,
+            bloom_position = 1, bloom_total = 2, title_shown = 'Test Entry kn-first',
+            guess = 'the first guess', model_id = NONE, phrase_source = 'authored',
+            phrases = ['alpha cue'], match_kind = 'exact', match_index = 0,
+            bucket = 'unhinted', content_hash = 'abc' RETURN NONE"
+    ))
+    .unwrap();
+    assert_eq!(stored_step(&db, &session_id), 0);
+
+    // The retry types a different guess. The first one counts.
+    let out = crate::wake_ritual::respond_ritual(&db, &ctx, "kn-first", "a retyped miss", &token)
+        .expect("the retry must be answered, not refused by the index");
+    let resp: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp["replayed"], true);
+    assert_eq!(resp["guess"], "the first guess");
+    assert_eq!(resp["bucket"], "unhinted");
+    assert_eq!(resp["match"]["kind"], "exact");
+    assert_eq!(resp["next"]["id"], "kn-second");
+    assert_eq!(resp["wake"], 7);
+    assert_eq!(stored_step(&db, &session_id), 1, "the session advanced");
+    let rows = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(rows.len(), 1, "still exactly one row");
+
+    // The logged judgment is what the session counted.
+    let loaded = db.get_wake_session(&session_id).unwrap().unwrap();
+    assert_eq!(loaded.bucket_totals().unhinted.authored, 1);
+
+    // And the ritual carries on with the token the replay handed back.
+    let next_token = resp["session"].as_str().unwrap();
+    let out = crate::wake_ritual::respond_ritual(&db, &ctx, "kn-second", "bravo cue", next_token)
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(resp["status"], "shown");
+    assert!(resp.get("replayed").is_none());
+    assert_eq!(resp["summary"]["buckets"]["unhinted"]["authored"], 2);
+    let loaded = db
+        .get_wake_session(&session_id)
+        .unwrap()
+        .expect("a completed session is kept");
+    assert!(loaded.completed_at.is_some());
+    assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
 }
