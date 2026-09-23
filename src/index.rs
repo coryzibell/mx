@@ -38,7 +38,7 @@ pub fn export_markdown(db: &dyn KnowledgeStore, dir_path: &Path) -> Result<()> {
     let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
-        let entries = db.list_by_category(&category.id, &ctx, &filter)?;
+        let entries = db.list_by_category_lean(&category.id, &ctx, &filter)?;
         if entries.is_empty() {
             continue;
         }
@@ -227,7 +227,7 @@ pub fn export_csv(db: &dyn KnowledgeStore, path: &Path) -> Result<()> {
     let filter = crate::store::KnowledgeFilter::default();
     let categories = db.list_categories()?;
     for category in categories {
-        for entry in db.list_by_category(&category.id, &ctx, &filter)? {
+        for entry in db.list_by_category_lean(&category.id, &ctx, &filter)? {
             let tags = entry.tags.join(";"); // Use semicolon to avoid comma collision
             let applicability = entry.applicability.join(";");
             let source_project = entry.source_project_id.as_deref().unwrap_or("");

@@ -104,7 +104,7 @@ fn print_resolved_memory(kn_id: &str, verbose: bool) {
         _ => AgentContext::public_only(),
     };
 
-    match db.get(kn_id, &ctx) {
+    match db.get_lean(kn_id, &ctx) {
         Ok(Some(entry)) => {
             println!();
             println!("Memory ({}):", kn_id);

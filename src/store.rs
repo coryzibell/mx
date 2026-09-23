@@ -145,6 +145,27 @@ pub trait KnowledgeStore {
     /// Get a knowledge entry by ID
     fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
 
+    /// Lean variant of [`get`](Self::get) (Issue #438): same entry, but a
+    /// backend that fetches over the network never selects the 768-float
+    /// `embedding` column for a caller that only renders the result —
+    /// `embedding_model`, `embedded_at` and `chunk_count` are unaffected.
+    /// Never use this on a result that gets written back through
+    /// `upsert_knowledge`: the write guard there means a lean read fed back
+    /// through upsert leaves a pre-existing stored vector untouched rather
+    /// than nulling it, but the in-memory value the caller holds is `None`
+    /// either way, which is wrong for anything that reads `.embedding`.
+    ///
+    /// The default forwards to `get` and strips the vector in Rust — correct
+    /// output, no byte savings. A backend worth leaning overrides this with
+    /// its own projection.
+    fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+        let mut entry = self.get(id, ctx)?;
+        if let Some(e) = entry.as_mut() {
+            e.embedding = None;
+        }
+        Ok(entry)
+    }
+
     /// Delete a knowledge entry (respects visibility: agents can only delete entries they can see)
     fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool>;
 
@@ -155,6 +176,26 @@ pub trait KnowledgeStore {
         ctx: &AgentContext,
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Lean variant of [`search`](Self::search) (Issue #438): same rows,
+    /// `embedding` dropped. Used for terminal output and for `--json` when
+    /// the caller opts into the lean flag; plain `--json` stays on `search`
+    /// (full) to keep that output byte-identical by default.
+    ///
+    /// The default forwards to `search` and strips the vector in Rust; a
+    /// backend worth leaning overrides this with its own projection.
+    fn search_lean(
+        &self,
+        query: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let mut entries = self.search(query, ctx, filter)?;
+        for e in &mut entries {
+            e.embedding = None;
+        }
+        Ok(entries)
+    }
 
     /// Semantic search using vector similarity
     fn semantic_search(
@@ -197,6 +238,27 @@ pub trait KnowledgeStore {
         ctx: &AgentContext,
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Lean variant of [`list_by_category`](Self::list_by_category) (Issue
+    /// #438): same rows, but `embedding` is dropped from every entry rather
+    /// than fetched and discarded. `export jsonl` must NOT use this — it is
+    /// the disaster-recovery path and needs the vector to round-trip into a
+    /// fresh database.
+    ///
+    /// The default forwards to `list_by_category` and strips the vector in
+    /// Rust; a backend worth leaning overrides this with its own projection.
+    fn list_by_category_lean(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        let mut entries = self.list_by_category(category, ctx, filter)?;
+        for e in &mut entries {
+            e.embedding = None;
+        }
+        Ok(entries)
+    }
 
     /// Count entries by category (fast path — single COUNT query, no row hydration).
     /// Avoids the N+1 pattern of `list_by_category(..)?.len()` which fetches every

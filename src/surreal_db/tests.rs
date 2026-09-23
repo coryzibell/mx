@@ -5421,3 +5421,363 @@ fn a_retry_after_a_half_written_step_replays_the_logged_guess() {
     assert!(loaded.completed_at.is_some());
     assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
 }
+
+// =========================================================================
+// Issue #438: lean embedding projection.
+//
+// The write guard in `upsert_knowledge_async` (embedding written only when
+// `entry.embedding.is_some()`) is the ONLY thing standing between a lean
+// renderer and a nulled stored vector -- every lean read site below proves a
+// round trip through that guard, not just that the projection is lean.
+//
+// The synthetic vector is distinct element-by-element so a truncated or
+// off-by-one copy fails the bit-exact comparison, not just a length check.
+// =========================================================================
+
+/// `v[i] = i / 768.0`.
+fn synthetic_768_vector() -> Vec<f32> {
+    (0..768).map(|i| i as f32 / 768.0).collect()
+}
+
+/// Public, non-ephemeral, resonance-9 entry carrying `vector` -- high enough
+/// to land in the wake cascade's core layer, and non-ephemeral so it isn't
+/// filtered out there.
+fn entry_with_768_vector(id: &str, vector: Vec<f32>) -> crate::knowledge::KnowledgeEntry {
+    let mut e = make_test_entry(id, 9, 0.0);
+    e.content_hash = Some(format!("hash-{id}"));
+    e.resonance_type = None;
+    e.embedding = Some(vector);
+    e.embedding_model = Some("test-model".to_string());
+    e.embedded_at = Some(chrono::Utc::now().to_rfc3339());
+    e
+}
+
+/// Shared assertion for every lean read site: the projection must not carry
+/// the vector but must keep `embedding_model`, and upserting that exact lean
+/// entry back must NOT clear the vector already in storage -- this is what
+/// pins the `upsert_knowledge_async` write guard (knowledge.rs, around 486).
+/// Revert the guard and every caller of this helper fails.
+fn assert_lean_read_then_upsert_preserves_vector(
+    db: &SurrealDatabase,
+    lean_entry: crate::knowledge::KnowledgeEntry,
+    expected_vector: &[f32],
+) {
+    let id = lean_entry.id.clone();
+    assert!(
+        lean_entry.embedding.is_none(),
+        "lean projection for {id} must not carry the vector"
+    );
+    assert!(
+        lean_entry.embedding_model.is_some(),
+        "embedding_model must survive the lean projection for {id}"
+    );
+
+    // Re-fetch as whoever can see the row (its own owner for a private entry,
+    // public-only otherwise) rather than assuming public visibility.
+    let ctx = match &lean_entry.owner {
+        Some(owner) if lean_entry.visibility == "private" => {
+            crate::store::AgentContext::for_agent(owner.clone())
+        }
+        _ => crate::store::AgentContext::public_only(),
+    };
+
+    db.upsert_knowledge(&lean_entry).unwrap();
+
+    let full = db.get_knowledge(&id, &ctx).unwrap().unwrap();
+    assert_eq!(
+        full.embedding.as_deref(),
+        Some(expected_vector),
+        "upserting a lean-read entry must not null the vector already in \
+         storage for {id}"
+    );
+}
+
+#[test]
+fn lean_get_preserves_vector_on_upsert() {
+    use crate::store::{AgentContext, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-lean-get", v.clone()))
+        .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let lean = db.get_lean("kn-lean-get", &ctx).unwrap().unwrap();
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_search_preserves_vector_on_upsert() {
+    use crate::store::{AgentContext, KnowledgeFilter, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    let mut entry = entry_with_768_vector("kn-lean-search", v.clone());
+    entry.title = "zephyrus768 search fixture".to_string();
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let results = db.search_lean("zephyrus768", &ctx, &filter).unwrap();
+    let lean = results
+        .into_iter()
+        .find(|e| e.id == "kn-lean-search")
+        .expect("keyword search must find the fixture");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_list_by_category_preserves_vector_on_upsert() {
+    use crate::store::{AgentContext, KnowledgeFilter, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-lean-list", v.clone()))
+        .unwrap();
+
+    let ctx = AgentContext::public_only();
+    let filter = KnowledgeFilter::default();
+    let results = db.list_by_category_lean("test", &ctx, &filter).unwrap();
+    let lean = results
+        .into_iter()
+        .find(|e| e.id == "kn-lean-list")
+        .expect("list_by_category_lean must find the fixture");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_owned_private_matching_preserves_vector_on_upsert() {
+    use crate::store::{KnowledgeFilter, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    let mut entry = entry_with_768_vector("kn-lean-private", v.clone());
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-owner".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    let filter = KnowledgeFilter::default();
+    let results = db
+        .owned_private_matching("agent-owner", None, &filter)
+        .unwrap();
+    let lean = results
+        .into_iter()
+        .find(|e| e.id == "kn-lean-private")
+        .expect("owned_private_matching must find the fixture");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_recent_facts_preserves_vector_on_upsert() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    let mut entry = entry_with_768_vector("kn-lean-recent", v.clone());
+    entry.resonance_type = Some("ephemeral".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    let results = db.query_recent_facts(7).unwrap();
+    let lean = results
+        .into_iter()
+        .find(|e| e.id == "kn-lean-recent")
+        .expect("query_recent_facts must find the fixture");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_recent_facts_all_types_preserves_vector_on_upsert() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-lean-recent-all", v.clone()))
+        .unwrap();
+
+    let results = db.query_recent_facts_all_types(7).unwrap();
+    let lean = results
+        .into_iter()
+        .find(|e| e.id == "kn-lean-recent-all")
+        .expect("query_recent_facts_all_types must find the fixture");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn lean_wake_cascade_preserves_vector_on_upsert() {
+    use crate::store::{AgentContext, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-lean-wake", v.clone()))
+        .unwrap();
+
+    let ctx = AgentContext::public_only();
+    // min_resonance = Some(8) takes the simple query_blooms_by_resonance
+    // branch (Q1) -- the same knowledge_select_fields(Projection::Lean) call
+    // every wake-cascade layer (Q1-Q4) shares.
+    let cascade = db.wake_cascade(&ctx, 20, Some(8), 30, false).unwrap();
+    let lean = cascade
+        .core
+        .into_iter()
+        .find(|e| e.id == "kn-lean-wake")
+        .expect("wake_cascade must surface the fixture in its core layer");
+    assert_lean_read_then_upsert_preserves_vector(&db, lean, &v);
+}
+
+#[test]
+fn edit_content_keeps_vector() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    let mut entry = entry_with_768_vector("kn-rmw-edit", v.clone());
+    entry.body = Some("original body".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    db.edit_content("kn-rmw-edit", &ctx, "original", "edited", false, None)
+        .unwrap();
+
+    let full = db.get_knowledge("kn-rmw-edit", &ctx).unwrap().unwrap();
+    assert_eq!(full.body.as_deref(), Some("edited body"));
+    assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
+}
+
+#[test]
+fn append_content_keeps_vector() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-rmw-append", v.clone()))
+        .unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    db.append_content("kn-rmw-append", &ctx, " more").unwrap();
+
+    let full = db.get_knowledge("kn-rmw-append", &ctx).unwrap().unwrap();
+    assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
+}
+
+#[test]
+fn prepend_content_keeps_vector() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-rmw-prepend", v.clone()))
+        .unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    db.prepend_content("kn-rmw-prepend", &ctx, "more ").unwrap();
+
+    let full = db.get_knowledge("kn-rmw-prepend", &ctx).unwrap().unwrap();
+    assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
+}
+
+#[test]
+fn update_shape_get_mutate_upsert_keeps_vector() {
+    use crate::store::{AgentContext, KnowledgeStore};
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-rmw-update", v.clone()))
+        .unwrap();
+
+    let ctx = AgentContext::public_only();
+    // `memory update`'s shape: trait `get` (full), mutate one field, upsert
+    // the whole entry back.
+    let mut entry = db.get("kn-rmw-update", &ctx).unwrap().unwrap();
+    entry.title = "updated title".to_string();
+    db.upsert_knowledge(&entry).unwrap();
+
+    let full = db.get_knowledge("kn-rmw-update", &ctx).unwrap().unwrap();
+    assert_eq!(full.title, "updated title");
+    assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
+}
+
+#[test]
+fn export_jsonl_round_trip_keeps_vector_bit_exact() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    // `export_jsonl` iterates `list_categories()` (the seeded category table),
+    // not arbitrary category_id strings, so the fixture needs a REAL seeded
+    // category ("insight") rather than the "test" placeholder `make_test_entry`
+    // uses -- `list_by_category("test", ...)` (used elsewhere in this file)
+    // doesn't have that requirement since it filters by field equality
+    // directly.
+    let mut entry = entry_with_768_vector("kn-export-rt", v.clone());
+    entry.category_id = "insight".to_string();
+    db.upsert_knowledge(&entry).unwrap();
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    crate::index::export_jsonl(&db, tmp.path()).unwrap();
+
+    let contents = std::fs::read_to_string(tmp.path()).unwrap();
+    let line = contents
+        .lines()
+        .find(|l| l.contains("kn-export-rt"))
+        .expect("exported line for the fixture");
+    let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+    let arr = parsed["embedding"]
+        .as_array()
+        .expect("export jsonl must keep the embedding array, not null");
+    assert_eq!(
+        arr.len(),
+        768,
+        "exported embedding must be the full 768-vector"
+    );
+
+    // Import into a FRESH store and confirm the vector survives the round trip.
+    let db2 = SurrealDatabase::open_in_memory().unwrap();
+    let imported = crate::index::import_jsonl(&db2, tmp.path()).unwrap();
+    assert_eq!(imported, 1);
+
+    let ctx = crate::store::AgentContext::public_only();
+    let full = db2.get_knowledge("kn-export-rt", &ctx).unwrap().unwrap();
+    assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
+}
+
+#[test]
+fn import_jsonl_null_embedding_does_not_clear_existing_vector() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-import-null", v.clone()))
+        .unwrap();
+
+    // A JSONL line for the SAME id with embedding explicitly null (e.g. a
+    // stale export taken before the entry was embedded).
+    let line = serde_json::json!({
+        "id": "kn-import-null",
+        "category_id": "test",
+        "title": "reimported over an existing vector",
+        "embedding": null,
+    })
+    .to_string();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), format!("{line}\n")).unwrap();
+
+    crate::index::import_jsonl(&db, tmp.path()).unwrap();
+
+    // Issue #438 write guard: upsert_knowledge_async only writes `embedding`
+    // when the incoming entry carries one, so a None import does NOT clear
+    // the column -- the pre-existing vector survives. This is correct per
+    // Weir's ruling: no production path imports a null embedding over an
+    // existing row to intentionally clear it (a real reset goes through
+    // `memory embed`, which writes a fresh vector, never `None`), and the
+    // guard's whole point is that NO read path -- lean or otherwise -- can
+    // ever null a stored vector through upsert.
+    let ctx = crate::store::AgentContext::public_only();
+    let full = db.get_knowledge("kn-import-null", &ctx).unwrap().unwrap();
+    assert_eq!(
+        full.embedding.as_deref(),
+        Some(v.as_slice()),
+        "the write guard must preserve a pre-existing vector across a \
+         null-embedding re-import"
+    );
+    assert_eq!(full.title, "reimported over an existing vector");
+}

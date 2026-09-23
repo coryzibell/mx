@@ -6,6 +6,35 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed — lean embedding projection on render-only reads (#438)
+
+Reads that only render — `memory list`, `memory search` (keyword), `memory
+show`, `memory wake`/`wake-fetch`/`recent`, and the internal existence/backup
+checks on `add`/`delete`/`edit`/`append`/`prepend`/`restore` — no longer
+fetch or deserialize the 768-float `embedding` column. On a 1,443-row list
+projection this drops the transferred payload from 26.7 MB to 3.3 MB, most of
+which was previously spent on a vector the terminal renderer never prints.
+
+- **`--json` output is unchanged by default** on `list`, `search` and `show`:
+  the `embedding` array is still there, byte-identical to before. Tooling
+  that reads `embedding == null` from `list --json` to find unembedded rows
+  keeps working unmodified.
+- **New opt-in flag `--omit-embedding`** on `list` and `search` (and `show`)
+  makes `--json` output lean too, emitting `"embedding": null` — the same
+  shape a never-embedded entry already has. `embedding_model`,
+  `embedded_at` and `chunk_count` are unaffected either way.
+- **Semantic search (`--semantic`), `auto_anchor`, `auto-anchor`, `embed`,
+  and every read-mutate-write path (`update`/`edit`/`append`/`prepend`/
+  `restore`)** are untouched — they still fetch the full vector, exactly as
+  before.
+- **`upsert_knowledge_async` now writes `embedding` only when the entry
+  carries one**, the same way its other optional columns already work. This
+  is what makes a lean read safe to write back: no read path, present or
+  future, can null a stored vector through an upsert.
+- **`export jsonl` is unaffected** — it stays on the full projection, since
+  it is the disaster-recovery path and needs the vector to round-trip into a
+  fresh database.
+
 ### Fixed — wake ritual failure paths (Wake 464 review)
 
 - **A half-written step no longer wedges a ritual.** The guess row and the

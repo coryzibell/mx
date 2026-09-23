@@ -836,7 +836,7 @@ fn fetch_blooms_by_ids(
     let mut map = HashMap::new();
 
     for id in bloom_ids {
-        if let Some(entry) = db.get(id, ctx)? {
+        if let Some(entry) = db.get_lean(id, ctx)? {
             map.insert(id.clone(), entry);
         }
     }

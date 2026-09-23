@@ -427,6 +427,13 @@ pub struct EntryFilter {
     // silent override -- pinned in the test module below.
     #[arg(long, value_name = "PREFIXES")]
     pub exclude_tags: Option<String>,
+
+    /// With --json, drop the `embedding` vector from the output (emits
+    /// `"embedding": null`, same shape as a never-embedded entry). Has no
+    /// effect without --json: terminal output never includes the vector
+    /// either way (Issue #438).
+    #[arg(long)]
+    pub omit_embedding: bool,
 }
 
 /// Sort order for `memory recent` results.
@@ -494,6 +501,12 @@ pub enum MemoryCommands {
         /// Output only the body content (for piping)
         #[arg(long)]
         content_only: bool,
+
+        /// With --json, drop the `embedding` vector from the output (emits
+        /// `"embedding": null`, same shape as a never-embedded entry). Has no
+        /// effect without --json (Issue #438).
+        #[arg(long)]
+        omit_embedding: bool,
     },
 
     /// Show index statistics
