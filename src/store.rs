@@ -145,11 +145,46 @@ pub trait KnowledgeStore {
     /// Get a knowledge entry by ID
     fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
 
+    /// Lean variant of [`get`](Self::get) (Issue #438): same entry, but a
+    /// backend that fetches over the network never selects the 768-float
+    /// `embedding` column for a caller that only renders the result —
+    /// `embedding_model`, `embedded_at` and `chunk_count` are unaffected.
+    /// Never use this on a result that gets written back through
+    /// `upsert_knowledge`: a lean-read entry keeps `embedding_model`, which
+    /// is what tells the write guard "this is a lean read, not a genuinely
+    /// unembedded entry" and leaves a pre-existing stored vector untouched —
+    /// but the in-memory value the caller holds is `None` either way, which
+    /// is wrong for anything that reads `.embedding`.
+    ///
+    /// No default body: every `KnowledgeStore` implementor (SurrealDB, and
+    /// every test mock) must say explicitly how it produces a lean result,
+    /// even if that's "forward to `get` and strip `.embedding`" for a mock
+    /// backed by an in-memory `Vec`. A default here would let a future
+    /// implementor forget the override and silently fall back to a full
+    /// fetch with no compile error — the same reason #437 gave for making
+    /// `list_by_category_limited` its own required method rather than a
+    /// defaulted one.
+    fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
+
     /// Delete a knowledge entry (respects visibility: agents can only delete entries they can see)
     fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool>;
 
     /// Search knowledge entries
     fn search(
+        &self,
+        query: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Lean variant of [`search`](Self::search) (Issue #438): same rows,
+    /// `embedding` dropped. Used for terminal output and for `--json` when
+    /// the caller opts into the lean flag; plain `--json` stays on `search`
+    /// (full) to keep that output byte-identical by default.
+    ///
+    /// No default body — see [`get_lean`](Self::get_lean) for why every
+    /// implementor must say explicitly how it produces a lean result.
+    fn search_lean(
         &self,
         query: &str,
         ctx: &AgentContext,
@@ -192,6 +227,21 @@ pub trait KnowledgeStore {
 
     /// List entries by category
     fn list_by_category(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>>;
+
+    /// Lean variant of [`list_by_category`](Self::list_by_category) (Issue
+    /// #438): same rows, but `embedding` is dropped from every entry rather
+    /// than fetched and discarded. `export jsonl` must NOT use this — it is
+    /// the disaster-recovery path and needs the vector to round-trip into a
+    /// fresh database.
+    ///
+    /// No default body — see [`get_lean`](Self::get_lean) for why every
+    /// implementor must say explicitly how it produces a lean result.
+    fn list_by_category_lean(
         &self,
         category: &str,
         ctx: &AgentContext,

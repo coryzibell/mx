@@ -7,6 +7,24 @@ use crate::knowledge::KnowledgeEntry;
 use super::connection::normalize_datetime;
 use super::{RecordId, SurrealConnection, SurrealDatabase};
 
+/// Which columns `knowledge_select_fields()` projects for the 768-float
+/// `embedding` column (Issue #438).
+///
+/// `Full` is the historical projection: every read gets the vector back.
+/// `Lean` drops only `embedding` (`embedding_model`, `embedded_at` and
+/// `chunk_count` are unaffected) — for reads that never touch `.embedding`,
+/// this is most of a list/search response's transferred bytes. `Lean` output
+/// is indistinguishable from a never-embedded row on the wire; callers that
+/// upsert what they read must use `Full`, since `upsert_knowledge_async`'s
+/// write guard means a lean-then-upsert round trip would otherwise leave the
+/// column untouched (safe) but any caller relying on the *value* would see
+/// `None` where a vector exists in storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Projection {
+    Full,
+    Lean,
+}
+
 /// DTO for deserializing knowledge records from SurrealDB queries.
 ///
 /// SurrealDB returns record links as `Thing` types, which don't deserialize
@@ -220,8 +238,17 @@ impl SurrealDatabase {
     /// ordered one (#456). The other numeric fields here coalesce to their own
     /// zero, so the same idiom is harmless for them; `wake_order` is the one
     /// whose fallback is null and therefore means "unset".
-    pub(super) fn knowledge_select_fields() -> &'static str {
-        "meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
+    ///
+    /// `projection` controls only the `embedding` line (see [`Projection`]);
+    /// every other column is identical between variants, so there is one
+    /// source string, not two copies that can drift.
+    pub(super) fn knowledge_select_fields(projection: Projection) -> String {
+        let embedding_field = match projection {
+            Projection::Full => "IF embedding THEN embedding ELSE null END AS embedding,",
+            Projection::Lean => "NONE AS embedding,",
+        };
+        format!(
+            "meta::id(id) AS id, title, body, summary, file_path, content_hash, ephemeral,
         owner, visibility,
         meta::id(category) AS category_id,
         meta::id(source_type) AS source_type_id,
@@ -241,11 +268,12 @@ impl SurrealDatabase {
         IF triggers THEN triggers ELSE [] END AS triggers,
         IF wake_order IS NOT NONE THEN wake_order ELSE null END AS wake_order,
         IF wake_phrase THEN wake_phrase ELSE null END AS wake_phrase,
-        IF embedding THEN embedding ELSE null END AS embedding,
+        {embedding_field}
         IF embedding_model THEN embedding_model ELSE null END AS embedding_model,
         IF embedded_at THEN <string>embedded_at ELSE null END AS embedded_at,
         IF chunk_count THEN chunk_count ELSE 0 END AS chunk_count,
         IF format THEN format ELSE 'markdown' END AS format"
+        )
     }
 
     /// Build visibility filter for privacy-aware queries
@@ -483,13 +511,38 @@ impl SurrealDatabase {
             triggers = $triggers,
             wake_order = $wake_order,
             wake_phrase = $wake_phrase,
-            embedding = $embedding,
             embedding_model = $embedding_model,
             chunk_count = $chunk_count,
             format = $format"
             .to_string();
 
         // Add optional fields
+        // `embedding` is written when the entry carries a vector, OR when it
+        // is genuinely unembedded (`embedding_model` also `None`) (Issue
+        // #438). This is NOT "write only when Some": a fresh construct
+        // upserted over an existing row (`memory add`/`add-batch` on a
+        // title/category or session/type/body-prefix collision, or `seed
+        // knowledge` of a never-embedded export line) must still clear a
+        // stale vector, exactly as it did before this change — otherwise the
+        // old vector survives under new content with no detector, since
+        // nothing selects on "vector present, model null".
+        //
+        // The discriminator is `embedding_model`: a LEAN READ keeps
+        // `embedding_model` (it only drops `embedding` itself), so
+        // `write_embedding` is false for a lean-read entry and the column is
+        // left untouched — the guard's actual job. A fresh, never-embedded
+        // entry has both `None`, so `write_embedding` is true and the column
+        // is cleared to match.
+        //
+        // Residual edge (undocumented in production, not fixed here): a
+        // legacy row that already carries a vector with a `None` model,
+        // lean-read and upserted back, would be cleared. No lean-read →
+        // upsert path exists today (every lean read either renders, drops
+        // the value, or backs up title/body), so this is latent, not live.
+        let write_embedding = entry.embedding.is_some() || entry.embedding_model.is_none();
+        if write_embedding {
+            query.push_str(", embedding = $embedding");
+        }
         if entry.source_project_id.is_some() {
             query.push_str(", source_project = type::thing('project', $source_project_id)");
         }
@@ -565,12 +618,14 @@ impl SurrealDatabase {
                 ))
                 .bind(("wake_order", entry.wake_order))
                 .bind(("wake_phrase", entry.wake_phrase.clone()))
-                .bind(("embedding", entry.embedding.clone()))
                 .bind(("embedding_model", entry.embedding_model.clone()))
                 .bind(("chunk_count", entry.chunk_count))
                 .bind(("format", entry.format.clone()));
 
             // Bind optional parameters
+            if write_embedding {
+                q = q.bind(("embedding", entry.embedding.clone()));
+            }
             if let Some(ref proj) = entry.source_project_id {
                 q = q.bind(("source_project_id", proj.clone()));
             }
@@ -710,19 +765,32 @@ impl SurrealDatabase {
         Ok(record_id)
     }
 
-    /// Get a knowledge entry by ID
+    /// Get a knowledge entry by ID (full projection, embedding included).
     pub fn get_knowledge(
         &self,
         id: &str,
         ctx: &crate::store::AgentContext,
     ) -> Result<Option<KnowledgeEntry>> {
-        Self::runtime().block_on(self.get_knowledge_async(id, ctx))
+        Self::runtime().block_on(self.get_knowledge_async(id, ctx, Projection::Full))
+    }
+
+    /// Lean variant of [`get_knowledge`](Self::get_knowledge) (Issue #438):
+    /// same row, but the projection never selects `embedding`. For a renderer
+    /// that never reads `.embedding`, this drops the 768-float column from
+    /// the wire instead of fetching and immediately discarding it.
+    pub fn get_knowledge_lean(
+        &self,
+        id: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<KnowledgeEntry>> {
+        Self::runtime().block_on(self.get_knowledge_async(id, ctx, Projection::Lean))
     }
 
     async fn get_knowledge_async(
         &self,
         id: &str,
         ctx: &crate::store::AgentContext,
+        projection: Projection,
     ) -> Result<Option<KnowledgeEntry>> {
         let id_part = id.strip_prefix("kn-").unwrap_or(id);
 
@@ -758,7 +826,7 @@ impl SurrealDatabase {
         let sql = format!(
             "SELECT {}
             FROM type::thing('knowledge', $id) {}",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(projection),
             where_clause
         );
 
@@ -907,7 +975,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE id IN $ids {}",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Full),
             visibility_clause
         );
 
@@ -1022,14 +1090,29 @@ impl SurrealDatabase {
         Ok(true)
     }
 
-    /// Search knowledge using BM25 full-text indexes
+    /// Search knowledge using BM25 full-text indexes (full projection,
+    /// embedding included). This backs the trait's `search` — the `--json`
+    /// default (Issue #438), which must stay byte-identical.
     pub fn search_knowledge(
         &self,
         query: &str,
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.search_knowledge_async(query, ctx, filter))
+        Self::runtime().block_on(self.search_knowledge_async(query, ctx, filter, Projection::Full))
+    }
+
+    /// Lean variant of [`search_knowledge`](Self::search_knowledge) (Issue
+    /// #438): same rows, `embedding` dropped from the projection. Used for
+    /// terminal (non-`--json`) output and for `--json` when the caller opts
+    /// into the lean flag.
+    pub fn search_knowledge_lean(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.search_knowledge_async(query, ctx, filter, Projection::Lean))
     }
 
     async fn search_knowledge_async(
@@ -1037,6 +1120,7 @@ impl SurrealDatabase {
         query: &str,
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
+        projection: Projection,
     ) -> Result<Vec<KnowledgeEntry>> {
         let query_owned = query.to_string();
 
@@ -1048,7 +1132,7 @@ impl SurrealDatabase {
             "SELECT {}
             FROM knowledge
             WHERE (title @@ $query OR body @@ $query OR summary @@ $query) {} {} {}",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(projection),
             visibility_clause,
             resonance_clause,
             category_clause
@@ -1156,7 +1240,7 @@ impl SurrealDatabase {
             WHERE embedding IS NOT NONE AND array::len(embedding) = $dim AND (chunk_count IS NONE OR chunk_count <= 0) {} {} {} {}
             ORDER BY score DESC
             LIMIT $limit",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Full),
             visibility_clause,
             resonance_clause,
             category_clause,
@@ -1432,7 +1516,7 @@ impl SurrealDatabase {
             WHERE embedding IS NOT NONE AND array::len(embedding) = $dim {}
             ORDER BY score DESC
             LIMIT $limit",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Full),
             visibility_clause,
         );
 

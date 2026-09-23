@@ -116,7 +116,7 @@ pub(crate) fn find_open_thread_by_content(
         ..Default::default()
     };
 
-    let threads = db.list_by_category("thread", &ctx, &filter)?;
+    let threads = db.list_by_category_lean("thread", &ctx, &filter)?;
     let normalized_content = KnowledgeEntry::normalize_content(content);
 
     for thread in threads {
@@ -1262,6 +1262,9 @@ mod auto_anchor_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -1272,6 +1275,14 @@ mod auto_anchor_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -1308,6 +1319,14 @@ mod auto_anchor_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
@@ -2039,6 +2058,43 @@ mod auto_anchor_tests {
             "--no-embed must skip embedding even when env flag would allow it"
         );
     }
+
+    #[test]
+    #[serial]
+    fn anchoring_survives_an_rmw_update_issue_438() {
+        // Issue #438: the lean-projection change elsewhere in the read
+        // surface must never touch the RMW paths (edit/append/prepend/
+        // update). This pins that an update through `edit_content` keeps the
+        // target's embedding intact -- if it didn't, `auto_anchor` would
+        // silently no-op (it returns `Ok(())` early on `embedding.is_none()`)
+        // instead of finding the in-band neighbor.
+        clear_agent_env();
+        let db = SurrealDatabase::open_in_memory().unwrap();
+
+        let target = entry_with_embedding("kn-t", unit_query(), "public", None, vec![]);
+        db.upsert_knowledge(&target).unwrap();
+        db.upsert_knowledge(&entry_with_embedding(
+            "kn-neighbor",
+            unit_vec(0.85),
+            "public",
+            None,
+            vec![],
+        ))
+        .unwrap();
+
+        let ctx = AgentContext::public_only();
+        db.edit_content("kn-t", &ctx, "body", "updated body", false, None)
+            .unwrap();
+
+        auto_anchor("kn-t", &db, None).unwrap();
+        let got = anchors_of(&db, "kn-t");
+        assert!(
+            !got.is_empty(),
+            "the target must still carry its embedding after an RMW update, \
+             so auto_anchor finds the in-band neighbor rather than no-op'ing"
+        );
+        assert!(got.contains(&"kn-neighbor".to_string()));
+    }
 }
 
 #[cfg(test)]
@@ -2079,6 +2135,7 @@ mod hidden_private_hint_tests {
             limit: None,
             tags: None,
             exclude_tags: None,
+            omit_embedding: false,
         }
     }
 

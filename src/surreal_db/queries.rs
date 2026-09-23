@@ -8,6 +8,7 @@ use crate::knowledge::KnowledgeEntry;
 use crate::store::WAKE_EXCLUDED_TAGS;
 
 use super::connection::normalize_datetime;
+use super::knowledge::Projection;
 use super::{SurrealConnection, SurrealDatabase};
 
 /// The first excluded tag this entry carries, by EXACT match. Prefix matching
@@ -283,9 +284,11 @@ impl SurrealDatabase {
         // exclusion, so an excluded entry never costs a kept one its slot.
         //
         // Bounded rather than fetching the whole ordered set and truncating in
-        // Rust, because `knowledge_select_fields` carries `embedding` and an
-        // unbounded core query would drag a 768-float vector per row on every
-        // wake, growing with the graph.
+        // Rust. This layer projects `Projection::Lean` (Issue #438) so it no
+        // longer carries the 768-float `embedding` column, but each row still
+        // costs a body plus per-row tag/applicability follow-ups
+        // (`value_to_knowledge_entry`), which still grows with the graph on
+        // an unbounded core query.
         //
         // Growth is geometric. Widening by exactly the number of exclusions
         // seen terminates, but a long run of excluded entries sorting above
@@ -409,7 +412,7 @@ impl SurrealDatabase {
                 effective_wake_order ASC,
                 resonance DESC,
                 id ASC",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             visibility_clause
         );
 
@@ -459,7 +462,7 @@ impl SurrealDatabase {
                 resonance DESC,
                 id ASC
             LIMIT $limit",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             visibility_clause
         );
 
@@ -510,7 +513,7 @@ impl SurrealDatabase {
                 resonance DESC,
                 id ASC
             LIMIT $limit",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             visibility_clause
         );
 
@@ -562,7 +565,7 @@ impl SurrealDatabase {
                 resonance DESC,
                 id ASC
             LIMIT $limit",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             visibility_clause
         );
 
@@ -966,7 +969,7 @@ impl SurrealDatabase {
              AND created_at > time::now() - duration::from::days($days)
              AND ({expr}) > 0.5
              ORDER BY effective_resonance DESC",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             expr = expr
         );
 
@@ -1007,7 +1010,7 @@ impl SurrealDatabase {
              WHERE created_at > time::now() - duration::from::days($days)
              AND ({expr}) > 0.5
              ORDER BY effective_resonance DESC",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             expr = expr
         );
 
@@ -1549,7 +1552,7 @@ impl SurrealDatabase {
             FROM knowledge
             {}
             ORDER BY id",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Full),
             where_clause
         );
 
@@ -1571,14 +1574,37 @@ impl SurrealDatabase {
         Ok(entries)
     }
 
-    /// List entries by category
+    /// List entries by category (full projection, embedding included). Keep
+    /// using this for `export jsonl` (Issue #438) — it's the disaster-recovery
+    /// path and needs the vector to round-trip into a fresh database.
     pub fn list_by_category(
         &self,
         category: &str,
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.list_by_category_async(category, ctx, filter))
+        Self::runtime().block_on(self.list_by_category_async(
+            category,
+            ctx,
+            filter,
+            Projection::Full,
+        ))
+    }
+
+    /// Lean variant of [`list_by_category`](Self::list_by_category) (Issue
+    /// #438): same rows, `embedding` dropped from the projection.
+    pub fn list_by_category_lean(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.list_by_category_async(
+            category,
+            ctx,
+            filter,
+            Projection::Lean,
+        ))
     }
 
     /// Fast count of entries in a category with the same visibility / resonance
@@ -1637,6 +1663,7 @@ impl SurrealDatabase {
         category: &str,
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
+        projection: Projection,
     ) -> Result<Vec<KnowledgeEntry>> {
         let category_thing = Thing::from(("category", category));
 
@@ -1649,7 +1676,7 @@ impl SurrealDatabase {
             FROM knowledge
             WHERE category = $category {} {}
             ORDER BY id",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(projection),
             visibility_clause,
             resonance_clause
         );
@@ -1725,7 +1752,7 @@ impl SurrealDatabase {
             FROM knowledge
             WHERE visibility = 'private' AND owner = $current_agent {} {} {}
             ORDER BY id",
-            Self::knowledge_select_fields(),
+            Self::knowledge_select_fields(Projection::Lean),
             search_clause,
             resonance_clause,
             category_clause

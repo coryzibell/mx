@@ -23,6 +23,14 @@ impl KnowledgeStore for SurrealDatabase {
         self.get_knowledge(id, ctx)
     }
 
+    fn get_lean(
+        &self,
+        id: &str,
+        ctx: &crate::store::AgentContext,
+    ) -> Result<Option<KnowledgeEntry>> {
+        self.get_knowledge_lean(id, ctx)
+    }
+
     fn delete(&self, id: &str, ctx: &crate::store::AgentContext) -> Result<bool> {
         self.delete_knowledge(id, ctx)
     }
@@ -34,6 +42,15 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.search_knowledge(query, ctx, filter)
+    }
+
+    fn search_lean(
+        &self,
+        query: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.search_knowledge_lean(query, ctx, filter)
     }
 
     fn semantic_search(
@@ -72,6 +89,15 @@ impl KnowledgeStore for SurrealDatabase {
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
         self.list_by_category(category, ctx, filter)
+    }
+
+    fn list_by_category_lean(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.list_by_category_lean(category, ctx, filter)
     }
 
     fn count_by_category(

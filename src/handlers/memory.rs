@@ -558,7 +558,7 @@ fn add_one(
             args.entry_owner.as_deref(),
             &args.agent_id,
         );
-        if db.get(&id, &ctx)?.is_none() {
+        if db.get_lean(&id, &ctx)?.is_none() {
             bail!(
                 "write rejected: entry '{}' was not persisted (likely a permission denial — \
                  check that the writing agent owns the entry or has permission to create it)",
@@ -571,7 +571,7 @@ fn add_one(
     if let Some(ref sess_id) = args.session_id {
         let session_ref = normalize_id(sess_id);
         let ctx = store::AgentContext::public_only();
-        if db.get(&session_ref, &ctx)?.is_none() {
+        if db.get_lean(&session_ref, &ctx)?.is_none() {
             eprintln!(
                 "Warning: Session {} not found - EXTRACTED_FROM edge not created",
                 session_ref
@@ -718,9 +718,16 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     requested_limit
                 };
 
+                // Semantic search is left full unconditionally (Issue #438):
+                // the vector is part of what the query scores against, and
+                // this path is out of scope for the lean projection.
                 db.semantic_search(&query_embedding, &ctx, &db_filter, db_limit)?
-            } else {
+            } else if filter.json && !filter.omit_embedding {
+                // `--json` defaults to FULL, byte-identical to today — see
+                // the `list` handler above for why.
                 db.search(&query, &ctx, &db_filter)?
+            } else {
+                db.search_lean(&query, &ctx, &db_filter)?
             };
 
             // Apply in-memory field presence filters
@@ -784,11 +791,22 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 exclude_tag_prefixes: Vec::new(),
             };
 
+            // `--json` defaults to FULL (byte-identical to today, Issue
+            // #438): downstream consumers read `embedding == null` as
+            // "unembedded" from `list --json`, so a lean default would look
+            // like every row lost its vector. Terminal output and
+            // `--json --omit-embedding` are lean.
+            let want_full = filter.json && !filter.omit_embedding;
+
             // Get results from database with resonance filtering
             let entries = if let Some(ref cats) = filter.category {
                 let mut all = Vec::new();
                 for cat in cats {
-                    all.extend(db.list_by_category(cat, &ctx, &db_filter)?);
+                    all.extend(if want_full {
+                        db.list_by_category(cat, &ctx, &db_filter)?
+                    } else {
+                        db.list_by_category_lean(cat, &ctx, &db_filter)?
+                    });
                 }
                 all
             } else {
@@ -796,7 +814,11 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 let mut all = Vec::new();
                 let categories = db.list_categories()?;
                 for cat in categories {
-                    all.extend(db.list_by_category(&cat.id, &ctx, &db_filter)?);
+                    all.extend(if want_full {
+                        db.list_by_category(&cat.id, &ctx, &db_filter)?
+                    } else {
+                        db.list_by_category_lean(&cat.id, &ctx, &db_filter)?
+                    });
                 }
                 all
             };
@@ -825,6 +847,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             id,
             json,
             content_only,
+            omit_embedding,
         } => {
             let db = store::create_store_with_verbose(&config.db_path, verbose)?;
             let id = normalize_id(&id);
@@ -836,7 +859,17 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 _ => store::AgentContext::public_only(),
             };
 
-            match db.get(&id, &ctx)? {
+            // `--json` defaults to FULL (byte-identical to today, Issue #438):
+            // downstream consumers read `embedding == null` as "unembedded", so a
+            // lean default would look like every row lost its vector. Every
+            // other path (plain text, or --json --omit-embedding) is lean.
+            let fetched = if json && !omit_embedding {
+                db.get(&id, &ctx)?
+            } else {
+                db.get_lean(&id, &ctx)?
+            };
+
+            match fetched {
                 Some(entry) => {
                     // Activate fact when viewing details
                     if entry.id.starts_with("kn-")
@@ -983,7 +1016,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // Backup before delete (Issue #206)
-            if let Some(entry) = db.get(&id, &ctx)? {
+            if let Some(entry) = db.get_lean(&id, &ctx)? {
                 let _ = db
                     .backup_content(&entry, "delete", current_agent.as_deref())
                     .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
@@ -1106,7 +1139,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                     // Update existing thread to closed state
                     if let Some(thread_entry) =
-                        db.get(&tid, &store::AgentContext::for_agent(&agent_id))?
+                        db.get_lean(&tid, &store::AgentContext::for_agent(&agent_id))?
                     {
                         let mut meta: serde_json::Value = thread_entry
                             .summary
@@ -1277,7 +1310,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // loud failure.
                 {
                     let ctx = store::AgentContext::for_agent(&agent_id);
-                    if db.get(&id, &ctx)?.is_none() {
+                    if db.get_lean(&id, &ctx)?.is_none() {
                         bail!(
                             "write rejected: fact '{}' was not persisted (likely a permission denial — check that the writing agent owns the entry or has permission to create it)",
                             id
@@ -1294,7 +1327,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                     };
 
                     let ctx = crate::store::AgentContext::public_only();
-                    if db.get(&session_ref, &ctx)?.is_none() {
+                    if db.get_lean(&session_ref, &ctx)?.is_none() {
                         eprintln!(
                             "Warning: Session {} not found - relationship not created",
                             session_ref
@@ -1995,7 +2028,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                 // need both the field AND the edge for consistency.
                 let session_ref = normalized;
                 let edge_ctx = crate::store::AgentContext::public_only();
-                if db.get(&session_ref, &edge_ctx)?.is_none() {
+                if db.get_lean(&session_ref, &edge_ctx)?.is_none() {
                     eprintln!(
                         "Warning: Session {} not found - EXTRACTED_FROM edge not created",
                         session_ref
@@ -2159,7 +2192,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // Backup before edit (Issue #206)
-            if let Some(entry) = db.get(&id, &ctx)? {
+            if let Some(entry) = db.get_lean(&id, &ctx)? {
                 let _ = db
                     .backup_content(&entry, "edit", current_agent.as_deref())
                     .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
@@ -2265,7 +2298,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Backup before append (Issue #206)
-            if let Some(entry) = db.get(&id, &ctx)? {
+            if let Some(entry) = db.get_lean(&id, &ctx)? {
                 let _ = db
                     .backup_content(&entry, "append", current_agent.as_deref())
                     .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
@@ -2367,7 +2400,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
 
             // Backup before prepend (Issue #206)
-            if let Some(entry) = db.get(&id, &ctx)? {
+            if let Some(entry) = db.get_lean(&id, &ctx)? {
                 let _ = db
                     .backup_content(&entry, "prepend", current_agent.as_deref())
                     .map_err(|e| eprintln!("Warning: failed to create backup: {}", e));
@@ -2450,7 +2483,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if list {
                 // List available backups
                 // #7: filter by visibility — only show backups for entries the agent can see
-                if db.get(&id, &ctx)?.is_none() {
+                if db.get_lean(&id, &ctx)?.is_none() {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&serde_json::json!([]))?);
                     } else {
@@ -2811,7 +2844,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
 
                     // Read-back verify (same as single-add path)
                     let ctx = store::AgentContext::for_agent(&agent_id);
-                    match db.get(&id, &ctx) {
+                    match db.get_lean(&id, &ctx) {
                         Ok(Some(_)) => {}
                         Ok(None) => {
                             entry_errors.push((
@@ -2846,7 +2879,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
                             format!("kn-{}", sess)
                         };
                         let pub_ctx = store::AgentContext::public_only();
-                        match db.get(&session_ref, &pub_ctx) {
+                        match db.get_lean(&session_ref, &pub_ctx) {
                             Ok(None) => {
                                 eprintln!(
                                     "  line {}: Warning: Session {} not found - relationship not created",
@@ -3840,7 +3873,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             if json || format == "json" {
                 let mut json_facts = Vec::new();
                 for fact_id in &fact_ids {
-                    if let Some(fact) = db.get(fact_id, &ctx)? {
+                    if let Some(fact) = db.get_lean(fact_id, &ctx)? {
                         let fact_type = fact
                             .summary
                             .as_ref()
@@ -3864,7 +3897,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             } else {
                 println!("Facts for session {}:", session_ref);
                 for fact_id in fact_ids {
-                    if let Some(fact) = db.get(&fact_id, &ctx)? {
+                    if let Some(fact) = db.get_lean(&fact_id, &ctx)? {
                         let fact_type = fact
                             .summary
                             .as_ref()
@@ -4383,6 +4416,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -4393,6 +4433,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -4430,6 +4478,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
@@ -4746,6 +4802,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -4756,6 +4819,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -4793,6 +4864,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
@@ -5116,6 +5195,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -5126,6 +5212,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -5162,6 +5256,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
