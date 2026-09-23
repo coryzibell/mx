@@ -1339,8 +1339,12 @@ add --type` (fact-routing), and both lines of `mx memory add-batch`
 `title+body` (lowercase, ASCII punctuation and common Unicode
 punctuation stripped -- smart quotes, en/em dash, horizontal ellipsis --
 whitespace collapsed) against the writing agent's OWN entries in the
-SAME session before writing. A regenerated duplicate that differs only
-by case, punctuation, or whitespace -- the common shape when an LLM
+SAME session AND SAME CATEGORY before writing. Category is enforced by
+scoping the candidate query, not by folding it into `dedup_hash` itself
+-- identical title+body re-filed under a different category is a
+distinct fact (a different shelf), never a dedup candidate, so it always
+lands as its own entry. A regenerated duplicate that differs only by
+case, punctuation, or whitespace -- the common shape when an LLM
 re-derives the same fact across turns -- is detected and the write is
 SKIPPED rather than landing as a second row. Title and body are hashed
 as a length-prefixed pair, so a duplicate that shifts the split point
@@ -1393,9 +1397,9 @@ already durably saved, and there is nothing further to do.
 ::: {.admonition .note}
 **NOTE:** **Coverage boundary, read this before assuming full
 coverage:** the gate catches recased/repunctuated re-adds within the
-SAME session and SAME owner. It does NOT catch: cross-session
-regenerations (a fact re-derived in a later wake under a different
-`session_id` -- **open question, not yet confirmed:** the  20
+SAME session, SAME owner, and SAME category. It does NOT catch:
+cross-session regenerations (a fact re-derived in a later wake under a
+different `session_id` -- **open question, not yet confirmed:** the  20
 double-write pairs (W342--W445) that motivated this feature have not
 been checked against this scope; if most of them are cross-session
 rather than same-session, this fix closes only a minority of the
@@ -1405,14 +1409,21 @@ here), reworded duplicates (different words, same meaning -- e.g.
 "shipped" vs "published"), a public+owned entry vs. a later
 public+unowned entry with identical content (owner is a hard
 AND-conjoined predicate, so these two visible-to-everyone rows never
-dedup against each other even though both are public), or writes with no
-`session_id` at all (dedup is bypassed entirely when `session_id` is
-absent -- a bypass signal is emitted on EVERY funnel: `"dedup":
-"bypassed_no_session"` in `--json` mode on the standard single-add path
-(mutually exclusive with the stderr note -- json mode never prints
-both), a stderr note on all four funnels in every other mode, so the
-bypass is never silent). Keep marking back captured entries; this is a
-store-boundary backstop, not a substitute for careful write discipline.
+dedup against each other even though both are public), identical
+title+body filed under a DIFFERENT category (category is a hard
+AND-conjoined predicate too -- a re-file under a new category is treated
+as a distinct fact, deliberately, never a duplicate), identical
+title+body with DIFFERENT tags (tags are edge-modeled, not a scalar
+field on the row, and are deliberately excluded from the dedup identity
+entirely -- a tag-only-differing re-add still dedupes, same as any other
+identical-content re-add), or writes with no `session_id` at all (dedup
+is bypassed entirely when `session_id` is absent -- a bypass signal is
+emitted on EVERY funnel: `"dedup": "bypassed_no_session"` in `--json`
+mode on the standard single-add path (mutually exclusive with the stderr
+note -- json mode never prints both), a stderr note on all four funnels
+in every other mode, so the bypass is never silent). Keep marking back
+captured entries; this is a store-boundary backstop, not a substitute
+for careful write discipline.
 :::
 
 ::: {.admonition .note}
@@ -1425,12 +1436,15 @@ unenforced) and there is no `DEFINE INDEX ... UNIQUE` backing it at the
 schema level -- a persisted `dedup_hash` plus a compound unique index
 would close the TOCTOU gap and make the "store-boundary" framing
 literally true, at the cost of mapping a constraint violation to a skip;
-this is a design option for a future PR, not implemented here. The
-candidate query has no result limit, so a very long-lived session pays
-an O(n) rehash of every row ever written to its `(session, owner)` group
-on every future write in that group -- bounded in practice (memory
-sessions aren't usually thousands of rows), a follow-up if it ever
-isn't.
+this is a design option for a future PR, not implemented here -- and,
+per finding 1, that unique index must key on
+`(session, owner, category, dedup_hash)`, not just `(session, owner,
+dedup_hash)`, to match the same category scope this fix adds to the
+in-process gate. The candidate query has no result limit, so a very
+long-lived session pays an O(n) rehash of every row ever written to its
+`(session, owner, category)` group on every future write in that group
+-- bounded in practice (memory sessions aren't usually thousands of
+rows), a follow-up if it ever isn't.
 :::
 
 ::: {.admonition .note}
@@ -1872,17 +1886,20 @@ and presents them in the requested format.
 
 ### Flags
 
-  **Flag**            **Type**   **Description**
-  ------------------- ---------- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-  `-l, --limit`       `int`      Number of blooms to return. Default: `20`.
-  `--min-resonance`   `int`      Minimum resonance threshold -- get ALL blooms \>= this value (overrides `--limit`). Filtered on the **raw** stored resonance, unlike `list`/`search`, which use the decayed **effective** value (Issue #404).
-  `-d, --days`        `int`      Include memories activated in last N days. Default: `7`.
-  `--no-activate`     `flag`     Do not update activation counts.
-  `--begin`           `flag`     Start token-based wake ritual. Returns first bloom and session token.
-  `--bloom-id`        `string`   Bloom ID for `--respond` or `--skip` operations.
-  `--respond`         `string`   Submit wake phrase response for a bloom.
-  `--skip`            `flag`     Skip a bloom without wake phrase.
-  `--session`         `string`   Session token for chained ritual (required with `--respond` or `--skip`).
+  **Flag**               **Type**   **Description**
+  ---------------------- ---------- ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+  `-l, --limit`          `int`      Number of blooms to return. Default: `20`.
+  `--min-resonance`      `int`      Minimum resonance threshold -- get ALL blooms \>= this value (overrides `--limit`). Filtered on the **raw** stored resonance, unlike `list`/`search`, which use the decayed **effective** value (Issue #404).
+  `-d, --days`           `int`      Include memories activated in last N days. Default: `7`.
+  `--no-activate`        `flag`     Do not update activation counts.
+  `--begin`              `flag`     Start token-based wake ritual. Returns first bloom and session token.
+  `--bloom-id`           `string`   Bloom ID for `--respond`.
+  `--respond`            `string`   Submit your one guess for this bloom. Maximum 2000 characters.
+  `--session`            `string`   Session token for chained ritual (required with `--respond`).
+  `--wake`               `int`      Wake number recorded on every guess row (with `--begin`). Optional; mx keeps no counter of its own. Must be positive. Refused when another ritual already logged guesses under it.
+  `--force-wake`         `flag`     Begin under a `--wake` number another ritual already logged guesses under.
+  `--model`              `string`   Model identifier recorded on every guess row (with `--begin`). Optional; mx cannot discover it.
+  `--include-excluded`   `flag`     Include entries tagged `archive` or `wake-exclude`, which are kept out of the wake set by default.
 
 ### Examples
 
@@ -1898,9 +1915,8 @@ mx memory wake --min-resonance 7
 
 ``` bash
 # Token-based ritual (for non-TTY / programmatic use)
-mx memory wake --begin
-mx memory wake --bloom-id kn-abc --respond "the phrase" --session tok-xyz
-mx memory wake --bloom-id kn-def --skip --session tok-xyz
+mx memory wake --begin --wake 7 --model some-model-id
+mx memory wake --bloom-id kn-abc --respond "your guess" --session tok-xyz
 ```
 
 ::: {.admonition .note}
@@ -1913,10 +1929,105 @@ system reads blooms ordered by resonance and wake order.
 - **Default** (`mx memory wake`): plain text cascade output, blooms
   listed with titles and content.
 
-- **Token-based** (`--begin`, `--respond`, `--skip`): stateless chained
-  ritual for non-interactive environments. Start with `--begin`, then
-  loop with `--respond` or `--skip` using the returned session token and
-  bloom ID.
+- **Token-based** (`--begin`, `--respond`): stateless chained ritual for
+  non-interactive environments. Start with `--begin`, then loop with
+  `--respond` using the returned session token and bloom ID.
+
+### The ritual flow
+
+Each chunk gets exactly one guess, made from the title alone, after
+which the entry is shown. There is no hint ladder and no second attempt.
+
+`--respond` returns `status: "shown"` with a `bucket` of either
+`unhinted` (the guess string-matched one of the chunk's phrases, and the
+tool had given no hint) or `revealed` (it did not). `match` carries the
+mechanical facts: `kind` is `exact` (identical to a phrase after
+trimming), `close` (matched only after normalizing case, punctuation or
+spelling) or `none`, and `phrase_index` says which phrase matched. The
+bucket names what the tool did, not what the responder knew.
+
+The begin response and every respond payload echo `wake` and `model`.
+`--begin` refuses a wake number another session already logged guesses
+under (pass `--force-wake` to proceed anyway) and adds a `warnings`
+entry when the number is below the highest the agent has logged, or more
+than one above it.
+
+A step that is already logged is answered from the log rather than
+judged again: the response carries `replayed: true`, the **logged**
+`guess`, `bucket` and `match`, and the current token and `next`. The
+first guess counts.
+
+A caller whose response was lost retries with the token it spent and
+gets that response again, with `replayed: true` and the token it never
+received --- however far the lost call moved the ritual, including when
+it judged nothing: a lost `bloom_missing` or `chunk_truncated` is
+answered with the same status (without `bloom`). Only the last call can
+be resumed this way. A token older than that is refused with a pointer
+to the last one that worked, and the pointer is true: the token from the
+last successful response is always either current or resumable.
+
+The final response carries a summary of bucket counts split by phrase
+source (`authored`, `derived`, `auto`), the number of chunks walked, and
+`unjudged` --- the steps where no guess was judged. `chunks` always
+equals the bucket totals plus `unjudged`, so the difference never has to
+be worked out by subtraction.
+
+Two statuses judge no guess, write no row, and omit `bucket`, `guess`
+and `match`: `chunk_truncated`, when the entry shrank past the session's
+chunk cursor, and `bloom_missing`, when the entry was deleted
+mid-ritual. Both still advance the step, so the token the caller spent
+stops verifying, and both are counted in `unjudged`.
+
+The ritual is walked by the agent that began it: `MX_CURRENT_AGENT` must
+equal the session's agent, and a caller naming no agent is refused as
+well.
+
+A guess is refused outright, with no row written and no advance, when it
+is longer than 2000 characters (counted in characters, and never
+truncated) or carries no alphanumeric content at all. A refused call can
+simply be retried with the same session token.
+
+A session created by a version of mx older than the one-guess ritual is
+refused rather than continued. A completed session is kept, with
+`completed_at` set.
+
+Naming the wrong entry is refused with `{status: "error", error:
+"invalid_bloom_id", message, expected_id?}` on stderr and exit code 1,
+like every other error.
+
+### The guess log
+
+Every `--respond` that judges a guess writes one `wake_guess` row, keyed
+by session and step, in the same transaction as the session advance: the
+agent, wake number, model, entry, chunk, both positions in the sequence,
+the title as shown, the guess, the phrases it was matched against, the
+match, the bucket, and the SHA-256 of the chunk text. If the transaction
+fails, the respond call fails and neither the row nor the advance lands.
+
+Guess rows are scoped to the writing agent and are not reachable through
+`mx memory export`, which reads the knowledge table only.
+
+### Wake set exclusion
+
+Entries tagged `archive` or `wake-exclude` are kept out of every cascade
+layer by default, and `--begin` reports per-tag counts in its `excluded`
+field. The match is exact, so a tag that merely starts with `archive` is
+unaffected. `--include-excluded` turns the exclusion off.
+
+The core layer never lets an exclusion cost a kept entry its place: it
+widens its query until it holds a full set of entries that survive the
+exclusion. The recent and bridge layers fetch double their quota, which
+absorbs the ordinary case but is not a guarantee --- enough excluded
+entries in one layer can still leave the wake set short, and
+batch-archiving is how you would meet that, since a freshly tagged entry
+counts as recent for seven days.
+
+Every layer counts only as far as its quota is filled, so an entry
+ranked below the wake set is never counted. The reported figure is an
+upper bound on the entries the exclusion kept out --- an excluded entry
+displaces everything after it, so one reached only because an earlier
+exclusion pushed the window down is counted too, although it would not
+have made the cut untagged.
 
 ## `mx memory wake-fetch`
 
@@ -7933,8 +8044,8 @@ entry with the following field groups:
 - `anchors` (array\<string\>) -- IDs of related blooms this entry
   connects to
 
-- `wake_phrases` (array\<string\>) -- verification phrases for the wake
-  ritual
+- `wake_phrases` (array\<string\>) -- cues the title is meant to evoke,
+  used by the wake ritual
 
 - `wake_order` (optional int) -- custom sequence position
 
