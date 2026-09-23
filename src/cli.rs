@@ -431,7 +431,7 @@ pub struct EntryFilter {
     /// With --json, drop the `embedding` vector from the output (emits
     /// `"embedding": null`, same shape as a never-embedded entry). Has no
     /// effect without --json: terminal output never includes the vector
-    /// either way (Issue #438).
+    /// either way (Issue #438). Ignored with --semantic.
     #[arg(long)]
     pub omit_embedding: bool,
 }

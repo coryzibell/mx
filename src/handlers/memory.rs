@@ -792,7 +792,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // `--json` defaults to FULL (byte-identical to today, Issue
-            // #438): house consumers read `embedding == null` as
+            // #438): downstream consumers read `embedding == null` as
             // "unembedded" from `list --json`, so a lean default would look
             // like every row lost its vector. Terminal output and
             // `--json --omit-embedding` are lean.
@@ -860,7 +860,7 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             };
 
             // `--json` defaults to FULL (byte-identical to today, Issue #438):
-            // house consumers read `embedding == null` as "unembedded", so a
+            // downstream consumers read `embedding == null` as "unembedded", so a
             // lean default would look like every row lost its vector. Every
             // other path (plain text, or --json --omit-embedding) is lean.
             let fetched = if json && !omit_embedding {
@@ -4416,6 +4416,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -4426,6 +4433,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -4463,6 +4478,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
@@ -4779,6 +4802,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -4789,6 +4819,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -4826,6 +4864,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,
@@ -5149,6 +5195,13 @@ mod dedup_gate_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<knowledge::KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(
+            &self,
+            id: &str,
+            ctx: &AgentContext,
+        ) -> Result<Option<knowledge::KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -5159,6 +5212,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -5195,6 +5256,14 @@ mod dedup_gate_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<knowledge::KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<knowledge::KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,

@@ -150,21 +150,21 @@ pub trait KnowledgeStore {
     /// `embedding` column for a caller that only renders the result —
     /// `embedding_model`, `embedded_at` and `chunk_count` are unaffected.
     /// Never use this on a result that gets written back through
-    /// `upsert_knowledge`: the write guard there means a lean read fed back
-    /// through upsert leaves a pre-existing stored vector untouched rather
-    /// than nulling it, but the in-memory value the caller holds is `None`
-    /// either way, which is wrong for anything that reads `.embedding`.
+    /// `upsert_knowledge`: a lean-read entry keeps `embedding_model`, which
+    /// is what tells the write guard "this is a lean read, not a genuinely
+    /// unembedded entry" and leaves a pre-existing stored vector untouched —
+    /// but the in-memory value the caller holds is `None` either way, which
+    /// is wrong for anything that reads `.embedding`.
     ///
-    /// The default forwards to `get` and strips the vector in Rust — correct
-    /// output, no byte savings. A backend worth leaning overrides this with
-    /// its own projection.
-    fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
-        let mut entry = self.get(id, ctx)?;
-        if let Some(e) = entry.as_mut() {
-            e.embedding = None;
-        }
-        Ok(entry)
-    }
+    /// No default body: every `KnowledgeStore` implementor (SurrealDB, and
+    /// every test mock) must say explicitly how it produces a lean result,
+    /// even if that's "forward to `get` and strip `.embedding`" for a mock
+    /// backed by an in-memory `Vec`. A default here would let a future
+    /// implementor forget the override and silently fall back to a full
+    /// fetch with no compile error — the same reason #437 gave for making
+    /// `list_by_category_limited` its own required method rather than a
+    /// defaulted one.
+    fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>>;
 
     /// Delete a knowledge entry (respects visibility: agents can only delete entries they can see)
     fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool>;
@@ -182,20 +182,14 @@ pub trait KnowledgeStore {
     /// the caller opts into the lean flag; plain `--json` stays on `search`
     /// (full) to keep that output byte-identical by default.
     ///
-    /// The default forwards to `search` and strips the vector in Rust; a
-    /// backend worth leaning overrides this with its own projection.
+    /// No default body — see [`get_lean`](Self::get_lean) for why every
+    /// implementor must say explicitly how it produces a lean result.
     fn search_lean(
         &self,
         query: &str,
         ctx: &AgentContext,
         filter: &KnowledgeFilter,
-    ) -> Result<Vec<KnowledgeEntry>> {
-        let mut entries = self.search(query, ctx, filter)?;
-        for e in &mut entries {
-            e.embedding = None;
-        }
-        Ok(entries)
-    }
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// Semantic search using vector similarity
     fn semantic_search(
@@ -245,20 +239,14 @@ pub trait KnowledgeStore {
     /// the disaster-recovery path and needs the vector to round-trip into a
     /// fresh database.
     ///
-    /// The default forwards to `list_by_category` and strips the vector in
-    /// Rust; a backend worth leaning overrides this with its own projection.
+    /// No default body — see [`get_lean`](Self::get_lean) for why every
+    /// implementor must say explicitly how it produces a lean result.
     fn list_by_category_lean(
         &self,
         category: &str,
         ctx: &AgentContext,
         filter: &KnowledgeFilter,
-    ) -> Result<Vec<KnowledgeEntry>> {
-        let mut entries = self.list_by_category(category, ctx, filter)?;
-        for e in &mut entries {
-            e.embedding = None;
-        }
-        Ok(entries)
-    }
+    ) -> Result<Vec<KnowledgeEntry>>;
 
     /// Count entries by category (fast path — single COUNT query, no row hydration).
     /// Avoids the N+1 pattern of `list_by_category(..)?.len()` which fetches every

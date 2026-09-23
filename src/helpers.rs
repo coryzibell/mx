@@ -1262,6 +1262,9 @@ mod auto_anchor_tests {
         fn get(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
             self.inner.get(id, ctx)
         }
+        fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+            self.inner.get_lean(id, ctx)
+        }
         fn delete(&self, id: &str, ctx: &AgentContext) -> Result<bool> {
             self.inner.delete(id, ctx)
         }
@@ -1272,6 +1275,14 @@ mod auto_anchor_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<KnowledgeEntry>> {
             self.inner.search(query, ctx, filter)
+        }
+        fn search_lean(
+            &self,
+            query: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.search_lean(query, ctx, filter)
         }
         fn semantic_search(
             &self,
@@ -1308,6 +1319,14 @@ mod auto_anchor_tests {
             filter: &store::KnowledgeFilter,
         ) -> Result<Vec<KnowledgeEntry>> {
             self.inner.list_by_category(category, ctx, filter)
+        }
+        fn list_by_category_lean(
+            &self,
+            category: &str,
+            ctx: &AgentContext,
+            filter: &store::KnowledgeFilter,
+        ) -> Result<Vec<KnowledgeEntry>> {
+            self.inner.list_by_category_lean(category, ctx, filter)
         }
         fn count_by_category(
             &self,

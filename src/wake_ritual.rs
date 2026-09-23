@@ -2230,6 +2230,19 @@ mod tests {
                 Ok(self.blooms.borrow().get(id).cloned())
             }
 
+            /// Reachable, unlike the other lean methods below: `respond_ritual`'s
+            /// `fetch_blooms_by_ids` calls `get_lean` per bloom, so the tests in
+            /// this module exercise it. Forward-and-strip is correct here since
+            /// there is no SQL projection to short-circuit — `blooms` is already
+            /// an in-memory map.
+            fn get_lean(&self, id: &str, ctx: &AgentContext) -> Result<Option<KnowledgeEntry>> {
+                let mut entry = self.get(id, ctx)?;
+                if let Some(e) = entry.as_mut() {
+                    e.embedding = None;
+                }
+                Ok(entry)
+            }
+
             fn create_wake_session(&self, session: &WakeSession) -> Result<String> {
                 self.sessions
                     .borrow_mut()
@@ -2320,6 +2333,14 @@ mod tests {
             ) -> Result<Vec<KnowledgeEntry>> {
                 unreachable!()
             }
+            fn search_lean(
+                &self,
+                _q: &str,
+                _ctx: &AgentContext,
+                _f: &KnowledgeFilter,
+            ) -> Result<Vec<KnowledgeEntry>> {
+                unreachable!()
+            }
             fn semantic_search(
                 &self,
                 _emb: &[f32],
@@ -2347,6 +2368,14 @@ mod tests {
                 unreachable!()
             }
             fn list_by_category(
+                &self,
+                _c: &str,
+                _ctx: &AgentContext,
+                _f: &KnowledgeFilter,
+            ) -> Result<Vec<KnowledgeEntry>> {
+                unreachable!()
+            }
+            fn list_by_category_lean(
                 &self,
                 _c: &str,
                 _ctx: &AgentContext,

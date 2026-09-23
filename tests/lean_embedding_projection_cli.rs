@@ -84,7 +84,7 @@ fn json_default_stays_full_and_omit_embedding_goes_lean() {
 
     // Default --json: byte-identical to today -- the embedding array is
     // present and matches the fixture vector exactly. This is the contract
-    // house consumers (reading `embedding == null` as "unembedded") rely on.
+    // downstream consumers (reading `embedding == null` as "unembedded") rely on.
     let out = mx(&dir, &["memory", "list", "--json"]);
     assert!(out.status.success());
     let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&out)).unwrap();
@@ -134,5 +134,26 @@ fn json_default_stays_full_and_omit_embedding_goes_lean() {
         shown["embedding"].as_array().map(|a| a.len()),
         Some(768),
         "the stored vector must be intact after a lean --json read elsewhere"
+    );
+
+    // `search --json` (keyword mode) defaults to full too -- the same
+    // Full/Lean split as `list`, pinned separately since it's a different
+    // read site (`search_lean`, not `list_by_category_lean`).
+    let out = mx(&dir, &["memory", "search", "lean projection", "--json"]);
+    assert!(
+        out.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout_of(&out)).unwrap();
+    let entries = parsed.as_array().expect("search --json returns an array");
+    let entry = entries
+        .iter()
+        .find(|e| e["id"] == "kn-cli-lean-fixture")
+        .expect("keyword search must find the fixture by title");
+    assert_eq!(
+        entry["embedding"].as_array().map(|a| a.len()),
+        Some(768),
+        "default search --json must keep the embedding array, not null"
     );
 }

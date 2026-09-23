@@ -517,14 +517,30 @@ impl SurrealDatabase {
             .to_string();
 
         // Add optional fields
-        // `embedding` is written conditionally, like the other optional
-        // columns below: an entry with no embedding must never overwrite an
-        // existing stored vector with NULL (Issue #438). No production path
-        // upserts a fresh `None` over a row that already carries a vector
-        // (`grep -rn 'embedding = None' src/` finds only a test), so this
-        // does not change any existing clear-the-vector behavior — there
-        // isn't one.
-        if entry.embedding.is_some() {
+        // `embedding` is written when the entry carries a vector, OR when it
+        // is genuinely unembedded (`embedding_model` also `None`) (Issue
+        // #438). This is NOT "write only when Some": a fresh construct
+        // upserted over an existing row (`memory add`/`add-batch` on a
+        // title/category or session/type/body-prefix collision, or `seed
+        // knowledge` of a never-embedded export line) must still clear a
+        // stale vector, exactly as it did before this change — otherwise the
+        // old vector survives under new content with no detector, since
+        // nothing selects on "vector present, model null".
+        //
+        // The discriminator is `embedding_model`: a LEAN READ keeps
+        // `embedding_model` (it only drops `embedding` itself), so
+        // `write_embedding` is false for a lean-read entry and the column is
+        // left untouched — the guard's actual job. A fresh, never-embedded
+        // entry has both `None`, so `write_embedding` is true and the column
+        // is cleared to match.
+        //
+        // Residual edge (undocumented in production, not fixed here): a
+        // legacy row that already carries a vector with a `None` model,
+        // lean-read and upserted back, would be cleared. No lean-read →
+        // upsert path exists today (every lean read either renders, drops
+        // the value, or backs up title/body), so this is latent, not live.
+        let write_embedding = entry.embedding.is_some() || entry.embedding_model.is_none();
+        if write_embedding {
             query.push_str(", embedding = $embedding");
         }
         if entry.source_project_id.is_some() {
@@ -607,8 +623,8 @@ impl SurrealDatabase {
                 .bind(("format", entry.format.clone()));
 
             // Bind optional parameters
-            if let Some(ref emb) = entry.embedding {
-                q = q.bind(("embedding", emb.clone()));
+            if write_embedding {
+                q = q.bind(("embedding", entry.embedding.clone()));
             }
             if let Some(ref proj) = entry.source_project_id {
                 q = q.bind(("source_project_id", proj.clone()));

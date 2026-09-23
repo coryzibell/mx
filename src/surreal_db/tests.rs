@@ -5455,7 +5455,7 @@ fn entry_with_768_vector(id: &str, vector: Vec<f32>) -> crate::knowledge::Knowle
 /// Shared assertion for every lean read site: the projection must not carry
 /// the vector but must keep `embedding_model`, and upserting that exact lean
 /// entry back must NOT clear the vector already in storage -- this is what
-/// pins the `upsert_knowledge_async` write guard (knowledge.rs, around 486).
+/// pins the conditional `embedding` write in `upsert_knowledge_async`.
 /// Revert the guard and every caller of this helper fails.
 fn assert_lean_read_then_upsert_preserves_vector(
     db: &SurrealDatabase,
@@ -5740,21 +5740,67 @@ fn export_jsonl_round_trip_keeps_vector_bit_exact() {
     assert_eq!(full.embedding.as_deref(), Some(v.as_slice()));
 }
 
+// Issue #438 fix round: the write guard is NOT "write `embedding` only when
+// `Some`". It writes when the entry carries a vector, OR when it is
+// genuinely unembedded (`embedding_model` also `None`) -- the discriminator
+// that separates a LEAN READ (keeps `embedding_model`, so the column is left
+// alone) from a fresh/never-embedded construct (both `None`, so the column
+// is cleared, exactly as an unconditional write always did). The three
+// tests below each pin one branch of that discriminator.
+
 #[test]
-fn import_jsonl_null_embedding_does_not_clear_existing_vector() {
+fn import_jsonl_lean_shaped_line_keeps_vector() {
     use crate::store::KnowledgeStore;
 
     let db = SurrealDatabase::open_in_memory().unwrap();
     let v = synthetic_768_vector();
-    db.upsert_knowledge(&entry_with_768_vector("kn-import-null", v.clone()))
+    db.upsert_knowledge(&entry_with_768_vector("kn-import-lean", v.clone()))
         .unwrap();
 
-    // A JSONL line for the SAME id with embedding explicitly null (e.g. a
-    // stale export taken before the entry was embedded).
+    // The `--omit-embedding` output shape: `embedding: null` but
+    // `embedding_model` populated -- e.g. re-importing a lean `--json` export
+    // by mistake. This must NOT be treated as "genuinely unembedded".
     let line = serde_json::json!({
-        "id": "kn-import-null",
+        "id": "kn-import-lean",
         "category_id": "test",
-        "title": "reimported over an existing vector",
+        "title": "reimported from a lean-shaped line",
+        "embedding": null,
+        "embedding_model": "test-model",
+    })
+    .to_string();
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(tmp.path(), format!("{line}\n")).unwrap();
+
+    crate::index::import_jsonl(&db, tmp.path()).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let full = db.get_knowledge("kn-import-lean", &ctx).unwrap().unwrap();
+    assert_eq!(
+        full.embedding.as_deref(),
+        Some(v.as_slice()),
+        "a lean-shaped import line (embedding null, model populated) must \
+         not clear a pre-existing vector"
+    );
+    assert_eq!(full.title, "reimported from a lean-shaped line");
+}
+
+#[test]
+fn import_jsonl_unembedded_line_clears_vector() {
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    db.upsert_knowledge(&entry_with_768_vector("kn-import-unembedded", v))
+        .unwrap();
+
+    // A genuinely unembedded export line: no model either. Restoring this
+    // must clear the vector -- "unembedded at this body" has to mean that,
+    // or restore-from-export silently keeps a vector for content the export
+    // never had a vector for.
+    let line = serde_json::json!({
+        "id": "kn-import-unembedded",
+        "category_id": "test",
+        "title": "reimported as genuinely unembedded",
         "embedding": null,
     })
     .to_string();
@@ -5763,21 +5809,50 @@ fn import_jsonl_null_embedding_does_not_clear_existing_vector() {
 
     crate::index::import_jsonl(&db, tmp.path()).unwrap();
 
-    // Issue #438 write guard: upsert_knowledge_async only writes `embedding`
-    // when the incoming entry carries one, so a None import does NOT clear
-    // the column -- the pre-existing vector survives. This is correct per
-    // Weir's ruling: no production path imports a null embedding over an
-    // existing row to intentionally clear it (a real reset goes through
-    // `memory embed`, which writes a fresh vector, never `None`), and the
-    // guard's whole point is that NO read path -- lean or otherwise -- can
-    // ever null a stored vector through upsert.
     let ctx = crate::store::AgentContext::public_only();
-    let full = db.get_knowledge("kn-import-null", &ctx).unwrap().unwrap();
-    assert_eq!(
-        full.embedding.as_deref(),
-        Some(v.as_slice()),
-        "the write guard must preserve a pre-existing vector across a \
-         null-embedding re-import"
+    let full = db
+        .get_knowledge("kn-import-unembedded", &ctx)
+        .unwrap()
+        .unwrap();
+    assert!(
+        full.embedding.is_none(),
+        "an unembedded import line (embedding null, no model either) must \
+         clear a pre-existing vector, matching restore-from-export fidelity"
     );
-    assert_eq!(full.title, "reimported over an existing vector");
+    assert_eq!(full.title, "reimported as genuinely unembedded");
+}
+
+#[test]
+fn fresh_entry_upsert_over_embedded_row_clears_vector() {
+    // `memory add`'s shape: ids are deterministic (blake3 of category+title,
+    // or session+type+body-prefix for a fact), so re-adding under the same
+    // id upserts a fresh, never-embedded `KnowledgeEntry` literal over an
+    // existing row. That must still clear a stale vector -- this is the
+    // production path the guard has to keep working, not just import.
+    use crate::store::KnowledgeStore;
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let v = synthetic_768_vector();
+    let embedded = entry_with_768_vector("kn-fresh-over-embedded", v);
+    db.upsert_knowledge(&embedded).unwrap();
+
+    let mut fresh = make_test_entry("kn-fresh-over-embedded", 5, 0.0);
+    fresh.title = "a new title, same id".to_string();
+    fresh.body = Some("a new body".to_string());
+    assert!(fresh.embedding.is_none());
+    assert!(fresh.embedding_model.is_none());
+    db.upsert_knowledge(&fresh).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let full = db
+        .get_knowledge("kn-fresh-over-embedded", &ctx)
+        .unwrap()
+        .unwrap();
+    assert!(
+        full.embedding.is_none(),
+        "a fresh, never-embedded entry upserted over an existing row must \
+         clear the old vector rather than leave a stale vector under new \
+         content"
+    );
+    assert_eq!(full.title, "a new title, same id");
 }
