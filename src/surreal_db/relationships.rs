@@ -251,7 +251,17 @@ impl SurrealDatabase {
                 .context("Failed to query tags")
         })?;
 
-        let tags: Vec<String> = tags_response.take(0).unwrap_or_default();
+        let mut tags: Vec<String> = tags_response.take(0).unwrap_or_default();
+        // Deterministic order (issue #415): the underlying query has no
+        // ORDER BY. What it happened to return was traced to the
+        // `tagged_with_unique` index on (in, out) — sorted by `out`, i.e. by
+        // tag record id, which equals tag NAME (see upsert_knowledge_async's
+        // `UPSERT type::thing('tag', $tag_id)` where `$tag_id` is the tag
+        // name). That's an index-scan artifact, not a documented or
+        // depended-on order, so it's made explicit here instead of left
+        // implicit — and applied identically in the batch path
+        // (get_tags_for_entries_async below) so `show` and `list` agree.
+        tags.sort();
         Ok(tags)
     }
 
@@ -320,6 +330,11 @@ impl SurrealDatabase {
                 .or_default()
                 .extend(row.tags);
         }
+        // Deterministic order matching get_tags_for_entry_async (see its
+        // comment) so `show` and any batch-hydrated list agree.
+        for tags in out.values_mut() {
+            tags.sort();
+        }
 
         Ok(out)
     }
@@ -343,9 +358,12 @@ impl SurrealDatabase {
                 .context("Failed to query applicability")
         })?;
 
-        let applicability: Vec<String> = app_response
+        let mut applicability: Vec<String> = app_response
             .take(0)
             .context("Failed to deserialize applicability")?;
+        // Deterministic order (issue #415): sort by id, same reasoning
+        // as get_tags_for_entry_async above.
+        applicability.sort();
 
         Ok(applicability)
     }
@@ -407,6 +425,10 @@ impl SurrealDatabase {
             out.entry(format!("kn-{}", row.entry_id))
                 .or_default()
                 .extend(row.applies_ids);
+        }
+        // Deterministic order matching get_applicability_for_entry_async.
+        for ids in out.values_mut() {
+            ids.sort();
         }
 
         Ok(out)

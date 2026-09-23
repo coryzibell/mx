@@ -253,7 +253,7 @@ impl SurrealDatabase {
         include_excluded: bool,
     ) -> Result<crate::store::WakeCascade> {
         // Tag exclusion runs in Rust, on the `tags` field every cascade query
-        // populates via `value_to_knowledge_entry`, and is applied as each
+        // populates via `hydrate_entries_batch_async`, and is applied as each
         // layer is taken, so an excluded entry never occupies a slot in the
         // result. Whether the layer can then FILL its quota is a separate
         // question: the core layer widens until it can, but recent and bridges
@@ -422,10 +422,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -472,10 +469,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -526,10 +520,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -578,10 +569,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -981,10 +969,7 @@ impl SurrealDatabase {
             .take(0)
             .context("Failed to parse recent facts results")?;
 
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -1022,10 +1007,7 @@ impl SurrealDatabase {
             .take(0)
             .context("Failed to parse recent facts (all types) results")?;
 
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -1562,11 +1544,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -1663,11 +1641,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -1710,8 +1684,8 @@ impl SurrealDatabase {
         };
 
         // S1 — accepted cost: this SELECTs and hydrates FULL `KnowledgeEntry`
-        // rows (body + per-row tag/applicability follow-ups in
-        // `value_to_knowledge_entry`), not a bare COUNT, and it runs on every
+        // rows (body + batched tag/applicability follow-ups in
+        // `hydrate_entries_batch_async`), not a bare COUNT, and it runs on every
         // default `list`/`search` when a calling agent is set. Full hydration is
         // REQUIRED, not incidental: the hint count must match the main query
         // exactly, and the caller re-applies `apply_entry_filters` (tags + field
@@ -1741,10 +1715,7 @@ impl SurrealDatabase {
         })?;
 
         let results: Vec<serde_json::Value> = response.take(0)?;
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
