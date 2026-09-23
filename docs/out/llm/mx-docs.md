@@ -425,10 +425,10 @@ their defaults in filesystem layout → SurrealDB connection.
 |                        |                 |                 | `mx memory embed --all` |
 |                        |                 |                 | runs. Intended for      |
 |                        |                 |                 | deployments where a     |
-|                        |                 |                 | nightly embed timer     |
-|                        |                 |                 | (e.g. Cinder's          |
-|                        |                 |                 | `embed.nix`) keeps the  |
-|                        |                 |                 | graph fresh.            |
+|                        |                 |                 | scheduled               |
+|                        |                 |                 | `mx memory embed --all` |
+|                        |                 |                 | job keeps the graph     |
+|                        |                 |                 | fresh.                  |
 +------------------------+-----------------+-----------------+-------------------------+
 
 ## What's next
@@ -1305,13 +1305,13 @@ file path survives wrapper layers where a piped stdin may not.
 
 ``` bash
 # Stdin pipe
-printf '{"category":"insight","title":"T1","content":"C1","source_agent":"soren"}\n{"type":"decision","content":"chose Rust","source_agent":"soren"}\n' \
+printf '{"category":"insight","title":"T1","content":"C1","source_agent":"agent-1"}\n{"type":"decision","content":"chose Rust","source_agent":"agent-1"}\n' \
   | mx memory add-batch
 ```
 
 ``` bash
 # File (safer through sudo wrappers)
-mx memory add-batch --file /tmp/pocket-entries.jsonl
+mx memory add-batch --file /tmp/memory-batch.jsonl
 ```
 
 ``` bash
@@ -1400,30 +1400,30 @@ coverage:** the gate catches recased/repunctuated re-adds within the
 SAME session, SAME owner, and SAME category. It does NOT catch:
 cross-session regenerations (a fact re-derived in a later wake under a
 different `session_id` -- **open question, not yet confirmed:** the  20
-double-write pairs (W342--W445) that motivated this feature have not
-been checked against this scope; if most of them are cross-session
-rather than same-session, this fix closes only a minority of the
-motivating class, and owner-scoped matching with a bounded time window
-would be the sharper mechanism -- flagged for follow-up, not resolved
-here), reworded duplicates (different words, same meaning -- e.g.
-"shipped" vs "published"), a public+owned entry vs. a later
-public+unowned entry with identical content (owner is a hard
-AND-conjoined predicate, so these two visible-to-everyone rows never
-dedup against each other even though both are public), identical
-title+body filed under a DIFFERENT category (category is a hard
-AND-conjoined predicate too -- a re-file under a new category is treated
-as a distinct fact, deliberately, never a duplicate), identical
-title+body with DIFFERENT tags (tags are edge-modeled, not a scalar
-field on the row, and are deliberately excluded from the dedup identity
-entirely -- a tag-only-differing re-add still dedupes, same as any other
-identical-content re-add), or writes with no `session_id` at all (dedup
-is bypassed entirely when `session_id` is absent -- a bypass signal is
-emitted on EVERY funnel: `"dedup": "bypassed_no_session"` in `--json`
-mode on the standard single-add path (mutually exclusive with the stderr
-note -- json mode never prints both), a stderr note on all four funnels
-in every other mode, so the bypass is never silent). Keep marking back
-captured entries; this is a store-boundary backstop, not a substitute
-for careful write discipline.
+double-write pairs that motivated this feature have not been checked
+against this scope; if most of them are cross-session rather than
+same-session, this fix closes only a minority of the motivating class,
+and owner-scoped matching with a bounded time window would be the
+sharper mechanism -- flagged for follow-up, not resolved here), reworded
+duplicates (different words, same meaning -- e.g. "shipped" vs
+"published"), a public+owned entry vs. a later public+unowned entry with
+identical content (owner is a hard AND-conjoined predicate, so these two
+visible-to-everyone rows never dedup against each other even though both
+are public), identical title+body filed under a DIFFERENT category
+(category is a hard AND-conjoined predicate too -- a re-file under a new
+category is treated as a distinct fact, deliberately, never a
+duplicate), identical title+body with DIFFERENT tags (tags are
+edge-modeled, not a scalar field on the row, and are deliberately
+excluded from the dedup identity entirely -- a tag-only-differing re-add
+still dedupes, same as any other identical-content re-add), or writes
+with no `session_id` at all (dedup is bypassed entirely when
+`session_id` is absent -- a bypass signal is emitted on EVERY funnel:
+`"dedup": "bypassed_no_session"` in `--json` mode on the standard
+single-add path (mutually exclusive with the stderr note -- json mode
+never prints both), a stderr note on all four funnels in every other
+mode, so the bypass is never silent). Keep marking back captured
+entries; this is a store-boundary backstop, not a substitute for careful
+write discipline.
 :::
 
 ::: {.admonition .note}
@@ -2218,8 +2218,7 @@ durable immediately; only the vector embedding is deferred.
 This flag exists to amortize the  435 MB embedding model cold-load: use
 it with `add-batch` (which does its own single hoisted embed pass at the
 end), or set `MX_SKIP_WRITE_EMBED=1` globally in a deployment where a
-nightly `mx memory embed --all` (e.g. via Cinder's `embed.nix` timer)
-keeps the graph fresh.
+nightly `mx memory embed --all` job keeps the graph fresh.
 :::
 
 ## Relationships
@@ -8558,11 +8557,11 @@ used for change detection during seed/import operations.
 
 ::: {.admonition .note}
 **NOTE:** This is distinct from the runtime write-boundary `dedup_hash`
-(`knowledge::dedup_hash`, W447): `content_hash` is **title-only**,
-computed at import/seed time, and never enforced (no write-time check
-reads it back). `dedup_hash` is **title+body**, computed on every
-`mx memory add` / `add-batch` write, checked against the writer's own
-same-session entries BEFORE the write lands, and normalizes
+(`knowledge::dedup_hash`): `content_hash` is **title-only**, computed at
+import/seed time, and never enforced (no write-time check reads it
+back). `dedup_hash` is **title+body**, computed on every `mx memory add`
+/ `add-batch` write, checked against the writer's own same-session
+entries BEFORE the write lands, and normalizes
 case/punctuation/whitespace so regenerated near-duplicates collapse to
 the same hash. See "Write-boundary deduplication" in the Memory
 reference. The two hashes are unrelated and neither replaces the other.

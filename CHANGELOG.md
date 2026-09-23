@@ -239,9 +239,9 @@ JSON must be updated; the shapes below are the whole contract.
   both match as `c`) is **warned** about, naming what it became. Warnings and
   notes go to stderr; stdout stays machine-readable. `--trigger ""` remains the
   clear gesture and is never treated as a dead trigger.
-- `mx memory add` and `mx memory add-batch` now run a write-boundary
-  duplicate check (W447) before every new-entry write. Dedup identity is the
-  4-tuple **(session_id, owner, category, normalized title+body hash)** —
+- `mx memory add` and `mx memory add-batch` now run a write-boundary duplicate
+  check before every new-entry write. Dedup identity is the 4-tuple
+  **(session_id, owner, category, normalized title+body hash)** —
   `category` is part of the key (fixing PR #402 finding 1 where an
   identical title+body filed under a different category was wrongly treated
   as the same fact); `tags` are deliberately excluded, so identical content
@@ -392,6 +392,12 @@ JSON must be updated; the shapes below are the whole contract.
   are always empty, and it has no `--json` mode at all — stderr is its only
   signal surface. `add`'s `--type` fact-routing path ignores `--json`
   (pre-existing), so it surfaces the warning on stderr and nothing in JSON.
+- `mx memory sweep-ghosts --dry-run`'s "To apply" hint printed
+  `hearth mx memory sweep-ghosts`, naming a wrapper the `mx` binary has no
+  business knowing exists. Now prints `mx memory sweep-ghosts`, correct for
+  anyone invoking the binary directly; a deployment that only reaches `mx`
+  through a wrapper still needs to prepend it themselves, same as with any
+  other command in this help text.
 
 ### Changed
 - **Removed `mx memory trigger-check` and `mx memory trigger-reset`** (Issue
