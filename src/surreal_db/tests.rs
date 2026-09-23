@@ -3511,9 +3511,10 @@ fn test_get_entries_for_session_owner_scope_excludes_other_owners_public_entry()
 
 #[test]
 fn test_search_knowledge_returns_applicability() {
-    // Regression (twin of the single-entry read): `value_to_knowledge_entry`, which
-    // every list/search path funnels through, ran the same `SELECT VALUE meta::id(out)`
-    // string query into a Vec<Thing> and swallowed the deserialization error, so
+    // Regression (twin of the single-entry read): `value_to_knowledge_entry`
+    // (now `hydrate_entries_batch_async`), which every list/search path
+    // funnels through, ran the same `SELECT VALUE meta::id(out)` string
+    // query into a Vec<Thing> and swallowed the deserialization error, so
     // entries came back from list/search with empty applicability.
     let db = SurrealDatabase::open_in_memory().unwrap();
 
@@ -5420,4 +5421,262 @@ fn a_retry_after_a_half_written_step_replays_the_logged_guess() {
         .expect("a completed session is kept");
     assert!(loaded.completed_at.is_some());
     assert_eq!(db.query_json_for_test(WAKE_GUESS_SELECT).unwrap().len(), 2);
+}
+
+// =========================================================================
+// BATCH HYDRATION (Issue #415 ask #1) -- agreement tests
+//
+// `hydrate_entries_batch_async` (knowledge.rs) is a SEPARATE implementation
+// from the single-row path still used by `db.get()` (get_knowledge_async ->
+// get_tags_for_entry_async / get_applicability_for_entry_async). These
+// tests compare the two paths' output on the same fixtures rather than
+// comparing a caller (list_by_category) to its own callee, which would
+// prove nothing.
+// =========================================================================
+
+fn batch_hydration_entry(
+    id: &str,
+    tags: &[&str],
+    applicability: &[&str],
+) -> crate::knowledge::KnowledgeEntry {
+    let mut entry = make_test_entry(id, 5, 0.01);
+    entry.category_id = "batch-hydration".to_string();
+    entry.tags = tags.iter().map(|t| t.to_string()).collect();
+    entry.applicability = applicability.iter().map(|a| a.to_string()).collect();
+    entry
+}
+
+/// Ordering (issue #415): the per-row query has no ORDER BY. The underlying
+/// order is an index-scan artifact — driven by the `tagged_with_unique`
+/// index on (in, out), sorted by `out`, i.e. by tag record id, which equals
+/// tag NAME — not a documented or depended-on order, so both paths now sort
+/// explicitly instead of relying on it: tags by name
+/// (`get_tags_for_entry_async` / `get_tags_for_entries_async`,
+/// relationships.rs), applicability by id (`get_applicability_for_entry_async`
+/// / `get_applicability_for_entries_async`). `show` and `list` therefore
+/// agree on order, and this test checks exact equality, not just set
+/// membership.
+#[test]
+fn test_batch_hydration_tag_order_matches_single_row_path() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    // Written out of alphabetical order on purpose: an accidental pass here
+    // (both paths already happening to agree by luck) would prove nothing.
+    let entry = batch_hydration_entry("kn-tag-order", &["delta", "bravo", "charlie", "alpha"], &[]);
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let single = db.get("kn-tag-order", &ctx).unwrap().unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let batch_results = db
+        .list_by_category("batch-hydration", &ctx, &filter)
+        .unwrap();
+    let batch = batch_results
+        .iter()
+        .find(|e| e.id == "kn-tag-order")
+        .expect("entry must be present in batch path results");
+
+    assert_eq!(
+        single.tags,
+        vec!["alpha", "bravo", "charlie", "delta"],
+        "single-row path must sort tags by name"
+    );
+    assert_eq!(
+        single.tags, batch.tags,
+        "single-row and batch hydration must return tags in the SAME order"
+    );
+}
+
+#[test]
+fn test_batch_hydration_applicability_order_matches_single_row_path() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = batch_hydration_entry("kn-applicability", &["one-tag"], &["frontend", "backend"]);
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let single = db.get("kn-applicability", &ctx).unwrap().unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let batch_results = db
+        .list_by_category("batch-hydration", &ctx, &filter)
+        .unwrap();
+    let batch = batch_results
+        .iter()
+        .find(|e| e.id == "kn-applicability")
+        .expect("entry must be present in batch path results");
+
+    assert_eq!(single.applicability, vec!["backend", "frontend"]);
+    assert_eq!(single.applicability, batch.applicability);
+    assert_eq!(single.tags, batch.tags);
+}
+
+#[test]
+fn test_batch_hydration_zero_tag_entry() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let entry = batch_hydration_entry("kn-zero-tags", &[], &[]);
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
+    let batch_results = db
+        .list_by_category("batch-hydration", &ctx, &filter)
+        .unwrap();
+    let batch = batch_results
+        .iter()
+        .find(|e| e.id == "kn-zero-tags")
+        .expect("entry must be present in batch path results");
+
+    assert!(batch.tags.is_empty());
+    assert!(batch.applicability.is_empty());
+}
+
+#[test]
+fn test_batch_hydration_private_row_carries_tags_and_applicability() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut entry = batch_hydration_entry(
+        "kn-private-batch",
+        &["private-tag-a", "private-tag-b"],
+        &["backend"],
+    );
+    entry.visibility = "private".to_string();
+    entry.owner = Some("agent-batch".to_string());
+    db.upsert_knowledge(&entry).unwrap();
+
+    let ctx = crate::store::AgentContext::for_agent("agent-batch");
+    let single = db.get("kn-private-batch", &ctx).unwrap().unwrap();
+
+    let filter = crate::store::KnowledgeFilter::default();
+    let batch_results = db
+        .list_by_category("batch-hydration", &ctx, &filter)
+        .unwrap();
+    let batch = batch_results
+        .iter()
+        .find(|e| e.id == "kn-private-batch")
+        .expect("private entry visible to its own owner must be in batch path results");
+
+    assert_eq!(single.tags, batch.tags);
+    assert_eq!(single.applicability, batch.applicability);
+    assert_eq!(batch.visibility, "private");
+    assert_eq!(batch.owner.as_deref(), Some("agent-batch"));
+
+    // A different agent must never see this private row via the batch path.
+    let other_ctx = crate::store::AgentContext::for_agent("agent-other");
+    let other_results = db
+        .list_by_category("batch-hydration", &other_ctx, &filter)
+        .unwrap();
+    assert!(
+        !other_results.iter().any(|e| e.id == "kn-private-batch"),
+        "batch hydration must not leak another agent's private row"
+    );
+}
+
+#[test]
+fn test_batch_hydration_preserves_list_order() {
+    // Seeds three entries and checks output order matches DB order
+    // (`ORDER BY id`) and each entry's tag/applicability count is exactly
+    // what was written.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-order-a", &["t1", "t2"], &[]))
+        .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-order-b", &["t1"], &[]))
+        .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-order-c", &[], &["backend"]))
+        .unwrap();
+
+    let ctx = crate::store::AgentContext::public_only();
+    let filter = crate::store::KnowledgeFilter::default();
+    let batch_results = db
+        .list_by_category("batch-hydration", &ctx, &filter)
+        .unwrap();
+
+    let ids: Vec<&str> = batch_results.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["kn-order-a", "kn-order-b", "kn-order-c"]);
+
+    let a = &batch_results[0];
+    let b = &batch_results[1];
+    let c = &batch_results[2];
+    assert_eq!(a.tags.len(), 2, "kn-order-a tags must not be doubled");
+    assert_eq!(b.tags.len(), 1, "kn-order-b tags must not be doubled");
+    assert_eq!(
+        c.applicability.len(),
+        1,
+        "kn-order-c applicability must not be doubled"
+    );
+}
+
+#[test]
+fn test_batch_hydration_duplicate_row_ids_do_not_double_tags() {
+    // The batch primitives `.extend` each id's list, so a duplicated id in
+    // the bound list would double that entry's tags. Feed the driver a row
+    // set that genuinely contains the same id twice.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.upsert_knowledge(&batch_hydration_entry(
+        "kn-dup",
+        &["t2", "t1"],
+        &["backend"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-solo", &["t3"], &[]))
+        .unwrap();
+
+    let sql = format!(
+        "SELECT {} FROM knowledge WHERE category = category:`batch-hydration` ORDER BY id",
+        SurrealDatabase::knowledge_select_fields()
+    );
+    let rows = db.query_json_for_test(&sql).unwrap();
+    assert_eq!(rows.len(), 2);
+    // [dup, solo, dup]: duplicate id, interleaved, so order preservation is checked too.
+    let input = vec![rows[0].clone(), rows[1].clone(), rows[0].clone()];
+
+    let out = SurrealDatabase::runtime()
+        .block_on(db.hydrate_entries_batch_async(input))
+        .unwrap();
+
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["kn-dup", "kn-solo", "kn-dup"]);
+    assert_eq!(out[0].tags, vec!["t1", "t2"]);
+    assert_eq!(out[2].tags, vec!["t1", "t2"]);
+    assert_eq!(out[0].applicability, vec!["backend"]);
+    assert_eq!(out[2].applicability, vec!["backend"]);
+    assert_eq!(out[1].tags, vec!["t3"]);
+}
+
+#[test]
+fn test_batch_hydration_duplicate_row_ids_do_not_double_tags_at_chunk_size_one() {
+    // Same fixture and assertions as the test above, but driven through
+    // hydrate_entries_batch_chunked_async at chunk_size = 1 instead of the
+    // production 1000. Forces every id through its own chunk and its own
+    // pair of batch queries, so a merge bug (e.g. `=` instead of `.extend()`
+    // across chunks, which would drop everything but the last chunk) fails
+    // here even though the fixture is far too small to reach a real chunk
+    // boundary at the production size.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.upsert_knowledge(&batch_hydration_entry(
+        "kn-dup",
+        &["t2", "t1"],
+        &["backend"],
+    ))
+    .unwrap();
+    db.upsert_knowledge(&batch_hydration_entry("kn-solo", &["t3"], &[]))
+        .unwrap();
+
+    let sql = format!(
+        "SELECT {} FROM knowledge WHERE category = category:`batch-hydration` ORDER BY id",
+        SurrealDatabase::knowledge_select_fields()
+    );
+    let rows = db.query_json_for_test(&sql).unwrap();
+    assert_eq!(rows.len(), 2);
+    let input = vec![rows[0].clone(), rows[1].clone(), rows[0].clone()];
+
+    let out = SurrealDatabase::runtime()
+        .block_on(db.hydrate_entries_batch_chunked_async(input, 1))
+        .unwrap();
+
+    let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(ids, vec!["kn-dup", "kn-solo", "kn-dup"]);
+    assert_eq!(out[0].tags, vec!["t1", "t2"]);
+    assert_eq!(out[2].tags, vec!["t1", "t2"]);
+    assert_eq!(out[0].applicability, vec!["backend"]);
+    assert_eq!(out[2].applicability, vec!["backend"]);
+    assert_eq!(out[1].tags, vec!["t3"]);
 }

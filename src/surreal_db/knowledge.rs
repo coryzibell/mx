@@ -1067,10 +1067,7 @@ impl SurrealDatabase {
         let results: Vec<serde_json::Value> =
             response.take(0).context("Failed to parse search results")?;
 
-        let mut entries = Vec::new();
-        for obj in results {
-            entries.push(self.value_to_knowledge_entry(obj).await?);
-        }
+        let entries = self.hydrate_entries_batch_async(results).await?;
 
         Ok(entries)
     }
@@ -1184,12 +1181,18 @@ impl SurrealDatabase {
             .take(0)
             .context("Failed to parse unchunked search results")?;
 
-        // Phase 2a: Collect unchunked entries with their scores.
+        // Phase 2a: Collect unchunked entries with their scores. Scores are
+        // pulled out (index, not take) before the rows are handed to the
+        // batch hydrator, then zipped back in the preserved input order —
+        // same shape as semantic_search_entries_scored_async above.
         let mut scored_entries: std::collections::HashMap<String, (f32, Option<KnowledgeEntry>)> =
             std::collections::HashMap::new();
-        for obj in unchunked_results {
-            let entry = self.value_to_knowledge_entry(obj.clone()).await?;
-            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
+        let unchunked_scores: Vec<f32> = unchunked_results
+            .iter()
+            .map(|obj| obj["score"].as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        let unchunked_entries = self.hydrate_entries_batch_async(unchunked_results).await?;
+        for (entry, score) in unchunked_entries.into_iter().zip(unchunked_scores) {
             scored_entries.insert(entry.id.clone(), (score, Some(entry)));
         }
 
@@ -1454,12 +1457,16 @@ impl SurrealDatabase {
             .take(0)
             .context("Failed to parse entry-level scored search results")?;
 
-        let mut scored = Vec::with_capacity(results.len());
-        for obj in results {
-            let score = obj["score"].as_f64().unwrap_or(0.0) as f32;
-            let entry = self.value_to_knowledge_entry(obj).await?;
-            scored.push((entry, score));
-        }
+        // Scores live on the same rows the batch hydrator consumes, so pull
+        // them out (index, not take — doesn't move `obj`) before handing the
+        // rows to `hydrate_entries_batch_async`, then zip back in input
+        // order (the batch driver preserves it).
+        let scores: Vec<f32> = results
+            .iter()
+            .map(|obj| obj["score"].as_f64().unwrap_or(0.0) as f32)
+            .collect();
+        let entries = self.hydrate_entries_batch_async(results).await?;
+        let scored = entries.into_iter().zip(scores).collect();
 
         Ok(scored)
     }
@@ -1469,6 +1476,120 @@ impl SurrealDatabase {
         &self,
         obj: serde_json::Value,
     ) -> Result<KnowledgeEntry> {
+        let id_str = obj["id"].as_str().unwrap_or_default().to_string();
+        let full_id = format!("kn-{}", id_str);
+
+        // Delegate to the single-entry primitives (relationships.rs) instead
+        // of duplicating their queries here: same SQL, same error semantics
+        // (tags swallow, applicability throws), and now one choke point for
+        // the tag/applicability sort order (see get_tags_for_entry_async's
+        // doc comment) instead of two copies that could drift.
+        let tags = self.get_tags_for_entry_async(&full_id).await?;
+        let applicability = self.get_applicability_for_entry_async(&full_id).await?;
+
+        Ok(Self::row_to_knowledge_entry(obj, tags, applicability))
+    }
+
+    /// Batch hydration driver shared by every list/search path that
+    /// materializes a full row set before attaching tags/applicability
+    /// (Issue #415, ask #1).
+    ///
+    /// Takes the already-materialized rows from a `SELECT knowledge_select_fields()`
+    /// query and returns entries in the SAME order as `rows`, with tags and
+    /// applicability attached via `get_tags_for_entries_async` /
+    /// `get_applicability_for_entries_async` (relationships.rs, PR #401)
+    /// instead of two serial per-row queries.
+    ///
+    /// - Ids are deduped before binding (duplicate rows would otherwise
+    ///   double the batch primitives' `.extend`ed tag/applicability lists —
+    ///   see the comment on those two functions).
+    /// - Ids are chunked at `BATCH_HYDRATE_CHUNK_SIZE` per query: the batch
+    ///   primitives' `FROM $knowledge` traversal is only measured up to
+    ///   1,000 record ids in one query; a category can carry several
+    ///   thousand ids, so this stays inside measured ground rather than
+    ///   assuming the untested range holds.
+    /// - Error handling (issue #415): both batch primitives already
+    ///   propagate query/deserialize failures via `.context(...)?` instead
+    ///   of swallowing them, so this driver inherits throwing behavior,
+    ///   though the single-row path (`get_tags_for_entry_async`) still
+    ///   swallows a failed *tags* query (unchanged, pre-existing behavior
+    ///   for `show`).
+    pub(super) async fn hydrate_entries_batch_async(
+        &self,
+        rows: Vec<serde_json::Value>,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.hydrate_entries_batch_chunked_async(rows, Self::BATCH_HYDRATE_CHUNK_SIZE)
+            .await
+    }
+
+    /// Chunk size for [`hydrate_entries_batch_async`]. A module-level
+    /// constant so the production call site and the chunk-boundary test
+    /// (which drives [`hydrate_entries_batch_chunked_async`] at a
+    /// different, smaller size) can't drift apart.
+    const BATCH_HYDRATE_CHUNK_SIZE: usize = 1000;
+
+    /// Same as [`hydrate_entries_batch_async`], parameterized on chunk size.
+    /// Split out so tests can exercise the cross-chunk merge at a size the
+    /// production path never uses (e.g. 1, to force many chunks from a
+    /// handful of rows) without needing thousands of fixture rows.
+    pub(super) async fn hydrate_entries_batch_chunked_async(
+        &self,
+        rows: Vec<serde_json::Value>,
+        chunk_size: usize,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Preserve input order; dedupe only the id list sent to the batch
+        // queries (see doc comment above).
+        let row_ids: Vec<String> = rows
+            .iter()
+            .map(|obj| format!("kn-{}", obj["id"].as_str().unwrap_or_default()))
+            .collect();
+
+        let mut unique_ids: Vec<String> = row_ids.clone();
+        unique_ids.sort_unstable();
+        unique_ids.dedup();
+
+        let mut tags_by_id: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut applicability_by_id: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        for chunk in unique_ids.chunks(chunk_size.max(1)) {
+            let chunk_tags = self.get_tags_for_entries_async(chunk).await?;
+            tags_by_id.extend(chunk_tags);
+            let chunk_applicability = self.get_applicability_for_entries_async(chunk).await?;
+            applicability_by_id.extend(chunk_applicability);
+        }
+
+        Ok(rows
+            .into_iter()
+            .zip(row_ids)
+            .map(|(obj, full_id)| {
+                let tags = tags_by_id.get(&full_id).cloned().unwrap_or_default();
+                let applicability = applicability_by_id
+                    .get(&full_id)
+                    .cloned()
+                    .unwrap_or_default();
+                Self::row_to_knowledge_entry(obj, tags, applicability)
+            })
+            .collect())
+    }
+
+    /// Pure field mapping shared by [`value_to_knowledge_entry`] and
+    /// [`hydrate_entries_batch_async`] (batch): turns one materialized row
+    /// plus its already-fetched tags/applicability into a `KnowledgeEntry`.
+    /// No DB access here — that's the caller's job. `show` reads through
+    /// `get_knowledge_async`, which calls the single-entry primitives
+    /// directly rather than through `value_to_knowledge_entry`; that
+    /// function has no production caller left after this change.
+    fn row_to_knowledge_entry(
+        obj: serde_json::Value,
+        tags: Vec<String>,
+        applicability: Vec<String>,
+    ) -> KnowledgeEntry {
         // Extract ID from string (queries use meta::id(id) AS id)
         let id_str = obj["id"].as_str().unwrap_or_default();
         let id = format!("kn-{}", id_str);
@@ -1513,28 +1634,7 @@ impl SurrealDatabase {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
-        // Fetch tags
-        let knowledge_thing = Thing::from(("knowledge", id_str));
-        let mut tags_response = with_db!(self, db, {
-            db.query("SELECT VALUE out.name FROM tagged_with WHERE in = $knowledge")
-                .bind(("knowledge", knowledge_thing.clone()))
-                .await
-                .context("Failed to query tags")
-        })?;
-        let tags: Vec<String> = tags_response.take(0).unwrap_or_default();
-
-        // Fetch applicability
-        let mut app_response = with_db!(self, db, {
-            db.query("SELECT VALUE meta::id(out) FROM applies_to WHERE in = $knowledge")
-                .bind(("knowledge", knowledge_thing))
-                .await
-                .context("Failed to query applicability")
-        })?;
-        let applicability: Vec<String> = app_response
-            .take(0)
-            .context("Failed to deserialize applicability")?;
-
-        Ok(KnowledgeEntry {
+        KnowledgeEntry {
             id,
             category_id,
             title: serde_json::from_value(obj["title"].clone()).unwrap_or_default(),
@@ -1573,7 +1673,7 @@ impl SurrealDatabase {
             format: serde_json::from_value(obj["format"].clone())
                 .unwrap_or_else(|_| "markdown".to_string()),
             effective_resonance: obj.get("effective_resonance").and_then(|v| v.as_f64()),
-        })
+        }
     }
 
     // =========================================================================
