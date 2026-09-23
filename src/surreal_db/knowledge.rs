@@ -483,13 +483,22 @@ impl SurrealDatabase {
             triggers = $triggers,
             wake_order = $wake_order,
             wake_phrase = $wake_phrase,
-            embedding = $embedding,
             embedding_model = $embedding_model,
             chunk_count = $chunk_count,
             format = $format"
             .to_string();
 
         // Add optional fields
+        // `embedding` is written conditionally, like the other optional
+        // columns below: an entry with no embedding must never overwrite an
+        // existing stored vector with NULL (Issue #438). No production path
+        // upserts a fresh `None` over a row that already carries a vector
+        // (`grep -rn 'embedding = None' src/` finds only a test), so this
+        // does not change any existing clear-the-vector behavior — there
+        // isn't one.
+        if entry.embedding.is_some() {
+            query.push_str(", embedding = $embedding");
+        }
         if entry.source_project_id.is_some() {
             query.push_str(", source_project = type::thing('project', $source_project_id)");
         }
@@ -565,12 +574,14 @@ impl SurrealDatabase {
                 ))
                 .bind(("wake_order", entry.wake_order))
                 .bind(("wake_phrase", entry.wake_phrase.clone()))
-                .bind(("embedding", entry.embedding.clone()))
                 .bind(("embedding_model", entry.embedding_model.clone()))
                 .bind(("chunk_count", entry.chunk_count))
                 .bind(("format", entry.format.clone()));
 
             // Bind optional parameters
+            if let Some(ref emb) = entry.embedding {
+                q = q.bind(("embedding", emb.clone()));
+            }
             if let Some(ref proj) = entry.source_project_id {
                 q = q.bind(("source_project_id", proj.clone()));
             }
