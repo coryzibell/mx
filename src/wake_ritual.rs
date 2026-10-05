@@ -172,8 +172,6 @@ fn build_prompt_for_chunk(
     }
 }
 
-/// Build the full reveal for one chunk. `content` is the *chunk's* content,
-/// not the whole bloom.
 fn reveal_from_row(row: &WakeGuessRow, bloom: &KnowledgeEntry) -> BloomFull {
     let content = bloom_content(bloom);
     let plan = compute_chunks(&content, chunk_threshold());
@@ -193,6 +191,8 @@ fn reveal_from_row(row: &WakeGuessRow, bloom: &KnowledgeEntry) -> BloomFull {
     }
 }
 
+/// Build the full reveal for one chunk. `content` is the *chunk's* content,
+/// not the whole bloom.
 fn build_full_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
