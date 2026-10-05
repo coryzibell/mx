@@ -6,6 +6,32 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — chunk phrases no longer leak on chunks 2..M (#469)
+
+- **Authored phrases apply to chunk 1 only.** Every chunk below the
+  authored-phrase count used to be matched against the whole authored list,
+  which chunk 1's reveal had just shown. Chunk 1 is still matched against all
+  of them, and a single-chunk entry behaves exactly as before. Each later chunk
+  gets one phrase from its own body text: `derived` on an entry with authored
+  phrases, `auto` on one without.
+- **A later chunk's phrase is body text, not a heading.** Derived phrases used
+  to take the chunk's first markdown heading, and chunks usually start at one.
+  The phrase is now the first sentence of a paragraph or list item; headings
+  (ATX and setext), rules, code, HTML and bold-only lines such as
+  `**Status:**` are skipped. A chunk with no body text still falls back to its
+  heading.
+- **A later chunk's phrase never repeats an earlier reveal.** A phrase that
+  matches anything shown for an earlier chunk of the same entry is replaced by
+  the chunk's next body sentence that doesn't.
+- A later chunk whose every body sentence repeats an earlier reveal is prompted
+  with no phrase (`phrase_source: unphrased`, always revealed).
+- **`wake-log` flags rows logged before the fix.** An `authored` row past the
+  first chunk was matched against phrases its entry had just revealed. Read
+  commands mark it `leaked` (a `leaked` field in JSON, `leaked` after the
+  bucket in text); `report` counts such rows in a new `leaked` column instead of
+  `authored`, and leaves them out of Axis A `sim_phrase`. Nothing stored
+  changes and `score` is unchanged.
+
 ### Added — `mx memory wake-log`: scoring and terminal-only reads (#449)
 
 - **`wake-log score`** scores every pending guess row of the calling agent,

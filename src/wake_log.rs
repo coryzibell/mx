@@ -94,6 +94,15 @@ pub struct ScoredFields {
     pub cross: Option<PriorStats>,
 }
 
+/// Was this row matched against phrases an earlier reveal of the same entry
+/// had already shown? Before #469 every chunk below the authored-phrase count
+/// was matched against the whole authored list, which chunk 0's reveal shows,
+/// so an `authored` row past chunk 0 is exactly such a row. None is logged
+/// after the fix, which never uses authored phrases past chunk 0.
+pub fn leaked(chunk_index: i64, phrase_source: &str) -> bool {
+    chunk_index > 0 && phrase_source == "authored"
+}
+
 /// A row as the read commands show it. Never carries `embedding`.
 #[derive(Debug, Clone, Serialize)]
 pub struct LogRow {
@@ -111,6 +120,8 @@ pub struct LogRow {
     pub model_id: Option<String>,
     pub phrase_source: String,
     pub bucket: String,
+    /// See [`leaked`]. Computed when the row is read; nothing stores it.
+    pub leaked: bool,
     pub scored: bool,
     pub sim_phrase: Option<f64>,
     pub sim_content: Option<f64>,
@@ -582,14 +593,22 @@ struct SourceCounts {
     authored: usize,
     derived: usize,
     auto: usize,
+    unphrased: usize,
+    /// Rows counted here are not counted under their source.
+    leaked: usize,
 }
 
 impl SourceCounts {
-    fn bump(&mut self, source: &str) {
-        match source {
+    fn bump(&mut self, row: &LogRow) {
+        if leaked(row.chunk_index, &row.phrase_source) {
+            self.leaked += 1;
+            return;
+        }
+        match row.phrase_source.as_str() {
             "authored" => self.authored += 1,
             "derived" => self.derived += 1,
             "auto" => self.auto += 1,
+            "unphrased" => self.unphrased += 1,
             _ => {}
         }
     }
@@ -679,8 +698,8 @@ pub fn build_report(wake: i64, rows: &[LogRow]) -> Report {
             entries.push(&row.bloom_id);
         }
         match row.bucket.as_str() {
-            "unhinted" => buckets.unhinted.bump(&row.phrase_source),
-            "revealed" => buckets.revealed.bump(&row.phrase_source),
+            "unhinted" => buckets.unhinted.bump(row),
+            "revealed" => buckets.revealed.bump(row),
             _ => {}
         }
     }
@@ -705,7 +724,15 @@ pub fn build_report(wake: i64, rows: &[LogRow]) -> Report {
         scored: scored.len(),
         buckets,
         axis_a: AxisA {
-            sim_phrase: Stat::of(scored.iter().filter_map(|r| r.sim_phrase).collect()),
+            // A leaked row's sim_phrase compares the guess with phrases shown
+            // one step earlier.
+            sim_phrase: Stat::of(
+                scored
+                    .iter()
+                    .filter(|r| !leaked(r.chunk_index, &r.phrase_source))
+                    .filter_map(|r| r.sim_phrase)
+                    .collect(),
+            ),
             sim_content: Stat::of(scored.iter().filter_map(|r| r.sim_content).collect()),
         },
         axis_b: AxisB {
@@ -760,14 +787,14 @@ pub fn report_text(r: &Report) -> String {
         r.scored,
         r.chunks
     ));
-    s.push_str("Buckets            authored  derived  auto\n");
+    s.push_str("Buckets            authored  derived  auto  unphrased  leaked\n");
     for (name, c) in [
         ("unhinted", &r.buckets.unhinted),
         ("revealed", &r.buckets.revealed),
     ] {
         s.push_str(&format!(
-            "  {name:<8}{:>17}{:>9}{:>6}\n",
-            c.authored, c.derived, c.auto
+            "  {name:<8}{:>17}{:>9}{:>6}{:>11}{:>8}\n",
+            c.authored, c.derived, c.auto, c.unphrased, c.leaked
         ));
     }
     s.push_str("\nAxis A (tunable; not identity evidence)\n");
@@ -831,8 +858,13 @@ fn row_text(row: &LogRow) -> String {
     } else {
         "  pending (not scored yet)".to_string()
     };
+    let leak = if leaked(row.chunk_index, &row.phrase_source) {
+        "   leaked"
+    } else {
+        ""
+    };
     format!(
-        "Wake {wake}   {}   model {}   step {}   entry {}/{}{chunk}   bucket {}\n  \
+        "Wake {wake}   {}   model {}   step {}   entry {}/{}{chunk}   bucket {}{leak}\n  \
          title  {}\n  guess  {}\n{scores}\n",
         date_of(&row.ts),
         shown(row.model_id.as_deref().unwrap_or("unknown")),

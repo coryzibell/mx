@@ -1699,6 +1699,7 @@ fn wake_log_goodhart_text_is_in_report_help_and_tops_every_report() {
         model_id: Some("model-a".into()),
         phrase_source: "authored".into(),
         bucket: "unhinted".into(),
+        leaked: false,
         scored: true,
         sim_phrase: Some(0.5),
         sim_content: Some(0.25),
@@ -1749,6 +1750,7 @@ fn wake_log_report_layout_counts_buckets_and_takes_medians() {
             model_id: model.map(str::to_string),
             phrase_source: source.into(),
             bucket: bucket.into(),
+            leaked: false,
             scored,
             sim_phrase: p,
             sim_content: None,
@@ -1775,9 +1777,18 @@ fn wake_log_report_layout_counts_buckets_and_takes_medians() {
         body[0],
         "Wake 3   model model-a, unknown   4 chunks, 3 entries   scored 3/4"
     );
-    assert_eq!(body[2], "Buckets            authored  derived  auto");
-    assert_eq!(body[3], "  unhinted                1        0     0");
-    assert_eq!(body[4], "  revealed                0        1     2");
+    assert_eq!(
+        body[2],
+        "Buckets            authored  derived  auto  unphrased  leaked"
+    );
+    assert_eq!(
+        body[3],
+        "  unhinted                1        0     0          0       0"
+    );
+    assert_eq!(
+        body[4],
+        "  revealed                0        1     2          0       0"
+    );
     assert_eq!(body[7], "  sim_phrase    median 0.75   n 3");
     assert_eq!(body[8], "  sim_content   median -   n 0");
     assert_eq!(
@@ -1789,6 +1800,194 @@ fn wake_log_report_layout_counts_buckets_and_takes_medians() {
         "  cross model   gap median -   sim_prior -   null -   n 0"
     );
     assert_eq!(median(vec![1.0, 4.0, 2.0, 3.0]), Some(2.5));
+}
+
+/// An invented, scored row for the report and listing tests.
+fn report_row(
+    chunk_index: i64,
+    source: &str,
+    bucket: &str,
+    sim_phrase: Option<f64>,
+    sim_content: Option<f64>,
+) -> LogRow {
+    LogRow {
+        wake: Some(4),
+        ts: ts_at(chunk_index as u32),
+        session_id: "s".into(),
+        position: chunk_index,
+        bloom_id: "kn-orchard".into(),
+        chunk_index,
+        chunk_total: 4,
+        bloom_position: 1,
+        bloom_total: 1,
+        title_shown: format!("Orchard Ledger (Part {}/4)", chunk_index + 1),
+        guess: "rows of pear trees".into(),
+        model_id: Some("model-a".into()),
+        phrase_source: source.into(),
+        bucket: bucket.into(),
+        leaked: leaked(chunk_index, source),
+        scored: true,
+        sim_phrase,
+        sim_content,
+        sim_title: None,
+        sim_prior: None,
+        sim_prior_null: None,
+        prior_n: None,
+        sim_prior_same: None,
+        sim_prior_null_same: None,
+        sim_prior_cross: None,
+        sim_prior_null_cross: None,
+    }
+}
+
+#[test]
+fn wake_log_report_counts_chunk_two_authored_rows_as_leaked() {
+    let rows = vec![
+        report_row(0, "authored", "unhinted", None, None),
+        report_row(1, "authored", "unhinted", None, None),
+        report_row(2, "authored", "revealed", None, None),
+        report_row(3, "derived", "unhinted", None, None),
+    ];
+    let r = build_report(4, &rows);
+    let text = report_text(&r);
+    let lines: Vec<&str> = text.lines().collect();
+    let body = &lines[2..];
+    assert_eq!(
+        body[2],
+        "Buckets            authored  derived  auto  unphrased  leaked"
+    );
+    assert_eq!(
+        body[3],
+        "  unhinted                1        1     0          0       1"
+    );
+    assert_eq!(
+        body[4],
+        "  revealed                0        0     0          0       1"
+    );
+
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["buckets"]["unhinted"]["authored"], 1);
+    assert_eq!(json["buckets"]["unhinted"]["leaked"], 1);
+    assert_eq!(json["buckets"]["revealed"]["authored"], 0);
+    assert_eq!(json["buckets"]["revealed"]["leaked"], 1);
+}
+
+#[test]
+fn wake_log_report_counts_phraseless_rows_under_unphrased() {
+    let rows = vec![report_row(1, "unphrased", "revealed", None, None)];
+    let r = build_report(4, &rows);
+    let text = report_text(&r);
+    let lines: Vec<&str> = text.lines().collect();
+    let body = &lines[2..];
+    assert_eq!(
+        body[2],
+        "Buckets            authored  derived  auto  unphrased  leaked"
+    );
+    assert_eq!(
+        body[3],
+        "  unhinted                0        0     0          0       0"
+    );
+    assert_eq!(
+        body[4],
+        "  revealed                0        0     0          1       0"
+    );
+
+    let json = serde_json::to_value(&r).unwrap();
+    let revealed = &json["buckets"]["revealed"];
+    assert_eq!(revealed["unphrased"], 1);
+    assert_eq!(revealed["derived"], 0);
+    assert_eq!(revealed["auto"], 0);
+    assert_eq!(revealed["leaked"], 0);
+}
+
+#[test]
+fn wake_log_report_sim_phrase_excludes_leaked_rows() {
+    let rows = vec![
+        report_row(0, "authored", "revealed", Some(0.25), Some(0.5)),
+        report_row(1, "authored", "unhinted", Some(1.0), Some(0.75)),
+        report_row(2, "authored", "unhinted", Some(1.0), Some(0.75)),
+    ];
+    let r = build_report(4, &rows);
+    let text = report_text(&r);
+    assert!(
+        text.contains("  sim_phrase    median 0.25   n 1\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  sim_content   median 0.75   n 3\n"),
+        "sim_content keeps every row: {text}"
+    );
+}
+
+#[test]
+fn wake_log_listing_marks_leaked_rows() {
+    // Read back through the store, so log_row is what sets the flag.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    insert(
+        &db,
+        &fx(
+            "s1",
+            0,
+            10,
+            "kn-orchard",
+            "Orchard Ledger (Part 1/3)",
+            "pear rows",
+        )
+        .chunk(0, 3),
+    );
+    insert(
+        &db,
+        &fx(
+            "s1",
+            1,
+            11,
+            "kn-orchard",
+            "Orchard Ledger (Part 2/3)",
+            "pear rows",
+        )
+        .chunk(1, 3)
+        .bucket("unhinted"),
+    );
+    insert(
+        &db,
+        &fx(
+            "s1",
+            2,
+            12,
+            "kn-orchard",
+            "Orchard Ledger (Part 3/3)",
+            "cider press",
+        )
+        .chunk(2, 3)
+        .source("derived", &["The press runs in October."]),
+    );
+    let rows = db.wake_log_rows_for_wake(AGENT, 1).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.leaked).collect::<Vec<_>>(),
+        vec![false, true, false]
+    );
+
+    let listing = RowListing {
+        goodhart: GOODHART_TEXT,
+        bloom_id: None,
+        wake: Some(1),
+        rows,
+    };
+    let text = listing_text(&listing);
+    let headers: Vec<&str> = text.lines().filter(|l| l.contains("   bucket ")).collect();
+    assert_eq!(headers.len(), 3, "{text}");
+    assert!(headers[0].ends_with("bucket revealed"), "{}", headers[0]);
+    assert!(
+        headers[1].ends_with("bucket unhinted   leaked"),
+        "{}",
+        headers[1]
+    );
+    assert!(headers[2].ends_with("bucket revealed"), "{}", headers[2]);
+
+    let json = serde_json::to_value(&listing).unwrap();
+    assert_eq!(json["rows"][0]["leaked"], false);
+    assert_eq!(json["rows"][1]["leaked"], true);
+    assert_eq!(json["rows"][2]["leaked"], false);
 }
 
 // =============================================================================

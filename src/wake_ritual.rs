@@ -6,55 +6,83 @@ use crate::knowledge::KnowledgeEntry;
 use crate::store::{AgentContext, KnowledgeStore, WakeCascade};
 use crate::wake_chunk::{
     ChunkPlan, PhraseMatch, chunk_threshold, compare_phrase, compute_chunks, extract_auto_phrase,
-    extract_salient_phrase,
+    salient_candidates,
 };
 use crate::wake_guess::{Bucket, MatchKind, WakeGuessRow, content_hash};
 use crate::wake_token::*;
 
 /// The phrases a chunk's guess is matched against, and where they came from.
 ///
-/// For an `Authored` chunk this is every authored phrase on the bloom, not
-/// just the one at the chunk's index: a single-chunk bloom with three phrases
-/// used to be matched against phrase 0 only, which made phrases 1 and 2
-/// unreachable (#450). For `Derived` and `Auto` it is the one generated phrase.
+/// On chunk 0 an `Authored` set is every authored phrase on the bloom, not
+/// just one of them: a single-chunk bloom with three phrases used to be
+/// matched against phrase 0 only, which made phrases 1 and 2 unreachable
+/// (#450). Every other set is one generated phrase, except a later chunk
+/// whose every candidate repeated an earlier reveal: its set is empty and its
+/// source is `Unphrased`.
 struct ChunkPhrases {
     phrases: Vec<String>,
     source: PhraseSource,
 }
 
-/// Pick the phrase set for a specific chunk of a bloom.
+/// Pick the phrase set for chunk `chunk_idx` of a bloom whose whole content
+/// is `content`, chunked by `plan`.
 ///
-/// The source is decided by position: `authored` while the chunk index is
-/// below the bloom's authored-phrase count, `derived` beyond it, and `auto`
-/// for a bloom with no authored phrases at all. Since mx#218 every chunk
-/// resolves to a non-empty phrase list.
+/// Chunk 0 is the only chunk with authored phrases: it gets all of them, or
+/// one `auto` phrase when the bloom has none. Each later chunk gets one phrase
+/// from its own body text, labelled `derived` when the bloom has authored
+/// phrases and `auto` when it has none. The reveal of a chunk shows its
+/// phrases, so a later chunk matched against them would be matched against
+/// its own answer key (#469). A later chunk walks its body sentences in order
+/// and takes the first that matches nothing an earlier chunk's reveal showed,
+/// which is why every earlier chunk's set is rebuilt here. When every
+/// candidate collides the set is empty and the source is `Unphrased`: the
+/// chunk is still prompted and guessed, and any guess on it is revealed.
 fn phrases_for_chunk(
     entry: &KnowledgeEntry,
+    plan: &ChunkPlan,
+    content: &str,
     chunk_idx: u16,
-    chunk_total: u16,
-    chunk_content: &str,
 ) -> ChunkPhrases {
     let authored = authored_phrases(entry);
-    if authored.is_empty() {
+    let has_authored = !authored.is_empty();
+    let first = if has_authored {
+        authored
+    } else {
+        vec![extract_auto_phrase(
+            chunk_text(plan, content, 0),
+            &entry.title,
+        )]
+    };
+    if chunk_idx == 0 {
         return ChunkPhrases {
-            phrases: vec![extract_auto_phrase(chunk_content, &entry.title)],
-            source: PhraseSource::Auto,
+            phrases: first,
+            source: if has_authored {
+                PhraseSource::Authored
+            } else {
+                PhraseSource::Auto
+            },
         };
     }
-    if (chunk_idx as usize) < authored.len() {
-        return ChunkPhrases {
-            phrases: authored,
-            source: PhraseSource::Authored,
-        };
+
+    let mut shown_before = first;
+    let mut phrases: Vec<String> = Vec::new();
+    for k in 1..=chunk_idx {
+        let text = chunk_text(plan, content, k);
+        phrases = salient_candidates(text, k, plan.total)
+            .into_iter()
+            .find(|c| best_match(c, &shown_before).0 == MatchKind::None)
+            .into_iter()
+            .collect();
+        shown_before.extend(phrases.iter().cloned());
     }
-    ChunkPhrases {
-        phrases: vec![extract_salient_phrase(
-            chunk_content,
-            chunk_idx,
-            chunk_total,
-        )],
-        source: PhraseSource::Derived,
-    }
+    let source = if phrases.is_empty() {
+        PhraseSource::Unphrased
+    } else if has_authored {
+        PhraseSource::Derived
+    } else {
+        PhraseSource::Auto
+    };
+    ChunkPhrases { phrases, source }
 }
 
 /// Compare a guess against every phrase in the set and keep the best result.
@@ -158,12 +186,7 @@ fn build_prompt_for_chunk(
     plan: &ChunkPlan,
     content: &str,
 ) -> BloomPrompt {
-    let resolved = phrases_for_chunk(
-        entry,
-        chunk_idx,
-        plan.total,
-        chunk_text(plan, content, chunk_idx),
-    );
+    let resolved = phrases_for_chunk(entry, plan, content, chunk_idx);
     BloomPrompt {
         id: entry.id.clone(),
         title: title_for_chunk(entry, chunk_idx, plan),
@@ -596,7 +619,7 @@ pub fn respond_ritual(
     // No guess was judged, so no row is written — but the step still ticks, so
     // the token the caller just spent stops verifying.
     if session.clamp_if_chunks_shrank(plan.total) {
-        let resolved = phrases_for_chunk(bloom, 0, plan.total, chunk_text(&plan, &content, 0));
+        let resolved = phrases_for_chunk(bloom, &plan, &content, 0);
         let shown =
             build_full_for_chunk(bloom, 0, &plan, &content, resolved.phrases, resolved.source);
         return Ok(serde_json::to_string(&unjudged_response(
@@ -612,7 +635,7 @@ pub fn respond_ritual(
 
     let chunk_idx = session.current_chunk_index;
     let chunk_content = chunk_text(&plan, &content, chunk_idx);
-    let resolved = phrases_for_chunk(bloom, chunk_idx, plan.total, chunk_content);
+    let resolved = phrases_for_chunk(bloom, &plan, &content, chunk_idx);
     // The row and the session's bucket split carry the source the prompt
     // announced, as a replay of this row will.
     let prompted_source = PhraseSource::parse(&prompted.phrase_source).ok_or_else(|| {
@@ -1085,43 +1108,282 @@ mod tests {
     // phrases_for_chunk — which phrases a chunk is matched against
     // =====================================================================
 
+    /// The whole content and a plan that cuts it exactly into `chunks`.
+    fn planned(chunks: &[&str]) -> (String, ChunkPlan) {
+        let mut content = String::new();
+        let mut boundaries = Vec::new();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            if idx > 0 {
+                boundaries.push(content.len());
+            }
+            content.push_str(chunk);
+        }
+        let plan = ChunkPlan {
+            total: chunks.len() as u16,
+            boundaries,
+            oversized: vec![false; chunks.len()],
+        };
+        (content, plan)
+    }
+
     #[test]
     fn authored_chunk_is_matched_against_every_authored_phrase() {
         let e = entry_with_phrases(vec!["alpha", "beta", "gamma"]);
-        let resolved = phrases_for_chunk(&e, 0, 5, "chunk 0 content");
+        let (content, plan) = planned(&[
+            "Chunk zero talks about orchards.\n",
+            "The cellar floods every spring.\n",
+            "Lamps hang along the north wall.\n",
+            "Nobody waters the fern on Sundays.\n",
+            "The gate squeaks in cold weather.\n",
+        ]);
+        let resolved = phrases_for_chunk(&e, &plan, &content, 0);
         assert_eq!(resolved.source, PhraseSource::Authored);
         assert_eq!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
 
-        // Same set at a later authored index — the index picks the SOURCE,
-        // not a single phrase.
-        let resolved = phrases_for_chunk(&e, 2, 5, "chunk 2 content");
-        assert_eq!(resolved.source, PhraseSource::Authored);
-        assert_eq!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
+        // A later chunk inside the authored count no longer reuses the list
+        // chunk 0's reveal just showed (#469): it derives from its own body.
+        let resolved = phrases_for_chunk(&e, &plan, &content, 2);
+        assert_eq!(resolved.source, PhraseSource::Derived);
+        assert_eq!(resolved.phrases, vec!["Lamps hang along the north wall."]);
+        assert_ne!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
     }
 
     #[test]
     fn chunk_beyond_authored_count_derives_one_phrase() {
         let e = entry_with_phrases(vec!["alpha"]);
-        let resolved = phrases_for_chunk(&e, 3, 5, "\n## Derived heading here\n\nbody text");
+        let (content, plan) = planned(&[
+            "Chunk zero talks about orchards.\n",
+            "The cellar floods every spring.\n",
+            "Lamps hang along the north wall.\n",
+            "\n## Derived heading here\n\nbody text",
+            "\nThe gate squeaks in cold weather.\n",
+        ]);
+        let resolved = phrases_for_chunk(&e, &plan, &content, 3);
         assert_eq!(resolved.source, PhraseSource::Derived);
-        assert_eq!(resolved.phrases, vec!["Derived heading here"]);
+        assert_eq!(resolved.phrases, vec!["body text"]);
     }
 
     #[test]
     fn phraseless_bloom_gets_one_auto_phrase() {
         let e = entry_with_phrases(vec![]);
-        let resolved = phrases_for_chunk(&e, 2, 3, "## A heading\n\nbody");
+        let (content, plan) = planned(&[
+            "## Opening\n\nFirst words of the entry.\n",
+            "Middle words sit here.\n",
+            "## A heading\n\nbody",
+        ]);
+        let resolved = phrases_for_chunk(&e, &plan, &content, 2);
         assert_eq!(resolved.source, PhraseSource::Auto);
-        assert_eq!(resolved.phrases, vec!["A heading"]);
+        assert_eq!(resolved.phrases, vec!["body"]);
     }
 
     #[test]
     fn legacy_single_wake_phrase_is_treated_as_authored() {
         let mut e = test_entry();
         e.wake_phrase = Some("legacy phrase".to_string());
-        let resolved = phrases_for_chunk(&e, 0, 1, "chunk");
+        let (content, plan) = planned(&["chunk"]);
+        let resolved = phrases_for_chunk(&e, &plan, &content, 0);
         assert_eq!(resolved.source, PhraseSource::Authored);
         assert_eq!(resolved.phrases, vec!["legacy phrase"]);
+    }
+
+    /// Walk every chunk of `e` and check that no later chunk's set matches
+    /// anything an earlier reveal showed, in either direction, and that a set
+    /// is empty exactly when its source is `Unphrased`.
+    fn assert_no_later_chunk_matches_an_earlier_reveal(
+        e: &KnowledgeEntry,
+        plan: &ChunkPlan,
+        content: &str,
+    ) {
+        let mut shown_before: Vec<String> = Vec::new();
+        for k in 0..plan.total {
+            let resolved = phrases_for_chunk(e, plan, content, k);
+            assert_eq!(
+                resolved.phrases.is_empty(),
+                resolved.source == PhraseSource::Unphrased,
+                "chunk {k}: {:?} labelled {:?}",
+                resolved.phrases,
+                resolved.source
+            );
+            if k > 0 {
+                for phrase in &resolved.phrases {
+                    assert_eq!(
+                        best_match(phrase, &shown_before),
+                        (MatchKind::None, None),
+                        "chunk {k} phrase {phrase:?} matches an earlier reveal {shown_before:?}"
+                    );
+                }
+                for shown in &shown_before {
+                    assert_eq!(
+                        best_match(shown, &resolved.phrases),
+                        (MatchKind::None, None),
+                        "earlier reveal {shown:?} matches chunk {k}'s set {:?}",
+                        resolved.phrases
+                    );
+                }
+            }
+            shown_before.extend(resolved.phrases);
+        }
+    }
+
+    #[test]
+    fn a_later_chunk_is_never_matched_against_an_earlier_reveal() {
+        let e = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let content = bloom_content(&e);
+        let plan = compute_chunks(&content, chunk_threshold());
+        assert!(plan.total >= 3, "fixture must chunk; got {}", plan.total);
+        assert_no_later_chunk_matches_an_earlier_reveal(&e, &plan, &content);
+    }
+
+    mod reveal_collision_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        const CHUNK: &str = "(## Section [0-9]\n\n)?((alpha|beta|Part [1-4]/4|This is section [0-9]) ?(of the bloom)?\\. ){0,4}";
+
+        proptest! {
+            #[test]
+            fn prop_no_later_chunk_matches_an_earlier_reveal(
+                authored in prop::collection::vec("(alpha|beta|This is section [0-9]\\.)", 0..3),
+                chunks in prop::collection::vec(CHUNK, 2..6),
+            ) {
+                let e = entry_with_phrases(authored.iter().map(String::as_str).collect());
+                let parts: Vec<&str> = chunks.iter().map(String::as_str).collect();
+                let (content, plan) = planned(&parts);
+                assert_no_later_chunk_matches_an_earlier_reveal(&e, &plan, &content);
+            }
+        }
+    }
+
+    #[test]
+    fn a_later_chunk_guessing_an_authored_phrase_is_revealed() {
+        let store = MockStore::new();
+        let bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let first = respond(&store, &bloom_id, MISS, &token_from_response(&begin_json));
+        assert_eq!(
+            first["bloom"]["phrases"],
+            serde_json::json!(["alpha", "beta", "gamma"])
+        );
+        assert_eq!(first["next"]["phrase_source"], "derived");
+
+        let second = respond(&store, &bloom_id, "beta", &token_from_response(&first));
+        assert_eq!(second["bucket"], "revealed");
+        assert_eq!(second["match"]["kind"], "none");
+        assert_eq!(second["bloom"]["phrase_source"], "derived");
+        let rows = store.guesses.borrow();
+        assert_eq!(rows[1].chunk_index, 1);
+        assert_eq!(rows[1].phrase_source, "derived");
+        assert_eq!(rows[1].bucket, "revealed");
+    }
+
+    #[test]
+    fn a_derived_phrase_repeating_an_authored_phrase_takes_the_next_sentence() {
+        // The author quoted chunk 2's opening sentence as a phrase, so chunk
+        // 1's reveal shows it.
+        let e = entry_with_phrases(vec!["The weir holds back the river.", "millstone"]);
+        let chunk_two = "\n## The Weir\n\nThe weir holds back the river. It was rebuilt twice.\n";
+        let (content, plan) = planned(&["The mill sits on a bend.\n", chunk_two]);
+
+        let resolved = phrases_for_chunk(&e, &plan, &content, 1);
+        assert_eq!(resolved.source, PhraseSource::Derived);
+        assert_eq!(resolved.phrases, vec!["It was rebuilt twice."]);
+    }
+
+    #[test]
+    fn a_chunk_whose_every_sentence_repeats_an_earlier_reveal_has_no_phrase() {
+        let e = entry_with_phrases(vec![
+            "The weir holds back the river.",
+            "It was rebuilt twice.",
+        ]);
+        let chunk_two = "\n## The Weir\n\nThe weir holds back the river. It was rebuilt twice.\n";
+        let (content, plan) = planned(&["The mill sits on a bend.\n", chunk_two]);
+
+        let resolved = phrases_for_chunk(&e, &plan, &content, 1);
+        assert!(resolved.phrases.is_empty(), "{:?}", resolved.phrases);
+        assert_eq!(resolved.source, PhraseSource::Unphrased);
+    }
+
+    /// A bloom whose every section repeats its one authored phrase, padded
+    /// with fenced filler so it chunks. Fences are never split, so every later
+    /// chunk's only body sentences are that phrase.
+    fn make_repetitive_bloom() -> KnowledgeEntry {
+        let filler = "let pears = 4;\n".repeat(150);
+        let mut body = String::new();
+        let mut section = 0;
+        while body.len() < 40_000 {
+            section += 1;
+            body.push_str(&format!(
+                "\n## Section {section}\n\nNothing new here.\n\n```\n{filler}```\n\n"
+            ));
+        }
+        let mut e = test_entry();
+        e.title = "Repeats".to_string();
+        e.body = Some(body);
+        e.wake_phrases = vec!["Nothing new here.".to_string()];
+        e
+    }
+
+    #[test]
+    fn a_phraseless_chunk_reveals_any_guess() {
+        let store = MockStore::new();
+        let bloom = make_repetitive_bloom();
+        let bloom_id = bloom.id.clone();
+        let plan = compute_chunks(&bloom_content(&bloom), chunk_threshold());
+        assert!(plan.total >= 2, "fixture must chunk; got {}", plan.total);
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let first = respond(&store, &bloom_id, MISS, &token_from_response(&begin_json));
+        assert_eq!(first["next"]["phrase_source"], "unphrased");
+
+        let mut resp = respond(
+            &store,
+            &bloom_id,
+            "Nothing new here.",
+            &token_from_response(&first),
+        );
+        assert_eq!(resp["bucket"], "revealed");
+        assert_eq!(resp["match"]["kind"], "none");
+        assert_eq!(resp["bloom"]["phrases"], serde_json::json!([]));
+        assert_eq!(resp["bloom"]["phrase_source"], "unphrased");
+        {
+            let rows = store.guesses.borrow();
+            assert_eq!(rows[1].chunk_index, 1);
+            assert_eq!(rows[1].phrase_source, "unphrased");
+            assert!(rows[1].phrases.is_empty(), "{:?}", rows[1].phrases);
+        }
+
+        for _ in 2..plan.total {
+            resp = respond(&store, &bloom_id, MISS, &token_from_response(&resp));
+        }
+        assert_eq!(
+            resp["summary"]["buckets"]["revealed"]["unphrased"],
+            u64::from(plan.total - 1)
+        );
+    }
+
+    #[test]
+    fn single_chunk_phrase_sets_are_unchanged() {
+        let e = entry_with_phrases(vec!["alpha", "beta", "gamma"]);
+        let (content, plan) = planned(&["One small entry about kilns.\n"]);
+        let resolved = phrases_for_chunk(&e, &plan, &content, 0);
+        assert_eq!(resolved.source, PhraseSource::Authored);
+        assert_eq!(resolved.phrases, vec!["alpha", "beta", "gamma"]);
+
+        // Chunk 0 of a phraseless entry keeps the auto ladder's heading tier.
+        let mut bare = entry_with_phrases(vec![]);
+        bare.title = "Kilns".to_string();
+        let (content, plan) = planned(&["## Kiln Schedule\n\nFiring starts on Monday.\n"]);
+        let resolved = phrases_for_chunk(&bare, &plan, &content, 0);
+        assert_eq!(resolved.source, PhraseSource::Auto);
+        assert_eq!(resolved.phrases, vec!["Kiln Schedule"]);
+        assert_eq!(
+            resolved.phrases,
+            vec![extract_auto_phrase(&content, &bare.title)]
+        );
     }
 
     // =====================================================================
@@ -2242,7 +2504,7 @@ mod tests {
             let content = bloom_content(entry);
             let plan = compute_chunks(&content, chunk_threshold());
             let chunk_content = chunk_text(&plan, &content, *chunk_idx);
-            let resolved = phrases_for_chunk(entry, *chunk_idx, plan.total, chunk_content);
+            let resolved = phrases_for_chunk(entry, &plan, &content, *chunk_idx);
             let (match_kind, match_index) = best_match(guess, &resolved.phrases);
             let bucket = match match_kind {
                 MatchKind::None => Bucket::Revealed,
@@ -3593,7 +3855,7 @@ mod tests {
             let bucketed = ["unhinted", "revealed"]
                 .iter()
                 .flat_map(|b| {
-                    ["authored", "derived", "auto"]
+                    ["authored", "derived", "auto", "unphrased"]
                         .iter()
                         .map(move |s| summary["buckets"][b][s].as_u64().unwrap_or(0))
                 })
