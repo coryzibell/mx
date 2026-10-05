@@ -150,7 +150,13 @@ fn wake_log_read_commands_refuse_piped_stdout_end_to_end() {
 #[cfg(unix)]
 fn cli_out_dev_stdout_does_not_bypass_the_terminal_rule() {
     let dir = TempDir::new().unwrap();
-    for target in ["/dev/stdout", "/proc/self/fd/1"] {
+    // /proc exists only on Linux; elsewhere /dev/stdout covers the same path.
+    let targets: &[&str] = if cfg!(target_os = "linux") {
+        &["/dev/stdout", "/proc/self/fd/1"]
+    } else {
+        &["/dev/stdout"]
+    };
+    for &target in targets {
         let out = mx(
             &dir,
             &[
@@ -178,7 +184,13 @@ fn cli_out_naming_stdout_captured_in_a_file_is_refused() {
     let dir = TempDir::new().unwrap();
     let cap_dir = TempDir::new().unwrap();
     let capture = cap_dir.path().join("capture.txt");
-    for target in ["/dev/stdout", "/proc/self/fd/1", "/dev/stderr"] {
+    // /proc exists only on Linux; elsewhere /dev/stdout covers the same path.
+    let targets: &[&str] = if cfg!(target_os = "linux") {
+        &["/dev/stdout", "/proc/self/fd/1", "/dev/stderr"]
+    } else {
+        &["/dev/stdout", "/dev/stderr"]
+    };
+    for &target in targets {
         let file = std::fs::File::create(&capture).unwrap();
         let mut cmd = Command::new(MX);
         common::isolate(&mut cmd, dir.path());
