@@ -25,6 +25,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `invalid_bloom_id` with the deleted entry as `expected_id`; responding about
   it (`bloom_missing`) hands out the next prompt. Previously the later entry
   was judged and logged under a title the caller was never shown.
+- **Only the prompted entry is answered as deleted.** Naming any other entry
+  while the prompted one is gone is refused with the prompted entry as
+  `expected_id`, even when that entry was deleted too or nothing is left after
+  it; previously such a call skipped the prompted entry, or was refused with no
+  `expected_id` to recover from.
+- **A response's `bloom` reveal takes `title` and `phrase_source` from the
+  prompt**, as the row does, so the original response, the row and any replay
+  of it agree. Its `phrases` and `content` are still the ones the guess was
+  judged against.
 - **A session awaiting a response with no prompt record is refused** with the
   usual "run `mx memory wake --begin`" error. Sessions opened by an earlier
   binary have none; nothing is backfilled. Completed sessions are unaffected.

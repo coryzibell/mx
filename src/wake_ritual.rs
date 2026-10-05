@@ -508,13 +508,31 @@ pub fn respond_ritual(
         session.advance_unjudged();
     }
 
-    // A caller naming an entry that has just gone is answered about that
-    // entry, not told it guessed the wrong id — it is following the sequence
-    // it was given. An id the caller was never handed is still a wrong id,
-    // including when the sweep ran the sequence out: answering it as vanished
-    // would complete the session on the way past and make the mistake
-    // uncorrectable.
-    if vanished.iter().any(|id| id == bloom_id) {
+    // The prompt the caller was handed. Every incomplete session carries one
+    // past the guard above.
+    let prompted = session.prompt.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Wake session {} has no prompt awaiting a response",
+            session_id
+        )
+    })?;
+
+    // The entry the caller was handed has gone. Only a call naming it is
+    // answered as `bloom_missing`: it is following the sequence it was given.
+    // Any other id was never handed out — even one that has also gone — and
+    // answering it as vanished would consume the prompted entry on the way
+    // past, or complete the session and make the mistake uncorrectable.
+    if vanished.contains(&prompted.id) {
+        if bloom_id != prompted.id {
+            return Err(rejection(
+                format!(
+                    "The entry awaiting a response is {}, which has since been deleted; \
+                     respond about it to be handed the next one. Got {}",
+                    prompted.id, bloom_id
+                ),
+                Some(prompted.id),
+            ));
+        }
         return Ok(serde_json::to_string(&unjudged_response(
             db,
             &mut session,
@@ -526,45 +544,18 @@ pub fn respond_ritual(
         )?)?);
     }
 
-    let Some(expected_id) = session.current_bloom_id().map(str::to_string) else {
-        // The sweep consumed the rest of the sequence and the caller named
-        // something it was never handed. Nothing is persisted, so the session
-        // survives for a corrected call.
-        return Err(rejection(
-            format!(
-                "No bloom is awaiting a response; {} was not part of this ritual",
-                bloom_id
-            ),
-            None,
-        ));
-    };
-
-    // The prompt the caller was handed. The sweep above can carry the cursor
-    // past it, onto an entry no prompt was ever issued for; a guess about that
-    // entry has no title to be logged against, so the caller is pointed back
-    // at the entry it was handed, whose `bloom_missing` answer issues the next.
-    let prompted = session.prompt.clone().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Wake session {} has no prompt awaiting a response",
-            session_id
-        )
-    })?;
-    if prompted.id != expected_id || prompted.chunk_index() != session.current_chunk_index {
-        if vanished.contains(&prompted.id) {
-            return Err(rejection(
-                format!(
-                    "The entry awaiting a response is {}, which has since been deleted; \
-                     respond about it to be handed the next one. Got {}",
-                    prompted.id, bloom_id
-                ),
-                Some(prompted.id),
-            ));
-        }
+    // The prompted entry is still there, so the sweep stepped over nothing
+    // after it and the cursor stands on it — unless the prompt record was left
+    // behind by an older binary.
+    if session.current_bloom_id() != Some(prompted.id.as_str())
+        || prompted.chunk_index() != session.current_chunk_index
+    {
         bail!(
             "This session was last advanced by an older version of mx and its prompt record \
              is out of date. Run `mx memory wake --begin` to start a new ritual."
         );
     }
+    let expected_id = prompted.id.clone();
 
     if bloom_id != expected_id {
         return Err(rejection(
@@ -640,14 +631,19 @@ pub fn respond_ritual(
         content_hash: content_hash(chunk_content),
     };
 
-    let shown = build_full_for_chunk(
-        bloom,
-        chunk_idx,
-        &plan,
-        &content,
-        resolved.phrases,
-        resolved.source,
-    );
+    // The reveal names the step the way the row does, so this response and
+    // any replay of it say the same thing.
+    let shown = BloomFull {
+        title: row.title_shown.clone(),
+        ..build_full_for_chunk(
+            bloom,
+            chunk_idx,
+            &plan,
+            &content,
+            resolved.phrases,
+            prompted_source,
+        )
+    };
 
     let before_advance = session.clone();
     session.last_status = Some("shown".to_string());
@@ -2346,6 +2342,37 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_repeats_the_reveal_of_an_entry_edited_before_its_response() {
+        // A retry after a lost response is meant to be the same answer. The
+        // edit lands between the prompt and the respond; nothing changes after.
+        let store = MockStore::new();
+        let first = titled("kn-first", "First", "alpha");
+        let second = titled("kn-second", "Second", "bravo");
+        store.seed(&first);
+        store.seed(&second);
+        let b = begin(&store, &test_cascade(vec![first, second]));
+        let t0 = token_from_response(&b);
+        store.mutate_bloom("kn-first", |e| {
+            e.title = "First, renamed".to_string();
+            e.wake_phrases.clear();
+        });
+
+        let original = respond(&store, "kn-first", MISS, &t0);
+        assert_eq!(original["bloom"]["title"], "First");
+        assert_eq!(original["bloom"]["phrase_source"], "authored");
+        let retry = respond(&store, "kn-first", MISS, &t0);
+        assert_eq!(retry["replayed"], true);
+        assert_eq!(retry["bloom"]["title"], original["bloom"]["title"]);
+        assert_eq!(
+            retry["bloom"]["phrase_source"],
+            original["bloom"]["phrase_source"]
+        );
+        let rows = store.guesses.borrow();
+        assert_eq!(rows[0].title_shown, "First");
+        assert_eq!(rows[0].phrase_source, "authored");
+    }
+
+    #[test]
     fn the_row_and_the_summary_count_the_prompted_phrase_source() {
         let store = MockStore::new();
         let bloom = titled("kn-only", "Only", "alpha");
@@ -2358,8 +2385,8 @@ mod tests {
 
         let resp = respond(&store, "kn-only", MISS, &token_from_response(&begin_json));
         assert_eq!(
-            resp["bloom"]["phrase_source"], "auto",
-            "matched as it is now"
+            resp["bloom"]["phrase_source"], "authored",
+            "the reveal names the step as the row does"
         );
         assert_eq!(store.guesses.borrow()[0].phrase_source, "authored");
         assert_eq!(resp["summary"]["buckets"]["revealed"]["authored"], 1);
@@ -2403,6 +2430,68 @@ mod tests {
         let resp = respond(&store, "kn-gone", "bravo", &token);
         assert_eq!(resp["status"], "bloom_missing");
         assert_eq!(resp["next"]["id"], "kn-last");
+    }
+
+    #[test]
+    fn naming_a_deleted_entry_that_was_never_prompted_for_is_refused() {
+        // kn-2 is prompted; kn-2 and kn-3 are deleted. kn-3 was never handed
+        // out, so naming it is a wrong id, the same as naming kn-4.
+        let store = MockStore::new();
+        let blooms = seed_ids(
+            &store,
+            &[
+                ("kn-1", "alpha"),
+                ("kn-2", "bravo"),
+                ("kn-3", "charlie"),
+                ("kn-4", "delta"),
+            ],
+        );
+        let b = begin(&store, &test_cascade(blooms));
+        let r = respond(&store, "kn-1", "alpha", &token_from_response(&b));
+        let t = token_from_response(&r);
+        store.blooms.borrow_mut().remove("kn-2");
+        store.blooms.borrow_mut().remove("kn-3");
+
+        let refusal = reject(&store, "kn-3", "charlie", &t);
+        assert_eq!(refusal["error"], "invalid_bloom_id");
+        assert_eq!(refusal["expected_id"], "kn-2");
+        assert_eq!(store.guesses.borrow().len(), 1, "nothing is logged");
+        assert_eq!(only_session(&store).step, 1, "nothing is advanced");
+
+        let missing = respond(&store, "kn-2", "bravo", &t);
+        assert_eq!(missing["status"], "bloom_missing");
+        assert_eq!(missing["next"]["id"], "kn-4");
+    }
+
+    #[test]
+    fn a_wrong_id_after_the_rest_of_the_ritual_is_deleted_is_pointed_at_the_prompt() {
+        // kn-2 is prompted, then it and everything after it is deleted. The
+        // sweep runs the sequence out, but the refusal still names the entry
+        // the caller was handed, and following it finishes the ritual.
+        let store = MockStore::new();
+        let blooms = seed_ids(
+            &store,
+            &[("kn-1", "alpha"), ("kn-2", "bravo"), ("kn-3", "charlie")],
+        );
+        let b = begin(&store, &test_cascade(blooms));
+        let r = respond(&store, "kn-1", "alpha", &token_from_response(&b));
+        let t = token_from_response(&r);
+        store.blooms.borrow_mut().remove("kn-2");
+        store.blooms.borrow_mut().remove("kn-3");
+
+        let refusal = reject(&store, "kn-elsewhere", "zulu", &t);
+        assert_eq!(refusal["error"], "invalid_bloom_id");
+        assert_eq!(refusal["expected_id"], "kn-2");
+        assert_eq!(store.guesses.borrow().len(), 1, "nothing is logged");
+        let session = only_session(&store);
+        assert_eq!(session.step, 1, "nothing is advanced");
+        assert!(!session.is_complete());
+
+        let done = respond(&store, "kn-2", "bravo", &t);
+        assert_eq!(done["status"], "bloom_missing");
+        assert!(done["next"].is_null(), "{done}");
+        assert!(done["summary"].is_object());
+        assert!(only_session(&store).is_complete());
     }
 
     // =====================================================================
