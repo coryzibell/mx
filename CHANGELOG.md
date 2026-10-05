@@ -6,6 +6,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed — `mx kv inc` only ever raises a counter (#453)
+
+- **An increment that would not raise the counter is an error.** `inc` used
+  to clamp silently, so a counter at its `max`, above a since-lowered `max`,
+  or at `i64::MAX` reported success while staying put. It now exits `5`, prints
+  the key, the current value and the value it would have become (and the
+  `max` when that is why) to stderr, and writes nothing. A rise that the `max`
+  clamps (51 `--by 100` under max 100 -> 100) still succeeds.
+- **`--by` must be positive.** `inc --by 0` and negative amounts exit `4`
+  with a pointer to `mx kv dec`; nothing is written.
+- **`mx kv inc <key> --expect N`.** Refuses the increment (exit `5`, nothing
+  written) unless the counter is currently `N`, so a caller that knows the
+  true count catches drift when it happens. A never-written key is compared
+  against its schema `default`.
+- **New exit code `5`:** the command was well-formed but the store's current
+  state refused the write.
+- **Concurrent `inc` is pinned by a test:** 8 processes on one counter make 8
+  increments and print exactly 1..=8. The kv write lock (#429) already made
+  this hold; without it, the same test loses increments on every run.
+- `dec` and `set` are unchanged: they are the explicit ways to lower a
+  counter, and keep clamping silently.
+- The strict check lives in `KvStore::inc_expecting` (`inc` delegates to it),
+  and a refused `inc` no longer materializes the key's default in memory.
+
 ### Fixed — chunk phrases no longer leak on chunks 2..M (#469)
 
 - **Authored phrases apply to chunk 1 only.** Every chunk below the

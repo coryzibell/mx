@@ -116,6 +116,8 @@ pub const EXIT_KEY_NOT_FOUND: i32 = 1;
 pub const EXIT_TYPE_MISMATCH: i32 = 2;
 pub const EXIT_SCHEMA_MISSING: i32 = 3;
 pub const EXIT_INVALID_INPUT: i32 = 4;
+/// The command was well-formed but the store's current state refused it.
+pub const EXIT_STATE_REFUSED: i32 = 5;
 
 // ---------------------------------------------------------------------------
 // Typed errors
@@ -140,6 +142,17 @@ pub enum KvError {
     },
     DataValidation {
         message: String,
+    },
+    ExpectMismatch {
+        key: String,
+        expected: i64,
+        actual: i64,
+    },
+    WouldNotIncrease {
+        key: String,
+        current: i64,
+        would_be: i64,
+        max: Option<i64>,
     },
     Other(anyhow::Error),
 }
@@ -169,6 +182,31 @@ impl std::fmt::Display for KvError {
                 )
             }
             KvError::DataValidation { message } => write!(f, "{}", message),
+            KvError::ExpectMismatch {
+                key,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Counter '{}' is {}, not the expected {}. Nothing was written.",
+                key, actual, expected
+            ),
+            KvError::WouldNotIncrease {
+                key,
+                current,
+                would_be,
+                max,
+            } => {
+                write!(
+                    f,
+                    "inc would not raise counter '{}': it is {} and would become {}",
+                    key, current, would_be
+                )?;
+                if let Some(max) = max {
+                    write!(f, " (schema max is {})", max)?;
+                }
+                write!(f, ". Nothing was written.")
+            }
             KvError::Other(e) => write!(f, "{}", e),
         }
     }
@@ -1563,17 +1601,19 @@ impl KvStore {
         Ok(())
     }
 
+    fn counter_default(def: &KeyDef) -> i64 {
+        def.default
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
     /// Get the default DataValue for a key based on its schema definition.
     fn default_value(def: &KeyDef) -> DataValue {
         match def.value_type {
-            ValueType::Counter => {
-                let default_val: i64 = def
-                    .default
-                    .as_ref()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                DataValue::Counter { value: default_val }
-            }
+            ValueType::Counter => DataValue::Counter {
+                value: Self::counter_default(def),
+            },
             ValueType::String => DataValue::String {
                 value: def.default.clone().unwrap_or_default(),
             },
@@ -1834,26 +1874,74 @@ impl KvStore {
         self.set_state_batch(key, &pairs)
     }
 
-    /// Increment a counter. Clamps to min/max, never errors on bounds.
+    /// Increment a counter. See [`KvStore::inc_expecting`].
     pub fn inc(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
+        self.inc_expecting(key, by, None)
+    }
+
+    /// Increment a counter, strictly: the stored value only ever goes up.
+    ///
+    /// A counter is read as authoritative, so an increment that would leave it
+    /// where it was is an error rather than a silent no-op (#453). That covers
+    /// sitting at `max`, a stored value above a since-lowered `max`, and
+    /// saturation at `i64::MAX` with one check. A clamp that still rises
+    /// (51 by 100 under max 100) is allowed. `expect` refuses the write unless
+    /// the current value is exactly that, so a caller who knows the true count
+    /// catches drift when it happens. Nothing is mutated on any error.
+    pub fn inc_expecting(
+        &mut self,
+        key: &str,
+        by: i64,
+        expect: Option<i64>,
+    ) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
 
-        let entry = self
-            .data
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| Self::default_value(&def));
-
-        match entry {
-            DataValue::Counter { value } => {
-                *value = Self::clamp(value.saturating_add(by), def.min, def.max);
-                Ok(*value)
-            }
-            _ => Err(KvError::Other(anyhow::anyhow!(
-                "Data corruption: key '{}' has wrong runtime type",
-                key
-            ))),
+        if by <= 0 {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "inc --by must be positive (got {}); use `mx kv dec` to lower a counter. \
+                     Nothing was written.",
+                    by
+                ),
+            });
         }
+
+        let current = match self.data.entries.get(key) {
+            Some(DataValue::Counter { value }) => *value,
+            Some(_) => {
+                return Err(KvError::Other(anyhow::anyhow!(
+                    "Data corruption: key '{}' has wrong runtime type",
+                    key
+                )));
+            }
+            None => Self::counter_default(&def),
+        };
+
+        if let Some(expected) = expect
+            && expected != current
+        {
+            return Err(KvError::ExpectMismatch {
+                key: key.to_string(),
+                expected,
+                actual: current,
+            });
+        }
+
+        let raw = current.saturating_add(by);
+        let new = Self::clamp(raw, def.min, def.max);
+        if new <= current {
+            return Err(KvError::WouldNotIncrease {
+                key: key.to_string(),
+                current,
+                would_be: new,
+                max: def.max.filter(|&m| raw > m),
+            });
+        }
+
+        self.data
+            .entries
+            .insert(key.to_string(), DataValue::Counter { value: new });
+        Ok(new)
     }
 
     /// Decrement a counter. Clamps to min/max, never errors on bounds.
@@ -3556,6 +3644,171 @@ max_entries = 5
         // capped has min=0, max=100, default=50
         assert_eq!(store.inc("capped", 1).unwrap(), 51);
         assert_eq!(store.inc("capped", 100).unwrap(), 100);
+    }
+
+    // -- Strict inc (#453) --
+
+    fn counter_value(store: &KvStore, key: &str) -> i64 {
+        match store.get(key).unwrap() {
+            DataValue::Counter { value } => *value,
+            _ => panic!("Expected counter"),
+        }
+    }
+
+    #[test]
+    fn inc_rejects_non_positive_by() {
+        let (mut store, _dir) = setup_store(test_schema());
+        for by in [0, -1, i64::MIN] {
+            let err = store.inc("warmth", by).unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+            assert!(err.to_string().contains("mx kv dec"));
+        }
+        assert!(!store.data.entries.contains_key("warmth"));
+    }
+
+    #[test]
+    fn inc_at_max_errors_and_names_the_max() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("capped", "100", None).unwrap();
+
+        let err = store.inc("capped", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotIncrease {
+                    current: 100,
+                    would_be: 100,
+                    max: Some(100),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert!(err.to_string().contains("max is 100"));
+        assert_eq!(counter_value(&store, "capped"), 100);
+    }
+
+    #[test]
+    fn inc_above_a_lowered_max_errors_without_lowering() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .data
+            .entries
+            .insert("capped".into(), DataValue::Counter { value: 150 });
+
+        let err = store.inc("capped", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotIncrease {
+                    current: 150,
+                    would_be: 100,
+                    max: Some(100),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert_eq!(counter_value(&store, "capped"), 150);
+    }
+
+    #[test]
+    fn inc_saturating_at_i64_max_errors() {
+        let schema = r#"
+[keys.from_default]
+type = "counter"
+default = "9223372036854775807"
+
+[keys.from_set]
+type = "counter"
+"#;
+        let (mut store, _dir) = setup_store(schema);
+
+        let err = store.inc("from_default", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotIncrease {
+                    current: i64::MAX,
+                    would_be: i64::MAX,
+                    max: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert!(!err.to_string().contains("max is"));
+
+        store
+            .set("from_set", &(i64::MAX - 1).to_string(), None)
+            .unwrap();
+        assert_eq!(store.inc("from_set", 5).unwrap(), i64::MAX);
+        assert!(matches!(
+            store.inc("from_set", 1).unwrap_err(),
+            KvError::WouldNotIncrease { .. }
+        ));
+        assert_eq!(counter_value(&store, "from_set"), i64::MAX);
+    }
+
+    #[test]
+    fn inc_error_leaves_no_materialized_entry() {
+        let schema = r#"
+[keys.full]
+type = "counter"
+max = 10
+default = "10"
+
+[keys.big]
+type = "counter"
+default = "9223372036854775807"
+"#;
+        let (mut store, _dir) = setup_store(schema);
+
+        assert!(store.inc("full", 1).is_err());
+        assert!(store.inc("big", 1).is_err());
+        assert!(store.inc_expecting("full", 1, Some(3)).is_err());
+        assert!(store.data.entries.is_empty(), "{:?}", store.data.entries);
+    }
+
+    #[test]
+    fn inc_expect_compares_against_the_default_when_unwritten() {
+        let (mut store, _dir) = setup_store(test_schema());
+
+        let err = store.inc_expecting("capped", 1, Some(0)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::ExpectMismatch {
+                    expected: 0,
+                    actual: 50,
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert!(err.to_string().contains("Nothing was written"));
+        assert!(!store.data.entries.contains_key("capped"));
+
+        assert_eq!(store.inc_expecting("capped", 1, Some(50)).unwrap(), 51);
+    }
+
+    #[test]
+    fn inc_expect_is_checked_before_monotonicity() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("capped", "100", None).unwrap();
+
+        assert!(matches!(
+            store.inc_expecting("capped", 1, Some(99)).unwrap_err(),
+            KvError::ExpectMismatch { .. }
+        ));
+        assert!(matches!(
+            store.inc_expecting("capped", 1, Some(100)).unwrap_err(),
+            KvError::WouldNotIncrease { .. }
+        ));
     }
 
     #[test]

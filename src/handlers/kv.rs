@@ -19,6 +19,8 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::EntryNotFound { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::AmbiguousId { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::DataValidation { .. } => Some(kv::EXIT_INVALID_INPUT),
+        KvError::ExpectMismatch { .. } => Some(kv::EXIT_STATE_REFUSED),
+        KvError::WouldNotIncrease { .. } => Some(kv::EXIT_STATE_REFUSED),
         KvError::Other(_) => None,
     }
 }
@@ -714,7 +716,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             Ok(kv::EXIT_OK)
         }
 
-        KvCommands::Inc { key, by } => match store.inc(&key, by) {
+        KvCommands::Inc { key, by, expect } => match store.inc_expecting(&key, by, expect) {
             Ok(val) => {
                 store.save()?;
                 println!("{}", val);
