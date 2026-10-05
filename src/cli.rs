@@ -1197,6 +1197,15 @@ pub enum MemoryCommands {
         include_excluded: bool,
     },
 
+    /// Score and read the wake ritual's guess log
+    ///
+    /// `score` prints counts only. The read commands (`report`, `bloom`,
+    /// `wake`) print only to a terminal; anywhere else they need --out FILE.
+    WakeLog {
+        #[command(subcommand)]
+        command: WakeLogCommands,
+    },
+
     /// List recent ephemeral facts with decay
     Recent {
         /// Number of days to look back
@@ -1809,6 +1818,57 @@ pub enum RelationshipTypesCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// `mx memory wake-log`. The three read commands refuse when stdout is not a
+/// terminal unless --out FILE is given: a model's shell tool is not a
+/// terminal, and the scores must never reach the model that made the guesses.
+#[derive(Subcommand)]
+pub enum WakeLogCommands {
+    /// Score every pending guess row of the calling agent. Loads the embedding
+    /// model once, and not at all when nothing is pending. Prints only
+    /// {"status","rows","skipped"}
+    Score,
+
+    /// Bucket counts and both axes for one ritual (terminal only, or --out)
+    #[command(after_help = crate::wake_log::GOODHART_TEXT)]
+    Report {
+        /// Wake number to report (default: the most recent wake with scored rows)
+        #[arg(long)]
+        wake: Option<i64>,
+
+        /// Write to FILE instead of the terminal (.json for JSON, else text);
+        /// prints only the path
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+
+    /// One entry's guesses across rituals, newest first (terminal only, or --out)
+    Bloom {
+        /// Entry ID
+        id: String,
+
+        /// Maximum number of rows
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Write to FILE instead of the terminal (.json for JSON, else text);
+        /// prints only the path
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+    },
+
+    /// Every row of one ritual in sequence order (terminal only, or --out)
+    Wake {
+        /// Wake number
+        #[arg(value_name = "N")]
+        wake: i64,
+
+        /// Write to FILE instead of the terminal (.json for JSON, else text);
+        /// prints only the path
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 

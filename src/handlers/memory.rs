@@ -3608,6 +3608,10 @@ pub(crate) fn handle_memory(cmd: MemoryCommands, verbose: bool) -> Result<()> {
             }
         }
 
+        MemoryCommands::WakeLog { command } => {
+            crate::wake_log::handle(command, &config.db_path, verbose)?
+        }
+
         MemoryCommands::Recent {
             days,
             json,

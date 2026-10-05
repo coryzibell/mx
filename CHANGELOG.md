@@ -6,6 +6,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx memory wake-log`: scoring and terminal-only reads (#449)
+
+- **`wake-log score`** scores every pending guess row of the calling agent,
+  including rows logged before this release: the guess embedding, Axis A
+  (`sim_phrase`, `sim_content`, `sim_title`) and Axis B (`sim_prior`,
+  `sim_prior_null`, `prior_n`, plus the same three split by substrate into
+  `*_same` / `*_cross`). It loads the embedding model once, and not at all when
+  nothing is pending. Its stdout is only `{"status","rows","skipped"}`. A row
+  that fails stays pending and is retried; a model-load failure exits non-zero
+  with nothing on stdout and every row pending.
+- **`wake-log report [--wake N]`, `wake-log bloom ID [--limit N]` and
+  `wake-log wake N`** read the scored log, each opening with the Goodhart text
+  (also in `report --help`).
+- **The terminal-only rule.** The three read commands print only when stdout is
+  a terminal. Otherwise they refuse before reading anything, naming the rule,
+  unless `--out FILE` is given; then they write the file (JSON for `.json`,
+  text otherwise) and print only its path. This stops accidental and casual
+  leakage of scores and guesses into a model's context; it does not stop a
+  process that fakes a terminal or reads the `--out` file.
+- **Schema:** six additive optional fields on `wake_guess`
+  (`sim_prior_same`, `sim_prior_null_same`, `prior_n_same`, `sim_prior_cross`,
+  `sim_prior_null_cross`, `prior_n_cross`). No backfill. `--begin`, `--respond`
+  and their replays project and print no scoring field.
+
 ### Fixed — a guess row records the title that was shown (#467)
 
 - **`title_shown` is the prompted title.** The session records each prompt as

@@ -436,8 +436,8 @@ DEFINE FIELD IF NOT EXISTS prompt ON wake_session FLEXIBLE TYPE option<object>;
 DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
 
 -- Wake ritual guess log. One row per chunk per wake, written by --respond
--- before the session advances. The sim_* / embedding / scored_at columns are
--- null at write time and filled later by the scoring pass.
+-- before the session advances. The sim_* / prior_n* / embedding / scored_at
+-- columns are null at write time and filled later by `wake-log score`.
 DEFINE TABLE IF NOT EXISTS wake_guess SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS agent            ON wake_guess TYPE string;
 DEFINE FIELD IF NOT EXISTS wake             ON wake_guess TYPE option<int>;
@@ -467,6 +467,16 @@ DEFINE FIELD IF NOT EXISTS sim_prior        ON wake_guess TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS sim_prior_null   ON wake_guess TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS prior_n          ON wake_guess TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS scored_at        ON wake_guess TYPE option<datetime>;
+-- Axis B split by substrate (wake-log score): the same three values over
+-- prior rows answered under the row's own model_id, and under a different
+-- known one. All six are NONE when the row's model_id is NONE. Additive: rows
+-- written before these existed read them as NONE and are not backfilled.
+DEFINE FIELD IF NOT EXISTS sim_prior_same       ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior_null_same  ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS prior_n_same         ON wake_guess TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS sim_prior_cross      ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior_null_cross ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS prior_n_cross        ON wake_guess TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS wake_guess_bloom   ON wake_guess FIELDS agent, bloom_id, chunk_index;
 DEFINE INDEX IF NOT EXISTS wake_guess_wake    ON wake_guess FIELDS agent, wake;
 DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
