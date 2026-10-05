@@ -622,7 +622,7 @@ refused with a pointer to the last one that worked, and the pointer is true: the
 token from the last successful response is always either current or resumable.
 
 The final response carries a summary of bucket counts split by phrase source
-(`authored`, `derived`, `auto`), the number of chunks walked, and `unjudged` —
+(`authored`, `derived`, `auto`, `unphrased`), the number of chunks walked, and `unjudged` —
 the steps where no guess was judged. `chunks` always equals the bucket totals
 plus `unjudged`, so the difference never has to be worked out by subtraction.
 
@@ -682,8 +682,8 @@ agent in every query.
 Per row it stores the guess embedding and:
 
 - *Axis A* (tunable; never identity evidence). `sim_phrase`: the best cosine
-  similarity to the row's own `authored` phrase snapshot (none for `derived` or
-  `auto`). `sim_content`: the best similarity to the entry's stored vectors
+  similarity to the row's own `authored` phrase snapshot (none for `derived`,
+  `auto` or `unphrased`). `sim_content`: the best similarity to the entry's stored vectors
   under the same embedding model, the mean-pooled entry embedding and every
   embedding chunk. `sim_title`: similarity to the title, with the ritual's own
   `(Part N/M)` suffix removed.
@@ -717,7 +717,11 @@ difference.]
 #command(
   "mx memory wake-log report",
   [The Goodhart text, then bucket counts and both axes (medians) for one ritual.
-  Terminal only; see below.],
+  Bucket counts are split by phrase source, with an `unphrased` column for
+  later chunks prompted with no phrase. An `authored` row past the first chunk,
+  logged before \#469, is marked `leaked` (a `leaked` field in JSON, after the
+  bucket in text), counted in its own column instead of `authored`, and left
+  out of `sim_phrase`. Terminal only; see below.],
   flags: (
     ([`--wake`], [`int`],  [Wake to report. Default: the most recent wake with scored rows.]),
     ([`--out`],  [`path`], [Write to this file instead (JSON if it ends in `.json`, text otherwise) and print only its path.]),

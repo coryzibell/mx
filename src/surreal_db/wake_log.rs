@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::{SurrealConnection, SurrealDatabase};
 use crate::wake_guess::PRIOR_SET_SIZE;
-use crate::wake_log::{HistoryScope, LogRow, PendingRow, ScoredFields, Substrate};
+use crate::wake_log::{HistoryScope, LogRow, PendingRow, ScoredFields, Substrate, leaked};
 
 /// The columns the read commands show. `embedding` is deliberately absent.
 const LOG_ROW_FIELDS: &str = "wake, <string>ts AS ts_text, ts, session_id, position, bloom_id,
@@ -57,20 +57,23 @@ fn text(obj: &Value, key: &str) -> String {
 }
 
 fn log_row(obj: &Value) -> LogRow {
+    let chunk_index = obj["chunk_index"].as_i64().unwrap_or(0);
+    let phrase_source = text(obj, "phrase_source");
     LogRow {
         wake: obj["wake"].as_i64(),
         ts: text(obj, "ts_text"),
         session_id: text(obj, "session_id"),
         position: obj["position"].as_i64().unwrap_or(0),
         bloom_id: text(obj, "bloom_id"),
-        chunk_index: obj["chunk_index"].as_i64().unwrap_or(0),
+        chunk_index,
         chunk_total: obj["chunk_total"].as_i64().unwrap_or(1),
         bloom_position: obj["bloom_position"].as_i64().unwrap_or(0),
         bloom_total: obj["bloom_total"].as_i64().unwrap_or(0),
         title_shown: text(obj, "title_shown"),
         guess: text(obj, "guess"),
         model_id: obj["model_id"].as_str().map(str::to_string),
-        phrase_source: text(obj, "phrase_source"),
+        leaked: leaked(chunk_index, &phrase_source),
+        phrase_source,
         bucket: text(obj, "bucket"),
         scored: obj["scored"].as_bool().unwrap_or(false),
         sim_phrase: obj["sim_phrase"].as_f64(),

@@ -1967,10 +1967,10 @@ to the last one that worked, and the pointer is true: the token from the
 last successful response is always either current or resumable.
 
 The final response carries a summary of bucket counts split by phrase
-source (`authored`, `derived`, `auto`), the number of chunks walked, and
-`unjudged` --- the steps where no guess was judged. `chunks` always
-equals the bucket totals plus `unjudged`, so the difference never has to
-be worked out by subtraction.
+source (`authored`, `derived`, `auto`, `unphrased`), the number of
+chunks walked, and `unjudged` --- the steps where no guess was judged.
+`chunks` always equals the bucket totals plus `unjudged`, so the
+difference never has to be worked out by subtraction.
 
 Two statuses judge no guess, write no row, and omit `bucket`, `guess`
 and `match`: `chunk_truncated`, when the entry shrank past the session's
@@ -2034,10 +2034,11 @@ Per row it stores the guess embedding and:
 
 - **Axis A** (tunable; never identity evidence). `sim_phrase`: the best
   cosine similarity to the row's own `authored` phrase snapshot (none
-  for `derived` or `auto`). `sim_content`: the best similarity to the
-  entry's stored vectors under the same embedding model, the mean-pooled
-  entry embedding and every embedding chunk. `sim_title`: similarity to
-  the title, with the ritual's own `(Part N/M)` suffix removed.
+  for `derived`, `auto` or `unphrased`). `sim_content`: the best
+  similarity to the entry's stored vectors under the same embedding
+  model, the mean-pooled entry embedding and every embedding chunk.
+  `sim_title`: similarity to the title, with the ritual's own
+  `(Part N/M)` suffix removed.
 
 - **Axis B**. `sim_prior`: similarity to the centroid of the 5 most
   recent earlier scored guesses on the same entry and the same shown
@@ -2074,7 +2075,12 @@ this makes no difference.
 ## `mx memory wake-log report`
 
 The Goodhart text, then bucket counts and both axes (medians) for one
-ritual. Terminal only; see below.
+ritual. Bucket counts are split by phrase source, with an `unphrased`
+column for later chunks prompted with no phrase. An `authored` row past
+the first chunk, logged before #469, is marked `leaked` (a `leaked`
+field in JSON, after the bucket in text), counted in its own column
+instead of `authored`, and left out of `sim_phrase`. Terminal only; see
+below.
 
 ### Flags
 

@@ -60,12 +60,15 @@ pub fn verify_token(token: &str) -> Result<(String, u32), String> {
 
 /// Where the phrase a chunk was matched against came from — authored by the
 /// bloom owner, derived from the chunk's own content, or auto-generated for a
-/// bloom with no authored phrases at all.
+/// bloom with no authored phrases at all. `Unphrased` is a later chunk whose
+/// every candidate phrase repeated an earlier reveal: it has no phrase, so
+/// any guess on it is revealed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhraseSource {
     Authored,
     Derived,
     Auto,
+    Unphrased,
 }
 
 impl PhraseSource {
@@ -74,6 +77,7 @@ impl PhraseSource {
             PhraseSource::Authored => "authored",
             PhraseSource::Derived => "derived",
             PhraseSource::Auto => "auto",
+            PhraseSource::Unphrased => "unphrased",
         }
     }
 
@@ -82,6 +86,7 @@ impl PhraseSource {
             "authored" => Some(PhraseSource::Authored),
             "derived" => Some(PhraseSource::Derived),
             "auto" => Some(PhraseSource::Auto),
+            "unphrased" => Some(PhraseSource::Unphrased),
             _ => None,
         }
     }
@@ -98,6 +103,8 @@ pub struct SourceCounts {
     pub derived: u32,
     #[serde(default)]
     pub auto: u32,
+    #[serde(default)]
+    pub unphrased: u32,
 }
 
 impl SourceCounts {
@@ -106,17 +113,19 @@ impl SourceCounts {
             PhraseSource::Authored => self.authored += 1,
             PhraseSource::Derived => self.derived += 1,
             PhraseSource::Auto => self.auto += 1,
+            PhraseSource::Unphrased => self.unphrased += 1,
         }
     }
 
     fn total(&self) -> u32 {
-        self.authored + self.derived + self.auto
+        self.authored + self.derived + self.auto + self.unphrased
     }
 
     fn add(&mut self, other: &SourceCounts) {
         self.authored += other.authored;
         self.derived += other.derived;
         self.auto += other.auto;
+        self.unphrased += other.unphrased;
     }
 }
 
@@ -517,7 +526,8 @@ pub struct BloomFull {
     pub id: String,
     pub title: String,
     /// The phrases the guess was matched against. For `derived` and `auto`
-    /// sources this holds the single generated phrase.
+    /// sources this holds the single generated phrase; empty when the source
+    /// is `unphrased`.
     pub phrases: Vec<String>,
     /// The phrase source the prompt announced; `phrases` is what the guess was
     /// judged against, and can differ if the entry's phrases changed after the
