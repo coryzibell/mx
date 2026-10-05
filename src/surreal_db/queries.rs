@@ -1765,6 +1765,11 @@ impl SurrealDatabase {
         // Serialize bloom_chunk_meta as a JSON array. The schema field is
         // `flexible array<object>` so SurrealDB will accept arbitrary shape.
         let bloom_chunk_meta_json = serde_json::to_value(&session.bloom_chunk_meta)?;
+        let prompt_json = session
+            .prompt
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
         let created_at = chrono::DateTime::from_timestamp(session.created_at, 0)
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339();
@@ -1783,7 +1788,8 @@ impl SurrealDatabase {
                     revealed_count = $revealed_count,
                     unjudged_count = $unjudged_count,
                     created_at = <datetime>$created_at,
-                    bloom_chunk_meta = $bloom_chunk_meta
+                    bloom_chunk_meta = $bloom_chunk_meta,
+                    prompt = $prompt
                 ",
             )
             .bind(("session_id", session.session_id.clone()))
@@ -1799,6 +1805,7 @@ impl SurrealDatabase {
             .bind(("unjudged_count", session.unjudged_count as i64))
             .bind(("created_at", normalize_datetime(&created_at)))
             .bind(("bloom_chunk_meta", bloom_chunk_meta_json))
+            .bind(("prompt", prompt_json))
             .await
             .context("Failed to create wake session")
         })?;
@@ -1844,6 +1851,7 @@ impl SurrealDatabase {
                     IF completed_at != NONE THEN <int>time::unix(completed_at) END AS completed_at,
                     prev_step,
                     last_status,
+                    prompt,
                     bloom_chunk_meta
                 FROM type::thing('wake_session', $session_id)",
             )
@@ -1940,6 +1948,17 @@ impl SurrealDatabase {
             completed_at: obj["completed_at"].as_i64(),
             prev_step: obj["prev_step"].as_u64().map(u32::try_from).transpose()?,
             last_status: obj["last_status"].as_str().map(str::to_string),
+            prompt: match obj.get("prompt") {
+                Some(v) if !v.is_null() => {
+                    Some(serde_json::from_value(v.clone()).with_context(|| {
+                        format!(
+                            "Wake session {} has an unreadable prompt record",
+                            session_id
+                        )
+                    })?)
+                }
+                _ => None,
+            },
             bloom_chunk_meta,
         }))
     }
@@ -2467,13 +2486,14 @@ const WAKE_SESSION_CAS: &str = "LET $moved = (UPDATE type::thing('wake_session',
         bloom_chunk_meta = $s.bloom_chunk_meta,
         completed_at = IF $complete THEN time::now() END,
         prev_step = $expected_step,
-        last_status = $s.last_status
+        last_status = $s.last_status,
+        prompt = $s.prompt
     WHERE step = $expected_step
     RETURN AFTER);";
 
 fn wake_session_fields(session: &crate::wake_token::WakeSession) -> Result<serde_json::Value> {
-    // `last_status` is left out when unset: a JSON null would reach the
-    // SCHEMAFULL `option<string>` field as NULL, which it rejects.
+    // `last_status` and `prompt` are left out when unset: a JSON null would
+    // reach their SCHEMAFULL `option<...>` fields as NULL, which they reject.
     let mut fields = serde_json::json!({
         "current_index": session.current_index as i64,
         "current_chunk_index": session.current_chunk_index as i64,
@@ -2485,6 +2505,9 @@ fn wake_session_fields(session: &crate::wake_token::WakeSession) -> Result<serde
     });
     if let Some(status) = &session.last_status {
         fields["last_status"] = serde_json::Value::String(status.clone());
+    }
+    if let Some(prompt) = &session.prompt {
+        fields["prompt"] = serde_json::to_value(prompt)?;
     }
     Ok(fields)
 }

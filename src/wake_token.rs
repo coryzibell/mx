@@ -196,6 +196,13 @@ pub struct WakeSession {
     /// The status of the last successful write (`shown`, `bloom_missing`,
     /// `chunk_truncated`), so a resumed call that judged nothing echoes it.
     pub last_status: Option<String>,
+    /// The prompt awaiting a response, exactly as it was handed out. Written by
+    /// the same write that hands it out, so the guess row records the title,
+    /// phrase source and chunk total the guesser saw rather than what the entry
+    /// says by the time the guess arrives, and a resumed call hands back the
+    /// same prompt. `None` once the ritual is complete; `None` on a session
+    /// awaiting a response means an older binary opened it.
+    pub prompt: Option<BloomPrompt>,
     /// Per-bloom outcome counters (1:1 with `bloom_ids`).
     pub bloom_chunk_meta: Vec<BloomChunkMeta>,
 }
@@ -234,6 +241,7 @@ impl WakeSession {
             completed_at: None,
             prev_step: None,
             last_status: None,
+            prompt: None,
             bloom_chunk_meta,
         }
     }
@@ -471,7 +479,7 @@ impl std::fmt::Display for WakeRejection {
 
 impl std::error::Error for WakeRejection {}
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BloomPrompt {
     pub id: String,
     /// The title as shown, including any `(Part N/M)` suffix.
@@ -482,7 +490,19 @@ pub struct BloomPrompt {
     pub chunk: Option<ChunkRef>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+impl BloomPrompt {
+    /// The 0-based chunk this prompt asked about.
+    pub fn chunk_index(&self) -> u16 {
+        self.chunk.as_ref().map_or(0, |c| c.index.saturating_sub(1))
+    }
+
+    /// How many chunks the bloom had when this prompt was handed out.
+    pub fn chunk_total(&self) -> u16 {
+        self.chunk.as_ref().map_or(1, |c| c.total)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChunkRef {
     pub index: u16,
     pub total: u16,

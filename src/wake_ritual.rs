@@ -314,7 +314,7 @@ pub fn begin_ritual(
         bail!("No blooms to wake");
     }
 
-    let session = WakeSession::new(cascade, meta.agent, meta.wake, meta.model_id);
+    let mut session = WakeSession::new(cascade, meta.agent, meta.wake, meta.model_id);
 
     // Build lookup map from the cascade we already have.
     let owned_blooms: HashMap<String, KnowledgeEntry> = build_bloom_map_owned(cascade);
@@ -333,6 +333,7 @@ pub fn begin_ritual(
     let first_plan = compute_chunks(&first_content, chunk_threshold());
 
     let prompt = build_prompt_for_chunk(first_bloom, 0, &first_plan, &first_content);
+    session.prompt = Some(prompt.clone());
 
     // Persist session to DB.
     let session_id = db.create_wake_session(&session)?;
@@ -423,6 +424,16 @@ pub fn respond_ritual(
         bail!(
             "This ritual was begun by another agent. Run `mx memory wake --begin` \
              to start your own."
+        );
+    }
+
+    // Every write this binary makes that leaves a prompt outstanding records
+    // it. Without the record there is nothing to log the guess's title from,
+    // and rebuilding it from the entry as it is now is the bug this guards.
+    if !session.is_complete() && session.prompt.is_none() {
+        bail!(
+            "This session was created by an older version of mx and cannot be continued. \
+             Run `mx memory wake --begin` to start a new ritual."
         );
     }
 
@@ -528,6 +539,33 @@ pub fn respond_ritual(
         ));
     };
 
+    // The prompt the caller was handed. The sweep above can carry the cursor
+    // past it, onto an entry no prompt was ever issued for; a guess about that
+    // entry has no title to be logged against, so the caller is pointed back
+    // at the entry it was handed, whose `bloom_missing` answer issues the next.
+    let prompted = session.prompt.clone().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Wake session {} has no prompt awaiting a response",
+            session_id
+        )
+    })?;
+    if prompted.id != expected_id || prompted.chunk_index() != session.current_chunk_index {
+        if vanished.contains(&prompted.id) {
+            return Err(rejection(
+                format!(
+                    "The entry awaiting a response is {}, which has since been deleted; \
+                     respond about it to be handed the next one. Got {}",
+                    prompted.id, bloom_id
+                ),
+                Some(prompted.id),
+            ));
+        }
+        bail!(
+            "This session was last advanced by an older version of mx and its prompt record \
+             is out of date. Run `mx memory wake --begin` to start a new ritual."
+        );
+    }
+
     if bloom_id != expected_id {
         return Err(rejection(
             format!("Expected bloom {}, got {}", expected_id, bloom_id),
@@ -565,6 +603,15 @@ pub fn respond_ritual(
     let chunk_idx = session.current_chunk_index;
     let chunk_content = chunk_text(&plan, &content, chunk_idx);
     let resolved = phrases_for_chunk(bloom, chunk_idx, plan.total, chunk_content);
+    // The row and the session's bucket split carry the source the prompt
+    // announced, as a replay of this row will.
+    let prompted_source = PhraseSource::parse(&prompted.phrase_source).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Wake session {} prompted with unknown phrase source {}",
+            session_id,
+            prompted.phrase_source
+        )
+    })?;
 
     let (match_kind, match_index) = best_match(guess, &resolved.phrases);
     let bucket = match match_kind {
@@ -578,14 +625,14 @@ pub fn respond_ritual(
         session_id: session_id.clone(),
         bloom_id: expected_id.clone(),
         chunk_index: chunk_idx,
-        chunk_total: plan.total,
+        chunk_total: prompted.chunk_total(),
         position: session.step,
         bloom_position: session.current_index + 1,
         bloom_total: session.total_blooms(),
-        title_shown: title_for_chunk(bloom, chunk_idx, &plan),
+        title_shown: prompted.title,
         guess: guess.to_string(),
         model_id: session.model_id.clone(),
-        phrase_source: resolved.source.as_str().to_string(),
+        phrase_source: prompted.phrase_source,
         phrases: resolved.phrases.clone(),
         match_kind: match_kind.as_str().to_string(),
         match_index,
@@ -604,8 +651,9 @@ pub fn respond_ritual(
 
     let before_advance = session.clone();
     session.last_status = Some("shown".to_string());
-    session.advance(plan.total, bucket, resolved.source);
+    session.advance(plan.total, bucket, prompted_source);
     skip_missing_blooms(&mut session, &all_blooms);
+    issue_next_prompt(&mut session, &all_blooms)?;
 
     if let Err(err) = db.record_wake_guess(&row, &session, token_step) {
         // Another call on the same token got there first: its guess is logged
@@ -628,7 +676,7 @@ pub fn respond_ritual(
         );
     }
 
-    let (next, progress, summary) = get_next_and_progress(&session, &all_blooms)?;
+    let (progress, summary) = progress_and_summary(&session, &all_blooms);
 
     let response = WakeRespondResponse {
         status: "shown".to_string(),
@@ -641,7 +689,7 @@ pub fn respond_ritual(
         }),
         bloom: Some(shown),
         session: create_token(&session_id, session.step),
-        next,
+        next: session.prompt.clone(),
         progress: Some(progress),
         summary,
         wake: session.wake,
@@ -677,7 +725,7 @@ fn resume(
     let status = session.last_status.clone().ok_or_else(|| {
         anyhow::anyhow!("Wake session {} has no record of its last step", session_id)
     })?;
-    let (next, progress, summary) = get_next_and_progress(&session, all_blooms)?;
+    let (progress, summary) = progress_and_summary(&session, all_blooms);
     let response = WakeRespondResponse {
         status,
         replayed: true,
@@ -686,7 +734,7 @@ fn resume(
         match_info: None,
         bloom: None,
         session: create_token(session_id, session.step),
-        next,
+        next: session.prompt.clone(),
         progress: Some(progress),
         summary,
         wake: session.wake,
@@ -701,7 +749,10 @@ fn resume(
 /// session write did not — in which case it is advanced with the LOGGED
 /// judgment and saved as a compare-and-swap on `expected_step`; or already
 /// past it, in which case nothing is written. Either way the response carries
-/// the logged guess, its judgment, and the current token and `next`.
+/// the logged guess, its judgment, and the current token and `next` — the
+/// prompt the session recorded when it was handed out, not one rebuilt from
+/// the entry as it is now, so the title a retry is shown is the one its guess
+/// is logged under.
 fn replay(
     db: &dyn KnowledgeStore,
     mut session: WakeSession,
@@ -732,11 +783,12 @@ fn replay(
         })?;
         session.advance(logged.chunk_total, bucket, source);
         skip_missing_blooms(&mut session, all_blooms);
+        issue_next_prompt(&mut session, all_blooms)?;
         session.last_status = Some("shown".to_string());
         db.update_wake_session(&session, expected_step)?;
     }
 
-    let (next, progress, summary) = get_next_and_progress(&session, all_blooms)?;
+    let (progress, summary) = progress_and_summary(&session, all_blooms);
 
     let shown = all_blooms.get(&logged.bloom_id).map(|bloom| {
         let content = bloom_content(bloom);
@@ -768,7 +820,7 @@ fn replay(
         }),
         bloom: shown,
         session: create_token(session_id, session.step),
-        next,
+        next: session.prompt.clone(),
         progress: Some(progress),
         summary,
         wake: session.wake,
@@ -793,7 +845,8 @@ fn unjudged_response(
 ) -> Result<WakeRespondResponse> {
     skip_missing_blooms(session, all_blooms);
 
-    let (next, progress, summary) = get_next_and_progress(session, all_blooms)?;
+    issue_next_prompt(session, all_blooms)?;
+    let (progress, summary) = progress_and_summary(session, all_blooms);
     session.last_status = Some(status.to_string());
     db.update_wake_session(session, expected_step)?;
 
@@ -805,7 +858,7 @@ fn unjudged_response(
         match_info: None,
         bloom: shown,
         session: create_token(session_id, session.step),
-        next,
+        next: session.prompt.clone(),
         progress: Some(progress),
         summary,
         wake: session.wake,
@@ -861,12 +914,38 @@ fn build_bloom_map_owned(cascade: &WakeCascade) -> HashMap<String, KnowledgeEntr
     map
 }
 
-/// Get next bloom prompt and current progress. Handles both in-bloom chunk
-/// advancement (staying on the same bloom) and cross-bloom advancement.
-fn get_next_and_progress(
+/// Build the prompt for the cursor's position and record it on the session,
+/// for the write that persists the cursor to persist with it. `None` once the
+/// ritual is complete. The caller must already have stepped over deleted
+/// entries, so the entry under the cursor is present.
+fn issue_next_prompt(
+    session: &mut WakeSession,
+    all_blooms: &HashMap<String, KnowledgeEntry>,
+) -> Result<()> {
+    session.prompt = match session.current_bloom_id() {
+        None => None,
+        Some(next_id) => {
+            let next_bloom = all_blooms
+                .get(next_id)
+                .ok_or_else(|| anyhow::anyhow!("Next bloom not found: {}", next_id))?;
+            let next_content = bloom_content(next_bloom);
+            let next_plan = compute_chunks(&next_content, chunk_threshold());
+            Some(build_prompt_for_chunk(
+                next_bloom,
+                session.current_chunk_index,
+                &next_plan,
+                &next_content,
+            ))
+        }
+    };
+    Ok(())
+}
+
+/// Current progress, and the summary once the ritual is complete.
+fn progress_and_summary(
     session: &WakeSession,
     all_blooms: &HashMap<String, KnowledgeEntry>,
-) -> Result<(Option<BloomPrompt>, Progress, Option<Summary>)> {
+) -> (Progress, Option<Summary>) {
     // Re-compute total chunks for progress (cheap; keeps the total fresh for
     // mid-ritual edits).
     let total_chunks = total_chunks_across_cascade(session, all_blooms).max(1);
@@ -896,36 +975,13 @@ fn get_next_and_progress(
         buckets: Some(buckets.totals()),
     };
 
-    if session.is_complete() {
-        let summary = Summary {
-            chunks: session.step as usize,
-            blooms: session.total_blooms(),
-            buckets,
-            unjudged: session.unjudged_count,
-        };
-        Ok((None, progress, Some(summary)))
-    } else {
-        let next_id = session
-            .current_bloom_id()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get next bloom"))?;
-        let next_bloom = all_blooms
-            .get(next_id)
-            .ok_or_else(|| anyhow::anyhow!("Next bloom not found: {}", next_id))?;
-
-        let next_content = bloom_content(next_bloom);
-        let next_plan = compute_chunks(&next_content, chunk_threshold());
-
-        Ok((
-            Some(build_prompt_for_chunk(
-                next_bloom,
-                session.current_chunk_index,
-                &next_plan,
-                &next_content,
-            )),
-            progress,
-            None,
-        ))
-    }
+    let summary = session.is_complete().then(|| Summary {
+        chunks: session.step as usize,
+        blooms: session.total_blooms(),
+        buckets,
+        unjudged: session.unjudged_count,
+    });
+    (progress, summary)
 }
 
 #[cfg(test)]
@@ -1555,6 +1611,7 @@ mod tests {
 
         let mut winner_session = store.sessions.borrow()[&session_id].clone();
         winner_session.advance(1, Bucket::Unhinted, PhraseSource::Authored);
+        issue_next_prompt(&mut winner_session, &store.blooms.borrow()).unwrap();
         let winner_row = WakeGuessRow {
             agent: "test-agent".to_string(),
             wake: Some(7),
@@ -2058,6 +2115,286 @@ mod tests {
             resp["next"]["id"], "kn-third",
             "the deleted entry must be stepped over, not prompted for: {resp}"
         );
+    }
+
+    // =====================================================================
+    // The prompt snapshot: a row records what the guesser was shown (#467)
+    // =====================================================================
+
+    fn titled(id: &str, title: &str, phrase: &str) -> KnowledgeEntry {
+        let mut e = entry_with_phrases(vec![phrase]);
+        e.id = id.to_string();
+        e.title = title.to_string();
+        e
+    }
+
+    fn only_session(store: &MockStore) -> WakeSession {
+        store.sessions.borrow().values().next().unwrap().clone()
+    }
+
+    #[test]
+    fn a_title_edited_after_its_prompt_is_logged_as_prompted() {
+        let store = MockStore::new();
+        let first = titled("kn-first", "First", "alpha");
+        let second = titled("kn-second", "Second", "bravo");
+        store.seed(&first);
+        store.seed(&second);
+
+        // Edited between --begin and the respond.
+        let begin_json = begin(&store, &test_cascade(vec![first, second]));
+        assert_eq!(begin_json["prompt"]["title"], "First");
+        store.mutate_bloom("kn-first", |e| e.title = "First, renamed".to_string());
+        let resp = respond(
+            &store,
+            "kn-first",
+            "alpha",
+            &token_from_response(&begin_json),
+        );
+
+        // Edited between the respond that handed out `next` and the next one.
+        assert_eq!(resp["next"]["title"], "Second");
+        store.mutate_bloom("kn-second", |e| e.title = "Second, renamed".to_string());
+        respond(&store, "kn-second", "bravo", &token_from_response(&resp));
+
+        let rows = store.guesses.borrow();
+        assert_eq!(rows[0].title_shown, "First");
+        assert_eq!(rows[1].title_shown, "Second");
+    }
+
+    #[test]
+    fn a_bloom_rechunked_after_its_prompt_is_logged_with_the_prompted_part() {
+        let store = MockStore::new();
+        let bloom = make_large_bloom(95_000, vec!["alpha", "beta", "gamma"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        let prompted_total = begin_json["prompt"]["chunk"]["total"].as_u64().unwrap() as u16;
+        let resp = respond(&store, &bloom_id, MISS, &token_from_response(&begin_json));
+        let prompted_title = format!("Ops (Part 2/{prompted_total})");
+        assert_eq!(resp["next"]["title"], prompted_title.as_str());
+
+        store.mutate_bloom(&bloom_id, |e| {
+            e.body = make_large_bloom(160_000, vec![]).body;
+        });
+        let current_total = compute_chunks(
+            &bloom_content(&store.blooms.borrow()[&bloom_id]),
+            chunk_threshold(),
+        )
+        .total;
+        assert_ne!(current_total, prompted_total, "the fixture must re-chunk");
+
+        let spent = token_from_response(&resp);
+        let resp = respond(&store, &bloom_id, MISS, &spent);
+        {
+            let rows = store.guesses.borrow();
+            assert_eq!(rows[1].title_shown, prompted_title);
+            assert_eq!(rows[1].chunk_total, prompted_total);
+            assert_eq!(rows[1].chunk_index, 1);
+        }
+
+        // Navigation is the bloom as it is now, exactly as before this change:
+        // the cursor advanced under the current plan, not the prompted one.
+        let next_title = format!("Ops (Part 3/{current_total})");
+        assert_eq!(resp["next"]["title"], next_title.as_str());
+        let after = only_session(&store);
+        assert_eq!(after.current_chunk_index, 2);
+
+        // A retry of the spent token is answered from the row and the record,
+        // and moves nothing.
+        let again = respond(&store, &bloom_id, "alpha", &spent);
+        assert_eq!(again["replayed"], true);
+        assert_eq!(again["bloom"]["title"], prompted_title.as_str());
+        assert_eq!(again["next"], resp["next"]);
+        let replayed = only_session(&store);
+        assert_eq!(replayed.step, after.step);
+        assert_eq!(replayed.current_chunk_index, after.current_chunk_index);
+        assert_eq!(store.guesses.borrow().len(), 2);
+    }
+
+    #[test]
+    fn an_unchanged_entry_logs_the_row_it_always_did() {
+        let store = MockStore::new();
+        let mut big = make_large_bloom(60_000, vec!["alpha"]);
+        big.id = "kn-big".to_string();
+        let plain = titled("kn-plain", "Plain", "bravo");
+        store.seed(&big);
+        store.seed(&plain);
+
+        let begin_json = begin(&store, &test_cascade(vec![big.clone(), plain.clone()]));
+        let big_total = compute_chunks(&bloom_content(&big), chunk_threshold()).total;
+        assert!(big_total > 1, "the fixture must chunk");
+
+        let mut steps: Vec<(&KnowledgeEntry, u16, &str)> = Vec::new();
+        for idx in 0..big_total {
+            steps.push((&big, idx, if idx == 0 { "alpha" } else { MISS }));
+        }
+        steps.push((&plain, 0, "bravo"));
+
+        let mut token = token_from_response(&begin_json);
+        for (entry, _, guess) in &steps {
+            token = token_from_response(&respond(&store, &entry.id, guess, &token));
+        }
+
+        // The row as main builds it, from the entry at respond time.
+        let rows = store.guesses.borrow();
+        assert_eq!(rows.len(), steps.len());
+        for (position, (entry, chunk_idx, guess)) in steps.iter().enumerate() {
+            let content = bloom_content(entry);
+            let plan = compute_chunks(&content, chunk_threshold());
+            let chunk_content = chunk_text(&plan, &content, *chunk_idx);
+            let resolved = phrases_for_chunk(entry, *chunk_idx, plan.total, chunk_content);
+            let (match_kind, match_index) = best_match(guess, &resolved.phrases);
+            let bucket = match match_kind {
+                MatchKind::None => Bucket::Revealed,
+                _ => Bucket::Unhinted,
+            };
+            let expected = WakeGuessRow {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                session_id: rows[0].session_id.clone(),
+                bloom_id: entry.id.clone(),
+                chunk_index: *chunk_idx,
+                chunk_total: plan.total,
+                position: position as u32,
+                bloom_position: if entry.id == "kn-big" { 1 } else { 2 },
+                bloom_total: 2,
+                title_shown: title_for_chunk(entry, *chunk_idx, &plan),
+                guess: guess.to_string(),
+                model_id: Some("test-model".to_string()),
+                phrase_source: resolved.source.as_str().to_string(),
+                phrases: resolved.phrases,
+                match_kind: match_kind.as_str().to_string(),
+                match_index,
+                bucket: bucket.as_str().to_string(),
+                content_hash: content_hash(chunk_content),
+            };
+            // Debug prints every field, so this compares all of them.
+            assert_eq!(
+                format!("{:?}", rows[position]),
+                format!("{expected:?}"),
+                "row {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_awaiting_a_response_without_a_prompt_record_is_refused() {
+        let store = MockStore::new();
+        let bloom = entry_with_phrases(vec!["alpha"]);
+        let bloom_id = bloom.id.clone();
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        // What an older binary leaves: a session with no prompt record.
+        let session_id = only_session(&store).session_id;
+        store
+            .sessions
+            .borrow_mut()
+            .get_mut(&session_id)
+            .unwrap()
+            .prompt = None;
+
+        let err = respond_ritual(
+            &store,
+            &AgentContext::for_agent("test-agent"),
+            &bloom_id,
+            "alpha",
+            &token_from_response(&begin_json),
+        )
+        .expect_err("a session with no prompt record must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("older version") && msg.contains("--begin"),
+            "{msg}"
+        );
+        assert!(store.guesses.borrow().is_empty(), "nothing is logged");
+        let session = only_session(&store);
+        assert_eq!(session.step, 0, "nothing is advanced");
+        assert_eq!(session.prev_step, None, "nothing is written");
+    }
+
+    #[test]
+    fn a_resumed_next_is_the_prompt_its_guess_is_logged_under() {
+        let store = MockStore::new();
+        let first = titled("kn-first", "First", "alpha");
+        let second = titled("kn-second", "Second", "bravo");
+        store.seed(&first);
+        store.seed(&second);
+
+        let begin_json = begin(&store, &test_cascade(vec![first, second]));
+        let token0 = token_from_response(&begin_json);
+        let lost = respond(&store, "kn-first", "alpha", &token0);
+        assert_eq!(lost["next"]["title"], "Second");
+
+        // The response was lost, and the next entry is renamed before the retry.
+        store.mutate_bloom("kn-second", |e| e.title = "Second, renamed".to_string());
+        let resumed = respond(&store, "kn-first", "alpha", &token0);
+        assert_eq!(resumed["replayed"], true);
+        assert_eq!(resumed["next"], lost["next"], "the prompt as handed out");
+
+        respond(&store, "kn-second", "bravo", &token_from_response(&resumed));
+        assert_eq!(store.guesses.borrow()[1].title_shown, "Second");
+    }
+
+    #[test]
+    fn the_row_and_the_summary_count_the_prompted_phrase_source() {
+        let store = MockStore::new();
+        let bloom = titled("kn-only", "Only", "alpha");
+        store.seed(&bloom);
+
+        let begin_json = begin(&store, &test_cascade(vec![bloom]));
+        assert_eq!(begin_json["prompt"]["phrase_source"], "authored");
+        // The authored phrase is removed after the prompt said "authored".
+        store.mutate_bloom("kn-only", |e| e.wake_phrases.clear());
+
+        let resp = respond(&store, "kn-only", MISS, &token_from_response(&begin_json));
+        assert_eq!(
+            resp["bloom"]["phrase_source"], "auto",
+            "matched as it is now"
+        );
+        assert_eq!(store.guesses.borrow()[0].phrase_source, "authored");
+        assert_eq!(resp["summary"]["buckets"]["revealed"]["authored"], 1);
+        assert_eq!(resp["summary"]["buckets"]["revealed"]["auto"], 0);
+    }
+
+    #[test]
+    fn a_guess_about_an_entry_never_prompted_for_is_refused() {
+        // The caller is handed kn-gone, which is deleted. Answering about
+        // kn-last instead would log a title nobody was shown.
+        let store = MockStore::new();
+        seed_ids(
+            &store,
+            &[
+                ("kn-first", "alpha"),
+                ("kn-gone", "bravo"),
+                ("kn-last", "charlie"),
+            ],
+        );
+        let blooms: Vec<KnowledgeEntry> = ["kn-first", "kn-gone", "kn-last"]
+            .iter()
+            .map(|id| store.blooms.borrow()[*id].clone())
+            .collect();
+        let begin_json = begin(&store, &test_cascade(blooms));
+        let resp = respond(
+            &store,
+            "kn-first",
+            "alpha",
+            &token_from_response(&begin_json),
+        );
+        let token = token_from_response(&resp);
+        store.blooms.borrow_mut().remove("kn-gone");
+
+        let refusal = reject(&store, "kn-last", "charlie", &token);
+        assert_eq!(refusal["error"], "invalid_bloom_id");
+        assert_eq!(refusal["expected_id"], "kn-gone");
+        assert_eq!(store.guesses.borrow().len(), 1, "nothing is logged");
+        assert_eq!(only_session(&store).step, 1, "nothing is advanced");
+
+        // Following the refusal walks on.
+        let resp = respond(&store, "kn-gone", "bravo", &token);
+        assert_eq!(resp["status"], "bloom_missing");
+        assert_eq!(resp["next"]["id"], "kn-last");
     }
 
     // =====================================================================
@@ -3154,6 +3491,12 @@ mod tests {
             token = token_from_response(&resp);
 
             store.blooms.borrow_mut().remove("kn-gone");
+
+            // The caller answers about the entry it was handed, learns it is
+            // gone, and is handed the last one.
+            let resp = respond(&store, "kn-gone", "bravo", &token);
+            assert_eq!(resp["status"], "bloom_missing");
+            token = token_from_response(&resp);
 
             let resp = respond(&store, "kn-last", "charlie", &token);
             let summary = &resp["summary"];
