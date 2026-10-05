@@ -486,6 +486,15 @@ DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
 -- random ids. A retry that finds the step already logged replays that row.
 DEFINE INDEX IF NOT EXISTS wake_guess_step ON wake_guess FIELDS session_id, position UNIQUE;
 
+-- Authored-phrase embeddings `wake-log score` has already computed. The record
+-- key is the SHA-256 hex of `embedding_model + "\n" + phrase`, the phrase
+-- trimmed with each whitespace run collapsed to one space. No phrase text is
+-- stored in any field. A lost or unreadable entry is simply embedded again.
+DEFINE TABLE IF NOT EXISTS wake_phrase_embedding SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS embedding_model ON wake_phrase_embedding TYPE string;
+DEFINE FIELD IF NOT EXISTS embedding       ON wake_phrase_embedding TYPE array<float>;
+DEFINE FIELD IF NOT EXISTS created_at      ON wake_phrase_embedding TYPE datetime DEFAULT time::now();
+
 -- =============================================================================
 -- SEED DATA
 -- =============================================================================

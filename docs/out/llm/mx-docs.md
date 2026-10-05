@@ -2057,6 +2057,12 @@ ritual would have. A skipped row is the exception: rows scored while it
 was pending are computed without it, and are not recomputed when it
 scores later.
 
+Authored-phrase vectors are cached in `wake_phrase_embedding`, keyed by
+a SHA-256 of the embedding model and the whitespace-normalized phrase,
+with no phrase text stored, so a later ritual embeds only each row's
+guess and title. A cache that cannot be read or written costs only time:
+the row still scores.
+
 ::: {.admonition .note}
 **NOTE:** **Known limitation of `sim_content`:** ritual chunks are cut
 by byte threshold and embedding chunks by token count. They do not line
@@ -2143,7 +2149,11 @@ score can play to it, and one that can read its own earlier guesses will
 repeat them. So `report`, `bloom` and `wake` print to stdout only when
 stdout is a terminal. Anywhere else they refuse with an error naming the
 rule, before reading anything, unless `--out FILE` is given. A model's
-shell tool is not a terminal; a human shell is.
+shell tool is not a terminal; a human shell is. An `--out` path that
+already exists must be a regular file, so `/dev/stdout` cannot route the
+output back onto a pipe. In the text layout every control character in a
+stored string is shown escaped (`\n`, `\u{1b}`), so a guess cannot drive
+the terminal.
 
 Be plain about what this guard is: it stops accidental and casual
 leakage, which is the realistic failure. It does not stop a process that

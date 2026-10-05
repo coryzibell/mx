@@ -15,14 +15,19 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `*_same` / `*_cross`). It loads the embedding model once, and not at all when
   nothing is pending. Its stdout is only `{"status","rows","skipped"}`. A row
   that fails stays pending and is retried; a model-load failure exits non-zero
-  with nothing on stdout and every row pending.
+  with nothing on stdout and every row pending. Authored-phrase vectors are
+  cached in a new `wake_phrase_embedding` table (keyed by a SHA-256 of model
+  and normalized phrase; no phrase text stored), so a repeat ritual embeds only
+  each row's guess and title.
 - **`wake-log report [--wake N]`, `wake-log bloom ID [--limit N]` and
   `wake-log wake N`** read the scored log, each opening with the Goodhart text
   (also in `report --help`).
 - **The terminal-only rule.** The three read commands print only when stdout is
   a terminal. Otherwise they refuse before reading anything, naming the rule,
   unless `--out FILE` is given; then they write the file (JSON for `.json`,
-  text otherwise) and print only its path. This stops accidental and casual
+  text otherwise) and print only its path. An `--out` path that exists must be
+  a regular file (`/dev/stdout` is refused), and the text layout escapes
+  control characters in stored strings. This stops accidental and casual
   leakage of scores and guesses into a model's context; it does not stop a
   process that fakes a terminal or reads the `--out` file.
 - **Schema:** six additive optional fields on `wake_guess`

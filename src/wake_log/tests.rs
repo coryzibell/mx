@@ -3,6 +3,8 @@
 //! model is loaded except by the ignored timing test.
 
 use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::knowledge::KnowledgeEntry;
@@ -1787,6 +1789,518 @@ fn wake_log_report_layout_counts_buckets_and_takes_medians() {
         "  cross model   gap median -   sim_prior -   null -   n 0"
     );
     assert_eq!(median(vec![1.0, 4.0, 2.0, 3.0]), Some(2.5));
+}
+
+// =============================================================================
+// The phrase-embedding cache
+// =============================================================================
+
+/// Counts embed calls per text. Its vectors are `fake_vec` mapped onto awkward
+/// f32 values, so a cache round trip that changed a single bit would show.
+#[derive(Clone)]
+struct CountingProvider {
+    model: &'static str,
+    calls: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl CountingProvider {
+    fn new(model: &'static str) -> Self {
+        Self {
+            model,
+            calls: Arc::default(),
+        }
+    }
+    fn calls(&self, text: &str) -> usize {
+        self.calls.lock().unwrap().get(text).copied().unwrap_or(0)
+    }
+    fn total(&self) -> usize {
+        self.calls.lock().unwrap().values().sum()
+    }
+    fn texts(&self) -> Vec<String> {
+        self.calls.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+fn odd_vec(text: &str) -> Vec<f32> {
+    fake_vec(text)
+        .iter()
+        .enumerate()
+        .map(|(i, x)| x * 0.123_456_79 + (i as f32 + 1.0) / 7_000.0)
+        .collect()
+}
+
+impl EmbeddingProvider for CountingProvider {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        *self
+            .calls
+            .lock()
+            .unwrap()
+            .entry(text.to_string())
+            .or_default() += 1;
+        Ok(odd_vec(text))
+    }
+    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+    fn dimensions(&self) -> usize {
+        DIM
+    }
+    fn model_id(&self) -> &str {
+        self.model
+    }
+}
+
+fn score_counting(db: &SurrealDatabase, provider: &CountingProvider) -> (ScoreCounts, String) {
+    let mut diag = Vec::new();
+    let p = provider.clone();
+    let counts = score(db, AGENT, move || Ok(p), &mut diag).unwrap();
+    (counts, String::from_utf8(diag).unwrap())
+}
+
+fn best_phrase_sim(guess: &str, phrases: &[&str]) -> f64 {
+    let g = odd_vec(guess);
+    phrases
+        .iter()
+        .map(|p| cos(&g, &odd_vec(&normalize_phrase(p))))
+        .reduce(f64::max)
+        .unwrap()
+}
+
+/// Every cache record: its field names, the whole record printed, its id.
+fn cache_rows(db: &SurrealDatabase) -> Vec<serde_json::Value> {
+    db.query_json_for_test(
+        "SELECT object::keys($this) AS fields, <string>$this AS dump, <string>id AS id,
+            embedding_model, embedding
+        FROM wake_phrase_embedding",
+    )
+    .unwrap()
+}
+
+const RITUAL: [(&str, &str, [&str; 3]); 3] = [
+    (
+        "kn-lantern",
+        "Lantern Notes",
+        ["lantern by the quay", "a lamp left lit", "glow over harbor"],
+    ),
+    (
+        "kn-tide",
+        "Tide Table",
+        [
+            "water climbing stairs",
+            "moon pulls the sea",
+            "salt on stones",
+        ],
+    ),
+    (
+        "kn-rope",
+        "Rope Knots",
+        [
+            "bowline tied twice",
+            "frayed hemp coil",
+            "hitch around post",
+        ],
+    ),
+];
+
+fn insert_ritual(db: &SurrealDatabase, session: &str, base: u32, guesses: [&str; 3]) {
+    for (i, ((bloom, title, phrases), guess)) in RITUAL.iter().zip(guesses).enumerate() {
+        insert(
+            db,
+            &fx(session, i as i64, base + i as u32, bloom, title, guess)
+                .source("authored", phrases),
+        );
+    }
+}
+
+#[test]
+fn wake_log_phrase_cache_second_ritual_embeds_only_guess_and_title() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let first = ["a candle on a dock", "the sea rising", "sailor knots"];
+    insert_ritual(&db, "s1", 10, first);
+    let r1 = CountingProvider::new(FAKE_MODEL);
+    let (counts, diag) = score_counting(&db, &r1);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 3,
+            skipped: 0
+        }
+    );
+    assert_eq!(diag, "");
+    assert_eq!(r1.total(), 15, "3 guesses + 3 titles + 9 phrases");
+    for (_, _, phrases) in RITUAL {
+        for phrase in phrases {
+            assert_eq!(r1.calls(phrase), 1, "{phrase}");
+        }
+    }
+    assert_eq!(cache_rows(&db).len(), 9);
+
+    let second = ["a lamp by the water", "high tide again", "a knot in a rope"];
+    insert_ritual(&db, "s2", 100, second);
+    let r2 = CountingProvider::new(FAKE_MODEL);
+    let (counts, diag) = score_counting(&db, &r2);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 3,
+            skipped: 0
+        }
+    );
+    assert_eq!(diag, "");
+    assert_eq!(
+        r2.total(),
+        6,
+        "only guess + title per row: {:?}",
+        r2.texts()
+    );
+    for ((_, title, phrases), guess) in RITUAL.iter().zip(second) {
+        assert_eq!(r2.calls(guess), 1);
+        assert_eq!(r2.calls(title), 1);
+        for phrase in phrases {
+            assert_eq!(r2.calls(phrase), 0, "{phrase} came from the cache");
+        }
+    }
+    for (i, ((_, _, phrases), guess)) in RITUAL.iter().zip(second).enumerate() {
+        assert_eq!(
+            stored(&db, "s2", i as i64)["sim_phrase"].as_f64().unwrap(),
+            best_phrase_sim(guess, phrases)
+        );
+    }
+    assert_eq!(cache_rows(&db).len(), 9);
+}
+
+#[test]
+fn wake_log_phrase_cache_keys_on_normalized_text_and_embedding_model() {
+    assert_eq!(
+        normalize_phrase("  lantern \t by\n\nthe   quay "),
+        "lantern by the quay"
+    );
+    assert_ne!(
+        phrase_cache_key(FAKE_MODEL, "Lantern by the quay"),
+        phrase_cache_key(FAKE_MODEL, "lantern by the quay"),
+        "case is kept"
+    );
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let variant = "  lantern \t by\n\nthe   quay ";
+    insert(
+        &db,
+        &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", "a candle")
+            .source("authored", &[variant, "lantern by the quay"]),
+    );
+    insert(
+        &db,
+        &fx("s2", 0, 20, "kn-lantern", "Lantern Notes", "a lamp")
+            .source("authored", &["lantern  by the\tquay"]),
+    );
+    let m1 = CountingProvider::new(FAKE_MODEL);
+    let (counts, _) = score_counting(&db, &m1);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 2,
+            skipped: 0
+        }
+    );
+    assert_eq!(m1.calls("lantern by the quay"), 1, "{:?}", m1.texts());
+    assert_eq!(
+        m1.calls(variant),
+        0,
+        "the normalized form is what gets embedded"
+    );
+    assert_eq!(m1.calls("lantern  by the\tquay"), 0);
+    assert_eq!(cache_rows(&db).len(), 1, "every variant shares one entry");
+
+    insert(
+        &db,
+        &fx("s3", 0, 30, "kn-lantern", "Lantern Notes", "a torch")
+            .source("authored", &["lantern by the quay"]),
+    );
+    let m2 = CountingProvider::new("test/other-embed");
+    let (counts, _) = score_counting(&db, &m2);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    assert_eq!(m2.calls("lantern by the quay"), 1, "another model misses");
+    assert_eq!(cache_rows(&db).len(), 2);
+}
+
+#[test]
+fn wake_log_phrase_cache_hit_gives_the_same_sim_phrase_as_a_fresh_embed() {
+    let phrases = ["glow  over harbor", "a lamp left lit"];
+    let guess = "a lamp glowing over the harbor";
+
+    let fresh = SurrealDatabase::open_in_memory().unwrap();
+    insert(
+        &fresh,
+        &fx("s2", 0, 20, "kn-lantern", "Lantern Notes", guess).source("authored", &phrases),
+    );
+    let p = CountingProvider::new(FAKE_MODEL);
+    score_counting(&fresh, &p);
+    assert_eq!(p.calls("glow over harbor"), 1);
+    let from_fresh = stored(&fresh, "s2", 0)["sim_phrase"].as_f64().unwrap();
+
+    let cached = SurrealDatabase::open_in_memory().unwrap();
+    insert(
+        &cached,
+        &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", "something else")
+            .source("authored", &phrases),
+    );
+    score_counting(&cached, &CountingProvider::new(FAKE_MODEL));
+    insert(
+        &cached,
+        &fx("s2", 0, 20, "kn-lantern", "Lantern Notes", guess).source("authored", &phrases),
+    );
+    let p = CountingProvider::new(FAKE_MODEL);
+    score_counting(&cached, &p);
+    assert_eq!(p.calls("glow over harbor") + p.calls("a lamp left lit"), 0);
+    let from_cache = stored(&cached, "s2", 0)["sim_phrase"].as_f64().unwrap();
+
+    assert_eq!(from_cache.to_bits(), from_fresh.to_bits());
+    assert_eq!(from_cache, best_phrase_sim(guess, &phrases));
+
+    let keys: Vec<String> = phrases
+        .iter()
+        .map(|p| phrase_cache_key(FAKE_MODEL, &normalize_phrase(p)))
+        .collect();
+    let read = cached.wake_phrase_embeddings(FAKE_MODEL, &keys).unwrap();
+    for (key, phrase) in keys.iter().zip(phrases) {
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&read[key]), bits(&odd_vec(&normalize_phrase(phrase))));
+    }
+}
+
+#[test]
+fn wake_log_phrase_cache_stores_no_phrase_text() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let phrases = ["quillfeather beacon", "marrowlight  sounding"];
+    insert(
+        &db,
+        &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", "a lamp").source("authored", &phrases),
+    );
+    run_score(&db, AGENT);
+
+    let rows = cache_rows(&db);
+    assert_eq!(rows.len(), 2);
+    let mut ids: Vec<String> = Vec::new();
+    for row in &rows {
+        let mut fields: Vec<&str> = row["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect();
+        fields.sort();
+        assert_eq!(fields, ["created_at", "embedding", "embedding_model", "id"]);
+        assert_eq!(row["embedding_model"], FAKE_MODEL);
+        assert_eq!(row["embedding"].as_array().unwrap().len(), DIM);
+        let dump = row["dump"].as_str().unwrap();
+        for word in ["quillfeather", "beacon", "marrowlight", "sounding"] {
+            assert!(!dump.contains(word), "{dump}");
+        }
+        ids.push(row["id"].as_str().unwrap().to_string());
+    }
+    for phrase in phrases {
+        let key = phrase_cache_key(FAKE_MODEL, &normalize_phrase(phrase));
+        assert_eq!(key.len(), 64);
+        assert!(ids.iter().any(|id| id.contains(&key)), "{key} in {ids:?}");
+    }
+}
+
+#[test]
+fn wake_log_phrase_cache_errors_never_skip_the_row() {
+    let phrases = ["lantern by the quay", "a lamp left lit"];
+    let guess = "a lamp on the pier";
+    let seed = |db: &SurrealDatabase| {
+        insert(
+            db,
+            &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", guess).source("authored", &phrases),
+        );
+    };
+    let check = |db: &SurrealDatabase, diag: &str, stage: &str| {
+        let row = stored(db, "s1", 0);
+        assert_eq!(row["scored"], true);
+        assert_eq!(
+            row["sim_phrase"].as_f64().unwrap(),
+            best_phrase_sim(guess, &phrases)
+        );
+        assert!(
+            diag.contains(&format!("({stage} failed); the row still scores")),
+            "{diag}"
+        );
+        for text in phrases.iter().chain([&guess, &"Lantern Notes"]) {
+            assert!(!diag.contains(text), "{diag}");
+        }
+        assert!(!diag.contains("0."), "no value in diag: {diag}");
+    };
+
+    // A cache that cannot be written: the row scores, the vectors are dropped.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    db.test_exec(
+        "DEFINE FIELD OVERWRITE embedding_model ON wake_phrase_embedding TYPE string \
+         ASSERT false",
+    )
+    .unwrap();
+    seed(&db);
+    let p = CountingProvider::new(FAKE_MODEL);
+    let (counts, diag) = score_counting(&db, &p);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    check(&db, &diag, "phrase cache write");
+    assert!(cache_rows(&db).is_empty());
+
+    // A cache that cannot be read: every phrase is a miss and is embedded.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let keys: Vec<(String, Vec<f32>)> = phrases
+        .iter()
+        .map(|p| (phrase_cache_key(FAKE_MODEL, p), odd_vec(p)))
+        .collect();
+    db.wake_phrase_embeddings_store(FAKE_MODEL, &keys).unwrap();
+    // A record link where a vector belongs cannot be read back as JSON.
+    db.test_exec(
+        "DEFINE FIELD OVERWRITE embedding ON wake_phrase_embedding TYPE any;
+        UPDATE wake_phrase_embedding SET embedding = id",
+    )
+    .unwrap();
+    assert!(
+        db.wake_phrase_embeddings(
+            FAKE_MODEL,
+            &keys.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()
+        )
+        .is_err(),
+        "precondition: the read fails"
+    );
+    seed(&db);
+    let p = CountingProvider::new(FAKE_MODEL);
+    let (counts, diag) = score_counting(&db, &p);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    for phrase in phrases {
+        assert_eq!(p.calls(phrase), 1, "a failed read is all-miss");
+    }
+    check(&db, &diag, "phrase cache read");
+}
+
+// =============================================================================
+// --out must name a regular file
+// =============================================================================
+
+#[test]
+fn wake_log_out_must_name_a_regular_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let refused = |path: &std::path::Path| {
+        let err = output_target("report", false, Some(path.to_path_buf()))
+            .expect_err("not a regular file");
+        let msg = err.to_string();
+        assert!(msg.contains("--out must name a regular file"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+    };
+    refused(dir.path());
+
+    let missing = dir.path().join("new.json");
+    assert_eq!(
+        output_target("report", false, Some(missing.clone())).unwrap(),
+        OutputTarget::File(missing)
+    );
+    let file = dir.path().join("old.txt");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(
+        output_target("report", false, Some(file.clone())).unwrap(),
+        OutputTarget::File(file.clone())
+    );
+
+    #[cfg(unix)]
+    {
+        refused(std::path::Path::new("/dev/null"));
+        let to_dir = dir.path().join("to-dir");
+        std::os::unix::fs::symlink(dir.path(), &to_dir).unwrap();
+        refused(&to_dir);
+        let to_file = dir.path().join("to-file.txt");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+        assert!(output_target("report", false, Some(to_file)).is_ok());
+    }
+}
+
+// =============================================================================
+// The text layout escapes control characters
+// =============================================================================
+
+#[test]
+fn terminal_text_layout_does_not_pass_raw_escape_sequences() {
+    let title = "Lantern \u{1b}]52;c;Y2xpcA==\u{7} Notes";
+    let guess = "a lamp \u{1b}[2J\u{1b}[H cleared";
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    insert(&db, &fx("s1", 0, 10, "kn-lantern", title, guess));
+    insert(
+        &db,
+        &fx(
+            "s1",
+            1,
+            11,
+            "kn-tide",
+            "Tide Table",
+            "first line\nsecond line",
+        ),
+    );
+    run_score(&db, AGENT);
+    let text = run(
+        WakeLogCommands::Wake { wake: 1, out: None },
+        Some(AGENT.to_string()),
+        true,
+        || Ok(db),
+        no_model,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    assert!(
+        !text.contains('\u{1b}'),
+        "raw ESC reaches the terminal: {text:?}"
+    );
+    assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(
+        text.lines()
+            .any(|l| l == r"  guess  first line\nsecond line"),
+        "a newline in a guess shows as \\n on one line: {text}"
+    );
+    assert!(
+        text.contains(r"guess  a lamp \u{1b}[2J\u{1b}[H cleared"),
+        "{text}"
+    );
+
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    insert(&db, &fx("s1", 0, 10, "kn-lantern", title, guess));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w.json");
+    run(
+        WakeLogCommands::Wake {
+            wake: 1,
+            out: Some(path.clone()),
+        },
+        Some(AGENT.to_string()),
+        false,
+        || Ok(db),
+        no_model,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(v["rows"][0]["guess"], guess, "JSON keeps the stored text");
+    assert_eq!(v["rows"][0]["title_shown"], title);
 }
 
 // =============================================================================

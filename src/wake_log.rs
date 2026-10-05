@@ -10,6 +10,7 @@
 //! prints counts only, and the read commands print only to a terminal or to a
 //! file named with `--out`.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ use crate::embeddings::EmbeddingProvider;
 use crate::helpers::cosine_similarity;
 use crate::store::{AgentContext, KnowledgeStore};
 use crate::surreal_db::SurrealDatabase;
-use crate::wake_guess::BASELINE_BLOOMS;
+use crate::wake_guess::{BASELINE_BLOOMS, content_hash};
 
 /// Shown in `wake-log report --help` and at the top of every report.
 pub const GOODHART_TEXT: &str = "Axis A rises by construction when wake phrases are retuned \
@@ -162,6 +163,8 @@ enum Stage {
     Embed,
     Read,
     Write,
+    CacheRead,
+    CacheWrite,
 }
 
 impl Stage {
@@ -170,8 +173,21 @@ impl Stage {
             Stage::Embed => "embedding",
             Stage::Read => "history read",
             Stage::Write => "write",
+            Stage::CacheRead => "phrase cache read",
+            Stage::CacheWrite => "phrase cache write",
         }
     }
+}
+
+/// A phrase as the cache keys it and the model embeds it: trimmed, every
+/// whitespace run collapsed to one space. Case is kept.
+pub fn normalize_phrase(phrase: &str) -> String {
+    phrase.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The `wake_phrase_embedding` record key of an already normalized phrase.
+pub fn phrase_cache_key(embedding_model: &str, normalized: &str) -> String {
+    content_hash(&format!("{embedding_model}\n{normalized}"))
 }
 
 /// Score every pending row of `agent`.
@@ -204,7 +220,7 @@ where
     let provider = load().context("Failed to load the embedding model; no row was scored")?;
 
     for row in &pending {
-        let outcome = score_row(db, agent, &provider, row).and_then(|fields| {
+        let outcome = score_row(db, agent, &provider, row, diag).and_then(|fields| {
             db.wake_log_write_score(agent, &row.key, &fields)
                 .map_err(|_| Stage::Write)
         });
@@ -231,6 +247,7 @@ fn score_row<P: EmbeddingProvider>(
     agent: &str,
     provider: &P,
     row: &PendingRow,
+    diag: &mut dyn Write,
 ) -> std::result::Result<ScoredFields, Stage> {
     let embed = |text: &str| provider.embed(text).map_err(|_| Stage::Embed);
     let em = provider.model_id();
@@ -238,12 +255,10 @@ fn score_row<P: EmbeddingProvider>(
     let guess = embed(&row.guess)?;
 
     let sim_phrase = if row.phrase_source == "authored" && !row.phrases.is_empty() {
-        let mut best: Option<f64> = None;
-        for phrase in &row.phrases {
-            let s = cosine_similarity(&guess, &embed(phrase)?) as f64;
-            best = Some(best.map_or(s, |b| b.max(s)));
-        }
-        best
+        phrase_vectors(db, provider, row, diag)?
+            .iter()
+            .map(|v| cosine_similarity(&guess, v) as f64)
+            .reduce(f64::max)
     } else {
         None
     };
@@ -290,6 +305,56 @@ fn score_row<P: EmbeddingProvider>(
         same,
         cross,
     })
+}
+
+/// The vectors of a row's authored phrases, in order. Cached vectors are read
+/// in one statement; only the misses are embedded, then stored. A cache error
+/// never fails the row: a failed read counts as all-miss and a failed write is
+/// dropped, each with one diag line that carries no text or value.
+fn phrase_vectors<P: EmbeddingProvider>(
+    db: &SurrealDatabase,
+    provider: &P,
+    row: &PendingRow,
+    diag: &mut dyn Write,
+) -> std::result::Result<Vec<Vec<f32>>, Stage> {
+    let em = provider.model_id();
+    let note = |diag: &mut dyn Write, stage: Stage| {
+        let _ = writeln!(
+            diag,
+            "wake-log score: session {} step {} ({} failed); the row still scores",
+            row.session_id,
+            row.position,
+            stage.as_str()
+        );
+    };
+
+    let phrases: Vec<(String, String)> = row
+        .phrases
+        .iter()
+        .map(|p| {
+            let normalized = normalize_phrase(p);
+            (phrase_cache_key(em, &normalized), normalized)
+        })
+        .collect();
+    let keys: Vec<String> = phrases.iter().map(|(k, _)| k.clone()).collect();
+    let mut known = db.wake_phrase_embeddings(em, &keys).unwrap_or_else(|_| {
+        note(diag, Stage::CacheRead);
+        HashMap::new()
+    });
+
+    let mut misses: Vec<(String, Vec<f32>)> = Vec::new();
+    for (key, normalized) in &phrases {
+        if !known.contains_key(key) {
+            let v = provider.embed(normalized).map_err(|_| Stage::Embed)?;
+            misses.push((key.clone(), v.clone()));
+            known.insert(key.clone(), v);
+        }
+    }
+    if db.wake_phrase_embeddings_store(em, &misses).is_err() {
+        note(diag, Stage::CacheWrite);
+    }
+
+    Ok(phrases.iter().map(|(key, _)| known[key].clone()).collect())
 }
 
 /// The title text `sim_title` compares against: `title_shown` without the
@@ -401,14 +466,25 @@ pub enum OutputTarget {
 }
 
 /// The terminal-only rule. Decided before anything is read: with `--out` the
-/// output goes to that file; otherwise stdout must be a terminal.
+/// output goes to that file; otherwise stdout must be a terminal. An `--out`
+/// path that exists must be a regular file once symlinks are followed, so
+/// `/dev/stdout` and the like cannot route the output back onto a pipe.
 pub fn output_target(
     command: &str,
     stdout_is_terminal: bool,
     out: Option<PathBuf>,
 ) -> Result<OutputTarget> {
     match out {
-        Some(path) => Ok(OutputTarget::File(path)),
+        Some(path) => {
+            if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+                bail!(
+                    "wake-log {command}: --out must name a regular file, and {} is not one, \
+                     so nothing was read or printed.",
+                    path.display()
+                );
+            }
+            Ok(OutputTarget::File(path))
+        }
         None if stdout_is_terminal => Ok(OutputTarget::Terminal),
         None => bail!(
             "wake-log {command} is terminal-only: stdout is not a terminal, so nothing was \
@@ -581,6 +657,21 @@ pub fn build_report(wake: i64, rows: &[LogRow]) -> Report {
     }
 }
 
+/// A stored string as the text layout shows it: every control character
+/// escaped, so an escape sequence or a newline in a guess or title reaches the
+/// terminal as visible text.
+fn shown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn num(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_string(), |v| format!("{v:.2}"))
 }
@@ -595,7 +686,7 @@ pub fn report_text(r: &Report) -> String {
         if r.models.is_empty() {
             "-".to_string()
         } else {
-            r.models.join(", ")
+            shown(&r.models.join(", "))
         },
         r.chunks,
         r.entries,
@@ -677,13 +768,13 @@ fn row_text(row: &LogRow) -> String {
         "Wake {wake}   {}   model {}   step {}   entry {}/{}{chunk}   bucket {}\n  \
          title  {}\n  guess  {}\n{scores}\n",
         date_of(&row.ts),
-        row.model_id.as_deref().unwrap_or("unknown"),
+        shown(row.model_id.as_deref().unwrap_or("unknown")),
         row.position,
         row.bloom_position,
         row.bloom_total,
         row.bucket,
-        row.title_shown,
-        row.guess,
+        shown(&row.title_shown),
+        shown(&row.guess),
     )
 }
 
@@ -692,7 +783,11 @@ pub fn listing_text(listing: &RowListing) -> String {
     s.push_str(GOODHART_TEXT);
     s.push_str("\n\n");
     match (&listing.bloom_id, listing.wake) {
-        (Some(id), _) => s.push_str(&format!("Entry {id}   {} rows\n", listing.rows.len())),
+        (Some(id), _) => s.push_str(&format!(
+            "Entry {}   {} rows\n",
+            shown(id),
+            listing.rows.len()
+        )),
         (None, Some(w)) => s.push_str(&format!("Wake {w}   {} rows\n", listing.rows.len())),
         (None, None) => {}
     }

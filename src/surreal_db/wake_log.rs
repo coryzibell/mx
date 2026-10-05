@@ -1,8 +1,12 @@
 //! Reads and writes for `mx memory wake-log`.
 //!
-//! Every statement here binds `$agent` and filters `agent = $agent` in its own
-//! WHERE clause, so no row of another agent is ever read. Only the statements
-//! that build a centroid project `embedding`; the read commands never do.
+//! Every `wake_guess` statement here binds `$agent` and filters
+//! `agent = $agent` in its own WHERE clause, so no row of another agent is ever
+//! read. Only the statements that build a centroid project `embedding`; the
+//! read commands never do. The phrase-embedding cache holds no agent's text,
+//! only vectors keyed by a hash, so it is shared.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
@@ -331,6 +335,77 @@ impl SurrealDatabase {
             }
             let updated: Vec<Value> = response.take(0)?;
             Ok(!updated.is_empty())
+        })
+    }
+
+    /// The cached phrase vectors among `keys` under `embedding_model`, by key,
+    /// in one statement. Absent keys are misses.
+    pub fn wake_phrase_embeddings(
+        &self,
+        embedding_model: &str,
+        keys: &[String],
+    ) -> Result<HashMap<String, Vec<f32>>> {
+        if keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+        Self::runtime().block_on(async {
+            let mut response = with_db!(self, db, {
+                db.query(
+                    "SELECT meta::id(id) AS key, embedding
+                    FROM array::map($keys, |$k| type::thing('wake_phrase_embedding', $k))
+                    WHERE embedding_model = $em",
+                )
+                .bind(("keys", keys.to_vec()))
+                .bind(("em", embedding_model.to_string()))
+                .await
+                .context("Failed to read cached phrase embeddings")
+            })?;
+            let rows: Vec<Value> = response.take(0)?;
+            Ok(rows
+                .iter()
+                .filter_map(|r| Some((r["key"].as_str()?.to_string(), vector_of(&r["embedding"])?)))
+                .collect())
+        })
+    }
+
+    /// Store phrase vectors under their cache keys, one UPSERT each, in one
+    /// round trip.
+    pub fn wake_phrase_embeddings_store(
+        &self,
+        embedding_model: &str,
+        entries: &[(String, Vec<f32>)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let sql: String = (0..entries.len())
+            .map(|i| {
+                format!(
+                    "UPSERT type::thing('wake_phrase_embedding', $key_{i})
+                    SET embedding_model = $em, embedding = $v_{i} RETURN NONE;"
+                )
+            })
+            .collect();
+        Self::runtime().block_on(async {
+            let mut response = with_db!(self, db, {
+                let mut query = db
+                    .query(sql.as_str())
+                    .bind(("em", embedding_model.to_string()));
+                for (i, (key, vector)) in entries.iter().enumerate() {
+                    query = query
+                        .bind((format!("key_{i}"), key.clone()))
+                        .bind((format!("v_{i}"), vector.clone()));
+                }
+                query.await.context("Failed to store phrase embeddings")
+            })?;
+            let errors = response.take_errors();
+            if !errors.is_empty() {
+                return Err(anyhow!(
+                    "SurrealDB error storing phrase embeddings: {} statement(s) failed",
+                    errors.len()
+                ));
+            }
+            Ok(())
         })
     }
 

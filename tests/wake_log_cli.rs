@@ -4,8 +4,9 @@
 //! What only the real binary can show: a spawned `mx` with piped stdout is not
 //! a terminal, so the read commands must refuse and print nothing on stdout;
 //! `--out` writes the file and prints only its path; `score` with nothing
-//! pending prints exactly the counts object. One `#[serial]` test, one store:
-//! several processes building embedded stores at once race SurrealDB.
+//! pending prints exactly the counts object; `--out` naming something other
+//! than a regular file is refused. Every test is `#[serial]`: several
+//! processes building embedded stores at once race SurrealDB.
 
 use serial_test::serial;
 use std::process::{Command, Output, Stdio};
@@ -139,5 +140,31 @@ fn wake_log_read_commands_refuse_piped_stdout_end_to_end() {
             "{}",
             stderr_of(&out)
         );
+    }
+}
+
+/// `--out /dev/stdout` and its kin would turn a refused pipe back into stdout,
+/// so an `--out` path that exists must be a regular file.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn cli_out_dev_stdout_does_not_bypass_the_terminal_rule() {
+    let dir = TempDir::new().unwrap();
+    for target in ["/dev/stdout", "/proc/self/fd/1"] {
+        let out = mx(
+            &dir,
+            &[
+                "memory", "wake-log", "report", "--wake", "1", "--out", target,
+            ],
+        );
+        assert!(
+            !stdout_of(&out).contains("Axis A rises by construction"),
+            "--out {target} printed the report into a pipe: {:?}",
+            stdout_of(&out)
+        );
+        assert!(!out.status.success(), "--out {target} must be refused");
+        assert!(out.stdout.is_empty(), "{:?}", stdout_of(&out));
+        let err = stderr_of(&out);
+        assert!(err.contains("--out must name a regular file"), "{err}");
     }
 }
