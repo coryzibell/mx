@@ -659,6 +659,125 @@ lands.
 Guess rows are scoped to the writing agent and are not reachable through
 `mx memory export`, which reads the knowledge table only.
 
+=== Scoring and reading the guess log
+
+`mx memory wake-log` scores the log and reads it back. Every command works on
+the calling agent's rows only (`MX_CURRENT_AGENT`, required) and filters by
+agent in every query.
+
+#command(
+  "mx memory wake-log score",
+  [Score every pending guess row (`scored_at` unset, including rows written
+  before scoring existed). Loads the embedding model once, and not at all when
+  nothing is pending. Its entire stdout is `{"status":"scored","rows":N,"skipped":M}`:
+  no similarity value, guess or title, so a ritual driver can run it as its
+  last step. A row that fails to score stays pending, counts in `skipped`, and
+  is retried next run. If the model cannot be loaded the command exits non-zero
+  with the error on stderr, prints nothing on stdout, and leaves every row
+  pending.],
+  flags: (),
+  examples: ("mx memory wake-log score",),
+)
+
+Per row it stores the guess embedding and:
+
+- *Axis A* (tunable; never identity evidence). `sim_phrase`: the best cosine
+  similarity to the row's own `authored` phrase snapshot (none for `derived` or
+  `auto`). `sim_content`: the best similarity to the entry's stored vectors
+  under the same embedding model, the mean-pooled entry embedding and every
+  embedding chunk. `sim_title`: similarity to the title, with the ritual's own
+  `(Part N/M)` suffix removed.
+- *Axis B*. `sim_prior`: similarity to the centroid of the 5 most recent
+  earlier scored guesses on the same entry and the same shown title (suffix
+  included), under the same embedding model, from other sessions; `prior_n` is
+  how many there were. `sim_prior_null`: the mean similarity to the same kind
+  of centroid for up to 10 other entries, those with the most recent history.
+  The signal is the gap between the two, never `sim_prior` alone. The same
+  three values are also stored over prior rows answered by the same `model_id`
+  (`*_same`) and by a different known one (`*_cross`); a row with no `model_id`
+  gets none of those. Axis B is empty on the first ritual: there is no history.
+  The 5 and the 10 are defaults with no data behind them yet.
+
+Rows are scored oldest first, each written before the next one is computed, so
+one run over many rituals stores what a run after every ritual would have.
+A skipped row is the exception: rows scored while it was pending are computed
+without it, and are not recomputed when it scores later.
+
+Authored-phrase vectors are cached in `wake_phrase_embedding`, keyed by a
+SHA-256 of the embedding model and the whitespace-normalized phrase, with no
+phrase text stored, so a later ritual embeds only each row's guess and title.
+A cache that cannot be read or written costs only time: the row still scores.
+
+#note[*Known limitation of `sim_content`:* ritual chunks are cut by byte
+threshold and embedding chunks by token count. They do not line up, so
+`sim_content` is measured against the whole entry, not the specific ritual
+chunk the guess was made on. For single-chunk entries this makes no
+difference.]
+
+#command(
+  "mx memory wake-log report",
+  [The Goodhart text, then bucket counts and both axes (medians) for one ritual.
+  Terminal only; see below.],
+  flags: (
+    ([`--wake`], [`int`],  [Wake to report. Default: the most recent wake with scored rows.]),
+    ([`--out`],  [`path`], [Write to this file instead (JSON if it ends in `.json`, text otherwise) and print only its path.]),
+  ),
+  examples: ("mx memory wake-log report", "mx memory wake-log report --wake 7 --out wake-7.json"),
+)
+
+#command(
+  "mx memory wake-log bloom",
+  [One entry across rituals, newest first: wake, date, model, position, guess,
+  bucket and the five similarity fields. The view for retuning a phrase.
+  Terminal only.],
+  flags: (
+    ([`<ID>`],    [`string`], [Entry ID (the `kn-` prefix is optional).]),
+    ([`--limit`], [`int`],    [Maximum rows. Default: `20`.]),
+    ([`--out`],   [`path`],   [Write to this file instead and print only its path.]),
+  ),
+  examples: ("mx memory wake-log bloom kn-abc",),
+)
+
+#command(
+  "mx memory wake-log wake",
+  [Every row of one ritual in sequence order. Terminal only.],
+  flags: (
+    ([`<N>`],   [`int`],  [Wake number.]),
+    ([`--out`], [`path`], [Write to this file instead and print only its path.]),
+  ),
+  examples: ("mx memory wake-log wake 7",),
+)
+
+Every report starts with this text, and `wake-log report --help` carries it:
+
+#quote[Axis A rises by construction when wake phrases are retuned toward logged
+guesses. It measures how well the phrases fit what the model says. It is a
+tuning dial for phrase authoring and must never be reported as evidence of
+identity or memory. Axis B is the only number here that phrase edits cannot
+raise. Axis B is evidence of stable reaching, not of remembering.]
+
+`--begin`, `--respond` and their replays never carry an axis value.
+
+#note[*The terminal-only rule.* The scores must never reach the context of the
+model that made the guesses: a model that can see its score can play to it,
+and one that can read its own earlier guesses will repeat them. So `report`,
+`bloom` and `wake` print to stdout only when stdout is a terminal. Anywhere else
+they refuse with an error naming the rule, before reading anything, unless
+`--out FILE` is given. A model's shell tool is not a terminal; a human shell
+is. An `--out` path that already exists must be a regular file, so
+`/dev/stdout` cannot route the output back onto a pipe. An `--out` that names
+the process's own stdout or stderr is refused too, since a model's shell tool
+may capture them in a file. In the text layout every control character and
+bidi control in a stored string is shown escaped (`\n`, `\u{1b}`,
+`\u{202e}`), so a guess cannot drive or reorder the terminal.
+
+Be plain about what this guard is: it stops accidental and casual leakage,
+which is the realistic failure. It does not stop a process that deliberately
+fakes a terminal or reads back a file written with `--out`. The rest is
+convention: these three commands are not run during a ritual session, and
+logged guesses and scores are never quoted into any text a model reads. The
+tool cannot enforce that.]
+
 === Wake set exclusion
 
 Entries tagged `archive` or `wake-exclude` are kept out of every cascade layer

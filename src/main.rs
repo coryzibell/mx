@@ -28,6 +28,7 @@ mod triggers;
 mod types;
 mod wake_chunk;
 mod wake_guess;
+mod wake_log;
 mod wake_ritual;
 mod wake_token;
 mod worktree;

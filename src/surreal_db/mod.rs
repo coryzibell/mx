@@ -32,6 +32,7 @@ mod lookups;
 mod queries;
 mod relationships;
 mod trait_impl;
+mod wake_log;
 
 // Re-export connection types that external code needs
 pub use connection::SurrealConnection;

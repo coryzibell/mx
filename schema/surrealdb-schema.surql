@@ -436,8 +436,8 @@ DEFINE FIELD IF NOT EXISTS prompt ON wake_session FLEXIBLE TYPE option<object>;
 DEFINE INDEX IF NOT EXISTS wake_session_created ON wake_session FIELDS created_at;
 
 -- Wake ritual guess log. One row per chunk per wake, written by --respond
--- before the session advances. The sim_* / embedding / scored_at columns are
--- null at write time and filled later by the scoring pass.
+-- before the session advances. The sim_* / prior_n* / embedding / scored_at
+-- columns are null at write time and filled later by `wake-log score`.
 DEFINE TABLE IF NOT EXISTS wake_guess SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS agent            ON wake_guess TYPE string;
 DEFINE FIELD IF NOT EXISTS wake             ON wake_guess TYPE option<int>;
@@ -467,6 +467,16 @@ DEFINE FIELD IF NOT EXISTS sim_prior        ON wake_guess TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS sim_prior_null   ON wake_guess TYPE option<float>;
 DEFINE FIELD IF NOT EXISTS prior_n          ON wake_guess TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS scored_at        ON wake_guess TYPE option<datetime>;
+-- Axis B split by substrate (wake-log score): the same three values over
+-- prior rows answered under the row's own model_id, and under a different
+-- known one. All six are NONE when the row's model_id is NONE. Additive: rows
+-- written before these existed read them as NONE and are not backfilled.
+DEFINE FIELD IF NOT EXISTS sim_prior_same       ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior_null_same  ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS prior_n_same         ON wake_guess TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS sim_prior_cross      ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS sim_prior_null_cross ON wake_guess TYPE option<float>;
+DEFINE FIELD IF NOT EXISTS prior_n_cross        ON wake_guess TYPE option<int>;
 DEFINE INDEX IF NOT EXISTS wake_guess_bloom   ON wake_guess FIELDS agent, bloom_id, chunk_index;
 DEFINE INDEX IF NOT EXISTS wake_guess_wake    ON wake_guess FIELDS agent, wake;
 DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
@@ -475,6 +485,15 @@ DEFINE INDEX IF NOT EXISTS wake_guess_session ON wake_guess FIELDS session_id;
 -- the session advance; the index also covers rows older binaries wrote under
 -- random ids. A retry that finds the step already logged replays that row.
 DEFINE INDEX IF NOT EXISTS wake_guess_step ON wake_guess FIELDS session_id, position UNIQUE;
+
+-- Authored-phrase embeddings `wake-log score` has already computed. The record
+-- key is the SHA-256 hex of `embedding_model + "\n" + phrase`, the phrase
+-- trimmed with each whitespace run collapsed to one space. No phrase text is
+-- stored in any field. A lost or unreadable entry is simply embedded again.
+DEFINE TABLE IF NOT EXISTS wake_phrase_embedding SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS embedding_model ON wake_phrase_embedding TYPE string;
+DEFINE FIELD IF NOT EXISTS embedding       ON wake_phrase_embedding TYPE array<float>;
+DEFINE FIELD IF NOT EXISTS created_at      ON wake_phrase_embedding TYPE datetime DEFAULT time::now();
 
 -- =============================================================================
 -- SEED DATA

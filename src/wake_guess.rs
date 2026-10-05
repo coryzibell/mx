@@ -5,11 +5,21 @@
 //! there is no second attempt, so every row is a first guess. The row is the
 //! data the ritual exists to collect: a failed write fails the respond call.
 //!
-//! The similarity columns (`embedding`, `sim_*`, `scored_at`) are defined in
-//! the schema but are never written here — they are filled by a later scoring
-//! pass, and a row with a null `scored_at` is pending.
+//! The similarity columns (`embedding`, `sim_*`, `prior_n*`, `scored_at`) are
+//! never written here — `mx memory wake-log score` fills them (see
+//! `crate::wake_log`), and a row with a null `scored_at` is pending.
 
 use sha2::{Digest, Sha256};
+
+/// Axis B prior-set size: the most recent this-many earlier scored rows on the
+/// same title. A default with no data behind it; revisit after roughly ten
+/// rituals of log.
+pub const PRIOR_SET_SIZE: usize = 5;
+
+/// Axis B baseline: how many other entries (those with the most recent rows)
+/// each contribute a prior-set centroid to `sim_prior_null`. A default with no
+/// data behind it, like `PRIOR_SET_SIZE`.
+pub const BASELINE_BLOOMS: usize = 10;
 
 /// Which bucket a guess landed in.
 ///
