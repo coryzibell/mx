@@ -18,15 +18,16 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   to take the chunk's first markdown heading, and chunks usually start at one.
   The phrase is now the first sentence of a paragraph or list item; headings
   (ATX and setext), rules, code, HTML, bold-only lines such as `**Status:**`
-  or `**Status**:`, and sentences with no letter or digit are skipped. A chunk
-  with no body text still falls back to its heading.
+  or `**Status**:`, and sentences without a letter are skipped. A chunk with
+  no body text at all still falls back to its heading.
 - **A later chunk's phrase never repeats an earlier reveal.** A phrase that
   matches anything shown for an earlier chunk of the same entry, as cut to
   length or in full, is replaced by the chunk's next body sentence that
   doesn't.
 - A later chunk is prompted with no phrase (`phrase_source: unphrased`, always
-  revealed) when it has no body text, heading or line to phrase from, or when
-  every candidate repeats an earlier reveal.
+  revealed) when it has no sentence, heading or line with a letter to phrase
+  from (a body of only `...` or an emoji is still body text, so it doesn't fall
+  back to the heading), or when every candidate repeats an earlier reveal.
 - **`wake-log` flags rows logged before the fix.** An `authored` row past the
   first chunk was matched against phrases its entry had just revealed. Read
   commands mark it `leaked` (a `leaked` field in JSON, `leaked` after the

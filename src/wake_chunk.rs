@@ -430,9 +430,11 @@ pub struct Candidate {
     pub text: String,
 }
 
-/// The candidate phrases for a chunk of bloom content, best first. Empty when
-/// the chunk has nothing to phrase from: no body text, no heading and no line
-/// outside a fence (empty, whitespace-only or code-only content).
+/// The candidate phrases for a chunk of bloom content, best first. Every
+/// candidate contains a letter. Empty when the chunk has nothing to phrase
+/// from: body text without a letter (`...`, `1.`, an emoji), or no body text
+/// and no lettered heading or line outside a fence (empty, whitespace-only,
+/// code-only or rule-only content).
 ///
 /// The tiers are mutually exclusive; the first that applies is the list:
 ///
@@ -440,8 +442,9 @@ pub struct Candidate {
 ///    order. Chunk boundaries prefer heading and rule positions, so a later
 ///    chunk usually opens with a heading; that heading is document structure,
 ///    not a cue, and is never offered while the chunk has body text (mx#469).
-/// 2. First markdown heading, only for a chunk with no body text at all.
-/// 3. First non-empty line outside a fence, truncated to
+/// 2. First markdown heading, only for a chunk with no body text at all,
+///    and only if it has a letter.
+/// 3. First non-empty line outside a fence, if it has a letter, truncated to
 ///    `LINE_FALLBACK_MAX_CHARS` (e.g. an HTML-only chunk).
 pub fn salient_candidates(content: &str) -> Vec<Candidate> {
     let capped = |text: String, max: usize| Candidate {
@@ -449,22 +452,26 @@ pub fn salient_candidates(content: &str) -> Vec<Candidate> {
         text,
     };
 
-    let sentences = body_sentences(content);
-    if !sentences.is_empty() {
+    if let Some(sentences) = body_sentences(content) {
         return sentences
             .into_iter()
             .map(|s| capped(s, SENTENCE_MAX_CHARS))
             .collect();
     }
 
-    if let Some(heading) = first_heading(content) {
+    if let Some(heading) = first_heading(content).filter(|h| has_letter(h)) {
         return vec![capped(heading, PHRASE_MAX_CHARS)];
     }
 
     first_non_empty_line(content)
+        .filter(|line| has_letter(line))
         .map(|line| capped(line, LINE_FALLBACK_MAX_CHARS))
         .into_iter()
         .collect()
+}
+
+fn has_letter(text: &str) -> bool {
+    text.chars().any(char::is_alphabetic)
 }
 
 fn first_heading(content: &str) -> Option<String> {
@@ -510,9 +517,13 @@ fn first_heading(content: &str) -> Option<String> {
 /// text, and neither is a bold-only block such as `**Status:**`,
 /// `**Status**:` or `- **Section**`, which is a heading in all but syntax.
 /// Each block is split on `". "`, keeping the period; a block with no
-/// terminator is one sentence. A sentence without a letter or digit, such as
-/// `...` or an emoji, is dropped.
-fn body_sentences(content: &str) -> Vec<String> {
+/// terminator is one sentence. A sentence without a letter, such as `...`,
+/// `1.` or an emoji, is dropped.
+///
+/// `None` when the chunk has no body text at all; `Some` (possibly empty) once
+/// it has a body block with non-blank text, so a chunk whose only body is
+/// letterless never falls back to its heading.
+fn body_sentences(content: &str) -> Option<Vec<String>> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
     #[derive(Default)]
@@ -548,26 +559,28 @@ fn body_sentences(content: &str) -> Vec<String> {
         )
     }
 
-    fn flush(block: &mut Block, out: &mut Vec<String>) {
+    fn flush(block: &mut Block, out: &mut Vec<String>, saw_body: &mut bool) {
         let taken = std::mem::take(block);
         let bold_only = !taken.text_outside_strong && taken.strong_spans_with_text == 1;
-        if bold_only {
+        let mut rest = taken.text.trim();
+        if bold_only || rest.is_empty() {
             return;
         }
-        let mut rest = taken.text.trim();
+        *saw_body = true;
         while let Some(pos) = rest.find(". ") {
             let sentence = rest[..=pos].trim();
-            if sentence.chars().any(char::is_alphanumeric) {
+            if has_letter(sentence) {
                 out.push(sentence.to_string());
             }
             rest = rest[pos + 2..].trim_start();
         }
-        if rest.chars().any(char::is_alphanumeric) {
+        if has_letter(rest) {
             out.push(rest.trim().to_string());
         }
     }
 
     let mut out = Vec::new();
+    let mut saw_body = false;
     let mut block = Block::default();
     // One entry per open block tag: whether its inline content is body text.
     let mut body_stack: Vec<bool> = Vec::new();
@@ -578,11 +591,11 @@ fn body_sentences(content: &str) -> Vec<String> {
         let in_body = body_stack.last().copied().unwrap_or(false);
         match event {
             Event::Start(ref tag) if !is_inline(tag) => {
-                flush(&mut block, &mut out);
+                flush(&mut block, &mut out, &mut saw_body);
                 body_stack.push(matches!(tag, Tag::Paragraph | Tag::Item));
             }
             Event::End(ref tag) if !is_inline_end(tag) => {
-                flush(&mut block, &mut out);
+                flush(&mut block, &mut out, &mut saw_body);
                 body_stack.pop();
             }
             Event::Start(Tag::Strong) => {
@@ -602,15 +615,15 @@ fn body_sentences(content: &str) -> Vec<String> {
                 if strong_depth > 0 {
                     span_has_text |= !text.trim().is_empty();
                 } else {
-                    block.text_outside_strong |= text.chars().any(char::is_alphanumeric);
+                    block.text_outside_strong |= has_letter(text);
                 }
             }
             Event::SoftBreak | Event::HardBreak if in_body => block.text.push(' '),
             _ => {}
         }
     }
-    flush(&mut block, &mut out);
-    out
+    flush(&mut block, &mut out, &mut saw_body);
+    saw_body.then_some(out)
 }
 
 fn first_non_empty_line(content: &str) -> Option<String> {
@@ -1213,17 +1226,27 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_empty_only_for_blank_input() {
-        // Sweep a range of pathological inputs: blank content has nothing to
-        // phrase from, anything else gets candidates, and none is blank.
-        let cases = ["", " ", "\n", "\n\n", "\t\t", "a", ".", "\u{200B}"];
+    fn every_candidate_has_a_letter() {
+        let cases = [
+            "", " ", "\n", "\n\n", "\t\t", "a", ".", "\u{200B}", "---", "1.",
+        ];
         for c in cases {
-            let phrases = candidate_phrases(c);
-            assert_eq!(phrases.is_empty(), c.trim().is_empty(), "input {:?}", c);
-            for p in phrases {
-                assert!(!p.trim().is_empty(), "blank phrase for input {:?}", c);
+            for p in candidate_phrases(c) {
+                assert!(has_letter(&p), "letterless phrase {p:?} for input {c:?}");
             }
         }
+        assert_eq!(candidate_phrases("a"), vec!["a"]);
+        for c in [".", "\u{200B}", "---", "1."] {
+            assert_eq!(candidate_phrases(c), Vec::<String>::new(), "input {c:?}");
+        }
+    }
+
+    #[test]
+    fn letterless_body_never_falls_back_to_the_heading() {
+        assert_eq!(
+            candidate_phrases("\n## Weir\n\n...\n"),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -1978,5 +2001,33 @@ Real tilde sentence.";
         assert_eq!(sentences.len(), 2);
         assert_eq!(sentences[0], "first item");
         assert_eq!(sentences[1], "second item");
+    }
+
+    /// Poppy r8 (mx#469): no candidate without a letter, on ANY tier.
+    #[test]
+    fn poppy_r8_no_letterless_candidate_on_any_tier() {
+        let mut failures = Vec::new();
+        for c in [
+            "...\n",
+            "\u{2014}\n",
+            "\u{1F30A}\n",
+            "\u{1F30A}\n\n```\nx\n```\n",
+            "\u{200B}\n",
+            "...\n\n---\n\n...\n",
+            "> ...\n",
+            "---\n",
+            "1.\n",
+        ] {
+            for p in candidate_phrases(c) {
+                if !has_letter(&p) {
+                    failures.push(format!("{c:?} -> {p:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "letterless phrase:\n{}",
+            failures.join("\n")
+        );
     }
 }

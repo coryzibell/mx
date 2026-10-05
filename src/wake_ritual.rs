@@ -67,6 +67,7 @@ fn phrases_for_chunk(
     }
 
     let mut shown_before = first;
+    shown_before.push(entry.title.clone());
     let mut phrases: Vec<String> = Vec::new();
     for k in 1..=chunk_idx {
         let text = chunk_text(plan, content, k);
@@ -1484,18 +1485,22 @@ mod tests {
         );
     }
 
-    /// A capped derived phrase is a verbatim prefix of a longer authored
-    /// phrase that chunk 0's reveal just showed.
+    /// Chunk 1's first sentence is the long authored phrase chunk 0's reveal
+    /// just showed; capped, it would be a verbatim prefix of that reveal. The
+    /// uncapped sentence is checked, so chunk 1 takes its next sentence.
     #[test]
     fn capped_phrase_is_not_a_prefix_of_an_earlier_reveal() {
         let long = "The weir holds back the river through every spring flood and every autumn storm while the millers \
                     argue about who should pay for the repairs to its crumbling stones.";
+        assert!(long.chars().count() > 100, "the sentence is capped");
         let e = entry_with_phrases(vec![long]);
         let (content, plan) = planned(&[
             "The mill sits on a bend.\n",
-            &format!("\n## Weir\n\n{long}\n"),
+            &format!("\n## Weir\n\n{long} The sluice was oiled in May.\n"),
         ]);
         let one = phrases_for_chunk(&e, &plan, &content, 1);
+        assert_eq!(one.source, PhraseSource::Derived);
+        assert_eq!(one.phrases, vec!["The sluice was oiled in May."]);
         assert_eq!(
             best_match(long, &one.phrases),
             (MatchKind::None, None),
@@ -1540,16 +1545,9 @@ mod tests {
         );
         let rows = store.guesses.borrow();
         let row = &rows[1];
-        assert!(
-            row.phrase_source != "unphrased"
-                || (row.phrases.is_empty() && row.bucket == "revealed"),
-            "row says {} with phrases {:?} and bucket {} (response {} / {})",
-            row.phrase_source,
-            row.phrases,
-            row.bucket,
-            r1["bucket"],
-            r1["bloom"]["phrase_source"]
-        );
+        assert_eq!(row.phrase_source, "unphrased", "response {r1}");
+        assert!(row.phrases.is_empty(), "phrases {:?}", row.phrases);
+        assert_eq!(row.bucket, "revealed");
     }
 
     #[test]
@@ -4211,6 +4209,123 @@ mod tests {
                  {bucketed} bucketed guesses and does not name the \
                  difference: {progress}"
             );
+        }
+    }
+
+    /// Poppy's round-8 probes (mx#469), invented fixtures.
+    mod poppy_r8 {
+        use super::mock_store::MockStore;
+        use super::*;
+
+        const CHUNK0: &str = "## Mill\n\nThe mill sits on a bend.\n";
+
+        fn one_guess(e: &KnowledgeEntry, chunk1: &str, guess: &str) -> serde_json::Value {
+            let filler = "let pears = 4;\n".repeat(1300);
+            let mut e = e.clone();
+            e.body = Some(format!(
+                "{CHUNK0}\n```\n{filler}```\n\n{chunk1}\n```\n{filler}```\n"
+            ));
+            let content = bloom_content(&e);
+            let plan = compute_chunks(&content, chunk_threshold());
+            assert_eq!(plan.total, 2, "fixture must chunk in two for {chunk1:?}");
+            let store = MockStore::new();
+            store.seed(&e);
+            let b = begin(&store, &test_cascade(vec![e.clone()]));
+            let r0 = respond(&store, &e.id, MISS, &token_from_response(&b));
+            let r1 = respond(&store, &e.id, guess, &token_from_response(&r0));
+            serde_json::json!({"prompt": r0["next"], "r": r1})
+        }
+
+        fn mill() -> KnowledgeEntry {
+            let mut e = entry_with_phrases(vec!["millstone"]);
+            e.id = "kn-mill".into();
+            e.title = "Mill".into();
+            e
+        }
+
+        /// Only code / HTML / a rule / whitespace / letterless -> the prompt
+        /// says unphrased, and the guess is revealed.
+        #[test]
+        fn poppy_r8_contentless_chunk_is_unphrased_and_revealed() {
+            let mut failures = Vec::new();
+            for (chunk1, guess) in [
+                ("---\n\n```\nlet a = 1;\n```\n", "let a = 1;"),
+                ("---\n", "rule"),
+                ("***\n", "rule"),
+                ("---\n\n<div>\n<p>pears</p>\n</div>\n", "<div>"),
+                ("---\n\n    let a = 1;\n", "let a = 1;"),
+                ("---\n\n   \n", "blank"),
+                ("---\n\n...\n", "dots"),
+                ("---\n\n\u{2014}\n", "dash"),
+                ("---\n\n\u{1F30A}\n", "wave"),
+                ("---\n\n\u{200B}\n", "zwsp"),
+                ("---\n\n1.\n", "1"),
+            ] {
+                let j = one_guess(&mill(), chunk1, guess);
+                let line = format!(
+                    "{chunk1:?} guess {guess:?} -> prompt {} / row {} {} {} vs {}",
+                    j["prompt"]["phrase_source"],
+                    j["r"]["bloom"]["phrase_source"],
+                    j["r"]["bucket"],
+                    j["r"]["match"]["kind"],
+                    j["r"]["bloom"]["phrases"]
+                );
+                if j["prompt"]["phrase_source"] != "unphrased" || j["r"]["bucket"] != "revealed" {
+                    failures.push(line);
+                }
+            }
+            assert!(failures.is_empty(), "phrased:\n{}", failures.join("\n"));
+        }
+
+        /// The prompt for chunk 1 shows the title `Mill (Part 2/2)`. A chunk
+        /// phrased by a heading equal to the title is phrased by the prompt.
+        #[test]
+        fn poppy_r8_heading_equal_to_title_is_not_a_phrase() {
+            let j = one_guess(&mill(), "## Mill\n", "Mill");
+            assert_eq!(j["prompt"]["title"], "Mill (Part 2/2)");
+            assert_eq!(j["prompt"]["phrase_source"], "unphrased");
+            assert_eq!(
+                j["r"]["bucket"], "revealed",
+                "guess copied from the prompt title -> {} vs {}",
+                j["r"]["match"]["kind"], j["r"]["bloom"]["phrases"]
+            );
+        }
+
+        /// The same chunk kinds, cut exactly by `planned` so no leading rule.
+        #[test]
+        fn poppy_r8_chunk_kinds_unit() {
+            let e = entry_with_phrases(vec!["millstone"]);
+            let mut failures = Vec::new();
+            for (chunk1, guess) in [
+                ("...\n", "x"),
+                ("\u{2014}\n", "x"),
+                ("\u{1F30A}\n", "x"),
+                ("\u{200B}\n", "x"),
+                ("> ...\n", "x"),
+                ("1.\n", "1"),
+                ("1.\n", "1)"),
+            ] {
+                let (content, plan) = planned(&["The mill sits on a bend. Steps 1.\n", chunk1]);
+                let one = phrases_for_chunk(&e, &plan, &content, 1);
+                let m = best_match(guess, &one.phrases);
+                let line = format!(
+                    "{chunk1:?} -> {:?} {:?}; guess {guess:?} -> {:?}",
+                    one.source, one.phrases, m.0
+                );
+                if one.source != PhraseSource::Unphrased {
+                    failures.push(line);
+                }
+            }
+            assert!(failures.is_empty(), "phrased:\n{}", failures.join("\n"));
+
+            let (content, plan) = planned(&[
+                "The mill sits on a bend. Steps 1.\n",
+                "Steps 1. 2. Then the river rose.\n",
+            ]);
+            let one = phrases_for_chunk(&e, &plan, &content, 1);
+            assert_eq!(one.source, PhraseSource::Derived);
+            assert_eq!(one.phrases, vec!["Steps 1."]);
+            assert_eq!(best_match("2", &one.phrases).0, MatchKind::None);
         }
     }
 }
