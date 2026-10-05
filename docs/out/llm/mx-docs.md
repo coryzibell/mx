@@ -3484,7 +3484,7 @@ Schema fields:
 
 :   Optional. Maximum value for counters. `set` and `dec` clamp to it
     silently; `inc` clamps a rise to it but errors (exit 5) when the
-    counter is already there.
+    counter is already at or above it.
 
 `max_entries`
 

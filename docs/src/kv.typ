@@ -83,7 +83,7 @@ Schema fields:
 / `type`: Required. One of `string`, `counter`, `history`, `list`, `state`.
 / `default`: Optional. Initial value for string and counter types.
 / `min`: Optional. Minimum value for counters (clamped, never errors).
-/ `max`: Optional. Maximum value for counters. `set` and `dec` clamp to it silently; `inc` clamps a rise to it but errors (exit 5) when the counter is already there.
+/ `max`: Optional. Maximum value for counters. `set` and `dec` clamp to it silently; `inc` clamps a rise to it but errors (exit 5) when the counter is already at or above it.
 / `max_entries`: Optional. Maximum entries for history and list types. Oldest entries are dropped when exceeded. Omit to allow unbounded growth.
 / `description`: Optional. Human-readable description of the key's purpose. Displayed as a third column by `mx kv schema list`.
 / `fields`: Optional. List of valid field names for state types. Writes to unlisted fields are rejected.

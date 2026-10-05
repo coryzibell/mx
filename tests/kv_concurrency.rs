@@ -149,7 +149,18 @@ fn concurrent_incs_on_one_counter_all_land() {
         })
         .collect();
     printed.sort_unstable();
-    let final_value = counter(&dir, "tally");
+    let got = run(&dir, &["kv", "get", "tally"]);
+    assert!(
+        got.status.success(),
+        "get tally failed: {}\n{}",
+        String::from_utf8_lossy(&got.stderr),
+        report
+    );
+    let got_stdout = String::from_utf8_lossy(&got.stdout);
+    let final_value: i64 = got_stdout
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("get tally printed {:?}:\n{}", got_stdout, report));
 
     assert_eq!(
         final_value, WRITERS as i64,
