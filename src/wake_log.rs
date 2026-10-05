@@ -470,12 +470,6 @@ pub enum OutputTarget {
     File(std::fs::File, PathBuf),
 }
 
-/// The terminal-only rule. Decided before anything is read: with `--out` the
-/// output goes to that file; otherwise stdout must be a terminal. The `--out`
-/// file is opened here, before the store, and checked through that handle: it
-/// must be a regular file once symlinks are followed, so `/dev/stdout` and the
-/// like cannot route the output back onto a pipe, and a `/proc/self/fd/N`
-/// path cannot later name a file the store opened.
 #[cfg(unix)]
 fn same_file_as_std_stream(target: &std::fs::Metadata) -> bool {
     use std::os::fd::AsFd;
@@ -493,6 +487,14 @@ fn same_file_as_std_stream(target: &std::fs::Metadata) -> bool {
     })
 }
 
+/// The terminal-only rule. Decided before anything is read: with `--out` the
+/// output goes to that file; otherwise stdout must be a terminal. An `--out`
+/// path that exists and is not a regular file is refused before it is opened,
+/// since opening a FIFO for writing blocks until a reader appears. The file is
+/// then opened here, before the store, and checked through that handle: it
+/// must be a regular file once symlinks are followed, so `/dev/stdout` and the
+/// like cannot route the output back onto a pipe, and a `/proc/self/fd/N`
+/// path cannot later name a file the store opened.
 pub fn output_target(
     command: &str,
     stdout_is_terminal: bool,
@@ -500,6 +502,13 @@ pub fn output_target(
 ) -> Result<OutputTarget> {
     match out {
         Some(path) => {
+            if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+                bail!(
+                    "wake-log {command}: --out must name a regular file, and {} is not one, \
+                     so nothing was read or printed.",
+                    path.display()
+                );
+            }
             let file = std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)

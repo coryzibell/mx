@@ -2310,7 +2310,7 @@ fn wake_log_out_must_name_a_regular_file() {
             }
             OutputTarget::Terminal => panic!("{} gave Terminal", path.display()),
         };
-    refused(dir.path(), "cannot open --out");
+    refused(dir.path(), "--out must name a regular file");
 
     let missing = dir.path().join("new.json");
     assert!(opened(&missing).is_file());
@@ -2332,7 +2332,7 @@ fn wake_log_out_must_name_a_regular_file() {
         );
         let to_dir = dir.path().join("to-dir");
         std::os::unix::fs::symlink(dir.path(), &to_dir).unwrap();
-        refused(&to_dir, "cannot open --out");
+        refused(&to_dir, "--out must name a regular file");
         let to_file = dir.path().join("to-file.txt");
         std::os::unix::fs::symlink(&file, &to_file).unwrap();
         assert!(opened(&to_file).is_file());

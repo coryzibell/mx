@@ -231,6 +231,17 @@ fn cli_out_proc_self_fd_never_writes_into_the_store() {
 
         let target = format!("/proc/self/fd/{n}");
         let attempt = mx(&dir, &["memory", "wake-log", "wake", "1", "--out", &target]);
+        assert!(!attempt.status.success(), "--out {target} must be refused");
+        assert!(
+            attempt.stdout.is_empty(),
+            "--out {target}: {:?}",
+            stdout_of(&attempt)
+        );
+        assert!(
+            stderr_of(&attempt).contains("so nothing was read or printed"),
+            "--out {target}: {}",
+            stderr_of(&attempt)
+        );
 
         let check = dir.path().join("check.json");
         let after = mx(
@@ -293,4 +304,52 @@ fn cli_out_existing_file_is_kept_when_refused_and_replaced_on_success() {
     let body = std::fs::read_to_string(&file).unwrap();
     assert!(squash(&body).starts_with(&squash(GOODHART_TEXT)), "{body}");
     assert!(!body.contains("invented earlier notes"), "{body}");
+}
+
+/// Opening a FIFO for writing blocks until a reader appears, so an `--out`
+/// FIFO is refused before it is opened, and the call never hangs.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn cli_out_fifo_is_refused_without_hanging() {
+    use std::time::{Duration, Instant};
+    let dir = TempDir::new().unwrap();
+    let fifo = dir.path().join("pipe.txt");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut cmd = Command::new(MX);
+    common::isolate(&mut cmd, dir.path());
+    cmd.args([
+        "memory",
+        "wake-log",
+        "report",
+        "--wake",
+        "1",
+        "--out",
+        fifo.to_str().unwrap(),
+    ])
+    .env("MX_CURRENT_AGENT", AGENT)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().expect("failed to run mx");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("--out a FIFO hung");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().unwrap();
+    let err = stderr_of(&out);
+    assert!(!out.status.success(), "--out a FIFO must be refused");
+    assert!(out.stdout.is_empty(), "{:?}", stdout_of(&out));
+    assert!(err.contains("--out must name a regular file"), "{err}");
 }
