@@ -12,19 +12,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   authored-phrase count used to be matched against the whole authored list,
   which chunk 1's reveal had just shown. Chunk 1 is still matched against all
   of them, and a single-chunk entry behaves exactly as before. Each later chunk
-  gets one phrase from its own body text: `derived` on an entry with authored
-  phrases, `auto` on one without.
+  gets at most one phrase, from its own text: `derived` on an entry with
+  authored phrases, `auto` on one without.
 - **A later chunk's phrase is body text, not a heading.** Derived phrases used
   to take the chunk's first markdown heading, and chunks usually start at one.
   The phrase is now the first sentence of a paragraph or list item; headings
-  (ATX and setext), rules, code, HTML and bold-only lines such as
-  `**Status:**` are skipped. A chunk with no body text still falls back to its
-  heading.
+  (ATX and setext), rules, code, HTML, bold-only lines such as `**Status:**`
+  or `**Status**:`, and sentences with no letter or digit are skipped. A chunk
+  with no body text still falls back to its heading.
 - **A later chunk's phrase never repeats an earlier reveal.** A phrase that
-  matches anything shown for an earlier chunk of the same entry is replaced by
-  the chunk's next body sentence that doesn't.
-- A later chunk whose every body sentence repeats an earlier reveal is prompted
-  with no phrase (`phrase_source: unphrased`, always revealed).
+  matches anything shown for an earlier chunk of the same entry, as cut to
+  length or in full, is replaced by the chunk's next body sentence that
+  doesn't.
+- A later chunk is prompted with no phrase (`phrase_source: unphrased`, always
+  revealed) when it has no body text, heading or line to phrase from, or when
+  every candidate repeats an earlier reveal.
 - **`wake-log` flags rows logged before the fix.** An `authored` row past the
   first chunk was matched against phrases its entry had just revealed. Read
   commands mark it `leaked` (a `leaked` field in JSON, `leaked` after the

@@ -98,7 +98,8 @@ pub struct ScoredFields {
 /// had already shown? Before #469 every chunk below the authored-phrase count
 /// was matched against the whole authored list, which chunk 0's reveal shows,
 /// so an `authored` row past chunk 0 is exactly such a row. None is logged
-/// after the fix, which never uses authored phrases past chunk 0.
+/// after the fix, which never uses authored phrases past chunk 0, except a
+/// row whose prompt an older mx issued and this one answered.
 pub fn leaked(chunk_index: i64, phrase_source: &str) -> bool {
     chunk_index > 0 && phrase_source == "authored"
 }

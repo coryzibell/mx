@@ -17,8 +17,8 @@ use crate::wake_token::*;
 /// just one of them: a single-chunk bloom with three phrases used to be
 /// matched against phrase 0 only, which made phrases 1 and 2 unreachable
 /// (#450). Every other set is one generated phrase, except a later chunk
-/// whose every candidate repeated an earlier reveal: its set is empty and its
-/// source is `Unphrased`.
+/// with nothing to phrase from or whose every candidate repeated an earlier
+/// reveal: its set is empty and its source is `Unphrased`.
 struct ChunkPhrases {
     phrases: Vec<String>,
     source: PhraseSource,
@@ -34,9 +34,11 @@ struct ChunkPhrases {
 /// phrases, so a later chunk matched against them would be matched against
 /// its own answer key (#469). A later chunk walks its body sentences in order
 /// and takes the first that matches nothing an earlier chunk's reveal showed,
-/// which is why every earlier chunk's set is rebuilt here. When every
-/// candidate collides the set is empty and the source is `Unphrased`: the
-/// chunk is still prompted and guessed, and any guess on it is revealed.
+/// capped or whole, which is why every earlier chunk's set is rebuilt here.
+/// When the chunk has no candidate (no body text, heading or line, e.g. all
+/// code) or every candidate collides, the set is empty and the source is
+/// `Unphrased`: the chunk is still prompted and guessed, and any guess on it
+/// is revealed.
 fn phrases_for_chunk(
     entry: &KnowledgeEntry,
     plan: &ChunkPlan,
@@ -68,9 +70,13 @@ fn phrases_for_chunk(
     let mut phrases: Vec<String> = Vec::new();
     for k in 1..=chunk_idx {
         let text = chunk_text(plan, content, k);
-        phrases = salient_candidates(text, k, plan.total)
+        phrases = salient_candidates(text)
             .into_iter()
-            .find(|c| best_match(c, &shown_before).0 == MatchKind::None)
+            .find(|c| {
+                best_match(&c.phrase, &shown_before).0 == MatchKind::None
+                    && best_match(&c.text, &shown_before).0 == MatchKind::None
+            })
+            .map(|c| c.phrase)
             .into_iter()
             .collect();
         shown_before.extend(phrases.iter().cloned());
@@ -646,7 +652,14 @@ pub fn respond_ritual(
         )
     })?;
 
-    let (match_kind, match_index) = best_match(guess, &resolved.phrases);
+    // A step announced unphrased showed no phrase, so nothing can match it,
+    // even if the entry's phrases were edited before the guess landed.
+    let phrases = if prompted_source == PhraseSource::Unphrased {
+        Vec::new()
+    } else {
+        resolved.phrases
+    };
+    let (match_kind, match_index) = best_match(guess, &phrases);
     let bucket = match match_kind {
         MatchKind::None => Bucket::Revealed,
         _ => Bucket::Unhinted,
@@ -666,7 +679,7 @@ pub fn respond_ritual(
         guess: guess.to_string(),
         model_id: session.model_id.clone(),
         phrase_source: prompted.phrase_source,
-        phrases: resolved.phrases.clone(),
+        phrases,
         match_kind: match_kind.as_str().to_string(),
         match_index,
         bucket: bucket.as_str().to_string(),
@@ -1362,6 +1375,180 @@ mod tests {
         assert_eq!(
             resp["summary"]["buckets"]["revealed"]["unphrased"],
             u64::from(plan.total - 1)
+        );
+    }
+
+    /// One chunk per section: the section text, then a fenced filler block
+    /// big enough that two sections never share a chunk window. Every section
+    /// after the first must open with `## ` or `---`.
+    fn sectioned(id: &str, title: &str, authored: &[&str], sections: &[&str]) -> KnowledgeEntry {
+        let filler = "let pears = 4;\n".repeat(1300);
+        let mut body = String::new();
+        for s in sections {
+            body.push_str(s);
+            body.push_str("\n\n```\n");
+            body.push_str(&filler);
+            body.push_str("```\n\n");
+        }
+        let mut e = test_entry();
+        e.id = id.to_string();
+        e.title = title.to_string();
+        e.body = Some(body);
+        e.wake_phrases = authored.iter().map(|s| s.to_string()).collect();
+        let content = bloom_content(&e);
+        let plan = compute_chunks(&content, chunk_threshold());
+        assert_eq!(
+            plan.total as usize,
+            sections.len(),
+            "fixture must chunk per section"
+        );
+        for (k, s) in sections.iter().enumerate() {
+            assert!(
+                chunk_text(&plan, &content, k as u16).contains(s.trim()),
+                "chunk {k} must hold its section"
+            );
+        }
+        e
+    }
+
+    /// Walk a whole ritual, the guess for step `i` chosen by `guess_for`.
+    fn run_ritual(
+        blooms: &[KnowledgeEntry],
+        mut guess_for: impl FnMut(usize) -> String,
+    ) -> Vec<serde_json::Value> {
+        let store = MockStore::new();
+        for b in blooms {
+            store.seed(b);
+        }
+        let first = begin(&store, &test_cascade(blooms.to_vec()));
+        let mut prompt = first["prompt"].clone();
+        let mut token = token_from_response(&first);
+        let mut out = Vec::new();
+        let mut step = 0;
+        while prompt.is_object() {
+            let id = prompt["id"].as_str().unwrap().to_string();
+            let r = respond(&store, &id, &guess_for(step), &token);
+            token = token_from_response(&r);
+            prompt = r["next"].clone();
+            out.push(r);
+            step += 1;
+            assert!(step < 64, "ritual never ended");
+        }
+        out
+    }
+
+    /// Every prompt and reveal shows the title with its `Part k/M` suffix, so
+    /// a chunk with nothing to phrase from must not be phrased `Part k/M`.
+    /// Chunk 0's reveal showed `Mill (Part 1/3)`; guessing its suffix on
+    /// chunk 1 must not match.
+    #[test]
+    fn code_only_chunk_is_not_matched_by_an_earlier_title_suffix() {
+        let filler = "let pears = 4;\n".repeat(1300);
+        let mut e = test_entry();
+        e.id = "kn-code".into();
+        e.title = "Mill".into();
+        e.wake_phrases = vec!["millstone".into()];
+        e.body = Some(format!(
+            "## Mill\n\nThe mill sits on a bend.\n\n```\n{filler}```\n\n\n```\n{filler}```\n\n## Gate\n\nThe gate squeaks.\n\n```\n{filler}```\n"
+        ));
+        let content = bloom_content(&e);
+        let plan = compute_chunks(&content, chunk_threshold());
+        assert_eq!(plan.total, 3, "fixture must chunk");
+        assert!(
+            !chunk_text(&plan, &content, 1).contains("##"),
+            "chunk 1 is code only"
+        );
+        let mut failures = Vec::new();
+        for g in ["Part 1/3", "Mill (Part 1/3)", "Part 2/3"] {
+            let rs = run_ritual(std::slice::from_ref(&e), |i| {
+                if i == 1 {
+                    g.to_string()
+                } else {
+                    MISS.to_string()
+                }
+            });
+            if rs[1]["bucket"] != "revealed" || rs[1]["bloom"]["phrase_source"] != "unphrased" {
+                failures.push(format!(
+                    "{g:?} -> {} {} vs {} ({})",
+                    rs[1]["bucket"],
+                    rs[1]["match"]["kind"],
+                    rs[1]["bloom"]["phrases"],
+                    rs[1]["bloom"]["phrase_source"]
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "a code-only chunk was phrased:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A capped derived phrase is a verbatim prefix of a longer authored
+    /// phrase that chunk 0's reveal just showed.
+    #[test]
+    fn capped_phrase_is_not_a_prefix_of_an_earlier_reveal() {
+        let long = "The weir holds back the river through every spring flood and every autumn storm while the millers \
+                    argue about who should pay for the repairs to its crumbling stones.";
+        let e = entry_with_phrases(vec![long]);
+        let (content, plan) = planned(&[
+            "The mill sits on a bend.\n",
+            &format!("\n## Weir\n\n{long}\n"),
+        ]);
+        let one = phrases_for_chunk(&e, &plan, &content, 1);
+        assert_eq!(
+            best_match(long, &one.phrases),
+            (MatchKind::None, None),
+            "copying the reveal whole is safe"
+        );
+        for p in &one.phrases {
+            let stem = p.trim_end_matches('\u{2026}');
+            assert!(
+                !long.starts_with(stem),
+                "chunk 1's phrase {p:?} is the first {} chars of the authored phrase chunk 0 revealed",
+                stem.chars().count()
+            );
+        }
+    }
+
+    /// The prompt announced `unphrased`; the owner edits the phrases before
+    /// the guess lands. The row keeps the announced source, so an `unphrased`
+    /// row must still have no phrases and be `revealed`.
+    #[test]
+    fn phrase_edit_mid_ritual_never_logs_an_unhinted_unphrased_row() {
+        let mut e = sectioned(
+            "kn-weir",
+            "Weir",
+            &["The weir holds back the river.", "It was rebuilt twice."],
+            &[
+                "## Mill\n\nThe mill sits on a bend.",
+                "## All\n\nThe weir holds back the river. It was rebuilt twice.",
+            ],
+        );
+        let store = MockStore::new();
+        store.seed(&e);
+        let b = begin(&store, &test_cascade(vec![e.clone()]));
+        let r0 = respond(&store, &e.id, MISS, &token_from_response(&b));
+        assert_eq!(r0["next"]["phrase_source"], "unphrased");
+        e.wake_phrases = vec!["millstone".into()];
+        store.seed(&e);
+        let r1 = respond(
+            &store,
+            &e.id,
+            "The weir holds back the river.",
+            &token_from_response(&r0),
+        );
+        let rows = store.guesses.borrow();
+        let row = &rows[1];
+        assert!(
+            row.phrase_source != "unphrased"
+                || (row.phrases.is_empty() && row.bucket == "revealed"),
+            "row says {} with phrases {:?} and bucket {} (response {} / {})",
+            row.phrase_source,
+            row.phrases,
+            row.bucket,
+            r1["bucket"],
+            r1["bloom"]["phrase_source"]
         );
     }
 

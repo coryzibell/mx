@@ -16,7 +16,8 @@
 //!   (property-tested — Risk 2 in the design).
 //! - **UTF-8 safety**: every boundary lands on a char boundary.
 //! - **Code-block integrity**: fenced ``` blocks are never split mid-block.
-//! - **Never-empty candidate list**: `salient_candidates` is a total function.
+//! - **Total extractors**: `salient_candidates` returns a list for any input,
+//!   empty only when the content has nothing to phrase from.
 //! - **Determinism**: same inputs → same output, always.
 
 use std::env;
@@ -411,7 +412,7 @@ fn recover_past_block(
 }
 
 // ============================================================================
-// salient_candidates — four-tier never-empty cascade
+// salient_candidates — the phrase candidates for a later chunk
 // ============================================================================
 
 /// Maximum length (in chars, not bytes) for an auto-derived phrase. Keeps the
@@ -419,11 +420,19 @@ fn recover_past_block(
 const PHRASE_MAX_CHARS: usize = 120;
 const SENTENCE_MAX_CHARS: usize = 100;
 const LINE_FALLBACK_MAX_CHARS: usize = 80;
-const SYNTHETIC_PREFIX_CHARS: usize = 40;
 
-/// The candidate phrases for a chunk of bloom content, best first. Never
-/// returns an empty list — even for whitespace-only or empty input, the
-/// synthetic fallback produces a stable, deterministic phrase.
+/// A phrase a chunk can be matched against, and the full text it was cut from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// `text` capped to a typable length: what the chunk is matched against.
+    pub phrase: String,
+    /// The whole sentence, heading or line, before the cap.
+    pub text: String,
+}
+
+/// The candidate phrases for a chunk of bloom content, best first. Empty when
+/// the chunk has nothing to phrase from: no body text, no heading and no line
+/// outside a fence (empty, whitespace-only or code-only content).
 ///
 /// The tiers are mutually exclusive; the first that applies is the list:
 ///
@@ -434,29 +443,28 @@ const SYNTHETIC_PREFIX_CHARS: usize = 40;
 /// 2. First markdown heading, only for a chunk with no body text at all.
 /// 3. First non-empty line outside a fence, truncated to
 ///    `LINE_FALLBACK_MAX_CHARS` (e.g. an HTML-only chunk).
-/// 4. Synthetic: `"Part {chunk_idx+1}/{total} — <prefix>"`. Deterministic
-///    even for empty input (`<prefix>` collapses to empty string).
-///
-/// `chunk_idx` and `total` are only used for the synthetic tier. Passing 0/1
-/// is fine for test fixtures.
-pub fn salient_candidates(content: &str, chunk_idx: u16, total: u16) -> Vec<String> {
+pub fn salient_candidates(content: &str) -> Vec<Candidate> {
+    let capped = |text: String, max: usize| Candidate {
+        phrase: cap_chars(text.trim(), max),
+        text,
+    };
+
     let sentences = body_sentences(content);
     if !sentences.is_empty() {
         return sentences
-            .iter()
-            .map(|s| cap_chars(s, SENTENCE_MAX_CHARS))
+            .into_iter()
+            .map(|s| capped(s, SENTENCE_MAX_CHARS))
             .collect();
     }
 
     if let Some(heading) = first_heading(content) {
-        return vec![cap_chars(heading.trim(), PHRASE_MAX_CHARS)];
+        return vec![capped(heading, PHRASE_MAX_CHARS)];
     }
 
-    if let Some(line) = first_non_empty_line(content) {
-        return vec![cap_chars(line.trim(), LINE_FALLBACK_MAX_CHARS)];
-    }
-
-    vec![synthetic_phrase(content, chunk_idx, total)]
+    first_non_empty_line(content)
+        .map(|line| capped(line, LINE_FALLBACK_MAX_CHARS))
+        .into_iter()
+        .collect()
 }
 
 fn first_heading(content: &str) -> Option<String> {
@@ -499,9 +507,11 @@ fn first_heading(content: &str) -> Option<String> {
 /// Body text is the inline text of a paragraph or a list item as
 /// pulldown-cmark parses it, with soft and hard breaks read as a space.
 /// Headings (ATX and setext), code blocks, HTML blocks and rules are not body
-/// text, and neither is a bold-only block such as `**Status:**` or
-/// `- **Section**`, which is a heading in all but syntax. Each block is split
-/// on `". "`, keeping the period; a block with no terminator is one sentence.
+/// text, and neither is a bold-only block such as `**Status:**`,
+/// `**Status**:` or `- **Section**`, which is a heading in all but syntax.
+/// Each block is split on `". "`, keeping the period; a block with no
+/// terminator is one sentence. A sentence without a letter or digit, such as
+/// `...` or an emoji, is dropped.
 fn body_sentences(content: &str) -> Vec<String> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
@@ -547,12 +557,12 @@ fn body_sentences(content: &str) -> Vec<String> {
         let mut rest = taken.text.trim();
         while let Some(pos) = rest.find(". ") {
             let sentence = rest[..=pos].trim();
-            if !sentence.is_empty() {
+            if sentence.chars().any(char::is_alphanumeric) {
                 out.push(sentence.to_string());
             }
             rest = rest[pos + 2..].trim_start();
         }
-        if !rest.trim().is_empty() {
+        if rest.chars().any(char::is_alphanumeric) {
             out.push(rest.trim().to_string());
         }
     }
@@ -589,12 +599,10 @@ fn body_sentences(content: &str) -> Vec<String> {
             }
             Event::Text(ref text) | Event::Code(ref text) if in_body => {
                 block.text.push_str(text);
-                if !text.trim().is_empty() {
-                    if strong_depth > 0 {
-                        span_has_text = true;
-                    } else {
-                        block.text_outside_strong = true;
-                    }
+                if strong_depth > 0 {
+                    span_has_text |= !text.trim().is_empty();
+                } else {
+                    block.text_outside_strong |= text.chars().any(char::is_alphanumeric);
                 }
             }
             Event::SoftBreak | Event::HardBreak if in_body => block.text.push(' '),
@@ -660,24 +668,6 @@ fn detect_fence_marker(trimmed_line: &str) -> Option<(char, usize)> {
         Some((first, run_len))
     } else {
         None
-    }
-}
-
-fn synthetic_phrase(content: &str, chunk_idx: u16, total: u16) -> String {
-    let prefix: String = content
-        .chars()
-        .take_while(|c| !matches!(c, '\n' | '\r'))
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let prefix_capped = cap_chars(prefix.trim(), SYNTHETIC_PREFIX_CHARS);
-    let display_idx = chunk_idx.saturating_add(1);
-    let display_total = total.max(display_idx);
-    if prefix_capped.is_empty() {
-        format!("Part {}/{}", display_idx, display_total)
-    } else {
-        format!("Part {}/{} — {}", display_idx, display_total, prefix_capped)
     }
 }
 
@@ -917,8 +907,15 @@ fn select_sentence_index(sentences: &[&str], content: &str) -> usize {
 mod tests {
     use super::*;
 
-    fn extract_salient_phrase(c: &str, i: u16, t: u16) -> String {
-        salient_candidates(c, i, t).remove(0)
+    fn candidate_phrases(c: &str) -> Vec<String> {
+        salient_candidates(c)
+            .into_iter()
+            .map(|c| c.phrase)
+            .collect()
+    }
+
+    fn extract_salient_phrase(c: &str) -> String {
+        candidate_phrases(c).remove(0)
     }
 
     // --- compute_chunks unit tests --------------------------------------------
@@ -1173,21 +1170,21 @@ mod tests {
     fn phrase_from_heading_preferred() {
         // The body sentence wins over the heading above it (mx#469).
         let content = "\n## Token semantics\n\nThe token signs (session_id, step).";
-        let p = extract_salient_phrase(content, 0, 1);
+        let p = extract_salient_phrase(content);
         assert_eq!(p, "The token signs (session_id, step).");
     }
 
     #[test]
     fn phrase_heading_strips_all_hash_levels() {
         let content = "#### Deep heading\n\nbody";
-        assert_eq!(extract_salient_phrase(content, 0, 1), "body");
+        assert_eq!(extract_salient_phrase(content), "body");
         assert_eq!(first_heading(content).unwrap(), "Deep heading");
     }
 
     #[test]
     fn phrase_from_first_sentence_when_no_heading() {
         let content = "The wake ritual walks a cascade. It uses chunks now.";
-        let p = extract_salient_phrase(content, 0, 1);
+        let p = extract_salient_phrase(content);
         assert_eq!(p, "The wake ritual walks a cascade.");
     }
 
@@ -1196,7 +1193,7 @@ mod tests {
         // Single giant line, no sentence boundary, no heading. The paragraph
         // is one body sentence, capped at SENTENCE_MAX_CHARS.
         let content = "word ".repeat(50); // ~250 chars, no period
-        let p = extract_salient_phrase(&content, 0, 1);
+        let p = extract_salient_phrase(&content);
         assert!(
             p.chars().count() <= SENTENCE_MAX_CHARS + 1,
             "got {} chars",
@@ -1206,24 +1203,26 @@ mod tests {
     }
 
     #[test]
-    fn phrase_synthetic_for_empty_input() {
-        let p = extract_salient_phrase("", 0, 3);
-        assert_eq!(p, "Part 1/3");
+    fn no_candidate_for_empty_input() {
+        assert_eq!(candidate_phrases(""), Vec::<String>::new());
     }
 
     #[test]
-    fn phrase_synthetic_for_whitespace_only() {
-        let p = extract_salient_phrase("   \n\n\n   ", 2, 5);
-        assert_eq!(p, "Part 3/5");
+    fn no_candidate_for_whitespace_only() {
+        assert_eq!(candidate_phrases("   \n\n\n   "), Vec::<String>::new());
     }
 
     #[test]
-    fn phrase_never_empty() {
-        // Sweep a range of pathological inputs — the total-function guarantee.
+    fn candidates_are_empty_only_for_blank_input() {
+        // Sweep a range of pathological inputs: blank content has nothing to
+        // phrase from, anything else gets candidates, and none is blank.
         let cases = ["", " ", "\n", "\n\n", "\t\t", "a", ".", "\u{200B}"];
         for c in cases {
-            let p = extract_salient_phrase(c, 0, 1);
-            assert!(!p.is_empty(), "empty phrase for input {:?}", c);
+            let phrases = candidate_phrases(c);
+            assert_eq!(phrases.is_empty(), c.trim().is_empty(), "input {:?}", c);
+            for p in phrases {
+                assert!(!p.trim().is_empty(), "blank phrase for input {:?}", c);
+            }
         }
     }
 
@@ -1241,7 +1240,7 @@ mod tests {
         // vs. etc. i.e. e.g. — a stop-list pass could improve this. Left as
         // a follow-up (see mx#212 review reply for scope rationale).
         let content = "See Dr. Smith for details. He prescribes two aspirin.";
-        let p = extract_salient_phrase(content, 0, 1);
+        let p = extract_salient_phrase(content);
         assert_eq!(p, "See Dr.");
     }
 
@@ -1256,7 +1255,7 @@ mod tests {
              more code lines\n\
              ```\n\
              trailing prose line.";
-        let p = extract_salient_phrase(content, 0, 1);
+        let p = extract_salient_phrase(content);
         assert!(
             !p.contains("fake heading in code"),
             "heading extractor descended into fenced block: {:?}",
@@ -1305,19 +1304,13 @@ mod tests {
     #[test]
     fn phrase_pure_fenced_chunk_has_no_extractable_heading() {
         // Chunk is nothing but a fenced block containing a fake heading.
-        // Heading tier must skip; we fall through to sentence/line/synthetic.
+        // Heading tier must skip, and so does every other: no candidate.
         let content = "\
             ```markdown\n\
             ## fake heading inside code\n\
             more code\n\
             ```\n";
-        let p = extract_salient_phrase(content, 0, 1);
-        assert!(
-            !p.contains("fake heading inside code"),
-            "fence-only chunk returned fake heading: {:?}",
-            p
-        );
-        assert!(!p.is_empty());
+        assert_eq!(candidate_phrases(content), Vec::<String>::new());
     }
 
     // --- mx#215 CommonMark fence edge-case tests --------------------------------
@@ -1404,7 +1397,7 @@ Content.";
     fn derived_phrase_skips_atx_heading() {
         let content = "\n### Harbor Notes\n\nThe tide turns twice daily. Boats wait.";
         assert_eq!(
-            extract_salient_phrase(content, 1, 3),
+            extract_salient_phrase(content),
             "The tide turns twice daily."
         );
     }
@@ -1412,31 +1405,22 @@ Content.";
     #[test]
     fn derived_phrase_skips_setext_heading() {
         let h1 = "Lantern Keeping\n===============\n\nWicks are trimmed at dusk. Oil later.";
-        assert_eq!(
-            extract_salient_phrase(h1, 1, 3),
-            "Wicks are trimmed at dusk."
-        );
+        assert_eq!(extract_salient_phrase(h1), "Wicks are trimmed at dusk.");
         let h2 = "Lantern Keeping\n---\n\nWicks are trimmed at dusk.";
-        assert_eq!(
-            extract_salient_phrase(h2, 1, 3),
-            "Wicks are trimmed at dusk."
-        );
+        assert_eq!(extract_salient_phrase(h2), "Wicks are trimmed at dusk.");
     }
 
     #[test]
     fn derived_phrase_skips_leading_rule() {
         let content = "---\n\n## Ferry Times\n\nThe ferry leaves at noon.";
-        assert_eq!(
-            extract_salient_phrase(content, 2, 4),
-            "The ferry leaves at noon."
-        );
+        assert_eq!(extract_salient_phrase(content), "The ferry leaves at noon.");
     }
 
     #[test]
     fn derived_phrase_skips_bold_only_paragraph() {
         let content = "**Status:**\n\nThe greenhouse is closed for repairs.";
         assert_eq!(
-            extract_salient_phrase(content, 1, 2),
+            extract_salient_phrase(content),
             "The greenhouse is closed for repairs."
         );
     }
@@ -1445,37 +1429,60 @@ Content.";
     fn derived_phrase_skips_bold_only_list_item() {
         let content = "- **Greenhouse**\n- Seedlings need water twice a day.\n";
         assert_eq!(
-            extract_salient_phrase(content, 1, 2),
+            extract_salient_phrase(content),
             "Seedlings need water twice a day."
         );
         let nested = "- **Greenhouse**\n  - Seedlings need water twice a day.\n";
         assert_eq!(
-            extract_salient_phrase(nested, 1, 2),
+            extract_salient_phrase(nested),
             "Seedlings need water twice a day."
+        );
+    }
+
+    /// `**Label**:` is the same pseudo-heading as `**Label:**`, colon outside.
+    #[test]
+    fn bold_label_with_colon_outside_is_skipped() {
+        assert_eq!(
+            candidate_phrases("**Status**:\n\nThe press runs in October."),
+            vec!["The press runs in October."]
+        );
+        assert_eq!(
+            candidate_phrases("- **Section**:\n- The press runs in October.\n"),
+            vec!["The press runs in October."]
+        );
+    }
+
+    #[test]
+    fn derived_phrase_skips_a_sentence_without_letters_or_digits() {
+        assert_eq!(
+            extract_salient_phrase("\n## Title\n\n... Then the river rose."),
+            "Then the river rose."
+        );
+        assert_eq!(
+            candidate_phrases("\u{1F30A}. Then the river rose. \u{1F30A}\n"),
+            vec!["Then the river rose."]
         );
     }
 
     #[test]
     fn heading_only_chunk_derives_the_heading() {
         assert_eq!(
-            extract_salient_phrase("\n## Orchard Ledger\n", 1, 3),
+            extract_salient_phrase("\n## Orchard Ledger\n"),
             "Orchard Ledger"
         );
     }
 
     #[test]
-    fn code_only_chunk_derives_synthetic() {
+    fn code_only_chunk_has_no_candidate() {
         let content = "```\nlet pears = 4;\n```\n";
-        let p = extract_salient_phrase(content, 2, 5);
-        assert_eq!(p, synthetic_phrase(content, 2, 5));
-        assert!(p.starts_with("Part 3/5"), "{p:?}");
+        assert_eq!(candidate_phrases(content), Vec::<String>::new());
     }
 
     #[test]
     fn tight_list_only_chunk_derives_first_item() {
         let content = "- Plant the beans after the frost.\n- Water them at dawn.\n";
         assert_eq!(
-            extract_salient_phrase(content, 1, 2),
+            extract_salient_phrase(content),
             "Plant the beans after the frost."
         );
     }
@@ -1483,7 +1490,7 @@ Content.";
     #[test]
     fn salient_candidates_lists_every_body_sentence_in_order() {
         assert_eq!(
-            salient_candidates("## H\n\nOne. Two.\n\n- Three\n", 1, 2),
+            candidate_phrases("## H\n\nOne. Two.\n\n- Three\n"),
             vec!["One.", "Two.", "Three"]
         );
     }
@@ -1491,7 +1498,7 @@ Content.";
     #[test]
     fn salient_candidates_never_offer_a_heading_when_the_chunk_has_body_text() {
         assert_eq!(
-            salient_candidates("## Orchard Ledger\n\nPears ripen late.\n", 1, 2),
+            candidate_phrases("## Orchard Ledger\n\nPears ripen late.\n"),
             vec!["Pears ripen late."]
         );
     }
@@ -1694,15 +1701,16 @@ Real tilde sentence.";
         }
 
         #[test]
-        fn prop_phrase_never_empty(content in "\\PC{0,4096}", idx in 0u16..10, total in 1u16..10) {
-            let p = extract_salient_phrase(&content, idx, total);
-            prop_assert!(!p.is_empty(), "empty phrase for content len {}", content.len());
+        fn prop_candidates_are_never_blank(content in "\\PC{0,4096}") {
+            for p in candidate_phrases(&content) {
+                prop_assert!(!p.trim().is_empty(), "blank phrase for content len {}", content.len());
+            }
         }
 
         #[test]
         fn prop_phrase_deterministic(content in "\\PC{0,4096}") {
-            let a = extract_salient_phrase(&content, 0, 1);
-            let b = extract_salient_phrase(&content, 0, 1);
+            let a = salient_candidates(&content);
+            let b = salient_candidates(&content);
             prop_assert_eq!(a, b);
         }
 
