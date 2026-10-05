@@ -205,3 +205,92 @@ fn cli_out_naming_stdout_captured_in_a_file_is_refused() {
         );
     }
 }
+
+/// `/proc/self/fd/N` for an fd that is not open yet passes the check (the path
+/// does not exist), then names the store's own files once the DB is open. The
+/// report must never be written into the store.
+#[test]
+#[serial]
+#[cfg(target_os = "linux")]
+fn cli_out_proc_self_fd_never_writes_into_the_store() {
+    for n in 3..=24 {
+        let dir = TempDir::new().unwrap();
+        let seed = dir.path().join("seed.json");
+        let out = mx(
+            &dir,
+            &[
+                "memory",
+                "wake-log",
+                "wake",
+                "1",
+                "--out",
+                seed.to_str().unwrap(),
+            ],
+        );
+        assert!(out.status.success(), "seed: {}", stderr_of(&out));
+
+        let target = format!("/proc/self/fd/{n}");
+        let attempt = mx(&dir, &["memory", "wake-log", "wake", "1", "--out", &target]);
+
+        let check = dir.path().join("check.json");
+        let after = mx(
+            &dir,
+            &[
+                "memory",
+                "wake-log",
+                "wake",
+                "1",
+                "--out",
+                check.to_str().unwrap(),
+            ],
+        );
+        assert!(
+            after.status.success(),
+            "--out {target} (exit {:?}, stdout {:?}) left the store unopenable: {}",
+            attempt.status.code(),
+            stdout_of(&attempt),
+            stderr_of(&after)
+        );
+    }
+}
+
+/// The `--out` file is opened before anything is read but emptied only when
+/// the output is written: a call refused after the open leaves an existing
+/// file as it was, and a call that succeeds replaces all of it.
+#[test]
+#[serial]
+fn cli_out_existing_file_is_kept_when_refused_and_replaced_on_success() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("old.txt");
+    let file_s = file.to_str().unwrap();
+    let old = "invented earlier notes\n".repeat(4096);
+    std::fs::write(&file, &old).unwrap();
+
+    let no_agent = mx_with(
+        &dir,
+        None,
+        &["memory", "wake-log", "wake", "1", "--out", file_s],
+    );
+    assert!(!no_agent.status.success());
+    assert!(no_agent.stdout.is_empty(), "{:?}", stdout_of(&no_agent));
+    let no_scored_wake = mx(&dir, &["memory", "wake-log", "report", "--out", file_s]);
+    assert!(!no_scored_wake.status.success());
+    assert!(
+        stderr_of(&no_scored_wake).contains("no scored wake"),
+        "{}",
+        stderr_of(&no_scored_wake)
+    );
+    assert!(
+        no_scored_wake.stdout.is_empty(),
+        "{:?}",
+        stdout_of(&no_scored_wake)
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), old);
+
+    let ok = mx(&dir, &["memory", "wake-log", "wake", "1", "--out", file_s]);
+    assert!(ok.status.success(), "{}", stderr_of(&ok));
+    assert_eq!(stdout_of(&ok), format!("{file_s}\n"));
+    let body = std::fs::read_to_string(&file).unwrap();
+    assert!(squash(&body).starts_with(&squash(GOODHART_TEXT)), "{body}");
+    assert!(!body.contains("invented earlier notes"), "{body}");
+}

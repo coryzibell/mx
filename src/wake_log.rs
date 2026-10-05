@@ -332,11 +332,13 @@ fn phrase_vectors<P: EmbeddingProvider>(
     let phrases: Vec<(String, String)> = row
         .phrases
         .iter()
-        .map(|p| {
-            let normalized = normalize_phrase(p);
-            (phrase_cache_key(em, &normalized), normalized)
-        })
+        .map(|p| normalize_phrase(p))
+        .filter(|normalized| !normalized.is_empty())
+        .map(|normalized| (phrase_cache_key(em, &normalized), normalized))
         .collect();
+    if phrases.is_empty() {
+        return Ok(Vec::new());
+    }
     let keys: Vec<String> = phrases.iter().map(|(k, _)| k.clone()).collect();
     let mut known = db.wake_phrase_embeddings(em, &keys).unwrap_or_else(|_| {
         note(diag, Stage::CacheRead);
@@ -460,17 +462,20 @@ fn prior_stats(
 // READ COMMANDS
 // =============================================================================
 
-/// Where a read command's output goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Where a read command's output goes. `File` holds the `--out` file already
+/// open, so the output lands in the file that was checked.
+#[derive(Debug)]
 pub enum OutputTarget {
     Terminal,
-    File(PathBuf),
+    File(std::fs::File, PathBuf),
 }
 
 /// The terminal-only rule. Decided before anything is read: with `--out` the
-/// output goes to that file; otherwise stdout must be a terminal. An `--out`
-/// path that exists must be a regular file once symlinks are followed, so
-/// `/dev/stdout` and the like cannot route the output back onto a pipe.
+/// output goes to that file; otherwise stdout must be a terminal. The `--out`
+/// file is opened here, before the store, and checked through that handle: it
+/// must be a regular file once symlinks are followed, so `/dev/stdout` and the
+/// like cannot route the output back onto a pipe, and a `/proc/self/fd/N`
+/// path cannot later name a file the store opened.
 #[cfg(unix)]
 fn same_file_as_std_stream(target: &std::fs::Metadata) -> bool {
     use std::os::fd::AsFd;
@@ -495,24 +500,39 @@ pub fn output_target(
 ) -> Result<OutputTarget> {
     match out {
         Some(path) => {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if !meta.is_file() {
-                    bail!(
-                        "wake-log {command}: --out must name a regular file, and {} is not one, \
-                         so nothing was read or printed.",
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .with_context(|| {
+                    format!(
+                        "wake-log {command}: cannot open --out {}, so nothing was read or printed.",
                         path.display()
-                    );
-                }
-                #[cfg(unix)]
-                if same_file_as_std_stream(&meta) {
-                    bail!(
-                        "wake-log {command}: --out names this process's own stdout or stderr ({}), \
-                         so nothing was read or printed.",
-                        path.display()
-                    );
-                }
+                    )
+                })?;
+            let meta = file.metadata().with_context(|| {
+                format!(
+                    "wake-log {command}: cannot inspect --out {}, so nothing was read or printed.",
+                    path.display()
+                )
+            })?;
+            if !meta.is_file() {
+                bail!(
+                    "wake-log {command}: --out must name a regular file, and {} is not one, \
+                     so nothing was read or printed.",
+                    path.display()
+                );
             }
-            Ok(OutputTarget::File(path))
+            #[cfg(unix)]
+            if same_file_as_std_stream(&meta) {
+                bail!(
+                    "wake-log {command}: --out names this process's own stdout or stderr ({}), \
+                     so nothing was read or printed.",
+                    path.display()
+                );
+            }
+            Ok(OutputTarget::File(file, path))
         }
         None if stdout_is_terminal => Ok(OutputTarget::Terminal),
         None => bail!(
@@ -841,13 +861,15 @@ pub fn listing_text(listing: &RowListing) -> String {
 fn deliver<T: Serialize>(target: &OutputTarget, value: &T, text: String) -> Result<String> {
     match target {
         OutputTarget::Terminal => Ok(text),
-        OutputTarget::File(path) => {
+        OutputTarget::File(file, path) => {
             let body = if is_json_path(path) {
                 serde_json::to_string_pretty(value)? + "\n"
             } else {
                 text
             };
-            std::fs::write(path, body)
+            let mut file = file;
+            file.set_len(0)
+                .and_then(|()| file.write_all(body.as_bytes()))
                 .with_context(|| format!("Failed to write {}", path.display()))?;
             Ok(path.display().to_string())
         }

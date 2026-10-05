@@ -2229,6 +2229,63 @@ fn wake_log_phrase_cache_errors_never_skip_the_row() {
     check(&db, &diag, "phrase cache read");
 }
 
+#[test]
+fn wake_log_blank_phrases_are_never_embedded_or_cached() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    insert(
+        &db,
+        &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", "a candle").source("authored", &["", "  "]),
+    );
+    let p = CountingProvider::new(FAKE_MODEL);
+    let (counts, diag) = score_counting(&db, &p);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    assert_eq!(diag, "");
+    let row = stored(&db, "s1", 0);
+    assert_eq!(row["scored"], true, "scored, not skipped");
+    assert!(
+        is_none(&row, "sim_phrase"),
+        "no non-blank phrase, no sim_phrase"
+    );
+    assert_eq!(p.total(), 2, "guess + title only: {:?}", p.texts());
+    assert_eq!(p.calls(""), 0);
+    assert!(cache_rows(&db).is_empty());
+
+    let real = "real phrase";
+    let guess = "a lamp";
+    insert(
+        &db,
+        &fx("s2", 0, 20, "kn-lantern", "Lantern Notes", guess).source("authored", &["", real]),
+    );
+    let p = CountingProvider::new(FAKE_MODEL);
+    let (counts, _) = score_counting(&db, &p);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    assert_eq!(p.calls(""), 0);
+    assert_eq!(p.calls(real), 1);
+    assert_eq!(
+        p.total(),
+        3,
+        "guess + title + the real phrase: {:?}",
+        p.texts()
+    );
+    assert_eq!(cache_rows(&db).len(), 1);
+    assert_eq!(
+        stored(&db, "s2", 0)["sim_phrase"].as_f64().unwrap(),
+        best_phrase_sim(guess, &[real])
+    );
+}
+
 // =============================================================================
 // --out must name a regular file
 // =============================================================================
@@ -2236,36 +2293,50 @@ fn wake_log_phrase_cache_errors_never_skip_the_row() {
 #[test]
 fn wake_log_out_must_name_a_regular_file() {
     let dir = tempfile::tempdir().unwrap();
-    let refused = |path: &std::path::Path| {
+    let refused = |path: &std::path::Path, why: &str| {
         let err = output_target("report", false, Some(path.to_path_buf()))
             .expect_err("not a regular file");
-        let msg = err.to_string();
-        assert!(msg.contains("--out must name a regular file"), "{msg}");
+        let msg = format!("{err:#}");
+        assert!(msg.contains(why), "{msg}");
         assert!(msg.contains(&path.display().to_string()), "{msg}");
     };
-    refused(dir.path());
+    let opened =
+        |path: &std::path::Path| match output_target("report", false, Some(path.to_path_buf()))
+            .unwrap()
+        {
+            OutputTarget::File(file, p) => {
+                assert_eq!(p, path);
+                file.metadata().unwrap()
+            }
+            OutputTarget::Terminal => panic!("{} gave Terminal", path.display()),
+        };
+    refused(dir.path(), "cannot open --out");
 
     let missing = dir.path().join("new.json");
+    assert!(opened(&missing).is_file());
     assert_eq!(
-        output_target("report", false, Some(missing.clone())).unwrap(),
-        OutputTarget::File(missing)
+        std::fs::read(&missing).unwrap(),
+        b"",
+        "created, not written"
     );
     let file = dir.path().join("old.txt");
     std::fs::write(&file, "x").unwrap();
-    assert_eq!(
-        output_target("report", false, Some(file.clone())).unwrap(),
-        OutputTarget::File(file.clone())
-    );
+    assert!(opened(&file).is_file());
+    assert_eq!(std::fs::read(&file).unwrap(), b"x", "opened, not truncated");
 
     #[cfg(unix)]
     {
-        refused(std::path::Path::new("/dev/null"));
+        refused(
+            std::path::Path::new("/dev/null"),
+            "--out must name a regular file",
+        );
         let to_dir = dir.path().join("to-dir");
         std::os::unix::fs::symlink(dir.path(), &to_dir).unwrap();
-        refused(&to_dir);
+        refused(&to_dir, "cannot open --out");
         let to_file = dir.path().join("to-file.txt");
         std::os::unix::fs::symlink(&file, &to_file).unwrap();
-        assert!(output_target("report", false, Some(to_file)).is_ok());
+        assert!(opened(&to_file).is_file());
+        assert_eq!(std::fs::read(&file).unwrap(), b"x");
     }
 }
 
