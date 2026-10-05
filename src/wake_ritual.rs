@@ -174,6 +174,25 @@ fn build_prompt_for_chunk(
 
 /// Build the full reveal for one chunk. `content` is the *chunk's* content,
 /// not the whole bloom.
+fn reveal_from_row(row: &WakeGuessRow, bloom: &KnowledgeEntry) -> BloomFull {
+    let content = bloom_content(bloom);
+    let plan = compute_chunks(&content, chunk_threshold());
+    let chunk = (row.chunk_total > 1).then(|| ChunkRef {
+        index: row.chunk_index + 1,
+        total: row.chunk_total,
+        oversized: (plan.total == row.chunk_total && plan.is_oversized(row.chunk_index))
+            .then_some(true),
+    });
+    BloomFull {
+        id: row.bloom_id.clone(),
+        title: row.title_shown.clone(),
+        phrases: row.phrases.clone(),
+        phrase_source: row.phrase_source.clone(),
+        content: chunk_text(&plan, &content, row.chunk_index).to_string(),
+        chunk,
+    }
+}
+
 fn build_full_for_chunk(
     entry: &KnowledgeEntry,
     chunk_idx: u16,
@@ -633,17 +652,7 @@ pub fn respond_ritual(
 
     // The reveal names the step the way the row does, so this response and
     // any replay of it say the same thing.
-    let shown = BloomFull {
-        title: row.title_shown.clone(),
-        ..build_full_for_chunk(
-            bloom,
-            chunk_idx,
-            &plan,
-            &content,
-            resolved.phrases,
-            prompted_source,
-        )
-    };
+    let shown = reveal_from_row(&row, bloom);
 
     let before_advance = session.clone();
     session.last_status = Some("shown".to_string());
@@ -790,24 +799,9 @@ fn replay(
 
     let (progress, summary) = progress_and_summary(&session, all_blooms);
 
-    let shown = all_blooms.get(&logged.bloom_id).map(|bloom| {
-        let content = bloom_content(bloom);
-        let plan = compute_chunks(&content, chunk_threshold());
-        let chunk = (logged.chunk_total > 1).then(|| ChunkRef {
-            index: logged.chunk_index + 1,
-            total: logged.chunk_total,
-            oversized: (plan.total == logged.chunk_total && plan.is_oversized(logged.chunk_index))
-                .then_some(true),
-        });
-        BloomFull {
-            id: logged.bloom_id.clone(),
-            title: logged.title_shown.clone(),
-            phrases: logged.phrases.clone(),
-            phrase_source: logged.phrase_source.clone(),
-            content: chunk_text(&plan, &content, logged.chunk_index).to_string(),
-            chunk,
-        }
-    });
+    let shown = all_blooms
+        .get(&logged.bloom_id)
+        .map(|b| reveal_from_row(&logged, b));
 
     let response = WakeRespondResponse {
         status: "shown".to_string(),
@@ -2209,6 +2203,7 @@ mod tests {
         let again = respond(&store, &bloom_id, "alpha", &spent);
         assert_eq!(again["replayed"], true);
         assert_eq!(again["bloom"]["title"], prompted_title.as_str());
+        assert_eq!(again["bloom"], resp["bloom"]);
         assert_eq!(again["next"], resp["next"]);
         let replayed = only_session(&store);
         assert_eq!(replayed.step, after.step);
@@ -2362,11 +2357,7 @@ mod tests {
         assert_eq!(original["bloom"]["phrase_source"], "authored");
         let retry = respond(&store, "kn-first", MISS, &t0);
         assert_eq!(retry["replayed"], true);
-        assert_eq!(retry["bloom"]["title"], original["bloom"]["title"]);
-        assert_eq!(
-            retry["bloom"]["phrase_source"],
-            original["bloom"]["phrase_source"]
-        );
+        assert_eq!(retry["bloom"], original["bloom"]);
         let rows = store.guesses.borrow();
         assert_eq!(rows[0].title_shown, "First");
         assert_eq!(rows[0].phrase_source, "authored");

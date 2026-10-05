@@ -519,6 +519,9 @@ pub struct BloomFull {
     /// The phrases the guess was matched against. For `derived` and `auto`
     /// sources this holds the single generated phrase.
     pub phrases: Vec<String>,
+    /// The phrase source the prompt announced; `phrases` is what the guess was
+    /// judged against, and can differ if the entry's phrases changed after the
+    /// prompt.
     pub phrase_source: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]

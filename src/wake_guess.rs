@@ -67,7 +67,8 @@ pub struct WakeGuessRow {
     pub wake: Option<i64>,
     pub session_id: String,
     pub bloom_id: String,
-    /// 0-based chunk within the bloom, and the bloom's chunk count as the prompt showed it (the ritual navigates by the current count).
+    /// 0-based chunk within the bloom, and the bloom's chunk count as the
+    /// prompt showed it (the ritual navigates by the current count).
     pub chunk_index: u16,
     pub chunk_total: u16,
     /// 0-based chunk step within the ritual (the session's `step` at guess
@@ -81,7 +82,9 @@ pub struct WakeGuessRow {
     pub title_shown: String,
     pub guess: String,
     pub model_id: Option<String>,
-    /// The phrase source the prompt announced. `phrases` is what the guess was judged against, and can differ if the entry's phrases changed after the prompt.
+    /// The phrase source the prompt announced. `phrases` is what the guess was
+    /// judged against, and can differ if the entry's phrases changed after the
+    /// prompt.
     pub phrase_source: String,
     /// Snapshot of the phrase list this guess was matched against. Phrases get
     /// edited over time; without the snapshot an old row cannot be read back.
