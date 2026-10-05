@@ -734,7 +734,11 @@ fn resume(
         match_info: None,
         bloom: None,
         session: create_token(session_id, session.step),
-        next: session.prompt.clone(),
+        next: if session.is_complete() {
+            None
+        } else {
+            session.prompt.clone()
+        },
         progress: Some(progress),
         summary,
         wake: session.wake,
@@ -820,7 +824,11 @@ fn replay(
         }),
         bloom: shown,
         session: create_token(session_id, session.step),
-        next: session.prompt.clone(),
+        next: if session.is_complete() {
+            None
+        } else {
+            session.prompt.clone()
+        },
         progress: Some(progress),
         summary,
         wake: session.wake,
