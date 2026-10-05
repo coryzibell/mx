@@ -1,4 +1,5 @@
-//! Integration test for the kv write lock.
+//! Integration tests for the kv write lock, and for `kv inc` refusing to lose
+//! or fake an increment (#453).
 //!
 //! `mx kv` loads the whole data file, mutates it in memory, and rewrites the
 //! whole thing. Without a lock spanning that cycle, two overlapping writers each
@@ -29,6 +30,13 @@ max_entries = 1000
 [keys.other]
 type = "history"
 max_entries = 1000
+
+[keys.tally]
+type = "counter"
+
+[keys.capped]
+type = "counter"
+max = 3
 "#;
 
 const WRITERS: usize = 8;
@@ -69,6 +77,102 @@ fn count(dir: &TempDir, key: &str) -> usize {
         .next()
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("count {} printed {:?}", key, stdout))
+}
+
+fn counter(dir: &TempDir, key: &str) -> i64 {
+    let out = run(dir, &["kv", "get", key]);
+    assert!(
+        out.status.success(),
+        "get {} failed: {}",
+        key,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    stdout
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("get {} printed {:?}", key, stdout))
+}
+
+/// One line per child: exit code, stdout, stderr. A CI failure has to say WHY.
+fn report(outs: &[std::process::Output]) -> String {
+    outs.iter()
+        .enumerate()
+        .map(|(i, o)| {
+            format!(
+                "  writer {}: exit {:?}, stdout {:?}, stderr {:?}",
+                i,
+                o.status.code(),
+                String::from_utf8_lossy(&o.stdout).trim(),
+                String::from_utf8_lossy(&o.stderr).trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Every concurrent `kv inc` on one counter lands, and each writer sees its own
+/// value: N processes, N increments, printed values exactly 1..=N (#453).
+#[test]
+fn concurrent_incs_on_one_counter_all_land() {
+    let dir = setup();
+
+    let kids: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            cmd(&dir, &["kv", "inc", "tally"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("failed to spawn mx")
+        })
+        .collect();
+
+    let outs: Vec<_> = kids
+        .into_iter()
+        .map(|k| k.wait_with_output().expect("writer did not exit"))
+        .collect();
+    let report = report(&outs);
+
+    assert!(
+        outs.iter().all(|o| o.status.success()),
+        "a writer failed:\n{}",
+        report
+    );
+
+    let mut printed: Vec<i64> = outs
+        .iter()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("a writer printed a non-integer:\n{}", report))
+        })
+        .collect();
+    printed.sort_unstable();
+    let got = run(&dir, &["kv", "get", "tally"]);
+    assert!(
+        got.status.success(),
+        "get tally failed: {}\n{}",
+        String::from_utf8_lossy(&got.stderr),
+        report
+    );
+    let got_stdout = String::from_utf8_lossy(&got.stdout);
+    let final_value: i64 = got_stdout
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("get tally printed {:?}:\n{}", got_stdout, report));
+
+    assert_eq!(
+        final_value, WRITERS as i64,
+        "final value lost increments (printed {:?}):\n{}",
+        printed, report
+    );
+    let expected: Vec<i64> = (1..=WRITERS as i64).collect();
+    assert_eq!(
+        printed, expected,
+        "printed values are not exactly 1..={} (final value {}):\n{}",
+        WRITERS, final_value, report
+    );
 }
 
 /// Every concurrent `kv push` to one key survives.
@@ -226,4 +330,124 @@ fn a_missing_store_is_not_created_by_a_failed_read() {
         "a failed read created {}",
         dir.path().join("kv").display()
     );
+}
+
+// -- `kv inc` refusals (#453): exit code, stderr-only, and nothing written --
+
+fn data_bytes(dir: &TempDir) -> Vec<u8> {
+    std::fs::read(dir.path().join("kv").join("data").join("test.json"))
+        .expect("data file should exist after a write")
+}
+
+/// Run an `inc` that must be refused, then prove the store was not touched.
+fn assert_inc_refused(dir: &TempDir, args: &[&str], code: i32, stderr_has: &[&str]) {
+    let key = args[2];
+    let value_before = counter(dir, key);
+    let bytes_before = data_bytes(dir);
+
+    let out = run(dir, args);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(code),
+        "{:?}: stdout {:?}, stderr {:?}",
+        args,
+        String::from_utf8_lossy(&out.stdout),
+        stderr
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{:?} printed to stdout: {:?}",
+        args,
+        String::from_utf8_lossy(&out.stdout)
+    );
+    for needle in stderr_has {
+        assert!(
+            stderr.contains(needle),
+            "{:?}: stderr missing {:?}: {}",
+            args,
+            needle,
+            stderr
+        );
+    }
+
+    assert_eq!(
+        counter(dir, key),
+        value_before,
+        "{:?} changed the value",
+        args
+    );
+    assert_eq!(
+        data_bytes(dir),
+        bytes_before,
+        "{:?} rewrote the data file",
+        args
+    );
+}
+
+#[test]
+fn inc_by_zero_or_negative_is_invalid_input() {
+    let dir = setup();
+    assert!(run(&dir, &["kv", "set", "tally", "5"]).status.success());
+
+    assert_inc_refused(
+        &dir,
+        &["kv", "inc", "tally", "--by", "0"],
+        4,
+        &["must be positive", "got 0", "mx kv dec"],
+    );
+    assert_inc_refused(
+        &dir,
+        &["kv", "inc", "tally", "--by", "-1"],
+        4,
+        &["must be positive", "got -1", "mx kv dec"],
+    );
+}
+
+#[test]
+fn inc_at_max_is_refused() {
+    let dir = setup();
+    assert!(run(&dir, &["kv", "set", "capped", "3"]).status.success());
+
+    assert_inc_refused(
+        &dir,
+        &["kv", "inc", "capped"],
+        5,
+        &[
+            "'capped'",
+            "is 3",
+            "become 3",
+            "max is 3",
+            "Nothing was written",
+        ],
+    );
+}
+
+#[test]
+fn inc_expect_mismatch_is_refused() {
+    let dir = setup();
+    assert!(run(&dir, &["kv", "set", "tally", "5"]).status.success());
+
+    assert_inc_refused(
+        &dir,
+        &["kv", "inc", "tally", "--expect", "4"],
+        5,
+        &["'tally'", "is 5", "expected 4", "Nothing was written"],
+    );
+}
+
+#[test]
+fn inc_expect_match_increments() {
+    let dir = setup();
+    assert!(run(&dir, &["kv", "set", "tally", "5"]).status.success());
+
+    let out = run(&dir, &["kv", "inc", "tally", "--expect", "5"]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr {:?}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "6");
+    assert_eq!(counter(&dir, "tally"), 6);
 }

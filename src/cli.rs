@@ -2084,14 +2084,18 @@ pub enum KvCommands {
         id: Option<String>,
     },
 
-    /// Increment a counter
+    /// Increment a counter. Errors (exit 5) if the value would not rise
     Inc {
         /// Key name
         key: String,
 
-        /// Amount to increment by (default: 1)
-        #[arg(long, default_value = "1")]
+        /// Amount to increment by; must be positive (default: 1)
+        #[arg(long, default_value = "1", allow_negative_numbers = true)]
         by: i64,
+
+        /// Refuse the increment (exit 5) unless the counter is currently N
+        #[arg(long, value_name = "N", allow_negative_numbers = true)]
+        expect: Option<i64>,
     },
 
     /// Decrement a counter

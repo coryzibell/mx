@@ -3396,7 +3396,8 @@ string
 counter
 
 :   An integer with optional `min`, `max`, and `default`. Clamped on
-    every write.
+    every write. `inc` is strict: it errors rather than leave the value
+    unchanged or lower (see inc).
 
 history
 
@@ -3481,7 +3482,9 @@ Schema fields:
 
 `max`
 
-:   Optional. Maximum value for counters (clamped, never errors).
+:   Optional. Maximum value for counters. `set` and `dec` clamp to it
+    silently; `inc` clamps a rise to it but errors (exit 5) when the
+    counter is already at or above it.
 
 `max_entries`
 
@@ -3546,7 +3549,15 @@ KV commands use structured exit codes for scripting:
 `4`
 
 :   Invalid input (e.g., reversed range, empty spec, empty ID after
-    `kv-` prefix, entry not found by ID, ambiguous ID prefix).
+    `kv-` prefix, entry not found by ID, ambiguous ID prefix, `inc --by`
+    not positive).
+
+`5`
+
+:   Refused by the store's current state: the command was well-formed,
+    but the value it found makes the write wrong (`inc --expect`
+    mismatch, or an `inc` that would not raise the counter). Nothing was
+    written.
 
 ## Basic operations
 
@@ -3785,17 +3796,56 @@ mx kv keys
 
 ## Counters
 
+### inc
+
 ## `mx kv inc <key>`
 
-Increment a counter key. Returns the new value after incrementing. The
-result is clamped to the schema's min/max bounds -- it never errors on
-overflow, it just stops at the limit.
+Increment a counter key. Prints the new value.
+
+`inc` only ever raises a counter. A counter is read as authoritative, so
+an increment that would leave it unchanged or lower is an error, not a
+silent write.
+
+Non-positive `--by`
+
+:   `0` or a negative amount exits `4`. Use `dec` to lower a counter.
+
+Would not rise
+
+:   If the new value is not greater than the current one, `inc` exits
+    `5`. That covers a counter already at the schema `max`, a stored
+    value above a `max` that was lowered later, and a counter at the
+    64-bit integer limit. The message names the key, the current value,
+    the value it would have become, and the `max` when that is the
+    reason.
+
+Clamped rise
+
+:   A rise that the schema `max` clamps still succeeds. At `51` with
+    `max = 100`, `inc --by 100` writes `100`.
+
+The current value is the stored value, or the schema `default` when the
+key has never been written.
+
+`--expect N` makes the increment conditional. If the current value is
+not exactly `N`, nothing is written and `inc` exits `5`, naming the key,
+the expected value, and the actual one. A caller that knows the true
+count catches drift at the moment it happens instead of reading a wrong
+number later. `--expect` is checked before the would-not-rise rule.
+
+On every error the message goes to stderr, stdout stays empty, and the
+data file is not rewritten.
+
+Concurrent `inc` calls on the same key never lose an increment: every
+`mx kv` write holds the store's lock from the read through the save, so
+N processes produce N increments and each prints a distinct value.
 
 ### Flags
 
-  **Flag**     **Type**   **Description**
-  ------------ ---------- -------------------------------------
-  `--by <n>`   integer    Amount to increment by (default: 1)
+  **Flag**         **Type**   **Description**
+  ---------------- ---------- -------------------------------------------------------------------
+  `--by <n>`       integer    Amount to increment by; must be positive (default: 1)
+  `--expect <N>`   integer    Refuse the increment (exit 5) unless the counter is currently `N`
 
 ### Examples
 
@@ -3807,10 +3857,16 @@ mx kv inc builds
 mx kv inc builds --by 5
 ```
 
+``` bash
+mx kv inc builds --expect 41
+```
+
 ## `mx kv dec <key>`
 
-Decrement a counter key. Returns the new value after decrementing. Like
-`inc`, the result is clamped to schema bounds.
+Decrement a counter key. Returns the new value after decrementing. The
+result is clamped to schema bounds and never errors on them. `dec` and
+`set` are the explicit ways to lower a counter, so neither has `inc`'s
+strictness or an `--expect` guard.
 
 ### Flags
 
