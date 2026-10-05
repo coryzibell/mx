@@ -6,6 +6,38 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — a guess row records the title that was shown (#467)
+
+- **`title_shown` is the prompted title.** The session records each prompt as
+  it is handed out (at `--begin` and with every `next`): its title, including
+  any `(Part N/M)` suffix, its `phrase_source` and its chunk total. The guess
+  row's `title_shown`, `phrase_source` and `chunk_total` come from that record,
+  not from the entry as it is when the guess arrives, so renaming or
+  re-chunking an entry mid-ritual no longer files a guess under a title nobody
+  saw. The guess is still matched against the entry's current phrases, and the
+  ritual still navigates by its current chunks.
+- **The session summary counts the prompted phrase source**, the same one the
+  row records and a replay of it counts.
+- **A resumed or replayed call hands back the recorded `next`**, so a retry
+  after a lost response sees the title its guess will be logged under.
+- **A guess about an entry no prompt was issued for is refused.** When the
+  entry the caller was handed has been deleted, naming a later one returns
+  `invalid_bloom_id` with the deleted entry as `expected_id`; responding about
+  it (`bloom_missing`) hands out the next prompt. Previously the later entry
+  was judged and logged under a title the caller was never shown.
+- **Only the prompted entry is answered as deleted.** Naming any other entry
+  while the prompted one is gone is refused with the prompted entry as
+  `expected_id`, even when that entry was deleted too or nothing is left after
+  it; previously such a call skipped the prompted entry, or was refused with no
+  `expected_id` to recover from.
+- **A response's `bloom` reveal takes `title` and `phrase_source` from the
+  prompt**, as the row does, so the original response, the row and any replay
+  of it agree. Its `phrases` and `content` are still the ones the guess was
+  judged against.
+- **A session awaiting a response with no prompt record is refused** with the
+  usual "run `mx memory wake --begin`" error. Sessions opened by an earlier
+  binary have none; nothing is backfilled. Completed sessions are unaffected.
+
 ### Fixed — wake ritual failure paths (Wake 464 review)
 
 - **A half-written step no longer wedges a ritual.** The guess row and the

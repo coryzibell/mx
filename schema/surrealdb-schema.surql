@@ -424,6 +424,12 @@ DEFINE FIELD IF NOT EXISTS completed_at ON wake_session TYPE option<datetime>;
 -- far that call moved `step`.
 DEFINE FIELD IF NOT EXISTS prev_step ON wake_session TYPE option<int>;
 DEFINE FIELD IF NOT EXISTS last_status ON wake_session TYPE option<string>;
+-- The prompt awaiting a response, as it was handed out (id, title with any
+-- `(Part N/M)` suffix, phrase_source, chunk), written by the same write that
+-- hands it out. The guess row's title_shown, phrase_source and chunk_total are
+-- taken from it. NONE on a completed session; a session awaiting a response
+-- without it was opened by an older binary and is refused, not backfilled.
+DEFINE FIELD IF NOT EXISTS prompt ON wake_session FLEXIBLE TYPE option<object>;
 -- remembered_count, needed_help_count, skipped_count and attempts_on_current
 -- above are no longer read or written. The definitions stay so existing rows
 -- keep validating under SCHEMAFULL.

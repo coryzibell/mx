@@ -5085,6 +5085,100 @@ fn a_session_row_with_an_agent_still_loads() {
 }
 
 #[test]
+fn a_wake_session_round_trips_its_prompt_record() {
+    // wake_session is SCHEMAFULL: a field it does not define is dropped on
+    // write without an error, and every session would then load looking like
+    // one an older binary opened. This is the test that the record survives.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let mut session = wake_session_at(&db, "session-1", 0);
+    let prompt_json =
+        |prompt: &Option<crate::wake_token::BloomPrompt>| serde_json::to_value(prompt).unwrap();
+    assert!(
+        db.get_wake_session("session-1")
+            .unwrap()
+            .unwrap()
+            .prompt
+            .is_none()
+    );
+
+    session.prompt = Some(crate::wake_token::BloomPrompt {
+        id: "kn-a".to_string(),
+        title: "Sample Title (Part 2/3)".to_string(),
+        phrase_source: "derived".to_string(),
+        chunk: Some(crate::wake_token::ChunkRef {
+            index: 2,
+            total: 3,
+            oversized: Some(true),
+        }),
+    });
+    db.update_wake_session(&session, 0).unwrap();
+    let loaded = db.get_wake_session("session-1").unwrap().unwrap();
+    assert_eq!(prompt_json(&loaded.prompt), prompt_json(&session.prompt));
+    let prompt = loaded.prompt.unwrap();
+    assert_eq!(prompt.chunk_index(), 1);
+    assert_eq!(prompt.chunk_total(), 3);
+
+    // Through the guess write's session advance too, unchunked this time.
+    session.step = 1;
+    session.prompt = Some(crate::wake_token::BloomPrompt {
+        id: "kn-b".to_string(),
+        title: "Plain".to_string(),
+        phrase_source: "authored".to_string(),
+        chunk: None,
+    });
+    db.record_wake_guess(&sample_guess_row("session-1", 0), &session, 0)
+        .unwrap();
+    let loaded = db.get_wake_session("session-1").unwrap().unwrap();
+    assert_eq!(prompt_json(&loaded.prompt), prompt_json(&session.prompt));
+
+    // A completed session awaits nothing; the record is cleared.
+    session.current_index = 2;
+    session.step = 2;
+    session.prompt = None;
+    db.update_wake_session(&session, 1).unwrap();
+    let loaded = db.get_wake_session("session-1").unwrap().unwrap();
+    assert!(loaded.prompt.is_none());
+}
+
+#[test]
+fn a_title_edited_mid_ritual_is_logged_as_prompted_in_the_real_store() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::for_agent("test-agent");
+    let mut entry = make_test_entry("kn-only", 9, 0.0);
+    entry.title = "Before".to_string();
+    entry.wake_phrases = vec!["alpha cue".to_string()];
+    db.upsert_knowledge(&entry).unwrap();
+    let cascade = crate::store::WakeCascade {
+        core: vec![entry.clone()],
+        ..Default::default()
+    };
+    let begin: serde_json::Value = serde_json::from_str(
+        &crate::wake_ritual::begin_ritual(
+            &db,
+            &cascade,
+            crate::wake_ritual::RitualMeta {
+                agent: "test-agent".to_string(),
+                wake: Some(7),
+                model_id: None,
+            },
+            false,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(begin["prompt"]["title"], "Before");
+
+    entry.title = "After".to_string();
+    db.upsert_knowledge(&entry).unwrap();
+    let token = begin["session"].as_str().unwrap();
+    crate::wake_ritual::respond_ritual(&db, &ctx, "kn-only", "alpha cue", token).unwrap();
+
+    let rows = db.query_json_for_test(WAKE_GUESS_SELECT).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["title_shown"], "Before");
+}
+
+#[test]
 fn a_guess_and_its_session_advance_land_together() {
     let db = SurrealDatabase::open_in_memory().unwrap();
     let mut session = wake_session_at(&db, "session-1", 0);
