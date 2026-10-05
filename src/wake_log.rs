@@ -318,12 +318,13 @@ fn content_similarity(
     let Some(entry) = db.get(bloom_id, &ctx).map_err(|_| Stage::Read)? else {
         return Ok(None);
     };
-    let key = bloom_id.strip_prefix("kn-").unwrap_or(bloom_id).to_string();
-    let mut entry_ids = vec![bloom_id.to_string(), entry.id.clone(), format!("kn-{key}")];
-    entry_ids.sort();
-    entry_ids.dedup();
+    let key = entry
+        .id
+        .strip_prefix("kn-")
+        .unwrap_or(&entry.id)
+        .to_string();
     let sims = db
-        .wake_log_content_similarities(&key, &entry_ids, guess, em)
+        .wake_log_content_similarities(&key, std::slice::from_ref(&entry.id), guess, em)
         .map_err(|_| Stage::Read)?;
     Ok(sims.into_iter().reduce(f64::max))
 }
@@ -770,6 +771,7 @@ where
         WakeLogCommands::Bloom { id, limit, out } => {
             let target = output_target("bloom", stdout_is_terminal, out)?;
             let agent = require_agent(agent)?;
+            let id = crate::helpers::normalize_id(&id);
             let db = open_db()?;
             let rows = db.wake_log_rows_for_bloom(&agent, &id, limit)?;
             let listing = RowListing {

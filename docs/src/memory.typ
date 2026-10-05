@@ -685,7 +685,7 @@ Per row it stores the guess embedding and:
   similarity to the row's own `authored` phrase snapshot (none for `derived` or
   `auto`). `sim_content`: the best similarity to the entry's stored vectors
   under the same embedding model, the mean-pooled entry embedding and every
-  embedding chunk. `sim_title`: similarity to the title, with any
+  embedding chunk. `sim_title`: similarity to the title, with the ritual's own
   `(Part N/M)` suffix removed.
 - *Axis B*. `sim_prior`: similarity to the centroid of the 5 most recent
   earlier scored guesses on the same entry and the same shown title (suffix
@@ -700,6 +700,8 @@ Per row it stores the guess embedding and:
 
 Rows are scored oldest first, each written before the next one is computed, so
 one run over many rituals stores what a run after every ritual would have.
+A skipped row is the exception: rows scored while it was pending are computed
+without it, and are not recomputed when it scores later.
 
 #note[*Known limitation of `sim_content`:* ritual chunks are cut by byte
 threshold and embedding chunks by token count. They do not line up, so
@@ -724,7 +726,7 @@ difference.]
   bucket and the five similarity fields. The view for retuning a phrase.
   Terminal only.],
   flags: (
-    ([`<ID>`],    [`string`], [Entry ID.]),
+    ([`<ID>`],    [`string`], [Entry ID (the `kn-` prefix is optional).]),
     ([`--limit`], [`int`],    [Maximum rows. Default: `20`.]),
     ([`--out`],   [`path`],   [Write to this file instead and print only its path.]),
   ),

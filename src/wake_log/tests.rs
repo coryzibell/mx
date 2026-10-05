@@ -681,7 +681,7 @@ fn read_commands(out: Option<std::path::PathBuf>) -> Vec<WakeLogCommands> {
             out: out.clone(),
         },
         WakeLogCommands::Bloom {
-            id: "kn-lantern".to_string(),
+            id: "lantern".to_string(),
             limit: 20,
             out: out.clone(),
         },
@@ -782,6 +782,10 @@ fn wake_log_read_commands_write_json_or_text_with_out() {
                 let v: serde_json::Value = serde_json::from_str(&body).unwrap();
                 assert_eq!(v["goodhart"], GOODHART_TEXT);
                 assert!(!body.contains("\"embedding\""));
+                if i == 1 {
+                    assert_eq!(v["bloom_id"], "kn-lantern");
+                    assert_eq!(v["rows"].as_array().unwrap().len(), 2);
+                }
             } else {
                 assert!(body.starts_with(GOODHART_TEXT), "{body}");
             }
@@ -1262,6 +1266,48 @@ fn wake_log_axis_a_uses_authored_phrases_and_same_model_entry_vectors() {
 // =============================================================================
 
 #[test]
+fn wake_log_write_score_touches_only_this_agents_pending_row() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    insert(
+        &db,
+        &fx(
+            "s1",
+            0,
+            10,
+            "kn-lantern",
+            "Lantern Notes",
+            "a lamp on the pier",
+        ),
+    );
+    let key = serde_json::json!(["s1", 0]);
+    let none = PriorStats {
+        sim_prior: None,
+        sim_prior_null: None,
+        prior_n: 0,
+    };
+    let fields = ScoredFields {
+        embedding: fake_vec("x"),
+        embedding_model: FAKE_MODEL.into(),
+        sim_phrase: None,
+        sim_content: None,
+        sim_title: Some(0.5),
+        all: none,
+        same: None,
+        cross: None,
+    };
+    assert!(!db.wake_log_write_score(OTHER_AGENT, &key, &fields).unwrap());
+    assert_eq!(stored(&db, "s1", 0)["scored"], false);
+    assert!(db.wake_log_write_score(AGENT, &key, &fields).unwrap());
+    let first = stored(&db, "s1", 0);
+    let again = ScoredFields {
+        sim_title: Some(0.25),
+        ..fields
+    };
+    assert!(!db.wake_log_write_score(AGENT, &key, &again).unwrap());
+    assert_eq!(stored(&db, "s1", 0), first);
+}
+
+#[test]
 fn wake_log_rows_of_another_agent_are_never_read() {
     let mine = [
         fx(
@@ -1295,10 +1341,12 @@ fn wake_log_rows_of_another_agent_are_never_read() {
             "a totally different lamp",
         )
         .agent(OTHER_AGENT)
-        .prescored(FAKE_MODEL),
+        .prescored(FAKE_MODEL)
+        .wake(Some(9)),
         fx("b1", 1, 151, "kn-tide", "Tide Table", "rope and salt")
             .agent(OTHER_AGENT)
-            .prescored(FAKE_MODEL),
+            .prescored(FAKE_MODEL)
+            .wake(Some(9)),
         fx(
             "b2",
             0,

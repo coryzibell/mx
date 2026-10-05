@@ -14,10 +14,10 @@ use crate::wake_log::{HistoryScope, LogRow, PendingRow, ScoredFields, Substrate}
 /// The columns the read commands show. `embedding` is deliberately absent.
 const LOG_ROW_FIELDS: &str = "wake, <string>ts AS ts_text, ts, session_id, position, bloom_id,
     chunk_index, chunk_total, bloom_position, bloom_total, title_shown, guess, model_id,
-    phrase_source, bucket, embedding_model, scored_at != NONE AS scored,
+    phrase_source, bucket, scored_at != NONE AS scored,
     sim_phrase, sim_content, sim_title, sim_prior, sim_prior_null, prior_n,
-    sim_prior_same, sim_prior_null_same, prior_n_same,
-    sim_prior_cross, sim_prior_null_cross, prior_n_cross";
+    sim_prior_same, sim_prior_null_same,
+    sim_prior_cross, sim_prior_null_cross";
 
 /// The shared filter of every Axis B read: this agent's scored rows under the
 /// same embedding model, from another session, logged strictly earlier.
@@ -145,9 +145,9 @@ impl SurrealDatabase {
         let sql: String = (0..keys.len())
             .map(|i| {
                 format!(
-                    "SELECT embedding, ts FROM wake_guess
+                    "SELECT embedding, ts, session_id, position FROM wake_guess
                     WHERE {ELIGIBLE} AND bloom_id = $bloom_{i} AND title_shown = $title_{i} {split}
-                    ORDER BY ts DESC LIMIT $prior_k;"
+                    ORDER BY ts DESC, session_id DESC, position DESC LIMIT $prior_k;"
                 )
             })
             .collect();
@@ -195,9 +195,9 @@ impl SurrealDatabase {
         substrate: Substrate<'_>,
     ) -> Result<Vec<(String, String)>> {
         let sql = format!(
-            "SELECT bloom_id, title_shown, ts FROM wake_guess
+            "SELECT bloom_id, title_shown, ts, session_id, position FROM wake_guess
             WHERE {ELIGIBLE} AND bloom_id != $bloom_id {}
-            ORDER BY ts DESC",
+            ORDER BY ts DESC, session_id DESC, position DESC",
             substrate_clause(substrate)
         );
         Self::runtime().block_on(async {
