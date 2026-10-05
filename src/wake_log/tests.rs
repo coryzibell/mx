@@ -2030,6 +2030,40 @@ fn wake_log_phrase_cache_keys_on_normalized_text_and_embedding_model() {
 }
 
 #[test]
+fn wake_log_phrase_cache_ignores_a_vector_of_the_wrong_dimension() {
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let phrase = "lantern by the quay";
+    let guess = "a lamp on the pier";
+    let key = phrase_cache_key(FAKE_MODEL, phrase);
+    db.wake_phrase_embeddings_store(FAKE_MODEL, &[(key.clone(), vec![1.0, 0.0])])
+        .unwrap();
+    insert(
+        &db,
+        &fx("s1", 0, 10, "kn-lantern", "Lantern Notes", guess).source("authored", &[phrase]),
+    );
+    let p = CountingProvider::new(FAKE_MODEL);
+    let (counts, _) = score_counting(&db, &p);
+    assert_eq!(
+        counts,
+        ScoreCounts {
+            rows: 1,
+            skipped: 0
+        }
+    );
+    assert_eq!(p.calls(phrase), 1, "a short cached vector is a miss");
+    assert_eq!(
+        stored(&db, "s1", 0)["sim_phrase"].as_f64().unwrap(),
+        best_phrase_sim(guess, &[phrase])
+    );
+    assert_eq!(
+        db.wake_phrase_embeddings(FAKE_MODEL, std::slice::from_ref(&key))
+            .unwrap()[&key]
+            .len(),
+        DIM
+    );
+}
+
+#[test]
 fn wake_log_phrase_cache_hit_gives_the_same_sim_phrase_as_a_fresh_embed() {
     let phrases = ["glow  over harbor", "a lamp left lit"];
     let guess = "a lamp glowing over the harbor";
@@ -2129,7 +2163,7 @@ fn wake_log_phrase_cache_errors_never_skip_the_row() {
             best_phrase_sim(guess, &phrases)
         );
         assert!(
-            diag.contains(&format!("({stage} failed); the row still scores")),
+            diag.contains(&format!("({stage} failed, ignored)")),
             "{diag}"
         );
         for text in phrases.iter().chain([&guess, &"Lantern Notes"]) {
@@ -2256,6 +2290,17 @@ fn terminal_text_layout_does_not_pass_raw_escape_sequences() {
             "first line\nsecond line",
         ),
     );
+    insert(
+        &db,
+        &fx(
+            "s1",
+            2,
+            12,
+            "kn-rope",
+            "Rope Knots",
+            "left \u{202E}thgir\u{2066} end",
+        ),
+    );
     run_score(&db, AGENT);
     let text = run(
         WakeLogCommands::Wake { wake: 1, out: None },
@@ -2271,6 +2316,31 @@ fn terminal_text_layout_does_not_pass_raw_escape_sequences() {
         "raw ESC reaches the terminal: {text:?}"
     );
     assert!(!text.contains('\u{7}'), "{text:?}");
+    assert!(
+        !text.contains('\u{202E}') && !text.contains('\u{2066}'),
+        "{text:?}"
+    );
+    assert!(
+        text.lines()
+            .any(|l| l == r"  guess  left \u{202e}thgir\u{2066} end"),
+        "{text}"
+    );
+    for c in [
+        '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+        '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+    ] {
+        assert_eq!(
+            shown(&format!("a{c}b")),
+            format!("a{}b", c.escape_default()),
+            "U+{:04X}",
+            c as u32
+        );
+    }
+    assert_eq!(
+        shown("café naïve"),
+        "café naïve",
+        "other non-ASCII is not escaped"
+    );
     assert!(
         text.lines()
             .any(|l| l == r"  guess  first line\nsecond line"),

@@ -26,8 +26,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   a terminal. Otherwise they refuse before reading anything, naming the rule,
   unless `--out FILE` is given; then they write the file (JSON for `.json`,
   text otherwise) and print only its path. An `--out` path that exists must be
-  a regular file (`/dev/stdout` is refused), and the text layout escapes
-  control characters in stored strings. This stops accidental and casual
+  a regular file and not the process's own stdout or stderr (`/dev/stdout` is
+  refused, whether stdout is a pipe or a file), and the text layout escapes
+  control and bidi-control characters in stored strings. This stops accidental and casual
   leakage of scores and guesses into a model's context; it does not stop a
   process that fakes a terminal or reads the `--out` file.
 - **Schema:** six additive optional fields on `wake_guess`

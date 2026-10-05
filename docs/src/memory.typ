@@ -765,9 +765,11 @@ and one that can read its own earlier guesses will repeat them. So `report`,
 they refuse with an error naming the rule, before reading anything, unless
 `--out FILE` is given. A model's shell tool is not a terminal; a human shell
 is. An `--out` path that already exists must be a regular file, so
-`/dev/stdout` cannot route the output back onto a pipe. In the text layout
-every control character in a stored string is shown escaped (`\n`, `\u{1b}`),
-so a guess cannot drive the terminal.
+`/dev/stdout` cannot route the output back onto a pipe. An `--out` that names
+the process's own stdout or stderr is refused too, since a model's shell tool
+may capture them in a file. In the text layout every control character and
+bidi control in a stored string is shown escaped (`\n`, `\u{1b}`,
+`\u{202e}`), so a guess cannot drive or reorder the terminal.
 
 Be plain about what this guard is: it stops accidental and casual leakage,
 which is the realistic failure. It does not stop a process that deliberately

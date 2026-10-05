@@ -255,7 +255,7 @@ fn score_row<P: EmbeddingProvider>(
     let guess = embed(&row.guess)?;
 
     let sim_phrase = if row.phrase_source == "authored" && !row.phrases.is_empty() {
-        phrase_vectors(db, provider, row, diag)?
+        phrase_vectors(db, provider, row, guess.len(), diag)?
             .iter()
             .map(|v| cosine_similarity(&guess, v) as f64)
             .reduce(f64::max)
@@ -315,13 +315,14 @@ fn phrase_vectors<P: EmbeddingProvider>(
     db: &SurrealDatabase,
     provider: &P,
     row: &PendingRow,
+    dims: usize,
     diag: &mut dyn Write,
 ) -> std::result::Result<Vec<Vec<f32>>, Stage> {
     let em = provider.model_id();
     let note = |diag: &mut dyn Write, stage: Stage| {
         let _ = writeln!(
             diag,
-            "wake-log score: session {} step {} ({} failed); the row still scores",
+            "wake-log score: session {} step {} ({} failed, ignored)",
             row.session_id,
             row.position,
             stage.as_str()
@@ -341,6 +342,7 @@ fn phrase_vectors<P: EmbeddingProvider>(
         note(diag, Stage::CacheRead);
         HashMap::new()
     });
+    known.retain(|_, v| v.len() == dims);
 
     let mut misses: Vec<(String, Vec<f32>)> = Vec::new();
     for (key, normalized) in &phrases {
@@ -469,6 +471,23 @@ pub enum OutputTarget {
 /// output goes to that file; otherwise stdout must be a terminal. An `--out`
 /// path that exists must be a regular file once symlinks are followed, so
 /// `/dev/stdout` and the like cannot route the output back onto a pipe.
+#[cfg(unix)]
+fn same_file_as_std_stream(target: &std::fs::Metadata) -> bool {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::MetadataExt;
+    [
+        std::io::stdout().as_fd().try_clone_to_owned(),
+        std::io::stderr().as_fd().try_clone_to_owned(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|fd| {
+        std::fs::File::from(fd)
+            .metadata()
+            .is_ok_and(|m| m.dev() == target.dev() && m.ino() == target.ino())
+    })
+}
+
 pub fn output_target(
     command: &str,
     stdout_is_terminal: bool,
@@ -476,12 +495,22 @@ pub fn output_target(
 ) -> Result<OutputTarget> {
     match out {
         Some(path) => {
-            if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
-                bail!(
-                    "wake-log {command}: --out must name a regular file, and {} is not one, \
-                     so nothing was read or printed.",
-                    path.display()
-                );
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if !meta.is_file() {
+                    bail!(
+                        "wake-log {command}: --out must name a regular file, and {} is not one, \
+                         so nothing was read or printed.",
+                        path.display()
+                    );
+                }
+                #[cfg(unix)]
+                if same_file_as_std_stream(&meta) {
+                    bail!(
+                        "wake-log {command}: --out names this process's own stdout or stderr ({}), \
+                         so nothing was read or printed.",
+                        path.display()
+                    );
+                }
             }
             Ok(OutputTarget::File(path))
         }
@@ -657,13 +686,22 @@ pub fn build_report(wake: i64, rows: &[LogRow]) -> Report {
     }
 }
 
-/// A stored string as the text layout shows it: every control character
-/// escaped, so an escape sequence or a newline in a guess or title reaches the
+/// The bidi controls (CVE-2021-42574): format characters, not `Cc`, that
+/// reorder how a terminal draws the text around them.
+fn is_bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// A stored string as the text layout shows it: every control or bidi-control
+/// character escaped, so an escape sequence or a newline in a guess or title reaches the
 /// terminal as visible text.
 fn shown(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() {
+        if c.is_control() || is_bidi_control(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);

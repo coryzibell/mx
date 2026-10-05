@@ -168,3 +168,40 @@ fn cli_out_dev_stdout_does_not_bypass_the_terminal_rule() {
         assert!(err.contains("--out must name a regular file"), "{err}");
     }
 }
+
+/// A model's shell tool may capture stdout in a regular file, not a pipe;
+/// `--out` naming that same file must still be refused.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn cli_out_naming_stdout_captured_in_a_file_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let cap_dir = TempDir::new().unwrap();
+    let capture = cap_dir.path().join("capture.txt");
+    for target in ["/dev/stdout", "/proc/self/fd/1", "/dev/stderr"] {
+        let file = std::fs::File::create(&capture).unwrap();
+        let mut cmd = Command::new(MX);
+        common::isolate(&mut cmd, dir.path());
+        cmd.args([
+            "memory", "wake-log", "report", "--wake", "1", "--out", target,
+        ])
+        .env("MX_CURRENT_AGENT", AGENT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file.try_clone().unwrap()))
+        .stderr(Stdio::from(file));
+        let status = cmd.status().expect("failed to run mx");
+        let captured = std::fs::read_to_string(&capture).unwrap();
+        assert!(
+            !status.success(),
+            "--out {target} must be refused: {captured:?}"
+        );
+        assert!(
+            !captured.contains("Axis A rises by construction"),
+            "--out {target}: {captured:?}"
+        );
+        assert!(
+            captured.contains("--out names this process's own stdout or stderr"),
+            "{captured}"
+        );
+    }
+}
