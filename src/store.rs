@@ -198,6 +198,32 @@ pub trait KnowledgeStore {
         filter: &KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>>;
 
+    /// Same as [`list_by_category`](Self::list_by_category), but with an
+    /// optional per-call LIMIT pushed into the query itself rather
+    /// than fetched in full and truncated by the caller afterward.
+    /// `limit: None` must behave identically to `list_by_category`.
+    ///
+    /// A SEPARATE trait method on purpose, not a new `KnowledgeFilter`
+    /// field: `KnowledgeFilter` derives `Default` and has 14
+    /// `..Default::default()` construction sites (one production,
+    /// `find_open_thread_by_content` in `src/helpers.rs`) that would
+    /// silently absorb a new field as `None`, leaving pushdown
+    /// unimplemented everywhere and every existing test green against it.
+    /// A required trait method forces every implementor — including test
+    /// mocks — to confront it at compile time instead.
+    ///
+    /// Ordering identity is a caller invariant: an implementation MUST
+    /// return the same rows, in the same order `list_by_category` would,
+    /// truncated to `limit` — never a different order for the sake of an
+    /// optimization.
+    fn list_by_category_limited(
+        &self,
+        category: &str,
+        ctx: &AgentContext,
+        filter: &KnowledgeFilter,
+        limit: Option<usize>,
+    ) -> Result<Vec<KnowledgeEntry>>;
+
     /// Count entries by category (fast path — single COUNT query, no row hydration).
     /// Avoids the N+1 pattern of `list_by_category(..)?.len()` which fetches every
     /// row's full body plus follow-up queries for tags/applicability per entry.
