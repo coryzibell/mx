@@ -256,7 +256,7 @@ defaults in #link("paths.html#env-surreal")[filesystem layout → SurrealDB conn
   [`MX_CURRENT_AGENT`], [string], [—], [Active agent identifier. Used as default `source_agent` on writes and to scope private entry visibility.],
   [`MX_SKIP_SCHEMA`], [bool], [`false`], [Skip automatic schema application on connection. Use `mx migrate` to apply the schema explicitly when set.],
   [`MX_SKIP_WRITE_ANCHOR`], [bool], [`false`], [Skip synchronous `auto-anchor` on every write. Equivalent to passing `--no-auto-anchor` globally. Useful when a nightly `mx memory auto-anchor` handles anchoring in batch.],
-  [`MX_SKIP_WRITE_EMBED`], [bool], [`false`], [Skip synchronous embedding generation on every write. Equivalent to passing `--no-embed` globally. Entries written with this set are absent from `--semantic` search until `mx memory embed --all` runs. Intended for deployments where a nightly embed timer (e.g. Cinder's `embed.nix`) keeps the graph fresh.],
+  [`MX_SKIP_WRITE_EMBED`], [bool], [`false`], [Skip synchronous embedding generation on every write. Equivalent to passing `--no-embed` globally. Entries written with this set are absent from `--semantic` search until `mx memory embed --all` runs. Intended for deployments where a scheduled `mx memory embed --all` job keeps the graph fresh.],
 )
 
 == What's next

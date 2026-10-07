@@ -975,7 +975,7 @@ pub enum MemoryCommands {
     /// entry failed.
     ///
     /// Example (stdin):
-    ///   printf '{"category":"insight","title":"T1","content":"C1","source_agent":"soren"}\n...' \
+    ///   printf '{"category":"insight","title":"T1","content":"C1","source_agent":"agent-1"}\n...' \
     ///     | mx memory add-batch
     ///
     /// Example (file):
