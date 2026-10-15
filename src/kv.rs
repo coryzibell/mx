@@ -595,8 +595,8 @@ fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
     }
     Err(KvError::DataValidation {
         message: format!(
-            "key '{}': --memory {:?} is not a memory ID (expected kn- followed by letters \
-             or digits, e.g. kn-1a2b3c4d; \"\" clears). Nothing was written.",
+            "key '{}': --memory {:?} is not a memory ID (expected kn- followed by ASCII \
+             letters or digits, e.g. kn-1a2b3c4d; \"\" clears). Nothing was written.",
             key, memory
         ),
     })
@@ -2038,7 +2038,7 @@ impl KvStore {
                 key: key.to_string(),
                 current,
                 would_be: new,
-                min: def.min.filter(|&m| raw < m),
+                min: def.min.filter(|&m| raw < m && new == m),
             });
         }
 
@@ -2074,6 +2074,10 @@ impl KvStore {
             triggers,
             fragment,
         } = attrs;
+        if let Some(m) = &memory {
+            check_memory_pointer(key, m)?;
+        }
+        let memory = memory.filter(|m| !m.is_empty());
         let triggers = triggers.filter(|t| !t.is_empty());
         let fragment = fragment.filter(|f| !f.trim().is_empty());
 
@@ -10386,6 +10390,46 @@ type = "history"
         assert_eq!(after.value, before.value);
         assert_eq!(after.fragment, before.fragment);
         assert_eq!(after.memory.as_deref(), Some("kn-keep1"));
+    }
+
+    #[test]
+    fn update_bad_data_keeps_the_old_memory() {
+        let (mut store, _dir) = setup_store(data_schema());
+        let push = store
+            .push(
+                "projects",
+                "p",
+                EntryAttrs {
+                    data: Some(serde_json::json!({ "status": "active" })),
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .update_entry(
+                "projects",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(serde_json::json!({ "status": 42 })),
+                    memory: Some("kn-new1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+
+        match &store.data.entries["projects"] {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries[0].memory.as_deref(), Some("kn-keep1"));
+                assert_eq!(
+                    entries[0].data,
+                    Some(serde_json::json!({ "status": "active" }))
+                );
+            }
+            _ => panic!("expected History"),
+        }
     }
 
     #[test]

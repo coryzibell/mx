@@ -2230,7 +2230,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to update only --data)
+        /// New value text (omit to change only --data, --trigger, --fragment or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.

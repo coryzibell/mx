@@ -1,5 +1,5 @@
 //! Integration tests for `mx kv dec` refusing to fake a decrement (#476, #457)
-//! and for `mx kv update --memory` (#480).
+//! and for the `--memory` shape check on `kv update`, `kv set --id` and `kv push` (#480).
 //!
 //! Harness mirrors `tests/kv_set_cli.rs`: the built binary against an isolated
 //! MX_HOME, so nothing touches the live store. Every refusal is checked against
@@ -342,4 +342,49 @@ fn set_with_id_shares_the_memory_shape_check() {
         &["\"foo\"", "Nothing was written"],
     );
     assert_eq!(note(&dir, &id)["memory"], "kn-keep1");
+}
+
+#[test]
+fn push_bad_memory_is_invalid_input_and_creates_nothing() {
+    let dir = setup();
+    run_ok(&dir, &["kv", "inc", "tally"]);
+
+    assert_refused(
+        &dir,
+        &["kv", "push", "notes", "v", "--memory", "foo"],
+        4,
+        &["\"foo\"", "Nothing was written"],
+    );
+    let data: serde_json::Value = serde_json::from_slice(&data_bytes(&dir)).unwrap();
+    assert!(data.get("notes").is_none(), "refused push created the key");
+
+    let id = push_note(&dir, "hello");
+    assert_refused(
+        &dir,
+        &["kv", "push", "notes", "v", "--memory", "foo"],
+        4,
+        &["\"foo\""],
+    );
+    let entries: serde_json::Value =
+        serde_json::from_str(&run_ok(&dir, &["kv", "get", "notes", "--json"])).unwrap();
+    assert_eq!(entries.as_array().unwrap().len(), 1);
+    assert_eq!(note(&dir, &id)["value"], "hello");
+}
+
+#[test]
+fn push_empty_memory_stores_no_pointer() {
+    let dir = setup();
+    run_ok(&dir, &["kv", "push", "notes", "v", "--memory", ""]);
+    let entries: serde_json::Value =
+        serde_json::from_str(&run_ok(&dir, &["kv", "get", "notes", "--json"])).unwrap();
+    let e = &entries.as_array().unwrap()[0];
+    assert_eq!(e["value"], "v");
+    assert!(e.get("memory").is_none(), "stored {:?}", e.get("memory"));
+
+    let raw = String::from_utf8(data_bytes(&dir)).unwrap();
+    assert!(
+        !raw.contains("\"memory\""),
+        "data file has a memory field: {}",
+        raw
+    );
 }
