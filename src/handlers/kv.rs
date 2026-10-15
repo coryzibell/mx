@@ -21,6 +21,7 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
         KvError::DataValidation { .. } => Some(kv::EXIT_INVALID_INPUT),
         KvError::ExpectMismatch { .. } => Some(kv::EXIT_STATE_REFUSED),
         KvError::WouldNotIncrease { .. } => Some(kv::EXIT_STATE_REFUSED),
+        KvError::WouldNotDecrease { .. } => Some(kv::EXIT_STATE_REFUSED),
         KvError::Other(_) => None,
     }
 }

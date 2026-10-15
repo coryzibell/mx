@@ -154,6 +154,12 @@ pub enum KvError {
         would_be: i64,
         max: Option<i64>,
     },
+    WouldNotDecrease {
+        key: String,
+        current: i64,
+        would_be: i64,
+        min: Option<i64>,
+    },
     Other(anyhow::Error),
 }
 
@@ -204,6 +210,22 @@ impl std::fmt::Display for KvError {
                 )?;
                 if let Some(max) = max {
                     write!(f, " (schema max is {})", max)?;
+                }
+                write!(f, ". Nothing was written.")
+            }
+            KvError::WouldNotDecrease {
+                key,
+                current,
+                would_be,
+                min,
+            } => {
+                write!(
+                    f,
+                    "dec would not lower counter '{}': it is {} and would become {}",
+                    key, current, would_be
+                )?;
+                if let Some(min) = min {
+                    write!(f, " (schema min is {})", min)?;
                 }
                 write!(f, ". Nothing was written.")
             }
@@ -1944,26 +1966,52 @@ impl KvStore {
         Ok(new)
     }
 
-    /// Decrement a counter. Clamps to min/max, never errors on bounds.
+    /// Decrement a counter, strictly: the stored value only ever goes down.
+    ///
+    /// The mirror of [`KvStore::inc_expecting`] (#476): a decrement that would
+    /// leave the counter where it was, or raise it, is an error rather than a
+    /// silent no-op. That covers sitting at `min`, a stored value below a
+    /// since-raised `min`, and saturation at `i64::MIN`. A clamp that still
+    /// falls (5 by 10 under min 0) is allowed. Nothing is mutated on any error.
     pub fn dec(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
 
-        let entry = self
-            .data
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| Self::default_value(&def));
-
-        match entry {
-            DataValue::Counter { value } => {
-                *value = Self::clamp(value.saturating_sub(by), def.min, def.max);
-                Ok(*value)
-            }
-            _ => Err(KvError::Other(anyhow::anyhow!(
-                "Data corruption: key '{}' has wrong runtime type",
-                key
-            ))),
+        if by <= 0 {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "dec --by must be positive (got {}); use `mx kv inc` to raise a counter. \
+                     Nothing was written.",
+                    by
+                ),
+            });
         }
+
+        let current = match self.data.entries.get(key) {
+            Some(DataValue::Counter { value }) => *value,
+            Some(_) => {
+                return Err(KvError::Other(anyhow::anyhow!(
+                    "Data corruption: key '{}' has wrong runtime type",
+                    key
+                )));
+            }
+            None => Self::counter_default(&def),
+        };
+
+        let raw = current.saturating_sub(by);
+        let new = Self::clamp(raw, def.min, def.max);
+        if new >= current {
+            return Err(KvError::WouldNotDecrease {
+                key: key.to_string(),
+                current,
+                would_be: new,
+                min: def.min.filter(|&m| raw < m),
+            });
+        }
+
+        self.data
+            .entries
+            .insert(key.to_string(), DataValue::Counter { value: new });
+        Ok(new)
     }
 
     /// Push a value onto a history (with auto-timestamp) or list.
@@ -3635,6 +3683,7 @@ max_entries = 5
     fn counter_clamp_min() {
         let (mut store, _dir) = setup_store(test_schema());
         // warmth has min=0, default=0
+        store.set("warmth", "5", None).unwrap();
         assert_eq!(store.dec("warmth", 100).unwrap(), 0);
     }
 
@@ -3809,6 +3858,123 @@ default = "9223372036854775807"
             store.inc_expecting("capped", 1, Some(100)).unwrap_err(),
             KvError::WouldNotIncrease { .. }
         ));
+    }
+
+    // -- Strict dec (#476) --
+
+    #[test]
+    fn dec_rejects_non_positive_by() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "5", None).unwrap();
+        for by in [0, -3, i64::MIN] {
+            let err = store.dec("warmth", by).unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+            let msg = err.to_string();
+            assert!(msg.contains("mx kv inc"), "{}", msg);
+            assert!(msg.contains("Nothing was written"), "{}", msg);
+        }
+        assert_eq!(counter_value(&store, "warmth"), 5);
+    }
+
+    #[test]
+    fn dec_at_min_errors_and_names_the_min() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "0", None).unwrap();
+
+        let err = store.dec("warmth", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: 0,
+                    would_be: 0,
+                    min: Some(0),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("min is 0"), "{}", msg);
+        assert!(msg.contains("Nothing was written"), "{}", msg);
+        assert_eq!(counter_value(&store, "warmth"), 0);
+    }
+
+    #[test]
+    fn dec_below_a_raised_min_errors_without_raising() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .data
+            .entries
+            .insert("warmth".into(), DataValue::Counter { value: -5 });
+
+        let err = store.dec("warmth", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: -5,
+                    would_be: 0,
+                    min: Some(0),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert_eq!(counter_value(&store, "warmth"), -5);
+    }
+
+    #[test]
+    fn dec_partial_clamp_still_lowers() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "5", None).unwrap();
+        assert_eq!(store.dec("warmth", 10).unwrap(), 0);
+        assert_eq!(counter_value(&store, "warmth"), 0);
+    }
+
+    #[test]
+    fn dec_saturating_at_i64_min_errors() {
+        let schema = r#"
+[keys.floor]
+type = "counter"
+default = "-9223372036854775808"
+"#;
+        let (mut store, _dir) = setup_store(schema);
+
+        let err = store.dec("floor", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: i64::MIN,
+                    would_be: i64::MIN,
+                    min: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert!(!err.to_string().contains("min is"));
+        assert!(store.data.entries.is_empty(), "{:?}", store.data.entries);
+    }
+
+    #[test]
+    fn dec_error_leaves_no_materialized_entry() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert!(store.dec("warmth", 1).is_err());
+        assert!(store.dec("warmth", 0).is_err());
+        assert!(!store.data.entries.contains_key("warmth"));
+    }
+
+    #[test]
+    fn dec_from_unwritten_default_materializes() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // capped: min=0, max=100, default=50
+        assert_eq!(store.dec("capped", 1).unwrap(), 49);
+        assert_eq!(store.dec("capped", 2).unwrap(), 47);
     }
 
     #[test]

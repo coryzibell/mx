@@ -2098,13 +2098,13 @@ pub enum KvCommands {
         expect: Option<i64>,
     },
 
-    /// Decrement a counter
+    /// Decrement a counter. Errors (exit 5) if the value would not fall
     Dec {
         /// Key name
         key: String,
 
-        /// Amount to decrement by (default: 1)
-        #[arg(long, default_value = "1")]
+        /// Amount to decrement by; must be positive (default: 1)
+        #[arg(long, default_value = "1", allow_negative_numbers = true)]
         by: i64,
     },
 
