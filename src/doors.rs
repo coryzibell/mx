@@ -225,10 +225,11 @@ fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
 ///
 /// Known edges: (1) a body that quotes a tag WITHOUT backticks can pair wrongly
 /// and leak part of that block's text, and nested blocks of the same name leak
-/// the outer block's text; (2) text between an unbackticked opener and a later
-/// unbackticked closer of the same name, with no other opener of that name
-/// between them, is removed whoever wrote them, including a closer quoted
-/// inside a different block.
+/// the outer block's text; (2) when the next unbackticked tag after an
+/// unbackticked opener with the same name is a closer, the text between them
+/// is removed whoever wrote them (unless the opener already sits inside an
+/// earlier removed block), including when that closer is quoted inside a
+/// different block.
 pub fn strip_harness_blocks(prompt: &str) -> String {
     let bytes = prompt.as_bytes();
     let tags: Vec<Tag<'_>> = prompt
@@ -251,7 +252,8 @@ pub fn strip_harness_blocks(prompt: &str) -> String {
 
     // block_end[i]: where the block opened by tag i ends. A closer pairs with
     // the latest unclosed opener of its name; an earlier one it displaced
-    // stays unpaired, so a quoted opener can never reach across later text.
+    // stays unpaired, so an opener quoted inside a block of its own name closes
+    // no later than that block's closer.
     let mut block_end: Vec<Option<usize>> = vec![None; tags.len()];
     let mut open: HashMap<&str, usize> = HashMap::new();
     for (i, tag) in tags.iter().enumerate() {

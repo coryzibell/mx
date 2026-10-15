@@ -29,10 +29,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   hundreds of KB of unclosed openers cost no more than balanced input.
 - Known edges: (1) a block whose body quotes a tag WITHOUT backticks can pair
   wrongly, so part of that block's text is still matched, and nested blocks
-  of the same name leak the outer block's text; (2) text between an
-  unbackticked opener and a later unbackticked closer of the same name, with
-  no other opener of that name between them, is removed whoever wrote them,
-  including a closer quoted inside a different block.
+  of the same name leak the outer block's text; (2) when the next
+  unbackticked tag after an unbackticked opener with the same name is a
+  closer, the text between them is removed whoever wrote them (unless the
+  opener already sits inside an earlier removed block), including when that
+  closer is quoted inside a different block.
 
 ### Changed — `mx kv inc` only ever raises a counter (#453)
 
