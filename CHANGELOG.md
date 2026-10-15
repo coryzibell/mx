@@ -18,20 +18,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **Channel bodies still match.** Harness blocks are removed first, then
   `<channel>` tags are stripped down to their body exactly as before, so a
   Matrix message still opens doors and its sender attributes still don't.
-- **Mentions of a tag are left alone.** Only bare tags count (`<name>`,
+- **Tag mentions mostly stay text.** Only bare tags count (`<name>`,
   `<name/>`, `</name>`; the harness never writes attributes), so prose like
   `the <system-reminder thing -> please fix` is untouched. A backtick-quoted
   tag is literal text too: an opener or self-closing tag right after a
   backtick, or a closer right before one, takes no part in pairing, so a
-  report saying `` `<task-notification>` `` is removed whole. Openers pair
-  with closers by depth, per name; an opener with no matching closer and a
-  stray closer each lose only the tag, never the text around them. Pairing
-  runs in linear time, so hundreds of KB of unclosed openers cost no more
-  than balanced input.
+  report saying `` `<task-notification>` `` is removed whole. A closer pairs
+  with the latest unclosed opener of its name; an opener nothing pairs with
+  and a stray closer each lose only the tag. Pairing runs in linear time, so
+  hundreds of KB of unclosed openers cost no more than balanced input.
 - Known edges: (1) a block whose body quotes a tag WITHOUT backticks can pair
-  wrongly, so part of that report is still matched; (2) human text between an
-  unbackticked bare opener and a later bare closer of the same name is
-  removed as if it were a block.
+  wrongly, so part of that block's text is still matched, and nested blocks
+  of the same name leak the outer block's text; (2) text between an
+  unbackticked opener and a later unbackticked closer of the same name, with
+  no other opener of that name between them, is removed whoever wrote them,
+  including a closer quoted inside a different block.
 
 ### Changed — `mx kv inc` only ever raises a counter (#453)
 

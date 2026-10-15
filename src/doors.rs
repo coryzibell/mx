@@ -217,15 +217,18 @@ fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
 /// writes attributes). A tag quoted in markdown is literal text: an opener or
 /// self-closing tag right after a backtick, or a closer right before one, is
 /// left alone and takes no part in pairing, so a report saying
-/// `` `<task-notification>` `` does not open a block. Openers pair with closers
-/// by depth, per name, in linear time. An opener with no matching closer and a
-/// stray closer each lose only the tag. Each removed block or tag becomes one
-/// space, so the text on either side stays separate tokens.
+/// `` `<task-notification>` `` does not open a block. A closer pairs with the
+/// latest unclosed opener of its name, in linear time. An opener nothing pairs
+/// with (no closer after it, or displaced by a later opener of the same name)
+/// and a stray closer each lose only the tag. Each removed block or tag becomes
+/// one space, so the text on either side stays separate tokens.
 ///
-/// Known edges: a body that quotes its own tag WITHOUT backticks can pair
-/// wrongly and leak part of that agent text; and human text between a bare,
-/// unbackticked opener and a later bare closer of the same name is removed as
-/// if it were a block.
+/// Known edges: (1) a body that quotes a tag WITHOUT backticks can pair wrongly
+/// and leak part of that block's text, and nested blocks of the same name leak
+/// the outer block's text; (2) text between an unbackticked opener and a later
+/// unbackticked closer of the same name, with no other opener of that name
+/// between them, is removed whoever wrote them, including a closer quoted
+/// inside a different block.
 pub fn strip_harness_blocks(prompt: &str) -> String {
     let bytes = prompt.as_bytes();
     let tags: Vec<Tag<'_>> = prompt
@@ -246,15 +249,18 @@ pub fn strip_harness_blocks(prompt: &str) -> String {
         })
         .collect();
 
-    // block_end[i]: where the block opened by tag i ends, for openers that
-    // have a depth-matched closer.
+    // block_end[i]: where the block opened by tag i ends. A closer pairs with
+    // the latest unclosed opener of its name; an earlier one it displaced
+    // stays unpaired, so a quoted opener can never reach across later text.
     let mut block_end: Vec<Option<usize>> = vec![None; tags.len()];
-    let mut open: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut open: HashMap<&str, usize> = HashMap::new();
     for (i, tag) in tags.iter().enumerate() {
         match tag.kind {
-            TagKind::Open => open.entry(tag.name).or_default().push(i),
+            TagKind::Open => {
+                open.insert(tag.name, i);
+            }
             TagKind::Close => {
-                if let Some(o) = open.get_mut(tag.name).and_then(Vec::pop) {
+                if let Some(o) = open.remove(tag.name) {
                     block_end[o] = Some(tag.end);
                 }
             }
@@ -821,7 +827,7 @@ mod tests {
     #[test]
     fn known_edge_unbackticked_quoted_closer_ends_the_block_early() {
         // Pinned: a body quoting its own closer without backticks ends there,
-        // so the tail leaks. It leaks agent text only.
+        // so the tail leaks. It leaks that block's text only.
         let prompt =
             "<task-notification>the </task-notification> closer, sprocket</task-notification>";
         assert_eq!(strip_harness_blocks(prompt), "  closer, sprocket ");
@@ -830,11 +836,54 @@ mod tests {
 
     #[test]
     fn known_edge_human_bare_opener_and_later_bare_closer_remove_the_text_between() {
-        // Pinned: unbackticked, same name, both typed by a human. Pairing
-        // cannot tell this from a harness block, so the text between goes.
+        // Pinned: an unbackticked opener and a later unbackticked closer of the
+        // same name, whoever wrote them. Pairing cannot tell this from a
+        // harness block, so the text between goes.
         let prompt = "my <system-reminder> said keurig, and that </system-reminder> was odd widget";
         assert_eq!(strip_harness_blocks(prompt), "my   was odd widget");
         assert_eq!(fired_on(prompt, &["keurig", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn known_edge_closer_quoted_in_another_block_pairs_with_a_human_opener() {
+        // Pinned: cross-name. The human's bare opener pairs with a closer a
+        // system-reminder body quotes, so the text between goes.
+        let prompt = "I typed <task-notification> keurig <system-reminder>quote </task-notification> x</system-reminder>";
+        assert_eq!(strip_harness_blocks(prompt), "I typed   x ");
+        assert!(fired_on(prompt, &["keurig"]).is_empty());
+    }
+
+    #[test]
+    fn unbackticked_quotes_in_two_reports_keep_the_human_between() {
+        let prompt = "<task-notification>r1 stripped <task-notification> blocks</task-notification>\nHUMAN keurig\n<task-notification>r2 the </task-notification> closer</task-notification>";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            " r1 stripped  \nHUMAN keurig\n  closer "
+        );
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn bare_mention_before_a_report_quoting_a_closer_keeps_the_human_text() {
+        let prompt = "I pasted <task-notification> earlier, keurig please <task-notification>report mentions </task-notification> lol</task-notification>";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "I pasted   earlier, keurig please   lol "
+        );
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn human_bare_closer_after_an_unbackticked_report_keeps_the_human_text() {
+        let prompt = "<task-notification>stripped <task-notification> blocks</task-notification>\nkeurig: the </task-notification> closer is weird";
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn backticks_inside_a_real_body_do_not_quote_its_tags() {
+        let prompt = "<local-command-stdout>`widget`</local-command-stdout> gizmo";
+        assert_eq!(strip_harness_blocks(prompt), "  gizmo");
+        assert_eq!(fired_on(prompt, &["widget", "gizmo"]), vec!["gizmo"]);
     }
 
     #[test]
@@ -952,11 +1001,13 @@ mod tests {
     }
 
     #[test]
-    fn nested_same_name_blocks_go_entirely() {
+    fn known_edge_nested_same_name_leaks_the_outer_text() {
+        // Pinned: the inner opener displaces the outer one, so only the inner
+        // block goes and the outer block's own text leaks. Agent text only.
         let prompt =
             "<system-reminder>a<system-reminder>b</system-reminder>c</system-reminder> widget";
-        assert_eq!(strip_harness_blocks(prompt), "  widget");
-        assert!(fired_on(prompt, &["c"]).is_empty());
+        assert_eq!(strip_harness_blocks(prompt), " a c  widget");
+        assert!(fired_on(prompt, &["b"]).is_empty());
     }
 
     #[test]
