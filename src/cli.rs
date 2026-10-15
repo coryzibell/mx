@@ -2098,13 +2098,13 @@ pub enum KvCommands {
         expect: Option<i64>,
     },
 
-    /// Decrement a counter
+    /// Decrement a counter. Errors (exit 5) if the value would not fall
     Dec {
         /// Key name
         key: String,
 
-        /// Amount to decrement by (default: 1)
-        #[arg(long, default_value = "1")]
+        /// Amount to decrement by; must be positive (default: 1)
+        #[arg(long, default_value = "1", allow_negative_numbers = true)]
         by: i64,
     },
 
@@ -2230,7 +2230,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to update only --data)
+        /// New value text (omit to change only --data, --trigger, --fragment or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.
@@ -2251,6 +2251,10 @@ pub enum KvCommands {
         /// rule resumes.
         #[arg(long)]
         fragment: Option<String>,
+
+        /// Set the entry's memory pointer (kn- ID); --memory "" clears it
+        #[arg(long)]
+        memory: Option<String>,
     },
 
     /// List every entry carrying triggers, with fire counts

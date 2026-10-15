@@ -6,6 +6,41 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx kv update --memory` (#480)
+
+- **`mx kv update <key> --id <id> --memory kn-...` sets an entry's memory
+  pointer.** It lands in the same write as the value, `--data`, `--trigger`
+  and `--fragment`, so either all of them change or none do. An entry that
+  already has a pointer gets the new one; `--memory ""` clears it. `--memory`
+  on its own is a complete update.
+- **Pointers are shape-checked** on `mx kv update --memory`,
+  `mx kv set <key> --id <id> --memory` and `mx kv push <key> --memory`. A
+  non-empty pointer must be `kn-` followed by one or more ASCII letters or
+  digits (`kn-1a2b3c4d`). Anything else (`foo`, `kn-`, `kn-x/y`) exits `4`,
+  names the bad value, and writes nothing, even when the same command also
+  carries a valid new value. The check is shape only: it does not look the ID
+  up in the graph, so kv still works without SurrealDB.
+- **`set --id --memory` and `push --memory` used to store any string.**
+  Key-level `mx kv set <key> --memory` (no `--id`) is unchanged.
+- **`push --memory ""` now stores no pointer** instead of an empty one.
+
+### Changed — `mx kv dec` only ever lowers a counter (#476, #457)
+
+- **A decrement that would not lower the counter is an error.** This is a
+  behavior change: `dec` on a counter sitting at its `min` used to clamp
+  silently and exit `0`. It now exits `5`, prints the key, the current value
+  and the value it would have become (and the `min` when that is why) to
+  stderr, and writes nothing. The same goes for a stored value below a
+  since-raised `min` and for saturation at `i64::MIN`. A fall that the `min`
+  clamps (5 `--by 10` under min 0 -> 0) still succeeds.
+- **`--by` must be positive.** `dec --by 0` and negative amounts exit `4`
+  with a pointer to `mx kv inc`; nothing is written. `--by -3` (with a space)
+  now reaches that check instead of failing in the argument parser with exit
+  `2`.
+- This is the `dec` half of #457; the `inc` half shipped in #453. There is no
+  `--expect` on `dec`. `set` is still the way to force a counter to a value.
+- A refused `dec` no longer materializes the key's default in memory.
+
 ### Fixed — `mx doors` ignores harness-injected blocks (#478)
 
 - **Harness blocks no longer open doors.** `<task-notification>`,
@@ -54,8 +89,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **Concurrent `inc` is pinned by a test:** 8 processes on one counter make 8
   increments and print exactly 1..=8. The kv write lock (#429) already made
   this hold; without it, the same test loses increments on every run.
-- `dec` and `set` are unchanged: they are the explicit ways to lower a
-  counter, and keep clamping silently.
+- `set` is unchanged: it is the explicit way to force a counter, and keeps
+  clamping silently. (`dec` got the mirror treatment in #476, above.)
 - The strict check lives in `KvStore::inc_expecting` (`inc` delegates to it),
   and a refused `inc` no longer materializes the key's default in memory.
 

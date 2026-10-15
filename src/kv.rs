@@ -154,6 +154,12 @@ pub enum KvError {
         would_be: i64,
         max: Option<i64>,
     },
+    WouldNotDecrease {
+        key: String,
+        current: i64,
+        would_be: i64,
+        min: Option<i64>,
+    },
     Other(anyhow::Error),
 }
 
@@ -204,6 +210,22 @@ impl std::fmt::Display for KvError {
                 )?;
                 if let Some(max) = max {
                     write!(f, " (schema max is {})", max)?;
+                }
+                write!(f, ". Nothing was written.")
+            }
+            KvError::WouldNotDecrease {
+                key,
+                current,
+                would_be,
+                min,
+            } => {
+                write!(
+                    f,
+                    "dec would not lower counter '{}': it is {} and would become {}",
+                    key, current, would_be
+                )?;
+                if let Some(min) = min {
+                    write!(f, " (schema min is {})", min)?;
                 }
                 write!(f, ". Nothing was written.")
             }
@@ -532,15 +554,17 @@ pub struct EntryAttrs {
 
 /// A partial update to an existing entry. `None` leaves a field untouched.
 ///
-/// `triggers: Some(vec![])` and `fragment: Some(String::new())` are the *clear*
-/// signals — one command removes a bad door — and both are stored back as
-/// `None` so they vanish from the serialized entry.
+/// `triggers: Some(vec![])`, `fragment: Some(String::new())` and
+/// `memory: Some(String::new())` are the *clear* signals — one command removes
+/// a bad door or a stale link — and all are stored back as `None` so they
+/// vanish from the serialized entry.
 #[derive(Debug, Default, Clone)]
 pub struct EntryPatch {
     pub value: Option<String>,
     pub data: Option<serde_json::Value>,
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
+    pub memory: Option<String>,
 }
 
 impl EntryPatch {
@@ -550,7 +574,32 @@ impl EntryPatch {
             && self.data.is_none()
             && self.triggers.is_none()
             && self.fragment.is_none()
+            && self.memory.is_none()
     }
+}
+
+/// Reject a per-entry memory pointer that is not shaped like a knowledge ID.
+///
+/// `""` passes: it is the clear signal. Anything else must be `kn-` followed by
+/// one or more ASCII alphanumerics. Shape only, no graph lookup, so kv keeps
+/// working without SurrealDB.
+fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
+    if memory.is_empty() {
+        return Ok(());
+    }
+    let well_formed = memory
+        .strip_prefix("kn-")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric()));
+    if well_formed {
+        return Ok(());
+    }
+    Err(KvError::DataValidation {
+        message: format!(
+            "key '{}': --memory {:?} is not a memory ID (expected kn- followed by ASCII \
+             letters or digits, e.g. kn-1a2b3c4d; \"\" clears). Nothing was written.",
+            key, memory
+        ),
+    })
 }
 
 /// A borrowed view of one trigger-carrying entry, with the key it lives under.
@@ -585,6 +634,7 @@ pub trait UpdateableEntry {
     fn set_data(&mut self, d: Option<serde_json::Value>);
     fn set_triggers(&mut self, t: Option<Vec<String>>);
     fn set_fragment(&mut self, f: Option<String>);
+    fn set_memory(&mut self, m: Option<String>);
 }
 
 macro_rules! impl_updateable_entry {
@@ -625,6 +675,9 @@ macro_rules! impl_updateable_entry {
             }
             fn set_fragment(&mut self, f: Option<String>) {
                 self.fragment = f.filter(|s| !s.trim().is_empty());
+            }
+            fn set_memory(&mut self, m: Option<String>) {
+                self.memory = m.filter(|s| !s.is_empty());
             }
         }
     };
@@ -757,6 +810,9 @@ fn apply_entry_update<T: UpdateableEntry>(
     }
     if let Some(fragment) = patch.fragment.clone() {
         entry.set_fragment(Some(fragment));
+    }
+    if let Some(memory) = patch.memory.clone() {
+        entry.set_memory(Some(memory));
     }
     Ok(UpdateResult {
         index: result_index,
@@ -1944,26 +2000,52 @@ impl KvStore {
         Ok(new)
     }
 
-    /// Decrement a counter. Clamps to min/max, never errors on bounds.
+    /// Decrement a counter, strictly: the stored value only ever goes down.
+    ///
+    /// The mirror of [`KvStore::inc_expecting`] (#476): a decrement that would
+    /// leave the counter where it was, or raise it, is an error rather than a
+    /// silent no-op. That covers sitting at `min`, a stored value below a
+    /// since-raised `min`, and saturation at `i64::MIN`. A clamp that still
+    /// falls (5 by 10 under min 0) is allowed. Nothing is mutated on any error.
     pub fn dec(&mut self, key: &str, by: i64) -> Result<i64, KvError> {
         let def = self.assert_type(key, ValueType::Counter)?.clone();
 
-        let entry = self
-            .data
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| Self::default_value(&def));
-
-        match entry {
-            DataValue::Counter { value } => {
-                *value = Self::clamp(value.saturating_sub(by), def.min, def.max);
-                Ok(*value)
-            }
-            _ => Err(KvError::Other(anyhow::anyhow!(
-                "Data corruption: key '{}' has wrong runtime type",
-                key
-            ))),
+        if by <= 0 {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "dec --by must be positive (got {}); use `mx kv inc` to raise a counter. \
+                     Nothing was written.",
+                    by
+                ),
+            });
         }
+
+        let current = match self.data.entries.get(key) {
+            Some(DataValue::Counter { value }) => *value,
+            Some(_) => {
+                return Err(KvError::Other(anyhow::anyhow!(
+                    "Data corruption: key '{}' has wrong runtime type",
+                    key
+                )));
+            }
+            None => Self::counter_default(&def),
+        };
+
+        let raw = current.saturating_sub(by);
+        let new = Self::clamp(raw, def.min, def.max);
+        if new >= current {
+            return Err(KvError::WouldNotDecrease {
+                key: key.to_string(),
+                current,
+                would_be: new,
+                min: def.min.filter(|&m| raw < m && new == m),
+            });
+        }
+
+        self.data
+            .entries
+            .insert(key.to_string(), DataValue::Counter { value: new });
+        Ok(new)
     }
 
     /// Push a value onto a history (with auto-timestamp) or list.
@@ -1992,6 +2074,10 @@ impl KvStore {
             triggers,
             fragment,
         } = attrs;
+        if let Some(m) = &memory {
+            check_memory_pointer(key, m)?;
+        }
+        let memory = memory.filter(|m| !m.is_empty());
         let triggers = triggers.filter(|t| !t.is_empty());
         let fragment = fragment.filter(|f| !f.trim().is_empty());
 
@@ -2949,7 +3035,9 @@ impl KvStore {
 
     /// Set or clear the memory pointer on a specific entry within a history or list.
     ///
-    /// Pass `None` (or `Some("")`) to clear the pointer.
+    /// Pass `None` (or `Some("")`) to clear the pointer. A non-empty pointer
+    /// must be shaped like a knowledge ID (`kn-` plus ASCII alphanumerics), or
+    /// this returns `KvError::DataValidation` without writing.
     /// Returns `KvError::EntryNotFound` if the entry is not found.
     pub fn set_entry_memory(
         &mut self,
@@ -2969,6 +3057,9 @@ impl KvStore {
             }
         }
 
+        if let Some(m) = &memory {
+            check_memory_pointer(key, m)?;
+        }
         // Normalize empty string to None (clearing the link)
         let memory = memory.filter(|s| !s.is_empty());
 
@@ -3058,6 +3149,9 @@ impl KvStore {
     /// passing `new_value = None` with `new_data = Some({})` (an empty object)
     /// is rejected here in the engine so library callers get the same guard as
     /// the CLI handler.
+    ///
+    /// A `memory` pointer must be shaped like a knowledge ID (`kn-` plus ASCII
+    /// alphanumerics) or be `""` to clear; a bad one fails the whole patch.
     pub fn update_entry(
         &mut self,
         key: &str,
@@ -3068,6 +3162,7 @@ impl KvStore {
         if patch.value.is_none()
             && patch.triggers.is_none()
             && patch.fragment.is_none()
+            && patch.memory.is_none()
             && patch
                 .data
                 .as_ref()
@@ -3080,6 +3175,9 @@ impl KvStore {
                     key
                 ),
             });
+        }
+        if let Some(m) = &patch.memory {
+            check_memory_pointer(key, m)?;
         }
 
         let def = self.key_def(key)?.clone();
@@ -3635,6 +3733,7 @@ max_entries = 5
     fn counter_clamp_min() {
         let (mut store, _dir) = setup_store(test_schema());
         // warmth has min=0, default=0
+        store.set("warmth", "5", None).unwrap();
         assert_eq!(store.dec("warmth", 100).unwrap(), 0);
     }
 
@@ -3809,6 +3908,123 @@ default = "9223372036854775807"
             store.inc_expecting("capped", 1, Some(100)).unwrap_err(),
             KvError::WouldNotIncrease { .. }
         ));
+    }
+
+    // -- Strict dec (#476) --
+
+    #[test]
+    fn dec_rejects_non_positive_by() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "5", None).unwrap();
+        for by in [0, -3, i64::MIN] {
+            let err = store.dec("warmth", by).unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+            let msg = err.to_string();
+            assert!(msg.contains("mx kv inc"), "{}", msg);
+            assert!(msg.contains("Nothing was written"), "{}", msg);
+        }
+        assert_eq!(counter_value(&store, "warmth"), 5);
+    }
+
+    #[test]
+    fn dec_at_min_errors_and_names_the_min() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "0", None).unwrap();
+
+        let err = store.dec("warmth", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: 0,
+                    would_be: 0,
+                    min: Some(0),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("min is 0"), "{}", msg);
+        assert!(msg.contains("Nothing was written"), "{}", msg);
+        assert_eq!(counter_value(&store, "warmth"), 0);
+    }
+
+    #[test]
+    fn dec_below_a_raised_min_errors_without_raising() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store
+            .data
+            .entries
+            .insert("warmth".into(), DataValue::Counter { value: -5 });
+
+        let err = store.dec("warmth", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: -5,
+                    would_be: 0,
+                    min: Some(0),
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert_eq!(counter_value(&store, "warmth"), -5);
+    }
+
+    #[test]
+    fn dec_partial_clamp_still_lowers() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set("warmth", "5", None).unwrap();
+        assert_eq!(store.dec("warmth", 10).unwrap(), 0);
+        assert_eq!(counter_value(&store, "warmth"), 0);
+    }
+
+    #[test]
+    fn dec_saturating_at_i64_min_errors() {
+        let schema = r#"
+[keys.floor]
+type = "counter"
+default = "-9223372036854775808"
+"#;
+        let (mut store, _dir) = setup_store(schema);
+
+        let err = store.dec("floor", 1).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                KvError::WouldNotDecrease {
+                    current: i64::MIN,
+                    would_be: i64::MIN,
+                    min: None,
+                    ..
+                }
+            ),
+            "{:?}",
+            err
+        );
+        assert!(!err.to_string().contains("min is"));
+        assert!(store.data.entries.is_empty(), "{:?}", store.data.entries);
+    }
+
+    #[test]
+    fn dec_error_leaves_no_materialized_entry() {
+        let (mut store, _dir) = setup_store(test_schema());
+        assert!(store.dec("warmth", 1).is_err());
+        assert!(store.dec("warmth", 0).is_err());
+        assert!(!store.data.entries.contains_key("warmth"));
+    }
+
+    #[test]
+    fn dec_from_unwritten_default_materializes() {
+        let (mut store, _dir) = setup_store(test_schema());
+        // capped: min=0, max=100, default=50
+        assert_eq!(store.dec("capped", 1).unwrap(), 49);
+        assert_eq!(store.dec("capped", 2).unwrap(), 47);
     }
 
     #[test]
@@ -7229,13 +7445,13 @@ type = "counter"
             .set_entry_memory(
                 "flavor_history",
                 &IdRef::Index(result.index),
-                Some("kn-hist-set".to_string()),
+                Some("kn-histset".to_string()),
             )
             .unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
-                assert_eq!(entries[0].memory, Some("kn-hist-set".to_string()));
+                assert_eq!(entries[0].memory, Some("kn-histset".to_string()));
             }
             _ => panic!("Expected history"),
         }
@@ -10083,5 +10299,195 @@ type = "history"
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "log");
         assert_eq!(found[0].memory, Some("kn-abc"));
+    }
+
+    // -- update --memory (#480) --
+
+    #[test]
+    fn check_memory_pointer_shape() {
+        for ok in ["", "kn-1a2b3c4d", "kn-dup01", "kn-X"] {
+            assert!(check_memory_pointer("k", ok).is_ok(), "{:?}", ok);
+        }
+        for bad in [
+            "foo", "kn-", "kv-abc", "kn-a b", "kn-x/y", "kn-a-b", "KN-abc", " kn-abc", "kn-é",
+        ] {
+            let err = check_memory_pointer("k", bad).unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", bad);
+            assert!(
+                err.to_string().contains(&format!("{:?}", bad)),
+                "{:?} not named in: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn update_memory_sets_replaces_and_clears() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push("facts", "the value", EntryAttrs::default())
+            .unwrap();
+        let id = IdRef::Index(push.index);
+        let patch = |m: &str| EntryPatch {
+            memory: Some(m.to_string()),
+            ..Default::default()
+        };
+
+        store
+            .update_entry("facts", &id, patch("kn-aaaa1111"))
+            .unwrap();
+        let e = get_list_entry(&store, "facts", push.index);
+        assert_eq!(e.memory.as_deref(), Some("kn-aaaa1111"));
+        assert_eq!(e.value, "the value");
+
+        store
+            .update_entry("facts", &id, patch("kn-bbbb2222"))
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index)
+                .memory
+                .as_deref(),
+            Some("kn-bbbb2222")
+        );
+
+        store.update_entry("facts", &id, patch("")).unwrap();
+        assert!(get_list_entry(&store, "facts", push.index).memory.is_none());
+    }
+
+    #[test]
+    fn update_bad_memory_rejects_the_whole_patch() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push(
+                "facts",
+                "old",
+                EntryAttrs {
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let before = get_list_entry(&store, "facts", push.index);
+
+        for bad in ["foo", "kn-"] {
+            let err = store
+                .update_entry(
+                    "facts",
+                    &IdRef::Index(push.index),
+                    EntryPatch {
+                        value: Some("new".to_string()),
+                        fragment: Some("frag".to_string()),
+                        memory: Some(bad.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+        }
+
+        let after = get_list_entry(&store, "facts", push.index);
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.fragment, before.fragment);
+        assert_eq!(after.memory.as_deref(), Some("kn-keep1"));
+    }
+
+    #[test]
+    fn update_bad_data_keeps_the_old_memory() {
+        let (mut store, _dir) = setup_store(data_schema());
+        let push = store
+            .push(
+                "projects",
+                "p",
+                EntryAttrs {
+                    data: Some(serde_json::json!({ "status": "active" })),
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .update_entry(
+                "projects",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(serde_json::json!({ "status": 42 })),
+                    memory: Some("kn-new1".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+
+        match &store.data.entries["projects"] {
+            DataValue::History { entries, .. } => {
+                assert_eq!(entries[0].memory.as_deref(), Some("kn-keep1"));
+                assert_eq!(
+                    entries[0].data,
+                    Some(serde_json::json!({ "status": "active" }))
+                );
+            }
+            _ => panic!("expected History"),
+        }
+    }
+
+    #[test]
+    fn update_memory_alone_is_not_an_empty_patch() {
+        let patch = EntryPatch {
+            memory: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(!patch.is_empty());
+
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store.push("facts", "v", EntryAttrs::default()).unwrap();
+        store
+            .update_entry(
+                "facts",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(serde_json::json!({})),
+                    memory: Some("kn-abc".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index)
+                .memory
+                .as_deref(),
+            Some("kn-abc")
+        );
+    }
+
+    #[test]
+    fn set_entry_memory_rejects_a_bad_pointer() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let push = store
+            .push(
+                "tags",
+                "alpha",
+                EntryAttrs {
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .set_entry_memory("tags", &IdRef::Index(push.index), Some("foo".to_string()))
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+        assert_eq!(
+            get_list_entry(&store, "tags", push.index).memory.as_deref(),
+            Some("kn-keep1")
+        );
+    }
+
+    #[test]
+    fn key_level_set_memory_is_not_shape_checked() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set_memory("tags", Some("foo".to_string())).unwrap();
     }
 }
