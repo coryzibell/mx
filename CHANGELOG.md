@@ -18,15 +18,20 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **Channel bodies still match.** Harness blocks are removed first, then
   `<channel>` tags are stripped down to their body exactly as before, so a
   Matrix message still opens doors and its sender attributes still don't.
-- **Malformed tags never swallow human text.** Only bare tags count (`<name>`,
+- **Mentions of a tag are left alone.** Only bare tags count (`<name>`,
   `<name/>`, `</name>`; the harness never writes attributes), so prose like
-  `the <system-reminder thing -> please fix` is left alone. An opener nothing
-  balances (a report quoting its own tag) ends at the first `</name>` after
-  it; with no `</name>` after it at all, only the opener is removed. Pairing
-  is one linear pass, so hundreds of KB of unclosed openers cost no more than
-  balanced input.
-- Known edge: a block whose body quotes its own lone closer ends at that
-  quote, so the rest of that agent text is still matched.
+  `the <system-reminder thing -> please fix` is untouched. A backtick-quoted
+  tag is literal text too: an opener or self-closing tag right after a
+  backtick, or a closer right before one, takes no part in pairing, so a
+  report saying `` `<task-notification>` `` is removed whole. Openers pair
+  with closers by depth, per name; an opener with no matching closer and a
+  stray closer each lose only the tag, never the text around them. Pairing
+  runs in linear time, so hundreds of KB of unclosed openers cost no more
+  than balanced input.
+- Known edges: (1) a block whose body quotes a tag WITHOUT backticks can pair
+  wrongly, so part of that report is still matched; (2) human text between an
+  unbackticked bare opener and a later bare closer of the same name is
+  removed as if it were a block.
 
 ### Changed — `mx kv inc` only ever raises a counter (#453)
 
