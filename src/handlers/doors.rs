@@ -7,12 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
+use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::cli::DoorsCommands;
-use crate::doors::{self, FIRED_KEY, FiredDoor, HookInput, Selection};
-use crate::kv::{DataValue, EntryAttrs, HistoryEntry, KvStore};
+use crate::doors::{self, Explanation, FIRED_KEY, FiredDoor, HookInput, NamesUs, Selection};
+use crate::kv::{DataFieldType, DataValue, EntryAttrs, HistoryEntry, KvStore, TriggeredRef};
 
 /// A `(kv key, entry id)` pair — the tuple that identifies one door. The key is
 /// part of it because kv ids are 6-char hashes generated per entry, so the same
@@ -71,12 +73,46 @@ fn fire_state(rows: &[FireRow], session: &str) -> (HashSet<DoorId>, HashMap<Door
     (fired, counts)
 }
 
-/// Run the matcher for one message. Does not write.
-fn evaluate(store: &KvStore, session: &str, prompt: &str, budget: usize) -> Selection {
+/// The words that mark text as ours, from `MX_DOORS_NAMES` (comma-separated).
+/// Unset or empty leaves only the standalone-`Q` rule.
+fn names_us() -> NamesUs {
+    NamesUs::new(
+        std::env::var("MX_DOORS_NAMES")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::to_string),
+    )
+}
+
+type Matcher<T> =
+    fn(&str, &NamesUs, &[TriggeredRef<'_>], &HashSet<DoorId>, &HashMap<DoorId, u64>, usize) -> T;
+
+/// Run `matcher` (`doors::select` or `doors::explain`) for one message. Does
+/// not write.
+fn evaluate<T>(
+    store: &KvStore,
+    session: &str,
+    prompt: &str,
+    budget: usize,
+    matcher: Matcher<T>,
+) -> T {
     let rows = read_fire_log(store);
     let (already, counts) = fire_state(&rows, session);
     let candidates = store.iter_triggered();
-    doors::select(prompt, &candidates, &already, &counts, budget)
+    matcher(prompt, &names_us(), &candidates, &already, &counts, budget)
+}
+
+/// Whether the store's schema accepts a string `origin` field on fire rows.
+/// Schemas written before origin existed reject undeclared fields, and a
+/// rejected push means no door fires at all, so origin is only written where it
+/// is declared as a string.
+fn schema_takes_origin(store: &KvStore) -> bool {
+    store.schema.keys.get(FIRED_KEY).is_some_and(|k| {
+        k.data.as_ref().is_none_or(|d| {
+            d.get("origin")
+                .is_some_and(|f| f.field_type == DataFieldType::String)
+        })
+    })
 }
 
 /// Append one fire row per opened door and persist. Overflow (`deferred`) is
@@ -86,17 +122,22 @@ fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()>
     if fired.is_empty() {
         return Ok(());
     }
+    let with_origin = schema_takes_origin(store);
     for f in fired {
+        let mut data = serde_json::json!({
+            "session": session,
+            "key": f.key,
+            "entry": f.id,
+            "trigger": f.trigger,
+        });
+        if with_origin {
+            data["origin"] = f.origin.into();
+        }
         store.push(
             FIRED_KEY,
             &f.trigger,
             EntryAttrs {
-                data: Some(serde_json::json!({
-                    "session": session,
-                    "key": f.key,
-                    "entry": f.id,
-                    "trigger": f.trigger,
-                })),
+                data: Some(data),
                 ..Default::default()
             },
         )?;
@@ -143,7 +184,13 @@ fn hook(dry_run: bool, budget: usize) {
         }
     };
 
-    let selection = evaluate(&store, &input.session_id, &input.prompt, budget);
+    let selection = evaluate(
+        &store,
+        &input.session_id,
+        &input.prompt,
+        budget,
+        doors::select,
+    );
     if selection.fired.is_empty() {
         return;
     }
@@ -161,16 +208,169 @@ fn hook(dry_run: bool, budget: usize) {
     print_fired(&selection.fired);
 }
 
-fn check(message: &str, session: &str, dry_run: bool, json: bool, budget: usize) -> Result<i32> {
+/// The id Claude Code puts on a session's paste tags: the first 4 hex of
+/// sha256(session id).
+fn paste_id(session: &str) -> String {
+    Sha256::digest(session.as_bytes())[..2]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The prompt the hook would see: the message (in a channel block when it is
+/// `--from` someone), then each paste in Claude Code's envelope.
+fn compose(message: &str, session: &str, pastes: &[String], from: Option<&str>) -> String {
+    let mut prompt = match from {
+        Some(user) => format!("<channel source=\"cli\" user_id=\"{user}\">\n{message}\n</channel>"),
+        None => message.to_string(),
+    };
+    let id = paste_id(session);
+    for body in pastes {
+        let body = body.strip_suffix('\n').unwrap_or(body);
+        prompt.push_str(&format!(
+            "\n\n<pasted_content id=\"{id}\">\n{body}\n</pasted_content id=\"{id}\">"
+        ));
+    }
+    prompt
+}
+
+const NOT_CLASSIFIED: &str = "typed/channel are never held";
+
+fn print_explanation(ex: &Explanation) {
+    for (n, seg) in ex.segments.iter().enumerate() {
+        let origin = match &seg.origin {
+            doors::Origin::Channel { user_id } if !user_id.is_empty() => {
+                format!("channel({user_id})")
+            }
+            o => o.label().to_string(),
+        };
+        let verdict = match &seg.classified {
+            Some(c) => {
+                let v = if c.gated {
+                    "Unsure(gate)".to_string()
+                } else {
+                    format!("{:?}", c.verdict)
+                };
+                let signals: Vec<String> = c.signals.iter().map(|s| s.label()).collect();
+                format!("verdict {v} F={} O={} [{}]", c.f, c.o, signals.join(", "))
+            }
+            None => format!("not classified ({NOT_CLASSIFIED})"),
+        };
+        println!(
+            "segment {}  {}  {} ch  {}  places {}",
+            n + 1,
+            origin,
+            seg.text.chars().count(),
+            verdict,
+            if seg.quarantined {
+                "\u{2205} (quarantined)"
+            } else {
+                "{house}"
+            }
+        );
+    }
+    for d in &ex.doors {
+        println!(
+            "{}  {}/kv-{}  {}  seg {}",
+            d.door.trigger,
+            d.door.key,
+            d.door.id,
+            d.status.label(),
+            d.segment
+        );
+    }
+}
+
+fn explanation_json(ex: &Explanation) -> serde_json::Value {
+    let segments: Vec<serde_json::Value> = ex
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(n, seg)| {
+            let user_id = match &seg.origin {
+                doors::Origin::Channel { user_id } => Some(user_id.as_str()),
+                _ => None,
+            };
+            let c = seg.classified.as_ref();
+            serde_json::json!({
+                "segment": n + 1,
+                "origin": seg.origin.label(),
+                "user_id": user_id,
+                "chars": seg.text.chars().count(),
+                "verdict": c.map(|c| c.verdict),
+                "reason": c.is_none().then_some(NOT_CLASSIFIED),
+                "gated": c.map(|c| c.gated),
+                "f": c.map(|c| c.f),
+                "o": c.map(|c| c.o),
+                "signals": c.map(|c| &c.signals),
+                "places": if seg.quarantined { vec![] } else { vec!["house"] },
+                "quarantined": seg.quarantined,
+            })
+        })
+        .collect();
+    let doors: Vec<serde_json::Value> = ex
+        .doors
+        .iter()
+        .map(|d| {
+            serde_json::json!({
+                "trigger": d.door.trigger,
+                "key": d.door.key,
+                "id": d.door.id,
+                "dig": d.door.dig,
+                "origin": d.door.origin,
+                "status": d.status,
+                "segment": d.segment,
+            })
+        })
+        .collect();
+    let sel = ex.selection();
+    serde_json::json!({
+        "segments": segments,
+        "doors": doors,
+        "fired": sel.fired,
+        "deferred": sel.deferred,
+    })
+}
+
+struct CheckArgs {
+    message: String,
+    session: String,
+    dry_run: bool,
+    json: bool,
+    budget: usize,
+    pastes: Vec<PathBuf>,
+    from: Option<String>,
+    explain: bool,
+}
+
+fn check(a: CheckArgs) -> Result<i32> {
+    let pastes = a
+        .pastes
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p).with_context(|| format!("reading --paste {}", p.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let prompt = compose(&a.message, &a.session, &pastes, a.from.as_deref());
     let mut store = KvStore::from_env()?;
-    let selection = evaluate(&store, session, message, budget);
+    // Explaining never burns dedup.
+    if a.explain {
+        let ex = evaluate(&store, &a.session, &prompt, a.budget, doors::explain);
+        if a.json {
+            println!("{}", serde_json::to_string(&explanation_json(&ex))?);
+        } else {
+            print_explanation(&ex);
+        }
+        return Ok(crate::kv::EXIT_OK);
+    }
+    let selection: Selection = evaluate(&store, &a.session, &prompt, a.budget, doors::select);
     // Same ordering as the hook: a door that reports without recording is a
     // door with no dedup. Here the error propagates instead of being swallowed,
     // because `check` is run by a person who wants to see it.
-    if !dry_run {
-        record(&mut store, session, &selection.fired)?;
+    if !a.dry_run {
+        record(&mut store, &a.session, &selection.fired)?;
     }
-    if json {
+    if a.json {
         println!("{}", serde_json::to_string(&selection)?);
     } else {
         print_fired(&selection.fired);
@@ -307,8 +507,51 @@ pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
             dry_run,
             json,
             budget,
-        } => check(&message, &session, dry_run, json, budget),
+            pastes,
+            from,
+            explain,
+        } => check(CheckArgs {
+            message,
+            session,
+            dry_run,
+            json,
+            budget,
+            pastes,
+            from,
+            explain,
+        }),
         DoorsCommands::Stats { since, json } => stats(since.as_deref(), json),
         DoorsCommands::Reset { session } => reset(session.as_deref()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compose_builds_the_envelope_the_hook_receives() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/doors/hook-paste.json"))
+                .unwrap();
+        let session = fixture["session_id"].as_str().unwrap();
+        let prompt = fixture["prompt"].as_str().unwrap();
+        assert_eq!(paste_id(session), "11e5");
+        let walden = include_str!("../../tests/fixtures/doors/pd/walden.txt");
+        let composed = compose(
+            "found this bit about huckleberries, worth a door? ",
+            session,
+            &[walden.to_string()],
+            None,
+        );
+        assert_eq!(format!("{composed}\n\n keep it short"), prompt);
+    }
+
+    #[test]
+    fn compose_wraps_from_in_a_channel_block() {
+        assert_eq!(
+            compose("hi", "s", &[], Some("@j:s")),
+            "<channel source=\"cli\" user_id=\"@j:s\">\nhi\n</channel>"
+        );
     }
 }

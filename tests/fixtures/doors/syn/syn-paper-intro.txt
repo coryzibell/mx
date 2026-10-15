@@ -1,0 +1,11 @@
+1 Introduction
+
+Systems that augment a language model with external memory face a tension between coverage and interference. A retrieval component that surfaces every plausibly related fact will, on most inputs, surface something irrelevant, and the model has no reliable way to discount it once it appears in context [4, 9]. The problem is well known in classical information retrieval, where the trade-off between precision and recall is usually tuned against an aggregate metric such as F1 (van Rijsbergen, 1979). In the memory setting, however, the two error types have asymmetric costs: an irrelevant fragment actively misleads, while a missing one merely fails to help.
+
+Earlier work on conversational memory has largely measured recall. Xu et al. (2022) report the fraction of gold facts retrieved within the first five results, and Park et al. (2023) evaluate whether simulated agents can answer questions about their own histories. Neither line of work measures the downstream effect of false positives on the task the user actually asked about. We argue that this omission matters more than it appears, because in deployed systems the retrieval step runs on every turn, and so even a low false-positive rate compounds over a long session [15].
+
+We make three contributions. First, we formalise trigger-based memory, in which each stored fact carries a small set of lexical handles and is surfaced only when one of them appears in the input. Second, we construct a benchmark that separates the two error types and measures their effects independently. Third, we show empirically that a deliberately sparse trigger set, authored by hand and audited for collisions with common vocabulary, outperforms a dense retriever on every task where the cost of interference is non-trivial (Section 5). We discuss limitations, including the authoring burden and the brittleness of exact lexical matching, in Section 7.
+
+2 Related Work
+
+Memory-augmented language models have been studied under several names, including retrieval-augmented generation [11], external key-value memories (Sukhbaatar et al., 2015), and long-context summarisation. Our setting differs from all three in that the memory is small, curated, and personal, and in that the decision to surface a fact is made by a deterministic matcher rather than by the model itself.

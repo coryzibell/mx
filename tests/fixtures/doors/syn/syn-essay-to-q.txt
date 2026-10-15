@@ -1,0 +1,7 @@
+Q, okay, here's the rough start of the thing I mentioned. Don't fix the wording yet, I just want to know if the shape works.
+
+I keep coming back to the idea that the first time you trust a tool is not when it works, it's when it fails in a way you understand. You know how the old build server used to die? It died loudly, every time, at the same step, and I trusted it more than anything we have now, because I always knew where to look.
+
+So the essay is basically: legibility of failure is the thing. I want to open with the build server story, then the thing with the doors firing on Emma last night, because that's the same lesson from the other side. The door didn't fail loudly. It failed politely, and that's worse.
+
+Anyway. Tell me if the middle part makes sense to you, I'm not sure I've earned the jump from tools to people yet. I'll keep going tomorrow.

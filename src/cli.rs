@@ -2020,6 +2020,20 @@ pub enum DoorsCommands {
         /// Maximum distinct entries to fire
         #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
         budget: usize,
+
+        /// Append FILE as a terminal paste, in Claude Code's paste envelope
+        /// (repeatable)
+        #[arg(long = "paste", value_name = "FILE")]
+        pastes: Vec<std::path::PathBuf>,
+
+        /// Send the message as a channel block from this user_id
+        #[arg(long, value_name = "USER_ID")]
+        from: Option<String>,
+
+        /// Show each segment's verdict and every matched door, fired, deferred
+        /// or held. Implies --dry-run
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Fire telemetry: fires per entry and per trigger, plus doors never fired

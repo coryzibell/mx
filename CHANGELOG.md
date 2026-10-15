@@ -41,6 +41,50 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `--expect` on `dec`. `set` is still the way to force a counter to a value.
 - A refused `dec` no longer materializes the key's default in memory.
 
+### Changed — `mx doors` quarantines pasted prose that isn't ours (doors P1)
+
+- **The prompt is matched in segments.** After harness blocks are removed,
+  the prompt is cut into typed text, terminal pastes (Claude Code's
+  `<pasted_content id="X">…</pasted_content id="X">` envelope; only a closer
+  with the same id closes it, an opener nothing closes is text) and
+  `<channel>` bodies (keyed by `user_id`, never the display name). Scanning
+  left to right, whichever opener comes first defines the block and its body
+  is opaque to the other kind: a pasted transcript stays one paste, and paste
+  tags inside a channel body are plain text. Channel attributes are stripped
+  everywhere and never become match text. Phrases no longer match across a
+  segment boundary.
+- **A pasted block of someone else's prose holds the doors in it.** Only
+  collapsed (tagged) pastes are judged. Each one of at least 600 characters is
+  classified ForeignProse / Ours / Unsure from its shape (dialogue share,
+  paragraph and sentence length, citations, headings, epigraphs against
+  lists, code, chat-log headers, chat register, house vocabulary and names).
+  A ForeignProse paste is quarantined: no door matches in it. Ours, Unsure
+  and pastes under 600 characters behave exactly as before. Known false
+  positive: a long first-person essay that never names us reads as foreign.
+- **Typed text and Matrix bodies are never held.** They are not classified
+  at all and fire exactly as before, however long. A short paste that
+  arrives untagged counts as typed text.
+- **A door matching in several segments fires once**, with the most specific
+  trigger across them (ties go to the earlier segment). Held doors are never
+  fired, never recorded and never spend the budget.
+- **`origin` on fire rows.** `doors_fired` rows and `check --json` doors
+  gain `origin`: `typed`, `paste` or `channel`. It is written only when the
+  store's schema declares `doors_fired.data.origin` as a string; a schema
+  without it keeps recording rows exactly as before. Legacy rows without
+  `origin` still dedup and count in `stats`.
+- **`mx doors check` flags:** `--paste FILE` (repeatable) appends the file
+  (less one trailing newline) in the paste envelope, id = first 4 hex of
+  sha256(`--session`); `--from USER_ID` sends the message as a channel
+  block; `--explain` prints each segment's origin, length, verdict, F/O
+  scores, signals and places (typed and channel segments say
+  `not classified`; in JSON their `verdict` is null with a `reason`), then
+  every matched door as FIRED, DEFERRED or HELD with its segment. It implies
+  `--dry-run`, and `--json` gives the same structure. The hook never
+  computes held doors.
+- **`MX_DOORS_NAMES`** (comma-separated) lists the words that mark text as
+  ours, matched whole-word and case-insensitive. Unset, only a standalone
+  `Q` counts.
+
 ### Fixed — `mx doors` ignores harness-injected blocks (#478)
 
 - **Harness blocks no longer open doors.** `<task-notification>`,
