@@ -6,6 +6,28 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — `mx doors` ignores harness-injected blocks (#478)
+
+- **Harness blocks no longer open doors.** `<task-notification>`,
+  `<system-reminder>` and every `<local-command-*>` block (`stdout`, `stderr`,
+  `caveat`, ...) are removed whole, body included, before triggers are
+  matched. A trigger word in a subagent report, a reminder or a CLI echo used
+  to open a door, spend its per-session dedup slot and eat the prompt's
+  budget. Self-closing tags and stray closers go too, and each removed piece
+  leaves one space, so the words on either side stay separate.
+- **Channel bodies still match.** Harness blocks are removed first, then
+  `<channel>` tags are stripped down to their body exactly as before, so a
+  Matrix message still opens doors and its sender attributes still don't.
+- **Malformed tags never swallow human text.** Only bare tags count (`<name>`,
+  `<name/>`, `</name>`; the harness never writes attributes), so prose like
+  `the <system-reminder thing -> please fix` is left alone. An opener nothing
+  balances (a report quoting its own tag) ends at the first `</name>` after
+  it; with no `</name>` after it at all, only the opener is removed. Pairing
+  is one linear pass, so hundreds of KB of unclosed openers cost no more than
+  balanced input.
+- Known edge: a block whose body quotes its own lone closer ends at that
+  quote, so the rest of that agent text is still matched.
+
 ### Changed — `mx kv inc` only ever raises a counter (#453)
 
 - **An increment that would not raise the counter is an error.** `inc` used
