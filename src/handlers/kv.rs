@@ -1058,6 +1058,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             data,
             triggers,
             fragment,
+            memory,
         } => {
             // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
             // list is a real instruction, so an all-empty `triggers` vec still
@@ -1077,9 +1078,14 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
 
             // 1. Reject the no-op case (nothing at all was given).
-            if value.is_none() && data.is_none() && trigger_patch.is_none() && fragment.is_none() {
+            if value.is_none()
+                && data.is_none()
+                && trigger_patch.is_none()
+                && fragment.is_none()
+                && memory.is_none()
+            {
                 eprintln!(
-                    "Error: provide a value argument, --data, --trigger, or --fragment to update"
+                    "Error: provide a value argument, --data, --trigger, --fragment, or --memory to update"
                 );
                 return Ok(kv::EXIT_INVALID_INPUT);
             }
@@ -1121,6 +1127,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         && value.is_none()
                         && trigger_patch.is_none()
                         && fragment.is_none()
+                        && memory.is_none()
                     {
                         eprintln!(
                             "Error: --data is an empty object and no value was given — nothing to update"
@@ -1138,6 +1145,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 data: parsed_data,
                 triggers: trigger_patch,
                 fragment,
+                memory,
             };
             match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {

@@ -6,6 +6,23 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx kv update --memory` (#480)
+
+- **`mx kv update <key> --id <id> --memory kn-...` sets an entry's memory
+  pointer.** It lands in the same write as the value, `--data`, `--trigger`
+  and `--fragment`, so either all of them change or none do. An entry that
+  already has a pointer gets the new one; `--memory ""` clears it. `--memory`
+  on its own is a complete update.
+- **Pointers are shape-checked.** A non-empty pointer must be `kn-` followed
+  by one or more letters or digits (`kn-1a2b3c4d`). Anything else (`foo`,
+  `kn-`, `kn-x/y`) exits `4`, names the bad value, and writes nothing, even
+  when the same command also carries a valid new value. The check is shape
+  only: it does not look the ID up in the graph, so kv still works without
+  SurrealDB.
+- **`mx kv set <key> --id <id> --memory` now runs the same check.** It used
+  to store any string. Key-level `mx kv set <key> --memory` (no `--id`) is
+  unchanged.
+
 ### Changed — `mx kv dec` only ever lowers a counter (#476, #457)
 
 - **A decrement that would not lower the counter is an error.** This is a

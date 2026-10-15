@@ -1,4 +1,5 @@
-//! Integration tests for `mx kv dec` refusing to fake a decrement (#476, #457).
+//! Integration tests for `mx kv dec` refusing to fake a decrement (#476, #457)
+//! and for `mx kv update --memory` (#480).
 //!
 //! Harness mirrors `tests/kv_set_cli.rs`: the built binary against an isolated
 //! MX_HOME, so nothing touches the live store. Every refusal is checked against
@@ -207,4 +208,138 @@ fn inc_by_negative_with_a_space_is_still_invalid_input() {
         &["must be positive", "got -3", "mx kv dec"],
     );
     assert_eq!(counter(&dir, "tally"), 5);
+}
+
+// -- `kv update --memory` (#480) --
+
+/// Push one entry onto `notes` and return its index as the `--id` argument.
+fn push_note(dir: &TempDir, value: &str) -> String {
+    run_ok(dir, &["kv", "push", "notes", value]);
+    let entries: serde_json::Value =
+        serde_json::from_str(&run_ok(dir, &["kv", "get", "notes", "--json"])).unwrap();
+    entries.as_array().unwrap().last().unwrap()["index"].to_string()
+}
+
+fn note(dir: &TempDir, id: &str) -> serde_json::Value {
+    let entries: serde_json::Value =
+        serde_json::from_str(&run_ok(dir, &["kv", "get", "notes", "--json"])).unwrap();
+    entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["index"].as_u64() == id.parse().ok())
+        .cloned()
+        .unwrap_or_else(|| panic!("no note with index {}", id))
+}
+
+#[test]
+fn update_memory_sets_replaces_and_clears() {
+    let dir = setup();
+    let id = push_note(&dir, "hello");
+
+    run_ok(
+        &dir,
+        &[
+            "kv",
+            "update",
+            "notes",
+            "--id",
+            &id,
+            "--memory",
+            "kn-1a2b3c4d",
+        ],
+    );
+    let e = note(&dir, &id);
+    assert_eq!(e["memory"], "kn-1a2b3c4d");
+    assert_eq!(e["value"], "hello");
+
+    run_ok(
+        &dir,
+        &["kv", "update", "notes", "--id", &id, "--memory", "kn-dup01"],
+    );
+    assert_eq!(note(&dir, &id)["memory"], "kn-dup01");
+
+    run_ok(
+        &dir,
+        &["kv", "update", "notes", "--id", &id, "--memory", ""],
+    );
+    assert!(note(&dir, &id).get("memory").is_none());
+}
+
+#[test]
+fn update_memory_alone_passes_the_no_op_guard() {
+    let dir = setup();
+    let id = push_note(&dir, "hello");
+
+    let out = run(&dir, &["kv", "update", "notes", "--id", &id]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--memory"));
+
+    run_ok(
+        &dir,
+        &["kv", "update", "notes", "--id", &id, "--memory", "kn-abc"],
+    );
+    run_ok(
+        &dir,
+        &[
+            "kv", "update", "notes", "--id", &id, "--data", "{}", "--memory", "kn-def",
+        ],
+    );
+    assert_eq!(note(&dir, &id)["memory"], "kn-def");
+}
+
+#[test]
+fn update_bad_memory_is_invalid_input_and_writes_nothing() {
+    let dir = setup();
+    let id = push_note(&dir, "hello");
+    run_ok(
+        &dir,
+        &["kv", "update", "notes", "--id", &id, "--memory", "kn-keep1"],
+    );
+
+    for bad in ["foo", "kn-", "kv-abc", "kn-a b", "kn-x/y"] {
+        assert_refused(
+            &dir,
+            &["kv", "update", "notes", "--id", &id, "--memory", bad],
+            4,
+            &[&format!("{:?}", bad), "Nothing was written"],
+        );
+        assert_refused(
+            &dir,
+            &[
+                "kv",
+                "update",
+                "notes",
+                "new value",
+                "--id",
+                &id,
+                "--memory",
+                bad,
+            ],
+            4,
+            &[&format!("{:?}", bad)],
+        );
+    }
+
+    let e = note(&dir, &id);
+    assert_eq!(e["value"], "hello");
+    assert_eq!(e["memory"], "kn-keep1");
+}
+
+#[test]
+fn set_with_id_shares_the_memory_shape_check() {
+    let dir = setup();
+    let id = push_note(&dir, "hello");
+    run_ok(
+        &dir,
+        &["kv", "set", "notes", "--id", &id, "--memory", "kn-keep1"],
+    );
+
+    assert_refused(
+        &dir,
+        &["kv", "set", "notes", "--id", &id, "--memory", "foo"],
+        4,
+        &["\"foo\"", "Nothing was written"],
+    );
+    assert_eq!(note(&dir, &id)["memory"], "kn-keep1");
 }

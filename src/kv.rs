@@ -554,15 +554,17 @@ pub struct EntryAttrs {
 
 /// A partial update to an existing entry. `None` leaves a field untouched.
 ///
-/// `triggers: Some(vec![])` and `fragment: Some(String::new())` are the *clear*
-/// signals — one command removes a bad door — and both are stored back as
-/// `None` so they vanish from the serialized entry.
+/// `triggers: Some(vec![])`, `fragment: Some(String::new())` and
+/// `memory: Some(String::new())` are the *clear* signals — one command removes
+/// a bad door or a stale link — and all are stored back as `None` so they
+/// vanish from the serialized entry.
 #[derive(Debug, Default, Clone)]
 pub struct EntryPatch {
     pub value: Option<String>,
     pub data: Option<serde_json::Value>,
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
+    pub memory: Option<String>,
 }
 
 impl EntryPatch {
@@ -572,7 +574,32 @@ impl EntryPatch {
             && self.data.is_none()
             && self.triggers.is_none()
             && self.fragment.is_none()
+            && self.memory.is_none()
     }
+}
+
+/// Reject a per-entry memory pointer that is not shaped like a knowledge ID.
+///
+/// `""` passes: it is the clear signal. Anything else must be `kn-` followed by
+/// one or more ASCII alphanumerics. Shape only, no graph lookup, so kv keeps
+/// working without SurrealDB.
+fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
+    if memory.is_empty() {
+        return Ok(());
+    }
+    let well_formed = memory
+        .strip_prefix("kn-")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric()));
+    if well_formed {
+        return Ok(());
+    }
+    Err(KvError::DataValidation {
+        message: format!(
+            "key '{}': --memory {:?} is not a memory ID (expected kn- followed by letters \
+             or digits, e.g. kn-1a2b3c4d; \"\" clears). Nothing was written.",
+            key, memory
+        ),
+    })
 }
 
 /// A borrowed view of one trigger-carrying entry, with the key it lives under.
@@ -607,6 +634,7 @@ pub trait UpdateableEntry {
     fn set_data(&mut self, d: Option<serde_json::Value>);
     fn set_triggers(&mut self, t: Option<Vec<String>>);
     fn set_fragment(&mut self, f: Option<String>);
+    fn set_memory(&mut self, m: Option<String>);
 }
 
 macro_rules! impl_updateable_entry {
@@ -647,6 +675,9 @@ macro_rules! impl_updateable_entry {
             }
             fn set_fragment(&mut self, f: Option<String>) {
                 self.fragment = f.filter(|s| !s.trim().is_empty());
+            }
+            fn set_memory(&mut self, m: Option<String>) {
+                self.memory = m.filter(|s| !s.is_empty());
             }
         }
     };
@@ -779,6 +810,9 @@ fn apply_entry_update<T: UpdateableEntry>(
     }
     if let Some(fragment) = patch.fragment.clone() {
         entry.set_fragment(Some(fragment));
+    }
+    if let Some(memory) = patch.memory.clone() {
+        entry.set_memory(Some(memory));
     }
     Ok(UpdateResult {
         index: result_index,
@@ -2997,7 +3031,9 @@ impl KvStore {
 
     /// Set or clear the memory pointer on a specific entry within a history or list.
     ///
-    /// Pass `None` (or `Some("")`) to clear the pointer.
+    /// Pass `None` (or `Some("")`) to clear the pointer. A non-empty pointer
+    /// must be shaped like a knowledge ID (`kn-` plus ASCII alphanumerics), or
+    /// this returns `KvError::DataValidation` without writing.
     /// Returns `KvError::EntryNotFound` if the entry is not found.
     pub fn set_entry_memory(
         &mut self,
@@ -3017,6 +3053,9 @@ impl KvStore {
             }
         }
 
+        if let Some(m) = &memory {
+            check_memory_pointer(key, m)?;
+        }
         // Normalize empty string to None (clearing the link)
         let memory = memory.filter(|s| !s.is_empty());
 
@@ -3106,6 +3145,9 @@ impl KvStore {
     /// passing `new_value = None` with `new_data = Some({})` (an empty object)
     /// is rejected here in the engine so library callers get the same guard as
     /// the CLI handler.
+    ///
+    /// A `memory` pointer must be shaped like a knowledge ID (`kn-` plus ASCII
+    /// alphanumerics) or be `""` to clear; a bad one fails the whole patch.
     pub fn update_entry(
         &mut self,
         key: &str,
@@ -3116,6 +3158,7 @@ impl KvStore {
         if patch.value.is_none()
             && patch.triggers.is_none()
             && patch.fragment.is_none()
+            && patch.memory.is_none()
             && patch
                 .data
                 .as_ref()
@@ -3128,6 +3171,9 @@ impl KvStore {
                     key
                 ),
             });
+        }
+        if let Some(m) = &patch.memory {
+            check_memory_pointer(key, m)?;
         }
 
         let def = self.key_def(key)?.clone();
@@ -7395,13 +7441,13 @@ type = "counter"
             .set_entry_memory(
                 "flavor_history",
                 &IdRef::Index(result.index),
-                Some("kn-hist-set".to_string()),
+                Some("kn-histset".to_string()),
             )
             .unwrap();
 
         match store.get("flavor_history").unwrap() {
             DataValue::History { entries, .. } => {
-                assert_eq!(entries[0].memory, Some("kn-hist-set".to_string()));
+                assert_eq!(entries[0].memory, Some("kn-histset".to_string()));
             }
             _ => panic!("Expected history"),
         }
@@ -10249,5 +10295,155 @@ type = "history"
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].key, "log");
         assert_eq!(found[0].memory, Some("kn-abc"));
+    }
+
+    // -- update --memory (#480) --
+
+    #[test]
+    fn check_memory_pointer_shape() {
+        for ok in ["", "kn-1a2b3c4d", "kn-dup01", "kn-X"] {
+            assert!(check_memory_pointer("k", ok).is_ok(), "{:?}", ok);
+        }
+        for bad in [
+            "foo", "kn-", "kv-abc", "kn-a b", "kn-x/y", "kn-a-b", "KN-abc", " kn-abc", "kn-é",
+        ] {
+            let err = check_memory_pointer("k", bad).unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", bad);
+            assert!(
+                err.to_string().contains(&format!("{:?}", bad)),
+                "{:?} not named in: {}",
+                bad,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn update_memory_sets_replaces_and_clears() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push("facts", "the value", EntryAttrs::default())
+            .unwrap();
+        let id = IdRef::Index(push.index);
+        let patch = |m: &str| EntryPatch {
+            memory: Some(m.to_string()),
+            ..Default::default()
+        };
+
+        store
+            .update_entry("facts", &id, patch("kn-aaaa1111"))
+            .unwrap();
+        let e = get_list_entry(&store, "facts", push.index);
+        assert_eq!(e.memory.as_deref(), Some("kn-aaaa1111"));
+        assert_eq!(e.value, "the value");
+
+        store
+            .update_entry("facts", &id, patch("kn-bbbb2222"))
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index)
+                .memory
+                .as_deref(),
+            Some("kn-bbbb2222")
+        );
+
+        store.update_entry("facts", &id, patch("")).unwrap();
+        assert!(get_list_entry(&store, "facts", push.index).memory.is_none());
+    }
+
+    #[test]
+    fn update_bad_memory_rejects_the_whole_patch() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store
+            .push(
+                "facts",
+                "old",
+                EntryAttrs {
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let before = get_list_entry(&store, "facts", push.index);
+
+        for bad in ["foo", "kn-"] {
+            let err = store
+                .update_entry(
+                    "facts",
+                    &IdRef::Index(push.index),
+                    EntryPatch {
+                        value: Some("new".to_string()),
+                        fragment: Some("frag".to_string()),
+                        memory: Some(bad.to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap_err();
+            assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+        }
+
+        let after = get_list_entry(&store, "facts", push.index);
+        assert_eq!(after.value, before.value);
+        assert_eq!(after.fragment, before.fragment);
+        assert_eq!(after.memory.as_deref(), Some("kn-keep1"));
+    }
+
+    #[test]
+    fn update_memory_alone_is_not_an_empty_patch() {
+        let patch = EntryPatch {
+            memory: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(!patch.is_empty());
+
+        let (mut store, _dir) = setup_store(doors_schema());
+        let push = store.push("facts", "v", EntryAttrs::default()).unwrap();
+        store
+            .update_entry(
+                "facts",
+                &IdRef::Index(push.index),
+                EntryPatch {
+                    data: Some(serde_json::json!({})),
+                    memory: Some("kn-abc".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            get_list_entry(&store, "facts", push.index)
+                .memory
+                .as_deref(),
+            Some("kn-abc")
+        );
+    }
+
+    #[test]
+    fn set_entry_memory_rejects_a_bad_pointer() {
+        let (mut store, _dir) = setup_store(test_schema());
+        let push = store
+            .push(
+                "tags",
+                "alpha",
+                EntryAttrs {
+                    memory: Some("kn-keep1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let err = store
+            .set_entry_memory("tags", &IdRef::Index(push.index), Some("foo".to_string()))
+            .unwrap_err();
+        assert!(matches!(err, KvError::DataValidation { .. }), "{:?}", err);
+        assert_eq!(
+            get_list_entry(&store, "tags", push.index).memory.as_deref(),
+            Some("kn-keep1")
+        );
+    }
+
+    #[test]
+    fn key_level_set_memory_is_not_shape_checked() {
+        let (mut store, _dir) = setup_store(test_schema());
+        store.set_memory("tags", Some("foo".to_string())).unwrap();
     }
 }

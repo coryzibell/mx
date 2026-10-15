@@ -2251,6 +2251,10 @@ pub enum KvCommands {
         /// rule resumes.
         #[arg(long)]
         fragment: Option<String>,
+
+        /// Set the entry's memory pointer (kn- ID); --memory "" clears it
+        #[arg(long)]
+        memory: Option<String>,
     },
 
     /// List every entry carrying triggers, with fire counts
