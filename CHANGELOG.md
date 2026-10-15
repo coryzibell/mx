@@ -6,6 +6,35 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — `mx doors` ignores harness-injected blocks (#478)
+
+- **Harness blocks no longer open doors.** `<task-notification>`,
+  `<system-reminder>` and every `<local-command-*>` block (`stdout`, `stderr`,
+  `caveat`, ...) are removed whole, body included, before triggers are
+  matched. A trigger word in a subagent report, a reminder or a CLI echo used
+  to open a door, spend its per-session dedup slot and eat the prompt's
+  budget. Self-closing tags and stray closers go too, and each removed piece
+  leaves one space, so the words on either side stay separate.
+- **Channel bodies still match.** Harness blocks are removed first, then
+  `<channel>` tags are stripped down to their body exactly as before, so a
+  Matrix message still opens doors and its sender attributes still don't.
+- **Tag mentions mostly stay text.** Only bare tags count (`<name>`,
+  `<name/>`, `</name>`; the harness never writes attributes), so prose like
+  `the <system-reminder thing -> please fix` is untouched. A backtick-quoted
+  tag is literal text too: an opener or self-closing tag right after a
+  backtick, or a closer right before one, takes no part in pairing, so a
+  report saying `` `<task-notification>` `` is removed whole. A closer pairs
+  with the latest unclosed opener of its name; an opener nothing pairs with
+  and a stray closer each lose only the tag. Pairing runs in linear time, so
+  hundreds of KB of unclosed openers cost no more than balanced input.
+- Known edges: (1) a block whose body quotes a tag WITHOUT backticks can pair
+  wrongly, so part of that block's text is still matched, and nested blocks
+  of the same name leak the outer block's text; (2) when the next
+  unbackticked tag after an unbackticked opener with the same name is a
+  closer, the text between them is removed whoever wrote them (unless the
+  opener already sits inside an earlier removed block), including when that
+  closer is quoted inside a different block.
+
 ### Changed — `mx kv inc` only ever raises a counter (#453)
 
 - **An increment that would not raise the counter is an error.** `inc` used

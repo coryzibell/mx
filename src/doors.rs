@@ -148,6 +148,145 @@ pub fn strip_channel_tags(prompt: &str) -> String {
     out
 }
 
+/// Harness block names matched exactly. `local-command-*` is handled apart
+/// because its suffix varies.
+const HARNESS_BLOCKS: [&str; 2] = ["task-notification", "system-reminder"];
+const LOCAL_COMMAND_PREFIX: &str = "local-command-";
+
+/// The harness tag name `s` begins with, if any. A `local-command-` name takes
+/// the longest `[a-z0-9-]` suffix, so the caller's `>` check is what rejects
+/// `local-command-stdoutX`.
+fn harness_name(s: &str) -> Option<&str> {
+    if let Some(name) = HARNESS_BLOCKS.into_iter().find(|n| s.starts_with(n)) {
+        return Some(name);
+    }
+    let suffix = s.strip_prefix(LOCAL_COMMAND_PREFIX)?;
+    let n = suffix
+        .bytes()
+        .take_while(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        .count();
+    (n > 0).then(|| &s[..LOCAL_COMMAND_PREFIX.len() + n])
+}
+
+enum TagKind {
+    Open,
+    SelfClosing,
+    Close,
+}
+
+struct Tag<'a> {
+    start: usize,
+    end: usize,
+    kind: TagKind,
+    name: &'a str,
+}
+
+/// The bare harness tag at the start of `s`: exactly `<name>`, `<name/>` or
+/// `</name>`. Attributes, whitespace and case variants are not harness tags.
+fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
+    let s = s.strip_prefix('<')?;
+    let (closing, s) = match s.strip_prefix('/') {
+        Some(s) => (true, s),
+        None => (false, s),
+    };
+    let name = harness_name(s)?;
+    let after = &s[name.len()..];
+    let lead = 1 + usize::from(closing) + name.len();
+    if after.starts_with('>') {
+        let kind = if closing {
+            TagKind::Close
+        } else {
+            TagKind::Open
+        };
+        Some((kind, name, lead + 1))
+    } else if !closing && after.starts_with("/>") {
+        Some((TagKind::SelfClosing, name, lead + 2))
+    } else {
+        None
+    }
+}
+
+/// Remove harness-injected blocks, body included: `<task-notification>`,
+/// `<system-reminder>` and every `<local-command-*>` (closed by the same name).
+///
+/// Claude Code puts these in the prompt the hook receives, but the human never
+/// typed them. A trigger word inside a subagent report or a CLI echo would open
+/// a door, burn its per-session dedup slot and eat the prompt's budget.
+///
+/// Only bare tags count (`<name>`, `<name/>`, `</name>`; the harness never
+/// writes attributes). A tag quoted in markdown is literal text: an opener or
+/// self-closing tag right after a backtick, or a closer right before one, is
+/// left alone and takes no part in pairing, so a report saying
+/// `` `<task-notification>` `` does not open a block. A closer pairs with the
+/// latest unclosed opener of its name, in linear time. An opener nothing pairs
+/// with (no closer after it, or displaced by a later opener of the same name)
+/// and a stray closer each lose only the tag. Each removed block or tag becomes
+/// one space, so the text on either side stays separate tokens.
+///
+/// Known edges: (1) a body that quotes a tag WITHOUT backticks can pair wrongly
+/// and leak part of that block's text, and nested blocks of the same name leak
+/// the outer block's text; (2) when the next unbackticked tag after an
+/// unbackticked opener with the same name is a closer, the text between them
+/// is removed whoever wrote them (unless the opener already sits inside an
+/// earlier removed block), including when that closer is quoted inside a
+/// different block.
+pub fn strip_harness_blocks(prompt: &str) -> String {
+    let bytes = prompt.as_bytes();
+    let tags: Vec<Tag<'_>> = prompt
+        .match_indices('<')
+        .filter_map(|(start, _)| {
+            let (kind, name, len) = bare_tag(&prompt[start..])?;
+            let end = start + len;
+            let quoted = match kind {
+                TagKind::Open | TagKind::SelfClosing => start > 0 && bytes[start - 1] == b'`',
+                TagKind::Close => bytes.get(end) == Some(&b'`'),
+            };
+            (!quoted).then_some(Tag {
+                start,
+                end,
+                kind,
+                name,
+            })
+        })
+        .collect();
+
+    // block_end[i]: where the block opened by tag i ends. A closer pairs with
+    // the latest unclosed opener of its name; an earlier one it displaced
+    // stays unpaired, so an opener quoted inside a block of its own name closes
+    // no later than that block's closer.
+    let mut block_end: Vec<Option<usize>> = vec![None; tags.len()];
+    let mut open: HashMap<&str, usize> = HashMap::new();
+    for (i, tag) in tags.iter().enumerate() {
+        match tag.kind {
+            TagKind::Open => {
+                open.insert(tag.name, i);
+            }
+            TagKind::Close => {
+                if let Some(o) = open.remove(tag.name) {
+                    block_end[o] = Some(tag.end);
+                }
+            }
+            TagKind::SelfClosing => {}
+        }
+    }
+
+    let mut out = String::with_capacity(prompt.len());
+    let mut pos = 0;
+    for (i, tag) in tags.iter().enumerate() {
+        if tag.start < pos {
+            continue;
+        }
+        out.push_str(&prompt[pos..tag.start]);
+        out.push(' ');
+        pos = match tag.kind {
+            TagKind::Open => block_end[i].unwrap_or(tag.end),
+            TagKind::SelfClosing | TagKind::Close => tag.end,
+        };
+    }
+    out.push_str(&prompt[pos..]);
+    out
+}
+
 /// The one-line fragment for an entry.
 ///
 /// An authored fragment is returned verbatim, however long. Otherwise the
@@ -235,6 +374,9 @@ fn specificity(trigger: &str) -> (usize, usize) {
 /// `fire_counts` the all-time count per pair. Ordering is fewest all-time fires
 /// first, then oldest `ts` — a door nobody has opened yet outranks a familiar
 /// one, so the budget goes to what the reader is least likely to already hold.
+///
+/// Only human text is matched: harness blocks are removed whole first, then
+/// channel tags are stripped down to their body.
 pub fn select(
     prompt: &str,
     candidates: &[TriggeredRef<'_>],
@@ -242,7 +384,7 @@ pub fn select(
     fire_counts: &HashMap<(String, String), u64>,
     budget: usize,
 ) -> Selection {
-    let text = strip_channel_tags(prompt);
+    let text = strip_channel_tags(&strip_harness_blocks(prompt));
     // Stemming OFF: doors are proper nouns, and the English stemmer folds
     // Tagalog "ayos" onto "ayo". Morphology is the enemy here.
     let message_tokens = triggers::tokens(&text, false);
@@ -491,6 +633,534 @@ mod tests {
     fn strip_channel_leaves_ordinary_angle_brackets() {
         let out = strip_channel_tags("if a < b and c > d");
         assert_eq!(out, "if a < b and c > d");
+    }
+
+    // ---- strip_harness_blocks ----
+
+    /// The triggers that opened a door on `prompt`, one candidate per trigger.
+    fn fired_on(prompt: &str, triggers: &[&str]) -> Vec<String> {
+        let owned: Vec<Vec<String>> = triggers.iter().map(|t| vec![t.to_string()]).collect();
+        let cands: Vec<TriggeredRef<'_>> = owned
+            .iter()
+            .enumerate()
+            .map(|(n, t)| TriggeredRef {
+                key: "d",
+                id: triggers[n],
+                value: "v",
+                ts: "2026-01-01T00:00:00Z",
+                triggers: t,
+                fragment: None,
+                memory: None,
+            })
+            .collect();
+        let mut fired: Vec<String> = select(
+            prompt,
+            &cands,
+            &HashSet::new(),
+            &HashMap::new(),
+            triggers.len(),
+        )
+        .fired
+        .into_iter()
+        .map(|f| f.trigger)
+        .collect();
+        fired.sort();
+        fired
+    }
+
+    #[test]
+    fn harness_blocks_are_removed_with_their_body() {
+        for (prompt, gone) in [
+            (
+                "a <task-notification>\n<status>done</status> secret\n</task-notification> b",
+                "secret",
+            ),
+            ("a <system-reminder>secret</system-reminder> b", "secret"),
+            (
+                "a <local-command-stdout>secret</local-command-stdout> b",
+                "secret",
+            ),
+            (
+                "a <local-command-stderr>secret</local-command-stderr> b",
+                "secret",
+            ),
+            (
+                "a <local-command-caveat>secret</local-command-caveat> b",
+                "secret",
+            ),
+        ] {
+            let out = strip_harness_blocks(prompt);
+            assert!(!out.contains(gone), "body must go: {out:?}");
+            assert!(!out.contains('<'), "tags must go: {out:?}");
+            assert_eq!(triggers::tokens(&out, false), vec!["a", "b"], "{out:?}");
+        }
+    }
+
+    #[test]
+    fn trigger_inside_a_harness_block_does_not_fire_but_human_text_does() {
+        let prompt = concat!(
+            "<task-notification>agent quoted widget and gizmo</task-notification>",
+            "<system-reminder>gizmo widget sprocket</system-reminder>",
+            "<local-command-stdout>sprocket</local-command-stdout>",
+            "\nwhat about the widget?"
+        );
+        assert_eq!(
+            fired_on(prompt, &["widget", "gizmo", "sprocket"]),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn tag_name_trigger_does_not_fire_off_the_tag() {
+        assert!(
+            fired_on(
+                "<system-reminder>note</system-reminder> hi",
+                &["system-reminder", "task-notification"]
+            )
+            .is_empty()
+        );
+        // A stray closer and a self-closing tag are tags too.
+        assert!(
+            fired_on(
+                "hi </system-reminder> <system-reminder/>",
+                &["system-reminder"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn near_miss_names_are_not_harness_tags() {
+        let prompt = "<system-reminderz>keep</system-reminderz> <System-Reminder>keep2</System-Reminder> <local-command->keep3</local-command-> <local-command-Stdout>keep4</local-command-Stdout>";
+        let out = strip_harness_blocks(prompt);
+        assert_eq!(out, prompt, "only exact lowercase names are stripped");
+    }
+
+    #[test]
+    fn unclosed_opener_keeps_the_rest_as_text() {
+        let out = strip_harness_blocks("hi <system-reminder oops widget");
+        assert!(out.contains("widget"), "{out:?}");
+        assert_eq!(
+            fired_on("hi <system-reminder oops widget", &["widget"]),
+            vec!["widget"]
+        );
+        // A later real block is still removed.
+        assert_eq!(
+            fired_on(
+                "hi <system-reminder oops widget <system-reminder>gizmo</system-reminder>",
+                &["widget", "gizmo"]
+            ),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn only_bare_tags_are_harness_tags() {
+        for prompt in [
+            "<system-reminder note=\"x\">widget</task-notification-not>",
+            "<system-reminder >widget",
+            "<System-Reminder>widget</System-Reminder>",
+            "<local-command-é>widget</local-command-é>",
+            "<task-notification id=\"1\"/>widget",
+        ] {
+            assert_eq!(strip_harness_blocks(prompt), prompt);
+            assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"], "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn prose_mention_of_a_tag_keeps_the_human_text() {
+        let prompt = "the <system-reminder thing keeps opening keurig -> please fix";
+        assert_eq!(strip_harness_blocks(prompt), prompt);
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn attributed_or_split_openers_are_literal_text() {
+        let prompt = "<system-reminder a=\">\" b=\"<\">widget</system-reminder>\n<task-notification\n  id=\"1\"\n>widget</task-notification> gizmo";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "<system-reminder a=\">\" b=\"<\">widget \n<task-notification\n  id=\"1\"\n>widget  gizmo"
+        );
+        assert_eq!(
+            fired_on(prompt, &["widget", "gizmo"]),
+            vec!["gizmo", "widget"]
+        );
+        assert_eq!(
+            fired_on("<system-\nreminder>widget</system-\nreminder>", &["widget"]),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn opener_with_no_closing_tag_loses_only_the_tag() {
+        let prompt = "<system-reminder>so about the widget";
+        let out = strip_harness_blocks(prompt);
+        assert_eq!(out, " so about the widget");
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn report_quoting_its_own_opener_in_backticks_is_removed_whole() {
+        let prompt = concat!(
+            "<task-notification>\n<status>completed</status>\n",
+            "<result>Ran kv update on keurig, then stripped `<task-notification>` blocks.</result>\n",
+            "</task-notification>\nhi"
+        );
+        assert_eq!(strip_harness_blocks(prompt), " \nhi");
+        assert!(fired_on(prompt, &["keurig"]).is_empty());
+        assert_eq!(fired_on(prompt, &["keurig", "hi"]), vec!["hi"]);
+    }
+
+    #[test]
+    fn unpaired_opener_loses_only_its_tag_between_blocks() {
+        let prompt = "<system-reminder>a <system-reminder>b</system-reminder> widget <system-reminder>c</system-reminder>";
+        assert_eq!(strip_harness_blocks(prompt), " a   widget  ");
+    }
+
+    #[test]
+    fn backtick_quoted_closer_inside_a_report_is_literal() {
+        let prompt =
+            "<task-notification>the `</task-notification>` closer, sprocket</task-notification>";
+        assert_eq!(strip_harness_blocks(prompt), " ");
+        assert!(fired_on(prompt, &["sprocket"]).is_empty());
+    }
+
+    #[test]
+    fn known_edge_unbackticked_quoted_closer_ends_the_block_early() {
+        // Pinned: a body quoting its own closer without backticks ends there,
+        // so the tail leaks. It leaks that block's text only.
+        let prompt =
+            "<task-notification>the </task-notification> closer, sprocket</task-notification>";
+        assert_eq!(strip_harness_blocks(prompt), "  closer, sprocket ");
+        assert_eq!(fired_on(prompt, &["sprocket"]), vec!["sprocket"]);
+    }
+
+    #[test]
+    fn known_edge_human_bare_opener_and_later_bare_closer_remove_the_text_between() {
+        // Pinned: an unbackticked opener and a later unbackticked closer of the
+        // same name, whoever wrote them. Pairing cannot tell this from a
+        // harness block, so the text between goes.
+        let prompt = "my <system-reminder> said keurig, and that </system-reminder> was odd widget";
+        assert_eq!(strip_harness_blocks(prompt), "my   was odd widget");
+        assert_eq!(fired_on(prompt, &["keurig", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn known_edge_closer_quoted_in_another_block_pairs_with_a_human_opener() {
+        // Pinned: cross-name. The human's bare opener pairs with a closer a
+        // system-reminder body quotes, so the text between goes.
+        let prompt = "I typed <task-notification> keurig <system-reminder>quote </task-notification> x</system-reminder>";
+        assert_eq!(strip_harness_blocks(prompt), "I typed   x ");
+        assert!(fired_on(prompt, &["keurig"]).is_empty());
+    }
+
+    #[test]
+    fn unbackticked_quotes_in_two_reports_keep_the_human_between() {
+        let prompt = "<task-notification>r1 stripped <task-notification> blocks</task-notification>\nHUMAN keurig\n<task-notification>r2 the </task-notification> closer</task-notification>";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            " r1 stripped  \nHUMAN keurig\n  closer "
+        );
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn bare_mention_before_a_report_quoting_a_closer_keeps_the_human_text() {
+        let prompt = "I pasted <task-notification> earlier, keurig please <task-notification>report mentions </task-notification> lol</task-notification>";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "I pasted   earlier, keurig please   lol "
+        );
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn human_bare_closer_after_an_unbackticked_report_keeps_the_human_text() {
+        let prompt = "<task-notification>stripped <task-notification> blocks</task-notification>\nkeurig: the </task-notification> closer is weird";
+        assert_eq!(fired_on(prompt, &["keurig"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn backticks_inside_a_real_body_do_not_quote_its_tags() {
+        let prompt = "<local-command-stdout>`widget`</local-command-stdout> gizmo";
+        assert_eq!(strip_harness_blocks(prompt), "  gizmo");
+        assert_eq!(fired_on(prompt, &["widget", "gizmo"]), vec!["gizmo"]);
+    }
+
+    #[test]
+    fn backtick_adjacent_opener_is_literal_and_does_not_pair() {
+        let prompt = "`<system-reminder>` widget</system-reminder> gizmo";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "`<system-reminder>` widget  gizmo"
+        );
+        assert_eq!(
+            fired_on(prompt, &["widget", "gizmo"]),
+            vec!["gizmo", "widget"]
+        );
+    }
+
+    #[test]
+    fn backtick_adjacent_closer_is_literal_and_does_not_pair() {
+        let prompt = "<system-reminder>note `</system-reminder>` widget";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            " note `</system-reminder>` widget"
+        );
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn backtick_adjacent_self_closing_is_literal() {
+        let prompt = "`<system-reminder/>` widget `<local-command-caveat/>`";
+        assert_eq!(strip_harness_blocks(prompt), prompt);
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn human_bare_opener_before_a_real_block_keeps_the_human_text() {
+        // Poppy P4.
+        let prompt = "why does <system-reminder> keep firing keurig\n<system-reminder>harness note</system-reminder>";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "why does   keep firing keurig\n "
+        );
+        assert_eq!(fired_on(prompt, &["keurig", "harness"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn quoted_opener_and_quoted_closer_in_two_reports_keep_the_human_between() {
+        // Poppy P5.
+        let prompt = concat!(
+            "<task-notification>r1 stripped `<task-notification>` blocks</task-notification>",
+            "\nHUMAN keurig\n",
+            "<task-notification>r2 the `</task-notification>` closer</task-notification>"
+        );
+        assert_eq!(strip_harness_blocks(prompt), " \nHUMAN keurig\n ");
+        assert_eq!(
+            fired_on(prompt, &["keurig", "stripped", "closer"]),
+            vec!["keurig"]
+        );
+    }
+
+    #[test]
+    fn human_bare_closer_after_a_report_loses_only_the_tag() {
+        // Poppy P6.
+        let prompt = "<task-notification>stripped `<task-notification>` blocks</task-notification>\nkeurig: the </task-notification> closer is weird";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            " \nkeurig: the   closer is weird"
+        );
+        assert_eq!(fired_on(prompt, &["keurig", "stripped"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn backticked_mention_before_a_real_block_keeps_the_human_text() {
+        // Diffi F6.
+        let prompt = "why does `<system-reminder>` keep firing keurig? <system-reminder>harness note</system-reminder>";
+        let out = strip_harness_blocks(prompt);
+        assert!(out.contains("keep firing keurig"), "{out:?}");
+        assert!(!out.contains("harness note"), "{out:?}");
+        assert_eq!(fired_on(prompt, &["keurig", "harness"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn bare_mention_before_a_real_block_keeps_the_human_text() {
+        // Diffi F6.
+        let prompt = "I pasted <task-notification> earlier, keurig please <task-notification>report</task-notification>";
+        let out = strip_harness_blocks(prompt);
+        assert!(out.contains("keurig please"), "{out:?}");
+        assert!(!out.contains("report"), "{out:?}");
+        assert_eq!(fired_on(prompt, &["keurig", "report"]), vec!["keurig"]);
+    }
+
+    #[test]
+    fn stray_closer_is_removed_and_text_survives() {
+        let prompt = "the widget</task-notification>works";
+        assert_eq!(strip_harness_blocks(prompt), "the widget works");
+        assert_eq!(
+            fired_on(prompt, &["widget", "works"]),
+            vec!["widget", "works"]
+        );
+    }
+
+    #[test]
+    fn self_closing_tag_is_removed_alone() {
+        let prompt = "the<system-reminder/>widget <local-command-caveat/>works";
+        assert_eq!(strip_harness_blocks(prompt), "the widget  works");
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn self_closing_tag_does_not_open_a_block() {
+        let prompt = "<system-reminder/> widget </system-reminder> gizmo";
+        assert_eq!(strip_harness_blocks(prompt), "  widget   gizmo");
+        assert_eq!(
+            fired_on(prompt, &["widget", "gizmo"]),
+            vec!["gizmo", "widget"]
+        );
+    }
+
+    #[test]
+    fn known_edge_nested_same_name_leaks_the_outer_text() {
+        // Pinned: the inner opener displaces the outer one, so only the inner
+        // block goes and the outer block's own text leaks. Agent text only.
+        let prompt =
+            "<system-reminder>a<system-reminder>b</system-reminder>c</system-reminder> widget";
+        assert_eq!(strip_harness_blocks(prompt), " a c  widget");
+        assert!(fired_on(prompt, &["b"]).is_empty());
+    }
+
+    #[test]
+    fn nested_different_name_goes_with_the_outer_body() {
+        let prompt = concat!(
+            "<task-notification>report <system-reminder>inner</system-reminder> ",
+            "<local-command-stdout>echo</local-command-stdout> tail</task-notification> widget"
+        );
+        assert_eq!(strip_harness_blocks(prompt), "  widget");
+        assert_eq!(
+            fired_on(prompt, &["widget", "inner", "echo", "tail"]),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn adjacent_blocks_each_go() {
+        let prompt = "<system-reminder>a</system-reminder><system-reminder>b</system-reminder><task-notification>c</task-notification>widget";
+        assert_eq!(strip_harness_blocks(prompt), "   widget");
+    }
+
+    #[test]
+    fn removed_block_leaves_a_token_boundary() {
+        let out = strip_harness_blocks("foo<system-reminder>x</system-reminder>bar");
+        assert_eq!(out, "foo bar");
+        assert_eq!(triggers::tokens(&out, false), vec!["foo", "bar"]);
+        assert!(fired_on("foo<system-reminder>x</system-reminder>bar", &["foobar"]).is_empty());
+    }
+
+    #[test]
+    fn mismatched_local_command_close_does_not_swallow_the_turn() {
+        let prompt = "<local-command-stdout>out</local-command-stderr> widget";
+        assert_eq!(strip_harness_blocks(prompt), " out  widget");
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn deep_nesting_balanced() {
+        let n = 5_000;
+        let prompt = format!(
+            "{}widget{} gizmo",
+            "<system-reminder>".repeat(n),
+            "</system-reminder>".repeat(n)
+        );
+        assert_eq!(fired_on(&prompt, &["widget", "gizmo"]), vec!["gizmo"]);
+    }
+
+    #[test]
+    fn multibyte_hugging_tags() {
+        let prompt = "é<system-reminder>🦊</system-reminder>ß<local-command-stdout>\u{200b}</local-command-stdout>🦊widget";
+        assert_eq!(strip_harness_blocks(prompt), "é ß 🦊widget");
+        assert_eq!(fired_on(prompt, &["widget"]), vec!["widget"]);
+        for literal in [
+            "<system-reminder",
+            "<system-reminder/",
+            "<local-command-",
+            "",
+        ] {
+            assert_eq!(strip_harness_blocks(literal), literal);
+        }
+        assert!(
+            fired_on(
+                "<system-reminder>widget</system-reminder><task-notification>widget</task-notification>",
+                &["widget"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn fuzz_multibyte_around_tags_never_panics() {
+        const PIECES: [&str; 22] = [
+            "<",
+            "</",
+            ">",
+            "/>",
+            "\"",
+            " ",
+            "\n",
+            "x",
+            "é",
+            "🦊",
+            "\u{200b}",
+            "ß",
+            "system-reminder",
+            "task-notification",
+            "local-command-stdout",
+            "local-command-",
+            "local-command-é",
+            "<system-reminder",
+            "</system-reminder>",
+            "<channel",
+            "</channel>",
+            "<task-notification>",
+        ];
+        let mut seed: u64 = 0x5eed_b0bb;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for _ in 0..20_000 {
+            let len = next() % 24;
+            let s: String = (0..len)
+                .map(|_| PIECES[(next() % PIECES.len() as u64) as usize])
+                .collect();
+            let _ = strip_channel_tags(&strip_harness_blocks(&s));
+            let _ = fired_on(&s, &["x", "system-reminder"]);
+        }
+    }
+
+    #[test]
+    fn many_unbalanced_openers_stay_linear() {
+        use std::time::{Duration, Instant};
+        for unit in ["<system-reminder>x ", "<local-command-stdout>x "] {
+            let prompt = format!("{} widget", unit.repeat(60_000));
+            let t = Instant::now();
+            let out = strip_harness_blocks(&prompt);
+            let took = t.elapsed();
+            assert!(out.ends_with(" widget"));
+            assert!(
+                took < Duration::from_millis(500),
+                "{} KB of {unit:?} took {took:?}",
+                prompt.len() / 1024
+            );
+        }
+    }
+
+    #[test]
+    fn channel_body_still_fires_next_to_a_harness_block() {
+        assert_eq!(fired_on(CHANNEL, &["widget", "tester"]), vec!["widget"]);
+        let prompt = format!(
+            "<system-reminder>gizmo tester</system-reminder>{CHANNEL}<task-notification>gizmo</task-notification>"
+        );
+        assert_eq!(
+            fired_on(&prompt, &["widget", "gizmo", "tester"]),
+            vec!["widget"]
+        );
+    }
+
+    #[test]
+    fn harness_blocks_are_stripped_before_channel_tags() {
+        let prompt = concat!(
+            "<system-reminder>quoted <channel oops</system-reminder>",
+            r#"<channel source="matrix" user="tester">widget</channel>"#
+        );
+        assert_eq!(
+            fired_on(prompt, &["widget", "quoted", "tester"]),
+            vec!["widget"]
+        );
     }
 
     // ---- fragment derivation ----
