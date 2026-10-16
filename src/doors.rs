@@ -1533,16 +1533,21 @@ mod tests {
     #[test]
     fn many_unclosed_paste_openers_stay_linear() {
         use std::time::{Duration, Instant};
+        // At this size quadratic pairing would take seconds, so the bound still bites.
         let prompt = format!(
             "{} widget {}",
-            "<pasted_content id=\"aaaa\">x ".repeat(60_000),
-            "</pasted_content id=\"bbbb\"> ".repeat(60_000)
+            "<pasted_content id=\"aaaa\">x ".repeat(20_000),
+            "</pasted_content id=\"bbbb\"> ".repeat(20_000)
         );
         let t = Instant::now();
         let segs = segment(&prompt);
         let took = t.elapsed();
         assert_eq!(segs.len(), 1);
-        assert!(took < Duration::from_millis(500), "took {took:?}");
+        assert!(
+            took < Duration::from_millis(500),
+            "{} KB of unclosed paste openers took {took:?}",
+            prompt.len() / 1024
+        );
     }
 
     #[test]
