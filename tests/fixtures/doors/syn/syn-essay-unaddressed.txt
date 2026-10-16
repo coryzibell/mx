@@ -1,0 +1,5 @@
+I learned to trust my first build server the night it failed for the fortieth time. It failed at the same step, with the same message, and by then I could read that message the way you read a friend's face across a room. Nothing about it was clever. It simply told the truth about where it hurt, and it told it the same way every time.
+
+I have been thinking about that machine because the tools I use now almost never fail like that. They fail politely. They return something plausible, and the plausible thing is wrong in a way that takes an afternoon to notice. I do not think this is a small change. A tool that fails loudly teaches you its shape; a tool that fails politely teaches you nothing, except to stop looking.
+
+What I want to argue here is that legibility of failure is the real precondition for trust, more than accuracy and more than speed. I am not sure yet that I can make that argument hold for people as well as for machines, but I suspect it does, and I suspect that is the more interesting half.
