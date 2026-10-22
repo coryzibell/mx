@@ -193,10 +193,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   A ForeignProse paste is quarantined: no door matches in it. Ours, Unsure
   and pastes under 600 characters behave exactly as before. Known false
   positive: a long first-person essay that never names us reads as foreign.
-- **Typed text and Matrix bodies are never classified.** They are not
-  classified at all and fire exactly as before, however long (in
-  `book:<slug>` mode typed text routes to the book; see Routing by mode). A
-  short paste that arrives untagged counts as typed text.
+- **Typed text and Matrix bodies are never classified.** However long, they
+  fire exactly as before (in `book:<slug>` mode typed text routes to the
+  book; see Routing by mode). A short paste that arrives untagged counts as
+  typed text.
 - **A door matching in several segments fires once**, with the most specific
   trigger across them (ties go to the earlier segment). Held doors are never
   fired, never recorded and never spend the budget.
