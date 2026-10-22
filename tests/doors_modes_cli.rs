@@ -229,6 +229,8 @@ fn scope_rejects_bad_values_and_writes_nothing() {
         "book:x@0",
         "book:x@",
         "book:x@abc",
+        "book:x@01",
+        "book:x@99999999999999999999",
     ] {
         let out = mx(
             &dir,
@@ -384,6 +386,53 @@ fn kv_triggers_shows_and_filters_scope() {
         "{pinned}"
     );
 
+    let at5 = push(
+        &dir,
+        "at5",
+        &["--trigger", "sprocket", "--scope", "book:walden@5"],
+    );
+    let bare = push(
+        &dir,
+        "bare",
+        &["--trigger", "cog", "--scope", "book:walden"],
+    );
+    let other = push(
+        &dir,
+        "other",
+        &["--trigger", "pin", "--scope", "book:prince@3"],
+    );
+    let filter = |s: &str| ok(&mx(&dir, &["kv", "triggers", "--scope", s]), "filter");
+    let walden = filter("book:walden");
+    for id in [&book, &at5, &bare] {
+        assert!(walden.contains(id.as_str()), "{walden}");
+    }
+    assert!(
+        !walden.contains(&plain) && !walden.contains(&other),
+        "{walden}"
+    );
+    let at3 = filter("book:walden@3");
+    assert!(at3.contains(&book), "{at3}");
+    for id in [&at5, &bare, &other, &plain] {
+        assert!(!at3.contains(id.as_str()), "exact: {at3}");
+    }
+    assert!(
+        !filter("book:wal").contains(&book),
+        "a slug prefix is another book"
+    );
+
+    let out = mx(&dir, &["kv", "triggers", "--scope", "banana"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert!(stderr(&out).contains("\"banana\""), "{}", stderr(&out));
+    let out = mx(&dir, &["kv", "triggers", "--scope", "book:x@01"]);
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    let out = mx(&dir, &["kv", "triggers", "--scope", "book:liberty"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        stderr(&out).trim(),
+        "no triggered entries match --scope book:liberty"
+    );
+
     let json: Vec<serde_json::Value> =
         serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "--json"]), "json")).unwrap();
     let by_id = |id: &str| json.iter().find(|r| r["id"] == id).unwrap().clone();
@@ -410,7 +459,7 @@ fn mode_needs_a_session_and_good_syntax() {
     );
     assert_eq!(out.status.code(), Some(1));
 
-    for bad in ["book", "book:Walden", "book:x@0", "pinned"] {
+    for bad in ["book", "book:Walden", "book:x@0", "book:x@01", "pinned"] {
         let out = mx(&dir, &["doors", "mode", bad, "--session", "s"]);
         assert_eq!(out.status.code(), Some(2), "{bad}");
     }
@@ -497,13 +546,37 @@ fn book_mode_fires_a_book_door_on_the_paste_and_records_its_place() {
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0]["data"]["entry"], wal.as_str());
     assert_eq!(fired[0]["data"]["place"], "book:walden");
-    // One foreign_paste row, after the mode row.
+    // The mode row is under an hour old: no foreign_paste row yet.
     let s = rows(&dir, "doors_session");
+    assert_eq!(s[0]["value"], "mode");
+}
+
+#[test]
+fn foreign_paste_row_is_written_at_most_once_an_hour() {
+    let dir = setup();
+    set_mode(&dir, "s1", "book:walden");
+    let prompt = with_paste("look", WALDEN);
+    let session_rows = |dir: &TempDir| rows(dir, "doors_session");
+
+    hook(&dir, "s1", &prompt, &[]);
+    assert_eq!(session_rows(&dir).len(), 1, "mode row just now: skipped");
+
+    backdate_latest_session_row(&dir, chrono::Duration::minutes(59));
+    hook(&dir, "s1", &prompt, &[]);
+    assert_eq!(session_rows(&dir).len(), 1, "59 minutes: skipped");
+
+    backdate_latest_session_row(&dir, chrono::Duration::minutes(61));
+    hook(&dir, "s1", &prompt, &[]);
+    let s = session_rows(&dir);
+    assert_eq!(s.len(), 2, "an hour: written");
     assert_eq!(s[0]["value"], "foreign_paste");
     assert_eq!(
         s[0]["data"],
         serde_json::json!({"session": "s1", "event": "foreign_paste"})
     );
+
+    hook(&dir, "s1", &prompt, &[]);
+    assert_eq!(session_rows(&dir).len(), 2, "the new row restarts the hour");
 }
 
 #[test]
@@ -595,10 +668,11 @@ fn ours_mode_prints_no_hints() {
     assert!(hint_lines(&hook(&dir, "s1", &with_paste("x", WALDEN), &[])).is_empty());
 }
 
-/// Push a mode row `hours` in the past by rewriting its ts in the data file.
-fn backdate_latest_mode_row(dir: &TempDir, hours: i64) -> String {
+/// Push the latest session row `age` into the past by rewriting its ts in the
+/// data file.
+fn backdate_latest_session_row(dir: &TempDir, age: chrono::Duration) -> String {
     let mut d = data(dir);
-    let ts = (chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339();
+    let ts = (chrono::Utc::now() - age).to_rfc3339();
     d["doors_session"]["entries"][0]["ts"] = ts.clone().into();
     std::fs::write(data_path(dir), serde_json::to_string(&d).unwrap()).unwrap();
     ts
@@ -608,7 +682,7 @@ fn backdate_latest_mode_row(dir: &TempDir, hours: i64) -> String {
 fn stale_hint_after_six_quiet_hours_with_a_paste() {
     let dir = setup();
     set_mode(&dir, "s1", "book:prince");
-    let ts = backdate_latest_mode_row(&dir, 7);
+    let ts = backdate_latest_session_row(&dir, chrono::Duration::hours(7));
     let hhmm = chrono::DateTime::parse_from_rfc3339(&ts)
         .unwrap()
         .with_timezone(&chrono::Local)
@@ -683,7 +757,7 @@ fn dry_run_prints_hints_and_writes_nothing() {
         "A pond.",
         &["--trigger", "fair haven", "--scope", "book:walden"],
     );
-    backdate_latest_mode_row(&dir, 8);
+    backdate_latest_session_row(&dir, chrono::Duration::hours(8));
     let before = std::fs::read_to_string(data_path(&dir)).unwrap();
     let out = hook(&dir, "s1", &with_paste("x", WALDEN), &["--dry-run"]);
     assert!(out.starts_with("\u{1f6aa} fair haven"), "{out}");
@@ -794,8 +868,10 @@ fn check_mode_and_explain_report_the_mode_and_its_source() {
     assert_eq!(json["segments"][1]["places"], serde_json::json!(["house"]));
     assert_eq!(json["hints"], serde_json::json!([]));
 
-    let out = mx(&dir, &["doors", "check", "x", "--mode", "book:"]);
-    assert_eq!(out.status.code(), Some(2));
+    for bad in ["book:", "book:walden@01"] {
+        let out = mx(&dir, &["doors", "check", "x", "--mode", bad]);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+    }
 }
 
 #[test]

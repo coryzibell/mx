@@ -26,6 +26,16 @@ fn exit_code_for(err: &KvError) -> Option<i32> {
     }
 }
 
+/// Whether scope value `v` passes the `kv triggers --scope want` filter. A
+/// position-less book filter takes the book at every position; any other
+/// filter matches exactly.
+fn scope_filter_matches(want: &str, v: &str) -> bool {
+    v == want
+        || (want.starts_with("book:")
+            && !want.contains('@')
+            && v.strip_prefix(want).is_some_and(|r| r.starts_with('@')))
+}
+
 /// Handle a KvError: print to stderr and return exit code, or propagate as anyhow.
 fn handle_kv_err(err: KvError) -> Result<i32> {
     match exit_code_for(&err) {
@@ -1182,6 +1192,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
         }
 
         KvCommands::Triggers { key, scope, json } => {
+            if let Some(want) = scope.as_deref()
+                && let Err(why) = crate::doors::ScopeValue::parse(want)
+            {
+                return handle_kv_err(KvError::DataValidation {
+                    message: format!("--scope {want:?} {why}."),
+                });
+            }
             // Fire counts come from the doors fire log. Its absence is normal
             // (nothing has fired yet), so a missing key means zero, not an error.
             let mut fires: std::collections::HashMap<(String, String), u64> =
@@ -1206,7 +1223,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 .filter(|c| key.as_deref().is_none_or(|k| k == c.key))
                 .filter(|c| {
                     scope.as_deref().is_none_or(|want| match c.scope {
-                        Some(list) => list.iter().any(|v| v == want),
+                        Some(list) => list.iter().any(|v| scope_filter_matches(want, v)),
                         None => want == "house",
                     })
                 })
@@ -1247,7 +1264,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
 
             if rows.is_empty() {
-                eprintln!("No entries carry triggers");
+                match scope.as_deref() {
+                    Some(want) => eprintln!("no triggered entries match --scope {want}"),
+                    None => eprintln!("No entries carry triggers"),
+                }
                 return Ok(kv::EXIT_OK);
             }
             let mut current = "";

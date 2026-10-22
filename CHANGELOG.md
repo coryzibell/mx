@@ -14,7 +14,7 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **`--scope` on `mx kv push` and `mx kv update`** (repeatable) says where a
   door may fire. Values: `house`, `pinned`, `book:<slug>` and
   `book:<slug>@<n>` (slug `[a-z0-9][a-z0-9-]*`, n a whole number of 1 or
-  more). It is a typed entry field next to `triggers` and `fragment`, not part
+  more with no leading zero). It is a typed entry field next to `triggers` and `fragment`, not part
   of `data`. On `update` it replaces the whole list; `--scope ""` clears it,
   and `--scope` on its own is a complete update. Duplicates are dropped, order
   kept. Anything else exits `4`, names the bad value, and writes nothing;
@@ -28,8 +28,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   safety and health facts.
 - **`mx kv triggers` shows `[scope: …]`** on the line of a scoped entry;
   unscoped lines are unchanged. `--scope S` lists only entries whose scope
-  holds S (no scope counts as `house`), and `--json` carries `"scope"` when
-  one is set.
+  holds S (no scope counts as `house`); `book:<slug>` with no position also
+  takes `book:<slug>@<n>` at every n. A bad S exits `4` like `push`, and a
+  good one that matches nothing says `no triggered entries match --scope S`.
+  `--json` carries `"scope"` when one is set.
 - **`mx doors mode`** prints the session's mode (`book:walden@3, since <ts>,
   set by <agent>`, or `house, never set`); `mx doors mode house | ours |
   book:<slug>[@n]` writes a mode row and prints the new mode. The session is
@@ -68,8 +70,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   and no mode or foreign-paste row for 6 hours). A hint is recorded before it
   prints, and one that cannot be recorded does not print. A prompt that opens
   no door still gets its hint. In book mode a prompt with a ForeignProse paste
-  also writes one `foreign_paste` row. `--dry-run` prints and writes nothing.
+  also writes one `foreign_paste` row, unless the session's latest mode or
+  `foreign_paste` row is under an hour old (the row only feeds the stale
+  timer). `--dry-run` prints and writes nothing.
   The hook still loads the store once and saves at most once per prompt.
+- **`doors_session` is shared by all sessions and capped at its
+  `max_entries`**, so a session's mode row can age out, and then that session
+  reads as house.
 - **Without `doors_session` in the schema nothing changes**: the hook reads
   `house`, writes no session rows, prints no hints and fires doors as before;
   `mx doors mode <x>` exits `1` and prints the schema to add.
@@ -79,8 +86,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **`mx doors check --mode M`** evaluates under M instead of the session's
   mode and writes nothing to `doors_session`. `--explain` now starts with
   `mode <mode> (--mode | session | default)`, prints each segment's places
-  (`{house}`, `{book:walden}`, `∅ (quarantined)`), each door's place and pool,
-  and `hint: <kind>` for any hint the hook would print (never recorded).
+  (`{house}`, `{book:walden}`, `∅ (quarantined)`), each door's place and pool
+  (`-` for a held door), and `hint: <kind>` for any hint the hook would print
+  (never recorded).
   `--json` carries `mode`, `mode_source`, `places`, `place`, `pool` and
   `hints`. `check` without `--explain` never hints.
 - **Schema to add** for modes, hints and `place` on fire rows:
@@ -119,10 +127,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 ### Changed — `mx doors` drops harness notification preambles
 
 - **A `[SYSTEM NOTIFICATION …]` header line and the prose under it no longer
-  open doors.** The header must start its line and close its `]` on the same
-  line; the line and the lines after it go, up to the first blank line or the
-  first harness block opener. A mention mid-sentence is left alone, and a
-  preamble never reaches past the next blank line. Harness blocks are then
+  open doors.** The header is a whole line: trimmed, it starts with
+  `[SYSTEM NOTIFICATION` followed by a space, `-` or `]`, ends with `]`, and
+  holds no `<`. The line and the lines after it go, up to the first blank line
+  or the first line holding a `<`, so a paste or block closer is never eaten.
+  A mention mid-sentence is left alone, and a preamble never reaches past the
+  next blank line. Harness blocks are then
   stripped as before.
 
 ### Added — `mx kv update --memory` (#480)

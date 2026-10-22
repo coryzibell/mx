@@ -31,14 +31,28 @@ impl Book {
         }
         let at = match at {
             None => None,
-            Some(n) => match n.parse::<u32>() {
-                Ok(v) if v >= 1 && n.bytes().all(|b| b.is_ascii_digit()) => Some(v),
-                _ => {
+            Some(n) => {
+                let digits = !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit());
+                if !digits || n.bytes().all(|b| b == b'0') {
                     return Err(format!(
                         "has position {n:?}; the part after '@' is a whole number of 1 or more"
                     ));
                 }
-            },
+                if n.starts_with('0') {
+                    return Err(format!(
+                        "has position {n:?}; write the position without leading zeros"
+                    ));
+                }
+                match n.parse::<u32>() {
+                    Ok(v) => Some(v),
+                    Err(_) => {
+                        return Err(format!(
+                            "has position {n:?}, which is too large; the most is {}",
+                            u32::MAX
+                        ));
+                    }
+                }
+            }
         };
         Ok(Book {
             slug: slug.to_string(),
@@ -293,6 +307,20 @@ mod tests {
             let e = ScopeValue::parse(later).unwrap_err();
             assert!(e.contains("later phase"), "{e}");
         }
+    }
+
+    #[test]
+    fn ordinals_refuse_leading_zeros_and_name_overflow() {
+        for bad in ["book:x@01", "book:x@007", "book:x@00"] {
+            assert!(ScopeValue::parse(bad).is_err(), "{bad:?}");
+            assert!(Mode::parse(bad).is_err(), "{bad:?}");
+        }
+        let e = ScopeValue::parse("book:x@01").unwrap_err();
+        assert!(e.contains("leading zeros"), "{e}");
+        let e = ScopeValue::parse("book:x@99999999999999999999").unwrap_err();
+        assert!(e.contains("too large") && !e.contains("1 or more"), "{e}");
+        assert!(ScopeValue::parse("book:x@4294967295").is_ok());
+        assert!(ScopeValue::parse("book:x@10").is_ok());
     }
 
     #[test]

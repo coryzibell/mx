@@ -225,27 +225,23 @@ fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
 
 const PREAMBLE_HEADER: &str = "[SYSTEM NOTIFICATION";
 
-/// A line that is a whole `[SYSTEM NOTIFICATION ...]` header: it starts the
-/// line (after indentation) and closes on it. A mention mid-sentence is not one.
+/// A line that is a whole `[SYSTEM NOTIFICATION ...]` header: trimmed, it is
+/// `[SYSTEM NOTIFICATION` followed by a space, `-` or `]`, it ends with `]`,
+/// and it holds no `<`. A mention mid-sentence or with text after it is not one.
 fn is_preamble_header(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix(PREAMBLE_HEADER)
-        .is_some_and(|rest| rest.contains(']'))
-}
-
-/// Whether `line` begins (after indentation) with a harness block tag.
-fn opens_harness_block(line: &str) -> bool {
-    line.trim_start()
-        .strip_prefix('<')
-        .and_then(harness_name)
-        .is_some()
+    let line = line.trim();
+    line.ends_with(']')
+        && !line.contains('<')
+        && line
+            .strip_prefix(PREAMBLE_HEADER)
+            .is_some_and(|rest| rest.starts_with([' ', '-', ']']))
 }
 
 /// Drop each notification preamble: its header line and the prose under it,
-/// up to the first blank line or harness block opener. The harness writes
-/// these above a `<task-notification>`; the human never typed them. A preamble
-/// with no blank line under it ends with its paragraph, so it can never reach
-/// past the next blank line.
+/// up to the first blank line or line holding a `<`. The harness writes these
+/// above a `<task-notification>`; the human never typed them. A preamble with
+/// no blank line under it ends with its paragraph, so it can never reach past
+/// the next blank line, and it never eats a tag line such as a paste closer.
 fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
     if !prompt.contains(PREAMBLE_HEADER) {
         return std::borrow::Cow::Borrowed(prompt);
@@ -258,7 +254,7 @@ fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
             continue;
         }
         while lines
-            .next_if(|l| !l.trim().is_empty() && !opens_harness_block(l))
+            .next_if(|l| !l.trim().is_empty() && !l.contains('<'))
             .is_some()
         {}
     }
@@ -2870,5 +2866,59 @@ mod tests {
         let prompt =
             "[SYSTEM NOTIFICATION]\ngizmo\n<system-reminder>gizmo</system-reminder>\nwidget";
         assert_eq!(fired_on(prompt, &["gizmo", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn preamble_at_the_end_of_a_paste_keeps_the_closer() {
+        let body = format!("{WALDEN}\n\n[SYSTEM NOTIFICATION - copied log]\nwidget sprocket");
+        let prompt = format!("{}\n\n gizmo", paste("aaaa", &body));
+        let doors = [
+            door("fh", "fair haven", &[]),
+            door("wi", "widget", &[]),
+            door("gz", "gizmo", &[]),
+        ];
+        let ex = explain_mode(&prompt, "house", &doors, &HashMap::new(), 3);
+        let p = ex
+            .segments
+            .iter()
+            .find(|s| s.origin == Origin::Paste)
+            .expect("the paste survives the strip");
+        assert_eq!(
+            p.classified.as_ref().map(|c| c.verdict),
+            Some(Verdict::ForeignProse)
+        );
+        assert!(p.places.is_empty(), "quarantined in house mode");
+        assert_eq!(fired_ids(&prompt, "house", &doors, 3), vec!["gz"]);
+    }
+
+    #[test]
+    fn preamble_at_the_end_of_a_harness_block_keeps_its_closer() {
+        let prompt = concat!(
+            "<task-notification>\nreport gizmo\n\n",
+            "[SYSTEM NOTIFICATION - X]\ngizmo more\n",
+            "</task-notification>\nthe widget"
+        );
+        assert_eq!(fired_on(prompt, &["gizmo", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn preamble_header_shape_is_exact() {
+        let trig = ["lighthouse keeper"];
+        for prompt in [
+            "[SYSTEM NOTIFICATIONs suck] lighthouse keeper",
+            "[SYSTEM NOTIFICATIONs suck]\nlighthouse keeper",
+            "[SYSTEM NOTIFICATION] then text\nlighthouse keeper",
+            "[SYSTEM NOTIFICATION - <x>]\nlighthouse keeper",
+        ] {
+            assert_eq!(strip_harness_blocks(prompt), prompt, "{prompt:?}");
+            assert_eq!(fired_on(prompt, &trig), vec!["lighthouse keeper"]);
+        }
+        for prompt in [
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\nlighthouse keeper",
+            "  [SYSTEM NOTIFICATION]  \nlighthouse keeper",
+            "[SYSTEM NOTIFICATION-x]\nlighthouse keeper",
+        ] {
+            assert!(fired_on(prompt, &trig).is_empty(), "{prompt:?}");
+        }
     }
 }

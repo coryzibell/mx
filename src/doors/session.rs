@@ -15,6 +15,9 @@ pub const SESSION_KEY: &str = "doors_session";
 /// stale hint asks whether the reading is over.
 const STALE_AFTER_HOURS: i64 = 6;
 
+/// The least time between two `foreign_paste` writes of one session.
+const FOREIGN_PASTE_EVERY_HOURS: i64 = 1;
+
 /// One `doors_session` row of the session being evaluated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRow {
@@ -111,11 +114,20 @@ fn verdict_of(s: &Segment) -> Option<Verdict> {
     s.classified.as_ref().map(|c| c.verdict)
 }
 
-/// Whether this prompt earns a `foreign_paste` row: book mode and at least one
-/// paste reading as someone else's prose.
-pub fn foreign_paste(segments: &[Segment], mode: &Mode) -> bool {
-    matches!(mode, Mode::Book(_))
+/// Whether this prompt earns a `foreign_paste` row: book mode, at least one
+/// paste reading as someone else's prose, and no mode or foreign-paste row in
+/// the last hour. The row only feeds the stale timer, which stays accurate to
+/// the hour, so most paste prompts skip the write.
+pub fn foreign_paste(segments: &[Segment], state: &SessionState, now: DateTime<Utc>) -> bool {
+    matches!(state.mode, Mode::Book(_))
+        && !state.last_activity.as_deref().is_some_and(|ts| {
+            younger_than(ts, now, chrono::Duration::hours(FOREIGN_PASTE_EVERY_HOURS))
+        })
         && pastes(segments).any(|s| verdict_of(s) == Some(Verdict::ForeignProse))
+}
+
+fn younger_than(ts: &str, now: DateTime<Utc>, age: chrono::Duration) -> bool {
+    DateTime::parse_from_rfc3339(ts).is_ok_and(|t| now - t.with_timezone(&Utc) < age)
 }
 
 fn older_than_stale(ts: &str, now: DateTime<Utc>) -> bool {
@@ -247,5 +259,49 @@ mod tests {
         );
         assert_eq!(st.hinted, vec![HintKind::Ours], "stale was a past epoch");
         assert_eq!(st.last_activity.as_deref(), Some("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn foreign_paste_row_is_written_at_most_hourly() {
+        use crate::doors::classify::Classified;
+        use crate::doors::route::Places;
+        let seg = Segment {
+            origin: Origin::Paste,
+            text: String::new(),
+            classified: Some(Classified {
+                verdict: Verdict::ForeignProse,
+                f: 0,
+                o: 0,
+                signals: Vec::new(),
+                gated: false,
+            }),
+            places: Places::none(),
+        };
+        let now = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let book = |last: Option<&str>| SessionState {
+            mode: Mode::parse("book:walden").unwrap(),
+            last_activity: last.map(str::to_string),
+            ..Default::default()
+        };
+        let segs = std::slice::from_ref(&seg);
+        assert!(!foreign_paste(
+            segs,
+            &book(Some("2026-01-01T11:01:00Z")),
+            now
+        ));
+        assert!(foreign_paste(
+            segs,
+            &book(Some("2026-01-01T11:00:00Z")),
+            now
+        ));
+        assert!(foreign_paste(
+            segs,
+            &book(Some("2026-01-01T10:59:00Z")),
+            now
+        ));
+        assert!(foreign_paste(segs, &book(None), now));
+        assert!(!foreign_paste(segs, &SessionState::default(), now), "house");
     }
 }

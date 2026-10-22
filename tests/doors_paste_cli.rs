@@ -263,7 +263,7 @@ fn explain_shows_segments_verdicts_and_held_doors_without_recording() {
     );
     assert_eq!(
         lines[4],
-        format!("fair haven  facts/kv-{haven}  HELD  seg 2  place -  pool house")
+        format!("fair haven  facts/kv-{haven}  HELD  seg 2  place -  pool -")
     );
 
     assert!(fire_rows(&dir).is_empty(), "--explain implies --dry-run");

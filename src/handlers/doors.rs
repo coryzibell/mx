@@ -315,10 +315,11 @@ fn hook(dry_run: bool, budget: usize) {
         doors::route,
     );
     let fired = ex.selection().fired;
+    let now = Utc::now();
     let (hints, mark_foreign) = if tracked {
         (
-            doors::hints(&ex.segments, &state.mode, &state, Utc::now()),
-            doors::foreign_paste(&ex.segments, &state.mode),
+            doors::hints(&ex.segments, &state.mode, &state, now),
+            doors::foreign_paste(&ex.segments, &state, now),
         )
     } else {
         (Vec::new(), false)
@@ -452,6 +453,11 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
         } else {
             &d.door.place
         };
+        let pool = if d.status == doors::DoorStatus::Held {
+            "-"
+        } else {
+            d.pool.label()
+        };
         println!(
             "{}  {}/kv-{}  {}  seg {}  place {}  pool {}",
             d.door.trigger,
@@ -460,7 +466,7 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
             d.status.label(),
             d.segment,
             place,
-            d.pool.label()
+            pool
         );
     }
     for h in hints {
