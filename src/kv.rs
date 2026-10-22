@@ -405,7 +405,7 @@ pub enum DataValue {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum RawListItem {
-    Entry(ListEntry),
+    Entry(Box<ListEntry>),
     Bare(String),
 }
 
@@ -476,7 +476,7 @@ impl<'de> Deserialize<'de> for DataValue {
                             if e.index >= next_idx {
                                 next_idx = e.index + 1;
                             }
-                            e
+                            *e
                         }
                         RawListItem::Bare(s) => {
                             next_idx += 1;
@@ -489,6 +489,7 @@ impl<'de> Deserialize<'de> for DataValue {
                                 memory: None,
                                 triggers: None,
                                 fragment: None,
+                                scope: None,
                             }
                         }
                     })
@@ -518,6 +519,10 @@ pub struct HistoryEntry {
     pub triggers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
+    /// Where this door may fire. Absent means `["house"]`; see
+    /// `validate_scope` for the accepted values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -536,6 +541,10 @@ pub struct ListEntry {
     pub triggers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<String>,
+    /// Where this door may fire. Absent means `["house"]`; see
+    /// `validate_scope` for the accepted values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Vec<String>>,
 }
 
 /// Optional attachments carried by a pushed entry.
@@ -550,12 +559,14 @@ pub struct EntryAttrs {
     pub memory: Option<String>,
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
+    pub scope: Option<Vec<String>>,
 }
 
 /// A partial update to an existing entry. `None` leaves a field untouched.
 ///
-/// `triggers: Some(vec![])`, `fragment: Some(String::new())` and
-/// `memory: Some(String::new())` are the *clear* signals — one command removes
+/// `triggers: Some(vec![])`, `fragment: Some(String::new())`,
+/// `scope: Some(vec![])` and `memory: Some(String::new())` are the *clear*
+/// signals — one command removes
 /// a bad door or a stale link — and all are stored back as `None` so they
 /// vanish from the serialized entry.
 #[derive(Debug, Default, Clone)]
@@ -564,6 +575,7 @@ pub struct EntryPatch {
     pub data: Option<serde_json::Value>,
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
+    pub scope: Option<Vec<String>>,
     pub memory: Option<String>,
 }
 
@@ -574,6 +586,7 @@ impl EntryPatch {
             && self.data.is_none()
             && self.triggers.is_none()
             && self.fragment.is_none()
+            && self.scope.is_none()
             && self.memory.is_none()
     }
 }
@@ -602,6 +615,33 @@ fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
     })
 }
 
+/// Check a door's `scope` list and return it deduplicated, first occurrence
+/// kept. `[]` (and a lone `""`) is the clear signal and comes back empty.
+///
+/// Accepted: `house`, `pinned`, `book:<slug>` and `book:<slug>@<n>`. `person:`
+/// and `agent:` are refused rather than stored: nothing routes them yet, so a
+/// door carrying one would silently never fire.
+pub fn validate_scope(key: &str, scope: &[String]) -> Result<Vec<String>, KvError> {
+    let mut out: Vec<String> = Vec::new();
+    for v in scope {
+        if v.is_empty() && scope.len() == 1 {
+            break;
+        }
+        if let Err(why) = crate::doors::ScopeValue::parse(v) {
+            return Err(KvError::DataValidation {
+                message: format!(
+                    "key '{}': --scope {:?} {}. Nothing was written.",
+                    key, v, why
+                ),
+            });
+        }
+        if !out.contains(v) {
+            out.push(v.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// A borrowed view of one trigger-carrying entry, with the key it lives under.
 ///
 /// History and List entries are distinct types, so the scan flattens both into
@@ -615,6 +655,7 @@ pub struct TriggeredRef<'a> {
     pub triggers: &'a [String],
     pub fragment: Option<&'a str>,
     pub memory: Option<&'a str>,
+    pub scope: Option<&'a [String]>,
 }
 
 /// Shared field access for entry types that live in History and List values.
@@ -630,10 +671,12 @@ pub trait UpdateableEntry {
     fn entry_memory(&self) -> Option<&str>;
     fn entry_triggers(&self) -> Option<&[String]>;
     fn entry_fragment(&self) -> Option<&str>;
+    fn entry_scope(&self) -> Option<&[String]>;
     fn set_value(&mut self, v: &str);
     fn set_data(&mut self, d: Option<serde_json::Value>);
     fn set_triggers(&mut self, t: Option<Vec<String>>);
     fn set_fragment(&mut self, f: Option<String>);
+    fn set_scope(&mut self, s: Option<Vec<String>>);
     fn set_memory(&mut self, m: Option<String>);
 }
 
@@ -664,6 +707,9 @@ macro_rules! impl_updateable_entry {
             fn entry_fragment(&self) -> Option<&str> {
                 self.fragment.as_deref()
             }
+            fn entry_scope(&self) -> Option<&[String]> {
+                self.scope.as_deref()
+            }
             fn set_value(&mut self, v: &str) {
                 self.value = v.to_string();
             }
@@ -675,6 +721,9 @@ macro_rules! impl_updateable_entry {
             }
             fn set_fragment(&mut self, f: Option<String>) {
                 self.fragment = f.filter(|s| !s.trim().is_empty());
+            }
+            fn set_scope(&mut self, s: Option<Vec<String>>) {
+                self.scope = s.filter(|list| !list.is_empty());
             }
             fn set_memory(&mut self, m: Option<String>) {
                 self.memory = m.filter(|s| !s.is_empty());
@@ -810,6 +859,9 @@ fn apply_entry_update<T: UpdateableEntry>(
     }
     if let Some(fragment) = patch.fragment.clone() {
         entry.set_fragment(Some(fragment));
+    }
+    if let Some(scope) = patch.scope.clone() {
+        entry.set_scope(Some(scope));
     }
     if let Some(memory) = patch.memory.clone() {
         entry.set_memory(Some(memory));
@@ -2073,10 +2125,15 @@ impl KvStore {
             memory,
             triggers,
             fragment,
+            scope,
         } = attrs;
         if let Some(m) = &memory {
             check_memory_pointer(key, m)?;
         }
+        let scope = match scope {
+            Some(s) => Some(validate_scope(key, &s)?).filter(|s| !s.is_empty()),
+            None => None,
+        };
         let memory = memory.filter(|m| !m.is_empty());
         let triggers = triggers.filter(|t| !t.is_empty());
         let fragment = fragment.filter(|f| !f.trim().is_empty());
@@ -2108,6 +2165,7 @@ impl KvStore {
                                 memory,
                                 triggers,
                                 fragment,
+                                scope,
                             },
                         );
                         // Drop oldest at max_entries
@@ -2145,6 +2203,7 @@ impl KvStore {
                             memory,
                             triggers,
                             fragment,
+                            scope,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
@@ -3156,12 +3215,13 @@ impl KvStore {
         &mut self,
         key: &str,
         id: &IdRef,
-        patch: EntryPatch,
+        mut patch: EntryPatch,
     ) -> Result<UpdateResult, KvError> {
         // Empty-object patch with no other change — nothing would be written.
         if patch.value.is_none()
             && patch.triggers.is_none()
             && patch.fragment.is_none()
+            && patch.scope.is_none()
             && patch.memory.is_none()
             && patch
                 .data
@@ -3178,6 +3238,9 @@ impl KvStore {
         }
         if let Some(m) = &patch.memory {
             check_memory_pointer(key, m)?;
+        }
+        if let Some(s) = &patch.scope {
+            patch.scope = Some(validate_scope(key, s)?);
         }
 
         let def = self.key_def(key)?.clone();
@@ -3230,6 +3293,7 @@ impl KvStore {
                     triggers,
                     fragment: e.entry_fragment(),
                     memory: e.entry_memory(),
+                    scope: e.entry_scope(),
                 });
             }
         }
@@ -8517,6 +8581,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8564,6 +8629,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8595,6 +8661,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8638,6 +8705,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8673,6 +8741,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8725,6 +8794,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8758,6 +8828,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8801,6 +8872,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8842,6 +8914,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -8959,6 +9032,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -9001,6 +9075,7 @@ type = "counter"
                     memory: None,
                     triggers: None,
                     fragment: None,
+                    scope: None,
                 }],
                 memory: None,
             },
@@ -10123,6 +10198,7 @@ type = "history"
         let raw = fs::read_to_string(&data_path).unwrap();
         assert!(!raw.contains("triggers"), "absent fields must stay absent");
         assert!(!raw.contains("fragment"));
+        assert!(!raw.contains("scope"));
     }
 
     #[test]

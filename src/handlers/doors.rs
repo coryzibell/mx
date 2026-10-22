@@ -10,11 +10,47 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 
 use crate::cli::DoorsCommands;
-use crate::doors::{self, Explanation, FIRED_KEY, FiredDoor, HookInput, NamesUs, Selection};
+use crate::doors::{
+    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, SESSION_KEY,
+    Selection, SessionRow, SessionState,
+};
 use crate::kv::{DataFieldType, DataValue, EntryAttrs, HistoryEntry, KvStore, TriggeredRef};
+
+/// What `mx doors mode` prints when the schema has no `doors_session` key.
+/// The CHANGELOG carries the same text.
+const SESSION_SCHEMA_TOML: &str = r#"[keys.doors_session]
+type = "history"
+max_entries = 1000
+description = "Doors session state: mode changes, hints shown, and foreign pastes read in book mode."
+
+[keys.doors_session.data.session]
+type = "string"
+required = true
+
+[keys.doors_session.data.event]
+type = "string"
+required = true
+
+[keys.doors_session.data.mode]
+type = "string"
+required = false
+
+[keys.doors_session.data.by]
+type = "string"
+required = false
+
+[keys.doors_session.data.kind]
+type = "string"
+required = false
+
+[keys.doors_fired.data.place]
+type = "string"
+required = false
+"#;
 
 /// A `(kv key, entry id)` pair — the tuple that identifies one door. The key is
 /// part of it because kv ids are 6-char hashes generated per entry, so the same
@@ -73,6 +109,61 @@ fn fire_state(rows: &[FireRow], session: &str) -> (HashSet<DoorId>, HashMap<Door
     (fired, counts)
 }
 
+/// Whether session state can be read and written: the schema declares
+/// `doors_session` and there is a session to key it by. Without it the hook
+/// reads house mode, writes nothing and hints nothing.
+fn tracks_sessions(store: &KvStore, session: &str) -> bool {
+    !session.is_empty() && store.schema.keys.contains_key(SESSION_KEY)
+}
+
+/// This session's `doors_session` rows, newest first.
+fn read_session(store: &KvStore, session: &str) -> Vec<SessionRow> {
+    let Ok(DataValue::History { entries, .. }) = store.get(SESSION_KEY) else {
+        return Vec::new();
+    };
+    let opt = |e: &HistoryEntry, n: &str| Some(field(e, n)).filter(|v| !v.is_empty());
+    entries
+        .iter()
+        .filter(|e| field(e, "session") == session)
+        .map(|e| SessionRow {
+            event: field(e, "event"),
+            mode: opt(e, "mode"),
+            kind: opt(e, "kind"),
+            by: opt(e, "by"),
+            ts: e.ts.clone(),
+        })
+        .collect()
+}
+
+fn session_state(store: &KvStore, session: &str) -> SessionState {
+    if tracks_sessions(store, session) {
+        doors::session_state(&read_session(store, session))
+    } else {
+        SessionState::default()
+    }
+}
+
+fn push_session(store: &mut KvStore, event: &str, mut data: serde_json::Value) -> Result<()> {
+    data["event"] = event.into();
+    store.push(
+        SESSION_KEY,
+        event,
+        EntryAttrs {
+            data: Some(data),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
+}
+
+/// The per-pool budget: `--budget`, else `MX_DOORS_BUDGET` when it parses
+/// (0 is the kill switch), else the default. A bad env value is ignored rather
+/// than reported, because the hook must never fail on it.
+fn resolve_budget(flag: Option<usize>) -> usize {
+    flag.or_else(|| std::env::var("MX_DOORS_BUDGET").ok()?.trim().parse().ok())
+        .unwrap_or(doors::DEFAULT_BUDGET)
+}
+
 /// The words that mark text as ours, from `MX_DOORS_NAMES` (comma-separated).
 /// Unset or empty leaves only the standalone-`Q` rule.
 fn names_us() -> NamesUs {
@@ -84,45 +175,59 @@ fn names_us() -> NamesUs {
     )
 }
 
-type Matcher<T> =
-    fn(&str, &NamesUs, &[TriggeredRef<'_>], &HashSet<DoorId>, &HashMap<DoorId, u64>, usize) -> T;
+type Matcher<T> = fn(
+    &str,
+    &Mode,
+    &NamesUs,
+    &[TriggeredRef<'_>],
+    &HashSet<DoorId>,
+    &HashMap<DoorId, u64>,
+    usize,
+) -> T;
 
-/// Run `matcher` (`doors::select` or `doors::explain`) for one message. Does
-/// not write.
+/// Run `matcher` (`doors::select`, `doors::explain` or `doors::route`) for one
+/// message. Does not write.
 fn evaluate<T>(
     store: &KvStore,
     session: &str,
     prompt: &str,
+    mode: &Mode,
     budget: usize,
     matcher: Matcher<T>,
 ) -> T {
     let rows = read_fire_log(store);
     let (already, counts) = fire_state(&rows, session);
     let candidates = store.iter_triggered();
-    matcher(prompt, &names_us(), &candidates, &already, &counts, budget)
+    matcher(
+        prompt,
+        mode,
+        &names_us(),
+        &candidates,
+        &already,
+        &counts,
+        budget,
+    )
 }
 
-/// Whether the store's schema accepts a string `origin` field on fire rows.
-/// Schemas written before origin existed reject undeclared fields, and a
-/// rejected push means no door fires at all, so origin is only written where it
-/// is declared as a string.
-fn schema_takes_origin(store: &KvStore) -> bool {
+/// Whether the store's schema accepts a string `name` field on fire rows.
+/// Schemas written before a field existed reject undeclared fields, and a
+/// rejected push means no door fires at all, so a field is only written where
+/// it is declared as a string.
+fn schema_takes(store: &KvStore, name: &str) -> bool {
     store.schema.keys.get(FIRED_KEY).is_some_and(|k| {
         k.data.as_ref().is_none_or(|d| {
-            d.get("origin")
+            d.get(name)
                 .is_some_and(|f| f.field_type == DataFieldType::String)
         })
     })
 }
 
-/// Append one fire row per opened door and persist. Overflow (`deferred`) is
-/// deliberately NOT recorded, which is what keeps a deferred door eligible on
-/// the next prompt.
-fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()> {
-    if fired.is_empty() {
-        return Ok(());
-    }
-    let with_origin = schema_takes_origin(store);
+/// Append one fire row per opened door, without saving. Overflow (`deferred`)
+/// is deliberately NOT recorded, which is what keeps a deferred door eligible
+/// on the next prompt.
+fn push_fires(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()> {
+    let with_origin = schema_takes(store, "origin");
+    let with_place = schema_takes(store, "place");
     for f in fired {
         let mut data = serde_json::json!({
             "session": session,
@@ -133,6 +238,9 @@ fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()>
         if with_origin {
             data["origin"] = f.origin.into();
         }
+        if with_place {
+            data["place"] = f.place.as_str().into();
+        }
         store.push(
             FIRED_KEY,
             &f.trigger,
@@ -142,6 +250,14 @@ fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()>
             },
         )?;
     }
+    Ok(())
+}
+
+fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()> {
+    if fired.is_empty() {
+        return Ok(());
+    }
+    push_fires(store, session, fired)?;
     store.save()?;
     Ok(())
 }
@@ -159,6 +275,9 @@ fn print_fired(fired: &[FiredDoor]) {
 /// user typed; any other non-zero paints a hook-error notice into every single
 /// message. A kv hiccup is never worth either. Failures go to stderr and the
 /// prompt proceeds untouched.
+///
+/// One store load and at most one save per prompt: fire rows, hint rows and the
+/// `foreign_paste` row all land in the same write.
 fn hook(dry_run: bool, budget: usize) {
     let mut raw = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
@@ -184,14 +303,33 @@ fn hook(dry_run: bool, budget: usize) {
         }
     };
 
-    let selection = evaluate(
+    let sid = input.session_id.as_str();
+    let tracked = tracks_sessions(&store, sid);
+    let state = session_state(&store, sid);
+    let ex = evaluate(
         &store,
-        &input.session_id,
+        sid,
         &input.prompt,
+        &state.mode,
         budget,
-        doors::select,
+        doors::route,
     );
-    if selection.fired.is_empty() {
+    let fired = ex.selection().fired;
+    let now = Utc::now();
+    let (hints, mark_foreign) = if tracked {
+        (
+            doors::hints(&ex.segments, &state.mode, &state, now),
+            doors::foreign_paste(&ex.segments, &state, now),
+        )
+    } else {
+        (Vec::new(), false)
+    };
+    if fired.is_empty() && hints.is_empty() && !mark_foreign {
+        return;
+    }
+    if dry_run {
+        print_fired(&fired);
+        print_hints(&hints);
         return;
     }
 
@@ -200,12 +338,55 @@ fn hook(dry_run: bool, budget: usize) {
     // after, forever. That is the exact shape of the migration hazard — if
     // `doors_fired` is missing from the schema every push fails, and printing
     // first would turn a one-line setup mistake into a door that shouts on
-    // every message. Failing to record means failing to fire.
-    if !dry_run && let Err(e) = record(&mut store, &input.session_id, &selection.fired) {
-        eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
+    // every message. Failing to record means failing to fire. Hints follow the
+    // same rule: one that cannot be recorded would print on every prompt.
+    let before = store.data.entries.get(FIRED_KEY).cloned();
+    let doors_ok = match push_fires(&mut store, sid, &fired) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
+            match before {
+                Some(v) => store.data.entries.insert(FIRED_KEY.to_string(), v),
+                None => store.data.entries.remove(FIRED_KEY),
+            };
+            false
+        }
+    };
+    let mut shown: Vec<Hint> = Vec::new();
+    for h in hints {
+        let row = serde_json::json!({
+            "session": sid,
+            "kind": h.kind.label(),
+            "mode": state.mode.to_string(),
+        });
+        match push_session(&mut store, "hint", row) {
+            Ok(()) => shown.push(h),
+            Err(e) => eprintln!("[mx doors] could not record hint, not shown: {e:#}"),
+        }
+    }
+    let marked = mark_foreign
+        && push_session(
+            &mut store,
+            "foreign_paste",
+            serde_json::json!({"session": sid}),
+        )
+        .is_ok();
+    if ((doors_ok && !fired.is_empty()) || !shown.is_empty() || marked)
+        && let Err(e) = store.save()
+    {
+        eprintln!("[mx doors] could not save, nothing opened: {e:#}");
         return;
     }
-    print_fired(&selection.fired);
+    if doors_ok {
+        print_fired(&fired);
+    }
+    print_hints(&shown);
+}
+
+fn print_hints(hints: &[Hint]) {
+    for h in hints {
+        println!("{}", h.text);
+    }
 }
 
 /// The id Claude Code puts on a session's paste tags: the first 4 hex of
@@ -234,9 +415,10 @@ fn compose(message: &str, session: &str, pastes: &[String], from: Option<&str>) 
     prompt
 }
 
-const NOT_CLASSIFIED: &str = "typed/channel are never held";
+const NOT_CLASSIFIED: &str = "only pastes are classified";
 
-fn print_explanation(ex: &Explanation) {
+fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
+    println!("mode {} ({source})", ex.mode);
     for (n, seg) in ex.segments.iter().enumerate() {
         let origin = match &seg.origin {
             doors::Origin::Channel { user_id } if !user_id.is_empty() => {
@@ -262,26 +444,37 @@ fn print_explanation(ex: &Explanation) {
             origin,
             seg.text.chars().count(),
             verdict,
-            if seg.quarantined {
-                "\u{2205} (quarantined)"
-            } else {
-                "{house}"
-            }
+            seg.places
         );
     }
     for d in &ex.doors {
+        let place = if d.door.place.is_empty() {
+            "-"
+        } else {
+            &d.door.place
+        };
+        let pool = if d.status == doors::DoorStatus::Held {
+            "-"
+        } else {
+            d.pool.label()
+        };
         println!(
-            "{}  {}/kv-{}  {}  seg {}",
+            "{}  {}/kv-{}  {}  seg {}  place {}  pool {}",
             d.door.trigger,
             d.door.key,
             d.door.id,
             d.status.label(),
-            d.segment
+            d.segment,
+            place,
+            pool
         );
+    }
+    for h in hints {
+        println!("hint: {}", h.kind.label());
     }
 }
 
-fn explanation_json(ex: &Explanation) -> serde_json::Value {
+fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_json::Value {
     let segments: Vec<serde_json::Value> = ex
         .segments
         .iter()
@@ -303,8 +496,8 @@ fn explanation_json(ex: &Explanation) -> serde_json::Value {
                 "f": c.map(|c| c.f),
                 "o": c.map(|c| c.o),
                 "signals": c.map(|c| &c.signals),
-                "places": if seg.quarantined { vec![] } else { vec!["house"] },
-                "quarantined": seg.quarantined,
+                "places": seg.places.labels(),
+                "quarantined": seg.places.is_empty(),
             })
         })
         .collect();
@@ -320,15 +513,24 @@ fn explanation_json(ex: &Explanation) -> serde_json::Value {
                 "origin": d.door.origin,
                 "status": d.status,
                 "segment": d.segment,
+                "place": d.door.place,
+                "pool": (d.status != doors::DoorStatus::Held).then_some(d.pool),
             })
         })
         .collect();
+    let hints: Vec<serde_json::Value> = hints
+        .iter()
+        .map(|h| serde_json::json!({"kind": h.kind, "text": h.text}))
+        .collect();
     let sel = ex.selection();
     serde_json::json!({
+        "mode": ex.mode.to_string(),
+        "mode_source": source,
         "segments": segments,
         "doors": doors,
         "fired": sel.fired,
         "deferred": sel.deferred,
+        "hints": hints,
     })
 }
 
@@ -338,6 +540,7 @@ struct CheckArgs {
     dry_run: bool,
     json: bool,
     budget: usize,
+    mode: Option<Mode>,
     pastes: Vec<PathBuf>,
     from: Option<String>,
     explain: bool,
@@ -353,17 +556,32 @@ fn check(a: CheckArgs) -> Result<i32> {
         .collect::<Result<Vec<_>>>()?;
     let prompt = compose(&a.message, &a.session, &pastes, a.from.as_deref());
     let mut store = KvStore::from_env()?;
-    // Explaining never burns dedup.
+    let state = session_state(&store, &a.session);
+    let (mode, source) = match a.mode {
+        Some(m) => (m, "--mode"),
+        None if state.since.is_some() => (state.mode.clone(), "session"),
+        None => (Mode::House, "default"),
+    };
+    // Explaining never burns dedup, and never records a hint.
     if a.explain {
-        let ex = evaluate(&store, &a.session, &prompt, a.budget, doors::explain);
-        if a.json {
-            println!("{}", serde_json::to_string(&explanation_json(&ex))?);
+        let ex = evaluate(&store, &a.session, &prompt, &mode, a.budget, doors::explain);
+        let hints = if tracks_sessions(&store, &a.session) {
+            doors::hints(&ex.segments, &mode, &state, Utc::now())
         } else {
-            print_explanation(&ex);
+            Vec::new()
+        };
+        if a.json {
+            println!(
+                "{}",
+                serde_json::to_string(&explanation_json(&ex, source, &hints))?
+            );
+        } else {
+            print_explanation(&ex, source, &hints);
         }
         return Ok(crate::kv::EXIT_OK);
     }
-    let selection: Selection = evaluate(&store, &a.session, &prompt, a.budget, doors::select);
+    let selection: Selection =
+        evaluate(&store, &a.session, &prompt, &mode, a.budget, doors::select);
     // Same ordering as the hook: a door that reports without recording is a
     // door with no dedup. Here the error propagates instead of being swallowed,
     // because `check` is run by a person who wants to see it.
@@ -375,6 +593,54 @@ fn check(a: CheckArgs) -> Result<i32> {
     } else {
         print_fired(&selection.fired);
     }
+    Ok(crate::kv::EXIT_OK)
+}
+
+/// `mx doors mode [MODE] [--session ID]`: print the session's mode, or write a
+/// mode row. Writing the current mode again is deliberate: it opens a fresh
+/// epoch, which re-arms the hints and resets the stale timer.
+fn mode(new: Option<String>, session: Option<String>) -> Result<i32> {
+    let new = match new.as_deref().map(|m| (m, Mode::parse(m))) {
+        None => None,
+        Some((_, Ok(m))) => Some(m),
+        Some((raw, Err(why))) => {
+            eprintln!("Error: {raw:?} {why}");
+            return Ok(2);
+        }
+    };
+    let session = session
+        .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok())
+        .filter(|s| !s.is_empty());
+    let Some(session) = session else {
+        eprintln!("Error: no session: pass --session ID or set CLAUDE_CODE_SESSION_ID");
+        return Ok(1);
+    };
+    let mut store = KvStore::from_env()?;
+    let Some(new) = new else {
+        let st = session_state(&store, &session);
+        match st.since {
+            Some((ts, by)) => println!("{}, since {ts}, set by {by}", st.mode),
+            None => println!("house, never set"),
+        }
+        return Ok(crate::kv::EXIT_OK);
+    };
+    if !store.schema.keys.contains_key(SESSION_KEY) {
+        eprintln!(
+            "Error: kv key '{SESSION_KEY}' is not in the schema, so the mode cannot be stored. Add this to the schema:\n\n{SESSION_SCHEMA_TOML}"
+        );
+        return Ok(1);
+    }
+    let by = std::env::var("MX_CURRENT_AGENT")
+        .ok()
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(|| "cli".to_string());
+    push_session(
+        &mut store,
+        "mode",
+        serde_json::json!({"session": session, "mode": new.to_string(), "by": by}),
+    )?;
+    store.save()?;
+    println!("{new}");
     Ok(crate::kv::EXIT_OK)
 }
 
@@ -498,7 +764,7 @@ fn reset(session: Option<&str>) -> Result<i32> {
 pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
     match command {
         DoorsCommands::Hook { dry_run, budget } => {
-            hook(dry_run, budget);
+            hook(dry_run, resolve_budget(budget));
             Ok(crate::kv::EXIT_OK)
         }
         DoorsCommands::Check {
@@ -507,21 +773,34 @@ pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
             dry_run,
             json,
             budget,
+            mode,
             pastes,
             from,
             explain,
-        } => check(CheckArgs {
-            message,
-            session,
-            dry_run,
-            json,
-            budget,
-            pastes,
-            from,
-            explain,
-        }),
+        } => {
+            let mode = match mode.as_deref().map(|m| (m, Mode::parse(m))) {
+                None => None,
+                Some((_, Ok(m))) => Some(m),
+                Some((raw, Err(why))) => {
+                    eprintln!("Error: --mode {raw:?} {why}");
+                    return Ok(2);
+                }
+            };
+            check(CheckArgs {
+                message,
+                session,
+                dry_run,
+                json,
+                budget: resolve_budget(budget),
+                mode,
+                pastes,
+                from,
+                explain,
+            })
+        }
         DoorsCommands::Stats { since, json } => stats(since.as_deref(), json),
         DoorsCommands::Reset { session } => reset(session.as_deref()),
+        DoorsCommands::Mode { mode: m, session } => mode(m, session),
     }
 }
 

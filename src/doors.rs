@@ -10,12 +10,18 @@
 //! the fire log and stdout live in `handlers::doors`.
 
 mod classify;
+mod route;
+mod session;
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 pub use classify::{Classified, NamesUs, Verdict, classify};
+pub use route::{Mode, Places, Pool, ScopeValue};
+pub use session::{
+    Hint, SESSION_KEY, SessionRow, SessionState, foreign_paste, hints, session_state,
+};
 
 use crate::kv::TriggeredRef;
 use crate::triggers;
@@ -72,6 +78,9 @@ pub struct FiredDoor {
     pub dig: String,
     /// Where the matching text came from: `typed`, `paste` or `channel`.
     pub origin: &'static str,
+    /// The place it opened through: `house`, `book:<slug>`, or `pinned`.
+    /// Empty for a held door, which opened through nothing.
+    pub place: String,
 }
 
 impl FiredDoor {
@@ -214,12 +223,52 @@ fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
     }
 }
 
+const PREAMBLE_HEADER: &str = "[SYSTEM NOTIFICATION";
+
+/// A line that is a whole `[SYSTEM NOTIFICATION ...]` header: trimmed, it is
+/// `[SYSTEM NOTIFICATION` followed by a space, `-` or `]`, it ends with `]`,
+/// and it holds no `<`. A mention mid-sentence or with text after it is not one.
+fn is_preamble_header(line: &str) -> bool {
+    let line = line.trim();
+    line.ends_with(']')
+        && !line.contains('<')
+        && line
+            .strip_prefix(PREAMBLE_HEADER)
+            .is_some_and(|rest| rest.starts_with([' ', '-', ']']))
+}
+
+/// Drop each notification preamble: its header line and the prose under it,
+/// up to the first blank line or line holding a `<`. The harness writes these
+/// above a `<task-notification>`; the human never typed them. A preamble with
+/// no blank line under it ends with its paragraph, so it can never reach past
+/// the next blank line, and it never eats a tag line such as a paste closer.
+fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
+    if !prompt.contains(PREAMBLE_HEADER) {
+        return std::borrow::Cow::Borrowed(prompt);
+    }
+    let mut out = String::with_capacity(prompt.len());
+    let mut lines = prompt.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if !is_preamble_header(line) {
+            out.push_str(line);
+            continue;
+        }
+        while lines
+            .next_if(|l| !l.trim().is_empty() && !l.contains('<'))
+            .is_some()
+        {}
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// Remove harness-injected blocks, body included: `<task-notification>`,
 /// `<system-reminder>` and every `<local-command-*>` (closed by the same name).
 ///
 /// Claude Code puts these in the prompt the hook receives, but the human never
 /// typed them. A trigger word inside a subagent report or a CLI echo would open
 /// a door, burn its per-session dedup slot and eat the prompt's budget.
+/// A `[SYSTEM NOTIFICATION ...]` preamble above such a block goes first (see
+/// `strip_notification_preambles`).
 ///
 /// Only bare tags count (`<name>`, `<name/>`, `</name>`; the harness never
 /// writes attributes). A tag quoted in markdown is literal text: an opener or
@@ -239,6 +288,7 @@ fn bare_tag(s: &str) -> Option<(TagKind, &str, usize)> {
 /// earlier removed block), including when that closer is quoted inside a
 /// different block.
 pub fn strip_harness_blocks(prompt: &str) -> String {
+    let prompt = &strip_notification_preambles(prompt);
     let bytes = prompt.as_bytes();
     let tags: Vec<Tag<'_>> = prompt
         .match_indices('<')
@@ -554,31 +604,72 @@ pub struct Segment {
     pub text: String,
     /// The classifier's judgement. Only pastes are judged.
     pub classified: Option<Classified>,
-    /// Places `∅`: no door matches in it. Otherwise places `{house}`.
-    pub quarantined: bool,
+    /// Where doors may open in it. `∅` admits only pinned doors.
+    pub places: Places,
 }
 
-/// Segment, classify and route a raw prompt.
+/// Places for typed text. In book mode the user is talking about the book, so
+/// typed text opens book doors and holds house doors; pinned still fires
+/// (decision D1, which overrides design §5's typed row).
+fn typed_places(mode: &Mode) -> Places {
+    match mode {
+        Mode::Book(b) => Places::book(&b.slug),
+        _ => Places::house(),
+    }
+}
+
+#[cfg(test)]
+mod d1 {
+    use super::*;
+
+    /// D1: typed text places `{book:<slug>}` in book mode, `{house}` otherwise.
+    #[test]
+    fn d1_typed_text_follows_the_book() {
+        let book = Mode::parse("book:walden@3").unwrap();
+        assert_eq!(typed_places(&book), Places::book("walden"));
+        assert_eq!(typed_places(&Mode::House), Places::house());
+        assert_eq!(typed_places(&Mode::Ours), Places::house());
+    }
+}
+
+/// The places one segment opens doors in under `mode` (the routing table).
+fn places_for(origin: &Origin, classified: Option<&Classified>, mode: &Mode) -> Places {
+    match origin {
+        // P3: `person:<owner>` joins typed places here, in every mode (`doors_people`).
+        Origin::Typed => typed_places(mode),
+        // P3: `person:<user_id>` or `house?` for channel bodies here.
+        // A mode never touches a channel body.
+        Origin::Channel { .. } => Places::house(),
+        Origin::Paste => {
+            let verdict = classified.map(|c| c.verdict);
+            match mode {
+                Mode::House if verdict == Some(Verdict::ForeignProse) => Places::none(),
+                Mode::Book(b) if verdict != Some(Verdict::Ours) => Places::book(&b.slug),
+                _ => Places::house(),
+            }
+        }
+    }
+}
+
+/// Segment, classify and route a raw prompt under `mode`.
 ///
-/// House mode only, and only tagged pastes are judged: a paste that reads as
-/// someone else's prose is quarantined. Typed text and channel bodies are never
-/// classified and always place `{house}`, as do Ours, Unsure and gated pastes.
-pub fn analyze(prompt: &str, names: &NamesUs) -> Vec<Segment> {
+/// Only tagged pastes are judged. House mode quarantines a paste that reads as
+/// someone else's prose; a book mode routes every paste but an Ours one to the
+/// book; `ours` mode never quarantines. Typed text goes through `typed_places`
+/// and channel bodies always place `{house}`.
+pub fn analyze(prompt: &str, mode: &Mode, names: &NamesUs) -> Vec<Segment> {
     segment(&strip_harness_blocks(prompt))
         .into_iter()
         .map(|s| {
             // Shelved: an untagged fallback that judges long typed and channel
             // text would go here. It held the user's own long typed messages.
             let classified = (s.origin == Origin::Paste).then(|| classify(&s.text, names));
-            // P2b: a book mode routes this to `book:<slug>` instead of `∅`.
-            let quarantined = classified
-                .as_ref()
-                .is_some_and(|c| c.verdict == Verdict::ForeignProse);
+            let places = places_for(&s.origin, classified.as_ref(), mode);
             Segment {
                 origin: s.origin,
                 text: s.text,
                 classified,
-                quarantined,
+                places,
             }
         })
         .collect()
@@ -590,7 +681,8 @@ pub enum DoorStatus {
     Fired,
     /// Matched, lost the budget. Not recorded, so it stays eligible.
     Deferred,
-    /// Matched only in quarantined segments. Never fired, never recorded.
+    /// Matched only in segments its scope does not admit. Never fired,
+    /// never recorded.
     Held,
 }
 
@@ -611,11 +703,14 @@ pub struct DoorMatch {
     pub status: DoorStatus,
     /// 1-based index into the segments.
     pub segment: usize,
+    /// The budget pool its winning hit spends.
+    pub pool: Pool,
 }
 
 /// Everything one prompt produced, for `check --explain`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Explanation {
+    pub mode: Mode,
     pub segments: Vec<Segment>,
     pub doors: Vec<DoorMatch>,
 }
@@ -676,11 +771,16 @@ fn best_hit<'s>(
 /// one, so the budget goes to what the reader is least likely to already hold.
 ///
 /// Only human text is matched: harness blocks are removed whole, then the
-/// prompt is segmented and each segment is matched on its own. A door matching
-/// in several admitted segments fires once; one matching only in quarantined
-/// segments is held.
+/// prompt is segmented and each segment is matched on its own. A door matches
+/// in the segments its scope admits (pinned admits every segment, `∅`
+/// included). A door matching in several admitted segments fires once; one
+/// matching only in segments it is not admitted to is held.
+///
+/// Two pools of `budget` each, `house` and `book`: a door spends the pool of
+/// the segment its winning hit came from. Within a pool pinned doors go first.
 pub fn explain(
     prompt: &str,
+    mode: &Mode,
     names: &NamesUs,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
@@ -689,10 +789,10 @@ pub fn explain(
 ) -> Explanation {
     run(
         prompt,
+        mode,
         names,
         candidates,
-        already_fired,
-        fire_counts,
+        (already_fired, fire_counts),
         budget,
         true,
     )
@@ -703,65 +803,103 @@ pub fn explain(
 /// not even tokenized.
 pub fn select(
     prompt: &str,
+    mode: &Mode,
     names: &NamesUs,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
     fire_counts: &HashMap<(String, String), u64>,
     budget: usize,
 ) -> Selection {
-    run(
+    route(
         prompt,
+        mode,
         names,
         candidates,
         already_fired,
         fire_counts,
         budget,
-        false,
     )
     .selection()
 }
 
-fn run(
+/// `select`, keeping the routed segments the hook reads its hints from. Held
+/// doors are not computed.
+pub fn route(
     prompt: &str,
+    mode: &Mode,
     names: &NamesUs,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
     fire_counts: &HashMap<(String, String), u64>,
     budget: usize,
+) -> Explanation {
+    run(
+        prompt,
+        mode,
+        names,
+        candidates,
+        (already_fired, fire_counts),
+        budget,
+        false,
+    )
+}
+
+/// This session's dedup set and the all-time fire counts.
+type FireState<'a> = (
+    &'a HashSet<(String, String)>,
+    &'a HashMap<(String, String), u64>,
+);
+
+fn run(
+    prompt: &str,
+    mode: &Mode,
+    names: &NamesUs,
+    candidates: &[TriggeredRef<'_>],
+    (already_fired, fire_counts): FireState<'_>,
+    budget: usize,
     with_held: bool,
 ) -> Explanation {
-    let segments = analyze(prompt, names);
+    let segments = analyze(prompt, mode, names);
+    let any_pinned = candidates.iter().any(|c| route::is_pinned(c.scope));
     // Stemming OFF: doors are proper nouns, and the English stemmer folds
     // Tagalog "ayos" onto "ayo". Morphology is the enemy here.
     let tokens: Vec<Vec<String>> = segments
         .iter()
         .map(|s| {
-            if with_held || !s.quarantined {
+            if with_held || any_pinned || !s.places.is_empty() {
                 triggers::tokens(&s.text, false)
             } else {
                 Vec::new()
             }
         })
         .collect();
-    let pool = |quarantined: bool| {
-        segments
-            .iter()
-            .zip(&tokens)
-            .enumerate()
-            .filter(move |(_, (s, t))| s.quarantined == quarantined && !t.is_empty())
-            .map(|(n, (_, t))| (n, t.as_slice()))
-    };
 
-    let mut matched: Vec<(u64, &str, DoorMatch)> = Vec::new();
-    let mut held: Vec<(u64, &str, DoorMatch)> = Vec::new();
+    // (pinned first, fires, ts, match)
+    let mut matched: Vec<(bool, u64, &str, DoorMatch)> = Vec::new();
+    let mut held: Vec<(bool, u64, &str, DoorMatch)> = Vec::new();
     for cand in candidates {
         let pair = (cand.key.to_string(), cand.id.to_string());
         if already_fired.contains(&pair) {
             continue;
         }
-        let (hit, status) = match best_hit(cand, pool(false)) {
+        let pinned = route::is_pinned(cand.scope);
+        let through = |n: usize| -> Option<String> {
+            if pinned {
+                return Some("pinned".to_string());
+            }
+            route::admitting_place(cand.scope, &segments[n].places, mode).map(|p| p.to_string())
+        };
+        let segs = |admitted: bool| {
+            let through = &through;
+            tokens
+                .iter()
+                .enumerate()
+                .filter(move |(n, t)| !t.is_empty() && through(*n).is_some() == admitted)
+                .map(|(n, t)| (n, t.as_slice()))
+        };
+        let (hit, status) = match best_hit(cand, segs(true)) {
             Some(h) => (h, DoorStatus::Fired),
-            None if with_held => match best_hit(cand, pool(true)) {
+            None if with_held => match best_hit(cand, segs(false)) {
                 Some(h) => (h, DoorStatus::Held),
                 None => continue,
             },
@@ -770,6 +908,7 @@ fn run(
         let (trigger, n) = hit;
         let count = fire_counts.get(&pair).copied().unwrap_or(0);
         let entry = (
+            !pinned,
             count,
             cand.ts,
             DoorMatch {
@@ -780,9 +919,11 @@ fn run(
                     fragment: derive_fragment(cand.value, cand.fragment),
                     dig: dig_pointer(cand.key, cand.id, cand.memory),
                     origin: segments[n].origin.label(),
+                    place: through(n).unwrap_or_default(),
                 },
                 status,
                 segment: n + 1,
+                pool: segments[n].places.pool(),
             },
         );
         match status {
@@ -791,26 +932,35 @@ fn run(
         }
     }
 
-    let order = |a: &(u64, &str, DoorMatch), b: &(u64, &str, DoorMatch)| {
+    type Ranked<'t> = (bool, u64, &'t str, DoorMatch);
+    let order = |a: &Ranked<'_>, b: &Ranked<'_>| {
         a.0.cmp(&b.0)
-            .then_with(|| a.1.cmp(b.1))
-            .then_with(|| a.2.door.key.cmp(&b.2.door.key))
-            .then_with(|| a.2.door.id.cmp(&b.2.door.id))
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(b.2))
+            .then_with(|| a.3.door.key.cmp(&b.3.door.key))
+            .then_with(|| a.3.door.id.cmp(&b.3.door.id))
     };
     matched.sort_by(order);
     held.sort_by(order);
+    let mut spent: HashMap<Pool, usize> = HashMap::new();
     let doors = matched
         .into_iter()
-        .enumerate()
-        .map(|(i, (_, _, mut m))| {
-            if i >= budget {
+        .map(|(_, _, _, mut m)| {
+            let used = spent.entry(m.pool).or_insert(0);
+            if *used >= budget {
                 m.status = DoorStatus::Deferred;
+            } else {
+                *used += 1;
             }
             m
         })
-        .chain(held.into_iter().map(|h| h.2))
+        .chain(held.into_iter().map(|h| h.3))
         .collect();
-    Explanation { segments, doors }
+    Explanation {
+        mode: mode.clone(),
+        segments,
+        doors,
+    }
 }
 
 #[cfg(test)]
@@ -838,6 +988,7 @@ mod tests {
             triggers,
             fragment: None,
             memory: None,
+            scope: None,
         }
     }
 
@@ -861,6 +1012,7 @@ mod tests {
         let cands = [cand("facts", "aaa", "x", "2026-01-01T00:00:00Z", &trig)];
         let sel = select(
             CHANNEL,
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -897,6 +1049,7 @@ mod tests {
         let cands = [cand("facts", "aaa", "v", "2026-01-01T00:00:00Z", &trig)];
         let sel = select(
             "<channel user=\"unclosed good morning widget",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -920,6 +1073,7 @@ mod tests {
         )];
         let sel = select(
             "gerf_slips is permanent",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -931,6 +1085,7 @@ mod tests {
         // And a message with only the short form still reports the short form.
         let sel = select(
             "ask gerf",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1036,10 +1191,12 @@ mod tests {
                 triggers: t,
                 fragment: None,
                 memory: None,
+                scope: None,
             })
             .collect();
         let mut fired: Vec<String> = select(
             prompt,
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1632,6 +1789,7 @@ mod tests {
         )];
         let sel = select(
             CHANNEL,
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1656,6 +1814,7 @@ mod tests {
             .collect();
         let sel = select(
             "hi widget",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &fired,
@@ -1683,6 +1842,7 @@ mod tests {
             .collect();
         let sel = select(
             "widget",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &fired,
@@ -1710,6 +1870,7 @@ mod tests {
         .collect();
         let sel = select(
             "widget",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1730,6 +1891,7 @@ mod tests {
         ];
         let sel = select(
             "widget",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1746,6 +1908,7 @@ mod tests {
         let cands = [cand("d", "aaa", "a", "2026-01-01T00:00:00Z", &trig)];
         let sel = select(
             "hello there",
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -1769,6 +1932,7 @@ mod tests {
         assert!(
             select(
                 "ayos lang",
+                &Mode::House,
                 &NamesUs::default(),
                 &cands,
                 &HashSet::new(),
@@ -1781,6 +1945,7 @@ mod tests {
         assert_eq!(
             select(
                 "switched to ayo-mirage",
+                &Mode::House,
                 &NamesUs::default(),
                 &cands,
                 &HashSet::new(),
@@ -1973,12 +2138,12 @@ mod tests {
     #[test]
     fn a_bare_typed_channel_word_does_not_swallow_a_later_paste() {
         let prompt = format!("what does <channel do here?\n\n{}", paste("ab12", WALDEN));
-        let segs = analyze(&prompt, &NamesUs::default());
+        let segs = analyze(&prompt, &Mode::House, &NamesUs::default());
         assert_eq!(segs.len(), 2, "{segs:?}");
         assert_eq!(segs[0].origin, Origin::Typed);
         assert_eq!(segs[0].text, "what does <channel do here?\n\n");
         assert_eq!(segs[1].origin, Origin::Paste);
-        assert!(segs[1].quarantined, "a foreign paste is held");
+        assert!(segs[1].places.is_empty(), "a foreign paste is held");
     }
 
     #[test]
@@ -2094,7 +2259,7 @@ mod tests {
             ("switched to ayo-mirage, ayos lang", &["ayo-", "ayos"]),
         ] {
             assert!(
-                analyze(prompt, &NamesUs::default())
+                analyze(prompt, &Mode::House, &NamesUs::default())
                     .iter()
                     .all(|s| s.origin == Origin::Typed && s.classified.is_none()),
                 "{prompt:?}"
@@ -2123,10 +2288,12 @@ mod tests {
                 triggers: t,
                 fragment: None,
                 memory: None,
+                scope: None,
             })
             .collect();
         explain(
             prompt,
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -2153,7 +2320,7 @@ mod tests {
             ex.segments[1].classified.as_ref().map(|c| c.verdict),
             Some(Verdict::ForeignProse)
         );
-        assert!(ex.segments[1].quarantined);
+        assert!(ex.segments[1].places.is_empty());
         assert_eq!(
             outcome(&ex),
             vec![
@@ -2234,11 +2401,19 @@ mod tests {
         let none = HashSet::new();
         let counts = HashMap::new();
         let names = NamesUs::default();
-        let held = run(&prompt, &names, &cands, &none, &counts, 2, false);
+        let held = run(
+            &prompt,
+            &Mode::House,
+            &names,
+            &cands,
+            (&none, &counts),
+            2,
+            false,
+        );
         assert!(held.doors.iter().all(|d| d.status != DoorStatus::Held));
         assert_eq!(
-            select(&prompt, &names, &cands, &none, &counts, 2),
-            explain(&prompt, &names, &cands, &none, &counts, 2).selection()
+            select(&prompt, &Mode::House, &names, &cands, &none, &counts, 2),
+            explain(&prompt, &Mode::House, &names, &cands, &none, &counts, 2).selection()
         );
     }
 
@@ -2249,6 +2424,7 @@ mod tests {
         let prompt = format!("ask gerf\n\n{}", paste("aaaa", "gerf_slips is permanent"));
         let sel = select(
             &prompt,
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &HashSet::new(),
@@ -2289,6 +2465,7 @@ mod tests {
         let fired: HashSet<(String, String)> = [("d".to_string(), "aaa".to_string())].into();
         let ex = explain(
             &paste("aaaa", WALDEN),
+            &Mode::House,
             &NamesUs::default(),
             &cands,
             &fired,
@@ -2296,5 +2473,477 @@ mod tests {
             2,
         );
         assert!(ex.doors.is_empty());
+    }
+
+    // ---- P2: scopes, modes, pools ----
+
+    const PREAMBLE: &str =
+        include_str!("../tests/fixtures/doors/syn/syn-notification-preamble.txt");
+
+    /// A door `d/kv-<id>` with one trigger and an optional scope.
+    struct Door {
+        id: &'static str,
+        trig: Vec<String>,
+        scope: Option<Vec<String>>,
+        ts: &'static str,
+    }
+
+    fn door(id: &'static str, trig: &str, scope: &[&str]) -> Door {
+        Door {
+            id,
+            trig: vec![trig.to_string()],
+            scope: (!scope.is_empty()).then(|| scope.iter().map(|s| s.to_string()).collect()),
+            ts: "2026-01-01T00:00:00Z",
+        }
+    }
+
+    fn refs(doors: &[Door]) -> Vec<TriggeredRef<'_>> {
+        doors
+            .iter()
+            .map(|d| TriggeredRef {
+                key: "d",
+                id: d.id,
+                value: "v",
+                ts: d.ts,
+                triggers: &d.trig,
+                fragment: None,
+                memory: None,
+                scope: d.scope.as_deref(),
+            })
+            .collect()
+    }
+
+    fn explain_mode(
+        prompt: &str,
+        mode: &str,
+        doors: &[Door],
+        counts: &HashMap<(String, String), u64>,
+        budget: usize,
+    ) -> Explanation {
+        explain(
+            prompt,
+            &Mode::parse(mode).unwrap(),
+            &NamesUs::default(),
+            &refs(doors),
+            &HashSet::new(),
+            counts,
+            budget,
+        )
+    }
+
+    /// `(id, status, place)` for every matched door.
+    fn verdicts(ex: &Explanation) -> Vec<(String, DoorStatus, String)> {
+        ex.doors
+            .iter()
+            .map(|d| (d.door.id.clone(), d.status, d.door.place.clone()))
+            .collect()
+    }
+
+    fn fired_ids(prompt: &str, mode: &str, doors: &[Door], budget: usize) -> Vec<String> {
+        explain_mode(prompt, mode, doors, &HashMap::new(), budget)
+            .selection()
+            .fired
+            .into_iter()
+            .map(|f| f.id)
+            .collect()
+    }
+
+    /// 0.1.228's selection, frozen: house-only routing (a ForeignProse paste is
+    /// quarantined, everything else admitted), one pool, fewest fires, oldest
+    /// ts, key, id.
+    fn legacy_select(
+        prompt: &str,
+        cands: &[TriggeredRef<'_>],
+        counts: &HashMap<(String, String), u64>,
+        budget: usize,
+    ) -> (Vec<String>, usize) {
+        let segs = analyze(prompt, &Mode::House, &NamesUs::default());
+        let toks: Vec<Vec<String>> = segs
+            .iter()
+            .map(|s| triggers::tokens(&s.text, false))
+            .collect();
+        let mut m: Vec<(u64, &str, String, String, String)> = Vec::new();
+        for c in cands {
+            let admitted = segs
+                .iter()
+                .zip(&toks)
+                .enumerate()
+                .filter(|(_, (s, t))| {
+                    !t.is_empty()
+                        && !s
+                            .classified
+                            .as_ref()
+                            .is_some_and(|c| c.verdict == Verdict::ForeignProse)
+                })
+                .map(|(n, (_, t))| (n, t.as_slice()));
+            if let Some((trigger, _)) = best_hit(c, admitted) {
+                let pair = (c.key.to_string(), c.id.to_string());
+                let line = format!(
+                    "\u{1f6aa} {} \u{2192} {} (dig: {})",
+                    trigger,
+                    derive_fragment(c.value, c.fragment),
+                    dig_pointer(c.key, c.id, c.memory)
+                );
+                m.push((
+                    counts.get(&pair).copied().unwrap_or(0),
+                    c.ts,
+                    pair.0,
+                    pair.1,
+                    line,
+                ));
+            }
+        }
+        m.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+        let deferred = m.len().saturating_sub(budget);
+        (m.into_iter().take(budget).map(|x| x.4).collect(), deferred)
+    }
+
+    #[test]
+    fn back_compat_no_scopes_house_mode_is_0_1_228() {
+        let mut doors = vec![
+            door("aaa", "widget", &[]),
+            door("bbb", "widget", &[]),
+            door("ccc", "fair haven", &[]),
+            door("ddd", "huckleberries", &[]),
+            door("eee", "eurocodes", &[]),
+            door("fff", "gizmo", &[]),
+        ];
+        doors[1].ts = "2020-01-01T00:00:00Z";
+        let counts: HashMap<(String, String), u64> = [
+            (("d".to_string(), "aaa".to_string()), 3),
+            (("d".to_string(), "ddd".to_string()), 1),
+        ]
+        .into_iter()
+        .collect();
+        let prompts = [
+            "widget and gizmo and huckleberries".to_string(),
+            CHANNEL.to_string(),
+            format!("huckleberries widget\n\n{}", paste("aaaa", WALDEN)),
+            format!("{}\n\nwidget", paste("aaaa", CV)),
+            paste("aaaa", "a short note about fair haven and gizmo"),
+            "<system-reminder>widget</system-reminder> gizmo".to_string(),
+            "nothing here".to_string(),
+        ];
+        let cands = refs(&doors);
+        for prompt in &prompts {
+            for budget in [0, 1, 2, 5] {
+                let sel = select(
+                    prompt,
+                    &Mode::House,
+                    &NamesUs::default(),
+                    &cands,
+                    &HashSet::new(),
+                    &counts,
+                    budget,
+                );
+                let lines: Vec<String> = sel.fired.iter().map(FiredDoor::render).collect();
+                assert_eq!(
+                    (lines, sel.deferred),
+                    legacy_select(prompt, &cands, &counts, budget),
+                    "{prompt:?} budget {budget}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn book_door_fires_on_its_paste_only_in_its_book_mode() {
+        let prompt = paste("aaaa", WALDEN);
+        let doors = [door("wal", "fair haven", &["book:walden"])];
+        assert_eq!(fired_ids(&prompt, "book:walden", &doors, 2), vec!["wal"]);
+        let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 2);
+        assert_eq!(ex.segments[0].places, Places::book("walden"));
+        assert_eq!(ex.doors[0].door.place, "book:walden");
+        assert_eq!(ex.doors[0].pool, Pool::Book);
+        for mode in ["house", "book:prince", "ours"] {
+            let ex = explain_mode(&prompt, mode, &doors, &HashMap::new(), 2);
+            assert_eq!(
+                verdicts(&ex),
+                vec![("wal".to_string(), DoorStatus::Held, String::new())],
+                "{mode}"
+            );
+        }
+        // And a house door is held on that paste in book mode.
+        let house = [door("hse", "fair haven", &[])];
+        assert!(fired_ids(&prompt, "book:walden", &house, 2).is_empty());
+    }
+
+    #[test]
+    fn spoiler_gate_holds_a_door_until_the_position_reaches_it() {
+        let prompt = paste("aaaa", WALDEN);
+        let doors = [door("wal", "fair haven", &["book:walden@5"])];
+        for mode in ["book:walden@4", "book:walden"] {
+            assert!(fired_ids(&prompt, mode, &doors, 2).is_empty(), "{mode}");
+        }
+        for mode in ["book:walden@5", "book:walden@9"] {
+            assert_eq!(fired_ids(&prompt, mode, &doors, 2), vec!["wal"], "{mode}");
+        }
+    }
+
+    #[test]
+    fn ours_mode_never_quarantines_a_foreign_paste() {
+        let prompt = paste("aaaa", WALDEN);
+        let ex = explain_mode(
+            &prompt,
+            "ours",
+            &[door("hse", "fair haven", &[])],
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(
+            ex.segments[0].classified.as_ref().map(|c| c.verdict),
+            Some(Verdict::ForeignProse),
+            "the classifier still runs"
+        );
+        assert_eq!(ex.segments[0].places, Places::house());
+        assert_eq!(
+            verdicts(&ex),
+            vec![("hse".to_string(), DoorStatus::Fired, "house".to_string())]
+        );
+    }
+
+    #[test]
+    fn book_mode_routes_an_ours_paste_to_house() {
+        let ex = explain_mode(
+            &paste("aaaa", CV),
+            "book:walden",
+            &[door("hse", "eurocodes", &[])],
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(ex.segments[0].places, Places::house());
+        assert_eq!(ex.selection().fired.len(), 1);
+    }
+
+    #[test]
+    fn channel_bodies_stay_house_in_every_mode() {
+        for mode in ["house", "ours", "book:walden"] {
+            let ex = explain_mode(
+                CHANNEL,
+                mode,
+                &[door("w", "widget", &[])],
+                &HashMap::new(),
+                2,
+            );
+            assert_eq!(ex.segments[0].places, Places::house(), "{mode}");
+            assert_eq!(ex.selection().fired.len(), 1, "{mode}");
+        }
+    }
+
+    #[test]
+    fn pinned_fires_in_a_quarantined_paste_and_sorts_first_in_its_pool() {
+        let prompt = format!("widget\n\n{}", paste("aaaa", WALDEN));
+        let pin = [door("pin", "fair haven", &["pinned"])];
+        let ex = explain_mode(&prompt, "house", &pin, &HashMap::new(), 2);
+        assert!(ex.segments[1].places.is_empty());
+        assert_eq!(
+            verdicts(&ex),
+            vec![("pin".to_string(), DoorStatus::Fired, "pinned".to_string())]
+        );
+        assert_eq!(ex.doors[0].pool, Pool::House, "∅ spends the house pool");
+
+        // Budget 1: a much-fired pinned door still beats a never-fired one.
+        let doors = [
+            door("new", "widget", &[]),
+            door("pin", "widget", &["pinned"]),
+        ];
+        let counts: HashMap<(String, String), u64> = [(("d".to_string(), "pin".to_string()), 9)]
+            .into_iter()
+            .collect();
+        let ex = explain_mode("widget", "house", &doors, &counts, 1);
+        assert_eq!(
+            verdicts(&ex),
+            vec![
+                ("pin".to_string(), DoorStatus::Fired, "pinned".to_string()),
+                ("new".to_string(), DoorStatus::Deferred, "house".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_text_in_book_mode_holds_house_doors_but_not_pinned() {
+        let doors = [
+            door("hse", "widget", &[]),
+            door("pin", "widget", &["pinned"]),
+            door("wal", "widget", &["book:walden"]),
+        ];
+        let mut got: Vec<(String, DoorStatus)> =
+            explain_mode("widget", "book:walden", &doors, &HashMap::new(), 2)
+                .doors
+                .into_iter()
+                .map(|d| (d.door.id, d.status))
+                .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                ("hse".to_string(), DoorStatus::Held),
+                ("pin".to_string(), DoorStatus::Fired),
+                ("wal".to_string(), DoorStatus::Fired),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_pools_each_get_the_budget() {
+        // The house segment is a channel body: typed text follows the book (D1).
+        let prompt = format!("{CHANNEL}\n\n{}", paste("aaaa", WALDEN));
+        let doors = [
+            door("hse", "widget", &[]),
+            door("hs2", "widget", &[]),
+            door("wal", "fair haven", &["book:walden"]),
+            door("wa2", "huckleberries", &["book:walden"]),
+        ];
+        let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 1);
+        let sel = ex.selection();
+        let fired: Vec<(&str, &str)> = sel
+            .fired
+            .iter()
+            .map(|f| (f.id.as_str(), f.place.as_str()))
+            .collect();
+        assert_eq!(fired, vec![("hs2", "house"), ("wa2", "book:walden")]);
+        assert_eq!(sel.deferred, 2, "one overflow per pool");
+        // Budget 0 is the kill switch for both pools.
+        assert!(fired_ids(&prompt, "book:walden", &doors, 0).is_empty());
+    }
+
+    #[test]
+    fn a_door_scoped_to_house_and_a_book_fires_once() {
+        let prompt = format!(
+            "<channel source=\"cli\" user_id=\"@j:s\">\nfair haven\n</channel>\n\n{}",
+            paste("aaaa", WALDEN)
+        );
+        let doors = [door("two", "fair haven", &["house", "book:walden"])];
+        let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 2);
+        assert_eq!(
+            verdicts(&ex),
+            vec![("two".to_string(), DoorStatus::Fired, "house".to_string())],
+            "equal specificity: the earlier segment wins"
+        );
+    }
+
+    #[test]
+    fn known_edge_paste_opener_in_a_channel_attribute_routes_no_further_than_a_paste() {
+        // A paste opener inside a channel attribute plus a closer in the body
+        // turns the rest into a paste. In book mode that segment must reach
+        // only what any paste reaches: the book place, house, or nothing.
+        let prompt = concat!(
+            r#"<channel source="matrix" user_id="<pasted_content id="ab12">">"#,
+            "\nsays fair haven twice, fair haven\n",
+            r#"</pasted_content id="ab12">"#,
+            "\ntail</channel>"
+        );
+        let ex = explain_mode(prompt, "book:walden", &[], &HashMap::new(), 2);
+        let p = ex
+            .segments
+            .iter()
+            .find(|s| s.origin == Origin::Paste)
+            .expect("the edge yields a paste segment");
+        assert!(
+            [Places::house(), Places::book("walden"), Places::none()].contains(&p.places),
+            "{:?}",
+            p.places
+        );
+        assert!(ex.segments.iter().all(|s| s.places.0.len() <= 1));
+    }
+
+    #[test]
+    fn notification_preamble_and_its_block_fire_nothing() {
+        let trig = ["lighthouse keeper"];
+        assert!(fired_on(PREAMBLE, &trig).is_empty());
+        let prompt = format!("{PREAMBLE}\nthe lighthouse keeper again?");
+        assert_eq!(fired_on(&prompt, &trig), vec!["lighthouse keeper"]);
+        assert!(!strip_harness_blocks(PREAMBLE).contains("background helper"));
+    }
+
+    #[test]
+    fn preamble_mention_mid_line_is_not_a_header() {
+        let prompt = "someone said [SYSTEM NOTIFICATION] lol\nthe lighthouse keeper";
+        assert_eq!(strip_harness_blocks(prompt), prompt);
+        assert_eq!(
+            fired_on(prompt, &["lighthouse keeper"]),
+            vec!["lighthouse keeper"]
+        );
+        // An opener without its `]` on the same line is no header either.
+        let prompt = "[SYSTEM NOTIFICATION\nwidget]";
+        assert_eq!(strip_harness_blocks(prompt), prompt);
+    }
+
+    #[test]
+    fn unterminated_preamble_ends_with_its_paragraph() {
+        let prompt =
+            "before widget\n  [SYSTEM NOTIFICATION - X]\nprose gizmo\nmore gizmo\n\nafter sprocket";
+        assert_eq!(
+            strip_harness_blocks(prompt),
+            "before widget\n\nafter sprocket"
+        );
+        assert_eq!(
+            fired_on(prompt, &["widget", "gizmo", "sprocket"]),
+            vec!["sprocket", "widget"]
+        );
+        // With no blank line at all it stops at a harness opener, and the
+        // block goes as usual.
+        let prompt =
+            "[SYSTEM NOTIFICATION]\ngizmo\n<system-reminder>gizmo</system-reminder>\nwidget";
+        assert_eq!(fired_on(prompt, &["gizmo", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn preamble_at_the_end_of_a_paste_keeps_the_closer() {
+        let body = format!("{WALDEN}\n\n[SYSTEM NOTIFICATION - copied log]\nwidget sprocket");
+        let prompt = format!("{}\n\n gizmo", paste("aaaa", &body));
+        let doors = [
+            door("fh", "fair haven", &[]),
+            door("wi", "widget", &[]),
+            door("gz", "gizmo", &[]),
+        ];
+        let ex = explain_mode(&prompt, "house", &doors, &HashMap::new(), 3);
+        let p = ex
+            .segments
+            .iter()
+            .find(|s| s.origin == Origin::Paste)
+            .expect("the paste survives the strip");
+        assert_eq!(
+            p.classified.as_ref().map(|c| c.verdict),
+            Some(Verdict::ForeignProse)
+        );
+        assert!(p.places.is_empty(), "quarantined in house mode");
+        assert_eq!(fired_ids(&prompt, "house", &doors, 3), vec!["gz"]);
+    }
+
+    #[test]
+    fn preamble_at_the_end_of_a_harness_block_keeps_its_closer() {
+        let prompt = concat!(
+            "<task-notification>\nreport gizmo\n\n",
+            "[SYSTEM NOTIFICATION - X]\ngizmo more\n",
+            "</task-notification>\nthe widget"
+        );
+        assert_eq!(fired_on(prompt, &["gizmo", "widget"]), vec!["widget"]);
+    }
+
+    #[test]
+    fn preamble_header_shape_is_exact() {
+        let trig = ["lighthouse keeper"];
+        for prompt in [
+            "[SYSTEM NOTIFICATIONs suck] lighthouse keeper",
+            "[SYSTEM NOTIFICATIONs suck]\nlighthouse keeper",
+            "[SYSTEM NOTIFICATION] then text\nlighthouse keeper",
+            "[SYSTEM NOTIFICATION - <x>]\nlighthouse keeper",
+        ] {
+            assert_eq!(strip_harness_blocks(prompt), prompt, "{prompt:?}");
+            assert_eq!(fired_on(prompt, &trig), vec!["lighthouse keeper"]);
+        }
+        for prompt in [
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\nlighthouse keeper",
+            "  [SYSTEM NOTIFICATION]  \nlighthouse keeper",
+            "[SYSTEM NOTIFICATION-x]\nlighthouse keeper",
+        ] {
+            assert!(fired_on(prompt, &trig).is_empty(), "{prompt:?}");
+        }
     }
 }

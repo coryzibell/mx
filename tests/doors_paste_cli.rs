@@ -58,6 +58,7 @@ fn mx_stdin(dir: &TempDir, args: &[&str], stdin: &str) -> std::process::Output {
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .env_remove("MX_DOORS_NAMES")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -244,24 +245,25 @@ fn explain_shows_segments_verdicts_and_held_doors_without_recording() {
         "check --explain",
     );
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 4, "{out}");
+    assert_eq!(lines.len(), 5, "{out}");
+    assert_eq!(lines[0], "mode house (default)");
     assert_eq!(
-        lines[0],
-        "segment 1  typed  21 ch  not classified (typed/channel are never held)  places {house}"
+        lines[1],
+        "segment 1  typed  21 ch  not classified (only pastes are classified)  places {house}"
     );
-    assert!(lines[1].starts_with("segment 2  paste  "), "{out}");
+    assert!(lines[2].starts_with("segment 2  paste  "), "{out}");
     assert!(
-        lines[1].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
+        lines[2].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
         "{out}"
     );
-    assert!(lines[1].ends_with("places \u{2205} (quarantined)"), "{out}");
-    assert_eq!(
-        lines[2],
-        format!("huckleberries  facts/kv-{berries}  FIRED  seg 1")
-    );
+    assert!(lines[2].ends_with("places \u{2205} (quarantined)"), "{out}");
     assert_eq!(
         lines[3],
-        format!("fair haven  facts/kv-{haven}  HELD  seg 2")
+        format!("huckleberries  facts/kv-{berries}  FIRED  seg 1  place house  pool house")
+    );
+    assert_eq!(
+        lines[4],
+        format!("fair haven  facts/kv-{haven}  HELD  seg 2  place -  pool -")
     );
 
     assert!(fire_rows(&dir).is_empty(), "--explain implies --dry-run");
@@ -291,7 +293,7 @@ fn explain_json_has_the_same_structure() {
     assert_eq!(segs.len(), 2);
     assert_eq!(segs[0]["origin"], "typed");
     assert_eq!(segs[0]["verdict"], serde_json::Value::Null);
-    assert_eq!(segs[0]["reason"], "typed/channel are never held");
+    assert_eq!(segs[0]["reason"], "only pastes are classified");
     assert_eq!(segs[0]["gated"], serde_json::Value::Null);
     assert_eq!(segs[0]["places"], serde_json::json!(["house"]));
     assert_eq!(segs[1]["origin"], "paste");
@@ -304,6 +306,7 @@ fn explain_json_has_the_same_structure() {
     assert_eq!(v["doors"][0]["status"], "HELD");
     assert_eq!(v["doors"][0]["origin"], "paste");
     assert_eq!(v["doors"][0]["segment"], 2);
+    assert_eq!(v["doors"][0]["pool"], serde_json::Value::Null);
     assert_eq!(v["fired"], serde_json::json!([]));
 }
 
@@ -388,6 +391,7 @@ fn names_from_env_reach_the_classifier() {
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .env("MX_DOORS_NAMES", "robin, sam")
         .args([
             "doors",

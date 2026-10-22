@@ -67,6 +67,7 @@ fn mx_stdin(dir: &TempDir, args: &[&str], stdin: Option<&str>) -> std::process::
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -340,6 +341,7 @@ fn hook_always_exits_zero_on_every_failure_mode() {
         .env_remove("MX_CURRENT_AGENT")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -643,6 +645,7 @@ fn eight_concurrent_hooks_all_record_and_do_not_clobber_an_unrelated_key() {
                 .env("MX_CURRENT_AGENT", "test")
                 .env_remove("MX_KV_SCHEMA")
                 .env_remove("MX_KV_DATA")
+                .env_remove("MX_DOORS_BUDGET")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -668,6 +671,7 @@ fn eight_concurrent_hooks_all_record_and_do_not_clobber_an_unrelated_key() {
             .env("MX_CURRENT_AGENT", "test")
             .env_remove("MX_KV_SCHEMA")
             .env_remove("MX_KV_DATA")
+            .env_remove("MX_DOORS_BUDGET")
             .output()
             .unwrap()
     });
