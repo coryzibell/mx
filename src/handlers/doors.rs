@@ -514,7 +514,7 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
                 "status": d.status,
                 "segment": d.segment,
                 "place": d.door.place,
-                "pool": d.pool,
+                "pool": (d.status != doors::DoorStatus::Held).then_some(d.pool),
             })
         })
         .collect();

@@ -306,6 +306,7 @@ fn explain_json_has_the_same_structure() {
     assert_eq!(v["doors"][0]["status"], "HELD");
     assert_eq!(v["doors"][0]["origin"], "paste");
     assert_eq!(v["doors"][0]["segment"], 2);
+    assert_eq!(v["doors"][0]["pool"], serde_json::Value::Null);
     assert_eq!(v["fired"], serde_json::json!([]));
 }
 

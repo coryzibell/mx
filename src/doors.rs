@@ -608,11 +608,12 @@ pub struct Segment {
     pub places: Places,
 }
 
-/// Places for typed text. D1 (open): A = design §5 as written, B = field data.
+/// Places for typed text. In book mode the user is talking about the book, so
+/// typed text opens book doors and holds house doors; pinned still fires
+/// (decision D1, which overrides design §5's typed row).
 fn typed_places(mode: &Mode) -> Places {
-    const OPTION_B: bool = false;
     match mode {
-        Mode::Book(b) if OPTION_B => Places::book(&b.slug),
+        Mode::Book(b) => Places::book(&b.slug),
         _ => Places::house(),
     }
 }
@@ -621,15 +622,11 @@ fn typed_places(mode: &Mode) -> Places {
 mod d1 {
     use super::*;
 
-    /// D1, pinned to Option A: typed text places `{house}` in every mode.
-    ///
-    /// Option B flips `OPTION_B` to `true` in `typed_places`, and this test's
-    /// book-mode assertion becomes
-    /// `assert_eq!(typed_places(&book), Places::book("walden"))`.
+    /// D1: typed text places `{book:<slug>}` in book mode, `{house}` otherwise.
     #[test]
-    fn d1_typed_places_is_option_a() {
+    fn d1_typed_text_follows_the_book() {
         let book = Mode::parse("book:walden@3").unwrap();
-        assert_eq!(typed_places(&book), Places::house());
+        assert_eq!(typed_places(&book), Places::book("walden"));
         assert_eq!(typed_places(&Mode::House), Places::house());
         assert_eq!(typed_places(&Mode::Ours), Places::house());
     }
@@ -638,7 +635,7 @@ mod d1 {
 /// The places one segment opens doors in under `mode` (the routing table).
 fn places_for(origin: &Origin, classified: Option<&Classified>, mode: &Mode) -> Places {
     match origin {
-        // P3: `person:<owner>` joins typed places here (`doors_people`).
+        // P3: `person:<owner>` joins typed places here, in every mode (`doors_people`).
         Origin::Typed => typed_places(mode),
         // P3: `person:<user_id>` or `house?` for channel bodies here.
         // A mode never touches a channel body.
@@ -2769,8 +2766,33 @@ mod tests {
     }
 
     #[test]
+    fn typed_text_in_book_mode_holds_house_doors_but_not_pinned() {
+        let doors = [
+            door("hse", "widget", &[]),
+            door("pin", "widget", &["pinned"]),
+            door("wal", "widget", &["book:walden"]),
+        ];
+        let mut got: Vec<(String, DoorStatus)> =
+            explain_mode("widget", "book:walden", &doors, &HashMap::new(), 2)
+                .doors
+                .into_iter()
+                .map(|d| (d.door.id, d.status))
+                .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            got,
+            vec![
+                ("hse".to_string(), DoorStatus::Held),
+                ("pin".to_string(), DoorStatus::Fired),
+                ("wal".to_string(), DoorStatus::Fired),
+            ]
+        );
+    }
+
+    #[test]
     fn two_pools_each_get_the_budget() {
-        let prompt = format!("widget\n\n{}", paste("aaaa", WALDEN));
+        // The house segment is a channel body: typed text follows the book (D1).
+        let prompt = format!("{CHANNEL}\n\n{}", paste("aaaa", WALDEN));
         let doors = [
             door("hse", "widget", &[]),
             door("hs2", "widget", &[]),
@@ -2792,7 +2814,10 @@ mod tests {
 
     #[test]
     fn a_door_scoped_to_house_and_a_book_fires_once() {
-        let prompt = format!("fair haven\n\n{}", paste("aaaa", WALDEN));
+        let prompt = format!(
+            "<channel source=\"cli\" user_id=\"@j:s\">\nfair haven\n</channel>\n\n{}",
+            paste("aaaa", WALDEN)
+        );
         let doors = [door("two", "fair haven", &["house", "book:walden"])];
         let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 2);
         assert_eq!(

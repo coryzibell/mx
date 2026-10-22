@@ -14,8 +14,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **`--scope` on `mx kv push` and `mx kv update`** (repeatable) says where a
   door may fire. Values: `house`, `pinned`, `book:<slug>` and
   `book:<slug>@<n>` (slug `[a-z0-9][a-z0-9-]*`, n a whole number of 1 or
-  more with no leading zero). It is a typed entry field next to `triggers` and `fragment`, not part
-  of `data`. On `update` it replaces the whole list; `--scope ""` clears it,
+  more with no leading zero). It is a typed entry field next to `triggers`
+  and `fragment`, not part of `data`. On `update` it replaces the whole list; `--scope ""` clears it,
   and `--scope` on its own is a complete update. Duplicates are dropped, order
   kept. Anything else exits `4`, names the bad value, and writes nothing;
   `person:` and `agent:` are refused with a note that they arrive in a later
@@ -39,9 +39,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   Bad syntax exits `2`. Setting the current mode again still writes a row,
   which starts a fresh epoch (re-arms hints, resets the stale timer). The
   writer is `$MX_CURRENT_AGENT`, else `cli`.
-- **Routing by mode.** Typed text places `{house}` in every mode (decision D1
-  is open; it is one line in `typed_places`). Channel bodies place `{house}`
-  in every mode. A paste is routed by its verdict: in `house` mode a
+- **Routing by mode.** Typed text places `{house}` in `house` and `ours`
+  mode, and `{book:<slug>}` in `book:<slug>` mode: while reading, the user's
+  own words about the book open book doors and hold house doors (pinned
+  still fires). This departs from the original design, whose typed row kept
+  `{house}` in book mode; book vocabulary in typed riffs was firing house
+  doors. Channel bodies place `{house}` in every mode. A paste is routed by its verdict: in `house` mode a
   ForeignProse paste is quarantined (`∅`) and everything else is `{house}`; in
   `book:<slug>` mode an Ours paste goes to `{house}` and every other paste
   (ForeignProse, Unsure, too short to judge) goes to `{book:<slug>}`; in `ours`
