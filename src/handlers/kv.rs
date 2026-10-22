@@ -75,6 +75,15 @@ fn vet_triggers(triggers: &[String]) -> Result<(), i32> {
     Ok(())
 }
 
+/// A pinned door ignores every place and mode, so say so once at authoring.
+fn warn_pinned(pinned: bool) {
+    if pinned {
+        eprintln!(
+            "warning: pinned fires in every place and every mode (book, quarantined paste, everything). Keep it for safety and health facts."
+        );
+    }
+}
+
 /// Resolve and display a memory pointer for a key.
 /// Connects to SurrealDB, fetches the kn- entry, and prints it.
 /// Failures are non-fatal: KV data is primary.
@@ -742,6 +751,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             memory,
             triggers,
             fragment,
+            scope,
             create,
             max_entries,
         } => {
@@ -810,15 +820,18 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             if let Err(code) = vet_triggers(&normalized) {
                 return Ok(code);
             }
+            let pinned = scope.iter().any(|v| v == "pinned");
             let attrs = kv::EntryAttrs {
                 data: parsed_data,
                 memory,
                 triggers: Some(normalized),
                 fragment,
+                scope: (!scope.is_empty()).then_some(scope),
             };
             match store.push(&key, &value, attrs) {
                 Ok(result) => {
                     store.save()?;
+                    warn_pinned(pinned);
                     println!("kv-{} ({})", result.id, result.index);
                     Ok(kv::EXIT_OK)
                 }
@@ -1058,6 +1071,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             data,
             triggers,
             fragment,
+            scope,
             memory,
         } => {
             // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
@@ -1077,15 +1091,22 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 Some(normalized)
             };
 
+            // `--scope ""` clears, same convention as `--trigger ""`.
+            let scope_patch = (!scope.is_empty()).then_some(scope);
+            let pinned = scope_patch
+                .as_ref()
+                .is_some_and(|s| s.iter().any(|v| v == "pinned"));
+
             // 1. Reject the no-op case (nothing at all was given).
             if value.is_none()
                 && data.is_none()
                 && trigger_patch.is_none()
                 && fragment.is_none()
+                && scope_patch.is_none()
                 && memory.is_none()
             {
                 eprintln!(
-                    "Error: provide a value argument, --data, --trigger, --fragment, or --memory to update"
+                    "Error: provide a value argument, --data, --trigger, --fragment, --scope, or --memory to update"
                 );
                 return Ok(kv::EXIT_INVALID_INPUT);
             }
@@ -1127,6 +1148,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         && value.is_none()
                         && trigger_patch.is_none()
                         && fragment.is_none()
+                        && scope_patch.is_none()
                         && memory.is_none()
                     {
                         eprintln!(
@@ -1145,11 +1167,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 data: parsed_data,
                 triggers: trigger_patch,
                 fragment,
+                scope: scope_patch,
                 memory,
             };
             match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {
                     store.save()?;
+                    warn_pinned(pinned);
                     println!("Updated entry {} (kv-{})", result.index, result.id);
                     Ok(kv::EXIT_OK)
                 }
@@ -1157,7 +1181,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             }
         }
 
-        KvCommands::Triggers { key, json } => {
+        KvCommands::Triggers { key, scope, json } => {
             // Fire counts come from the doors fire log. Its absence is normal
             // (nothing has fired yet), so a missing key means zero, not an error.
             let mut fires: std::collections::HashMap<(String, String), u64> =
@@ -1180,6 +1204,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 .iter_triggered()
                 .into_iter()
                 .filter(|c| key.as_deref().is_none_or(|k| k == c.key))
+                .filter(|c| {
+                    scope.as_deref().is_none_or(|want| match c.scope {
+                        Some(list) => list.iter().any(|v| v == want),
+                        None => want == "house",
+                    })
+                })
                 .map(|c| {
                     let n = fires
                         .get(&(c.key.to_string(), c.id.to_string()))
@@ -1193,7 +1223,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 let out: Vec<serde_json::Value> = rows
                     .iter()
                     .map(|(c, n)| {
-                        serde_json::json!({
+                        let mut row = serde_json::json!({
                             "key": c.key,
                             "id": c.id,
                             "triggers": c.triggers,
@@ -1205,7 +1235,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             "authored_fragment": c.fragment,
                             "memory": c.memory,
                             "fires": n,
-                        })
+                        });
+                        if let Some(s) = c.scope {
+                            row["scope"] = s.into();
+                        }
+                        row
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&out)?);
@@ -1222,7 +1256,17 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     current = c.key;
                     println!("{}", current);
                 }
-                println!("  kv-{}  [{}]  fires={}", c.id, c.triggers.join(", "), n);
+                let scope = c
+                    .scope
+                    .map(|s| format!("  [scope: {}]", s.join(", ")))
+                    .unwrap_or_default();
+                println!(
+                    "  kv-{}  [{}]  fires={}{}",
+                    c.id,
+                    c.triggers.join(", "),
+                    n,
+                    scope
+                );
                 // Show what the matcher actually sees whenever it differs from
                 // the stored text: `ayo-` matches as `ayo`, `c++` as `c`.
                 let differing: Vec<String> = c

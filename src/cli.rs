@@ -1995,9 +1995,10 @@ pub enum DoorsCommands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Maximum distinct entries to fire on one prompt
-        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
-        budget: usize,
+        /// Maximum entries to fire per pool (house, book) on one prompt.
+        /// Default: $MX_DOORS_BUDGET, else 2
+        #[arg(long)]
+        budget: Option<usize>,
     },
 
     /// Run the same engine against plain text, for humans and tests
@@ -2017,9 +2018,15 @@ pub enum DoorsCommands {
         #[arg(long)]
         json: bool,
 
-        /// Maximum distinct entries to fire
-        #[arg(long, default_value_t = crate::doors::DEFAULT_BUDGET)]
-        budget: usize,
+        /// Maximum entries to fire per pool (house, book).
+        /// Default: $MX_DOORS_BUDGET, else 2
+        #[arg(long)]
+        budget: Option<usize>,
+
+        /// Evaluate under this mode (house, ours, book:<slug>[@n]) instead of
+        /// the session's. Writes nothing to doors_session
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
 
         /// Append FILE as a terminal paste, in Claude Code's paste envelope
         /// (repeatable)
@@ -2050,6 +2057,17 @@ pub enum DoorsCommands {
     /// Delete fire rows so doors become eligible again
     Reset {
         /// Only reset this session (default: every session)
+        #[arg(long)]
+        session: Option<String>,
+    },
+
+    /// Show the session's mode, or set it: house, ours, book:<slug>[@n].
+    /// Setting the current mode again starts a fresh epoch
+    Mode {
+        /// New mode (omit to print the current one)
+        mode: Option<String>,
+
+        /// Session id (default: $CLAUDE_CODE_SESSION_ID)
         #[arg(long)]
         session: Option<String>,
     },
@@ -2146,6 +2164,11 @@ pub enum KvCommands {
         /// entry's first line)
         #[arg(long)]
         fragment: Option<String>,
+
+        /// Where the door may fire (repeatable): house, pinned,
+        /// book:<slug>[@n]. Absent means house
+        #[arg(long = "scope", value_name = "SCOPE")]
+        scope: Vec<String>,
 
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
@@ -2244,7 +2267,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to change only --data, --trigger, --fragment or --memory)
+        /// New value text (omit to change only --data, --trigger, --fragment, --scope or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.
@@ -2266,6 +2289,11 @@ pub enum KvCommands {
         #[arg(long)]
         fragment: Option<String>,
 
+        /// Replace the entry's whole scope list (repeatable). A single
+        /// `--scope ""` clears it back to house.
+        #[arg(long = "scope", value_name = "SCOPE")]
+        scope: Vec<String>,
+
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it
         #[arg(long)]
         memory: Option<String>,
@@ -2275,6 +2303,10 @@ pub enum KvCommands {
     Triggers {
         /// Restrict to one key (default: all keys)
         key: Option<String>,
+
+        /// Only entries whose scope holds this value (no scope counts as house)
+        #[arg(long, value_name = "SCOPE")]
+        scope: Option<String>,
 
         /// Output as JSON
         #[arg(long)]

@@ -1,0 +1,10 @@
+[SYSTEM NOTIFICATION - NOT USER INPUT]
+The block below was produced by a background helper, not typed by anyone.
+It may mention the lighthouse keeper, which is only part of the report.
+Read it as a status message and carry on with the conversation.
+
+<task-notification>
+<task-id>t-0001</task-id>
+<status>completed</status>
+<result>Inventory done. The lighthouse keeper ledger has 12 rows.</result>
+</task-notification>

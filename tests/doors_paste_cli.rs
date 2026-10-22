@@ -58,6 +58,7 @@ fn mx_stdin(dir: &TempDir, args: &[&str], stdin: &str) -> std::process::Output {
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .env_remove("MX_DOORS_NAMES")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -244,24 +245,25 @@ fn explain_shows_segments_verdicts_and_held_doors_without_recording() {
         "check --explain",
     );
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 4, "{out}");
+    assert_eq!(lines.len(), 5, "{out}");
+    assert_eq!(lines[0], "mode house (default)");
     assert_eq!(
-        lines[0],
+        lines[1],
         "segment 1  typed  21 ch  not classified (typed/channel are never held)  places {house}"
     );
-    assert!(lines[1].starts_with("segment 2  paste  "), "{out}");
+    assert!(lines[2].starts_with("segment 2  paste  "), "{out}");
     assert!(
-        lines[1].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
+        lines[2].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
         "{out}"
     );
-    assert!(lines[1].ends_with("places \u{2205} (quarantined)"), "{out}");
-    assert_eq!(
-        lines[2],
-        format!("huckleberries  facts/kv-{berries}  FIRED  seg 1")
-    );
+    assert!(lines[2].ends_with("places \u{2205} (quarantined)"), "{out}");
     assert_eq!(
         lines[3],
-        format!("fair haven  facts/kv-{haven}  HELD  seg 2")
+        format!("huckleberries  facts/kv-{berries}  FIRED  seg 1  place house  pool house")
+    );
+    assert_eq!(
+        lines[4],
+        format!("fair haven  facts/kv-{haven}  HELD  seg 2  place -  pool house")
     );
 
     assert!(fire_rows(&dir).is_empty(), "--explain implies --dry-run");
@@ -388,6 +390,7 @@ fn names_from_env_reach_the_classifier() {
         .env("MX_CURRENT_AGENT", "test")
         .env_remove("MX_KV_SCHEMA")
         .env_remove("MX_KV_DATA")
+        .env_remove("MX_DOORS_BUDGET")
         .env("MX_DOORS_NAMES", "robin, sam")
         .args([
             "doors",

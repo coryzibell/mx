@@ -6,6 +6,125 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx doors` scopes, modes and two budgets (doors P2a/P2b, #435)
+
+- **Upgrade before authoring the first scoped door.** An older `mx` doing a
+  read-modify-write of kv drops fields it does not know, so it would silently
+  strip `scope` from every entry it rewrites.
+- **`--scope` on `mx kv push` and `mx kv update`** (repeatable) says where a
+  door may fire. Values: `house`, `pinned`, `book:<slug>` and
+  `book:<slug>@<n>` (slug `[a-z0-9][a-z0-9-]*`, n a whole number of 1 or
+  more). It is a typed entry field next to `triggers` and `fragment`, not part
+  of `data`. On `update` it replaces the whole list; `--scope ""` clears it,
+  and `--scope` on its own is a complete update. Duplicates are dropped, order
+  kept. Anything else exits `4`, names the bad value, and writes nothing;
+  `person:` and `agent:` are refused with a note that they arrive in a later
+  phase (P3), because nothing routes them yet and such a door would never
+  fire. Not on `kv set`.
+- **No scope means `house`.** Nothing is migrated, and an entry without a
+  scope serializes byte-for-byte as before.
+- **`pinned` fires in every place and every mode**, a quarantined paste
+  included. Setting it prints one warning on stderr and exits `0`. Keep it for
+  safety and health facts.
+- **`mx kv triggers` shows `[scope: …]`** on the line of a scoped entry;
+  unscoped lines are unchanged. `--scope S` lists only entries whose scope
+  holds S (no scope counts as `house`), and `--json` carries `"scope"` when
+  one is set.
+- **`mx doors mode`** prints the session's mode (`book:walden@3, since <ts>,
+  set by <agent>`, or `house, never set`); `mx doors mode house | ours |
+  book:<slug>[@n]` writes a mode row and prints the new mode. The session is
+  `--session ID`, else `$CLAUDE_CODE_SESSION_ID`; with neither it exits `1`.
+  Bad syntax exits `2`. Setting the current mode again still writes a row,
+  which starts a fresh epoch (re-arms hints, resets the stale timer). The
+  writer is `$MX_CURRENT_AGENT`, else `cli`.
+- **Routing by mode.** Typed text places `{house}` in every mode (decision D1
+  is open; it is one line in `typed_places`). Channel bodies place `{house}`
+  in every mode. A paste is routed by its verdict: in `house` mode a
+  ForeignProse paste is quarantined (`∅`) and everything else is `{house}`; in
+  `book:<slug>` mode an Ours paste goes to `{house}` and every other paste
+  (ForeignProse, Unsure, too short to judge) goes to `{book:<slug>}`; in `ours`
+  mode every paste is `{house}` and nothing is ever quarantined (the classifier
+  still runs, so `--explain` shows its verdict). A door opens in a segment
+  when any of its scope values names one of the segment's places; a pinned
+  door opens anywhere.
+- **The spoiler gate.** `book:walden@12` opens on a Walden paste only in mode
+  `book:walden@n` with `12 <= n`. `book:walden` (no position) opens at any
+  position. A mode with no position is page one: only position-less book
+  doors open. Another slug never opens.
+- **Two budget pools**, `house` and `book`, each of `--budget`. A door spends
+  the pool of the segment its winning hit came from (a quarantined segment
+  spends `house`). Within a pool pinned doors go first, then the existing
+  order (fewest fires, oldest, key, id); overflow is deferred per pool. With no
+  scopes and `house` mode the fired set, order and lines are what 0.1.228
+  printed.
+- **`MX_DOORS_BUDGET` (#435).** `mx doors hook` and `mx doors check` take the
+  budget from `--budget`, else `MX_DOORS_BUDGET` when it parses as a whole
+  number (`0` turns doors off), else 2. An unparseable value is ignored
+  silently; the hook never fails on it. One value sets both pools.
+- **Hints** (hook only), printed after the door lines as single
+  `[doors] ` lines, never counted against a budget, each kind at most once per
+  mode epoch: `foreign` (house mode, a paste reads as someone else's prose),
+  `ours` (book mode, a paste reads as ours) and `stale` (book mode, a paste,
+  and no mode or foreign-paste row for 6 hours). A hint is recorded before it
+  prints, and one that cannot be recorded does not print. A prompt that opens
+  no door still gets its hint. In book mode a prompt with a ForeignProse paste
+  also writes one `foreign_paste` row. `--dry-run` prints and writes nothing.
+  The hook still loads the store once and saves at most once per prompt.
+- **Without `doors_session` in the schema nothing changes**: the hook reads
+  `house`, writes no session rows, prints no hints and fires doors as before;
+  `mx doors mode <x>` exits `1` and prints the schema to add.
+- **Fire rows gain `place`** (`house`, `book:<slug>` or `pinned`) when the
+  schema declares it as a string, the same guard as `origin`. Rows without it
+  read fine everywhere.
+- **`mx doors check --mode M`** evaluates under M instead of the session's
+  mode and writes nothing to `doors_session`. `--explain` now starts with
+  `mode <mode> (--mode | session | default)`, prints each segment's places
+  (`{house}`, `{book:walden}`, `∅ (quarantined)`), each door's place and pool,
+  and `hint: <kind>` for any hint the hook would print (never recorded).
+  `--json` carries `mode`, `mode_source`, `places`, `place`, `pool` and
+  `hints`. `check` without `--explain` never hints.
+- **Schema to add** for modes, hints and `place` on fire rows:
+
+  ```toml
+  [keys.doors_session]
+  type = "history"
+  max_entries = 1000
+  description = "Doors session state: mode changes, hints shown, and foreign pastes read in book mode."
+
+  [keys.doors_session.data.session]
+  type = "string"
+  required = true
+
+  [keys.doors_session.data.event]
+  type = "string"
+  required = true
+
+  [keys.doors_session.data.mode]
+  type = "string"
+  required = false
+
+  [keys.doors_session.data.by]
+  type = "string"
+  required = false
+
+  [keys.doors_session.data.kind]
+  type = "string"
+  required = false
+
+  [keys.doors_fired.data.place]
+  type = "string"
+  required = false
+  ```
+
+### Changed — `mx doors` drops harness notification preambles
+
+- **A `[SYSTEM NOTIFICATION …]` header line and the prose under it no longer
+  open doors.** The header must start its line and close its `]` on the same
+  line; the line and the lines after it go, up to the first blank line or the
+  first harness block opener. A mention mid-sentence is left alone, and a
+  preamble never reaches past the next blank line. Harness blocks are then
+  stripped as before.
+
 ### Added — `mx kv update --memory` (#480)
 
 - **`mx kv update <key> --id <id> --memory kn-...` sets an entry's memory
