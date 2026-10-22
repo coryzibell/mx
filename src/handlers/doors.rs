@@ -415,7 +415,7 @@ fn compose(message: &str, session: &str, pastes: &[String], from: Option<&str>) 
     prompt
 }
 
-const NOT_CLASSIFIED: &str = "typed/channel are never held";
+const NOT_CLASSIFIED: &str = "only pastes are classified";
 
 fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
     println!("mode {} ({source})", ex.mode);

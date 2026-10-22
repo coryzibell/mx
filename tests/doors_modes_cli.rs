@@ -679,7 +679,7 @@ fn backdate_latest_session_row(dir: &TempDir, age: chrono::Duration) -> String {
 }
 
 #[test]
-fn stale_hint_after_six_quiet_hours_with_a_paste() {
+fn stale_hint_after_six_quiet_hours_even_typed_only() {
     let dir = setup();
     set_mode(&dir, "s1", "book:prince");
     let ts = backdate_latest_session_row(&dir, chrono::Duration::hours(7));
@@ -689,17 +689,13 @@ fn stale_hint_after_six_quiet_hours_with_a_paste() {
         .format("%H:%M")
         .to_string();
 
-    assert!(
-        hint_lines(&hook(&dir, "s1", "typed only", &[])).is_empty(),
-        "needs a paste"
-    );
-    let out = hook(&dir, "s1", &with_paste("x", CV), &[]);
+    let out = hook(&dir, "s1", "typed only", &[]);
     assert!(
         hint_lines(&out).contains(
             &format!("[doors] book:prince since {hhmm}; still reading? mx doors mode house")
                 .as_str()
         ),
-        "{out}"
+        "typed-only prompt still gets told: {out}"
     );
     assert!(
         !hint_lines(&hook(&dir, "s1", &with_paste("x", CV), &[]))

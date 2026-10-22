@@ -249,7 +249,7 @@ fn explain_shows_segments_verdicts_and_held_doors_without_recording() {
     assert_eq!(lines[0], "mode house (default)");
     assert_eq!(
         lines[1],
-        "segment 1  typed  21 ch  not classified (typed/channel are never held)  places {house}"
+        "segment 1  typed  21 ch  not classified (only pastes are classified)  places {house}"
     );
     assert!(lines[2].starts_with("segment 2  paste  "), "{out}");
     assert!(
@@ -293,7 +293,7 @@ fn explain_json_has_the_same_structure() {
     assert_eq!(segs.len(), 2);
     assert_eq!(segs[0]["origin"], "typed");
     assert_eq!(segs[0]["verdict"], serde_json::Value::Null);
-    assert_eq!(segs[0]["reason"], "typed/channel are never held");
+    assert_eq!(segs[0]["reason"], "only pastes are classified");
     assert_eq!(segs[0]["gated"], serde_json::Value::Null);
     assert_eq!(segs[0]["places"], serde_json::json!(["house"]));
     assert_eq!(segs[1]["origin"], "paste");

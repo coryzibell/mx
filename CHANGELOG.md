@@ -13,14 +13,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   strip `scope` from every entry it rewrites.
 - **`--scope` on `mx kv push` and `mx kv update`** (repeatable) says where a
   door may fire. Values: `house`, `pinned`, `book:<slug>` and
-  `book:<slug>@<n>` (slug `[a-z0-9][a-z0-9-]*`, n a whole number of 1 or
-  more with no leading zero). It is a typed entry field next to `triggers`
-  and `fragment`, not part of `data`. On `update` it replaces the whole list; `--scope ""` clears it,
-  and `--scope` on its own is a complete update. Duplicates are dropped, order
-  kept. Anything else exits `4`, names the bad value, and writes nothing;
-  `person:` and `agent:` are refused with a note that they arrive in a later
-  phase (P3), because nothing routes them yet and such a door would never
-  fire. Not on `kv set`.
+  `book:<slug>@<n>` (slug `[a-z0-9][a-z0-9-]*`, n a whole number of 1 or more
+  with no leading zero). It is a typed entry field next to `triggers` and
+  `fragment`, not part of `data`. On `update` it replaces the whole list;
+  `--scope ""` clears it, and `--scope` on its own is a complete update.
+  Duplicates are dropped, order kept. Anything else exits `4`, names the bad
+  value, and writes nothing; `person:` and `agent:` are refused with a note
+  that they arrive in a later phase (P3), because nothing routes them yet and
+  such a door would never fire. Not on `kv set`.
 - **No scope means `house`.** Nothing is migrated, and an entry without a
   scope serializes byte-for-byte as before.
 - **`pinned` fires in every place and every mode**, a quarantined paste
@@ -39,19 +39,19 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   Bad syntax exits `2`. Setting the current mode again still writes a row,
   which starts a fresh epoch (re-arms hints, resets the stale timer). The
   writer is `$MX_CURRENT_AGENT`, else `cli`.
-- **Routing by mode.** Typed text places `{house}` in `house` and `ours`
-  mode, and `{book:<slug>}` in `book:<slug>` mode: while reading, the user's
-  own words about the book open book doors and hold house doors (pinned
-  still fires). This departs from the original design, whose typed row kept
+- **Routing by mode.** Typed text places `{house}` in `house` and `ours` mode,
+  and `{book:<slug>}` in `book:<slug>` mode: while reading, the user's own
+  words about the book open book doors and hold house doors (pinned still
+  fires). This departs from the original design, whose typed row kept
   `{house}` in book mode; book vocabulary in typed riffs was firing house
-  doors. Channel bodies place `{house}` in every mode. A paste is routed by its verdict: in `house` mode a
-  ForeignProse paste is quarantined (`∅`) and everything else is `{house}`; in
-  `book:<slug>` mode an Ours paste goes to `{house}` and every other paste
-  (ForeignProse, Unsure, too short to judge) goes to `{book:<slug>}`; in `ours`
-  mode every paste is `{house}` and nothing is ever quarantined (the classifier
-  still runs, so `--explain` shows its verdict). A door opens in a segment
-  when any of its scope values names one of the segment's places; a pinned
-  door opens anywhere.
+  doors. Channel bodies place `{house}` in every mode. A paste is routed by
+  its verdict: in `house` mode a ForeignProse paste is quarantined (`∅`) and
+  everything else is `{house}`; in `book:<slug>` mode an Ours paste goes to
+  `{house}` and every other paste (ForeignProse, Unsure, too short to judge)
+  goes to `{book:<slug>}`; in `ours` mode every paste is `{house}` and nothing
+  is ever quarantined (the classifier still runs, so `--explain` shows its
+  verdict). A door opens in a segment when any of its scope values names one
+  of the segment's places; a pinned door opens anywhere.
 - **The spoiler gate.** `book:walden@12` opens on a Walden paste only in mode
   `book:walden@n` with `12 <= n`. `book:walden` (no position) opens at any
   position. A mode with no position is page one: only position-less book
@@ -69,8 +69,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 - **Hints** (hook only), printed after the door lines as single
   `[doors] ` lines, never counted against a budget, each kind at most once per
   mode epoch: `foreign` (house mode, a paste reads as someone else's prose),
-  `ours` (book mode, a paste reads as ours) and `stale` (book mode, a paste,
-  and no mode or foreign-paste row for 6 hours). A hint is recorded before it
+  `ours` (book mode, a paste reads as ours) and `stale` (book mode, and no
+  mode or foreign-paste row for 6 hours). A hint is recorded before it
   prints, and one that cannot be recorded does not print. A prompt that opens
   no door still gets its hint. In book mode a prompt with a ForeignProse paste
   also writes one `foreign_paste` row, unless the session's latest mode or
@@ -193,9 +193,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   A ForeignProse paste is quarantined: no door matches in it. Ours, Unsure
   and pastes under 600 characters behave exactly as before. Known false
   positive: a long first-person essay that never names us reads as foreign.
-- **Typed text and Matrix bodies are never held.** They are not classified
-  at all and fire exactly as before, however long. A short paste that
-  arrives untagged counts as typed text.
+- **Typed text and Matrix bodies are never classified.** They are not
+  classified at all and fire exactly as before, however long (in
+  `book:<slug>` mode typed text routes to the book; see Routing by mode). A
+  short paste that arrives untagged counts as typed text.
 - **A door matching in several segments fires once**, with the most specific
   trigger across them (ties go to the earlier segment). Held doors are never
   fired, never recorded and never spend the budget.

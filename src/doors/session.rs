@@ -191,7 +191,6 @@ pub fn hints(
                 .and_then(|(ts, _)| DateTime::parse_from_rfc3339(ts).ok());
             if fresh(HintKind::Stale)
                 && stale
-                && pastes(segments).next().is_some()
                 && let Some(since) = since
             {
                 out.push(Hint {
