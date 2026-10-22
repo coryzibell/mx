@@ -690,6 +690,9 @@ fn stale_hint_after_six_quiet_hours_even_typed_only() {
         .to_string();
 
     let out = hook(&dir, "s1", "typed only", &[]);
+    let s = rows(&dir, "doors_session");
+    assert_eq!(s[0]["value"], "hint");
+    assert!(s.iter().all(|r| r["value"] != "foreign_paste"));
     assert!(
         hint_lines(&out).contains(
             &format!("[doors] book:prince since {hhmm}; still reading? mx doors mode house")
