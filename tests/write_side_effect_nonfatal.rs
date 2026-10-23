@@ -1,4 +1,4 @@
-//! Integration tests for the post-write side-effect non-fatal fix (W446).
+//! Integration tests for the post-write side-effect non-fatal fix.
 //!
 //! Root cause: durable write commands (Add/Update/Edit/Append/Prepend/Restore)
 //! commit the entry, then run `auto_embed`/`auto_anchor` as best-effort
