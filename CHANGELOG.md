@@ -6,6 +6,26 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — the wake chunker never cuts a chunk of only rules and blank lines (#487)
+
+- **A rule before a heading no longer becomes its own chunk.** The chunker
+  takes the latest break of the best kind in each window, so after splitting
+  at a `---` it could split again at the heading right below it and hand the
+  ritual a `Part N/M` that was just `---`, with nothing to phrase. A break
+  that would leave only blank and rule lines before it is now passed over for
+  the next kind of break. The same fix stops a paragraph break followed by a
+  long paragraph from producing a chunk that is a single newline.
+- **A document that ends in a rule no longer gets a rule-only last chunk.** A
+  break inside the trailing run of rules and blank lines is passed over for an
+  earlier one, so the rule stays with the prose before it. After an oversized
+  code block, a filler (or empty) remainder joins the oversized chunk instead
+  of standing alone; that chunk was already flagged oversized.
+- **Every other plan is unchanged.** A document that never produced such a
+  chunk gets the same boundaries, chunk count and oversized flags, so wake-log
+  positions still line up across wakes. A run of rules and blank lines about as
+  long as the threshold or longer, or a document that is nothing else, can
+  still be split into filler chunks.
+
 ### Added — `mx doors` scopes, modes and two budgets (doors P2a/P2b, #435)
 
 - **Upgrade before authoring the first scoped door.** An older `mx` doing a
