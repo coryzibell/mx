@@ -327,8 +327,10 @@ fn is_inside_fence(fences: &[usize], pos: usize) -> bool {
 /// search drops to the next tier. If the break sits at or after
 /// `filler_start`, everything after it is filler, so the search tries that
 /// tier's next earlier match. Neither rule touches a plan that never had a
-/// filler chunk. The UTF-8 fallback is exempt: it is reached with a filler
-/// head only when the window holds no prose to split at.
+/// filler chunk. The UTF-8 fallback never cuts into the trailing filler: when
+/// the window reaches it, the cut moves back to the start of the last word of
+/// prose (or one character before the prose ends), so the last chunk keeps
+/// some prose.
 ///
 /// Returns `None` only if the entire window is trapped inside a code fence
 /// AND the UTF-8 fallback would land inside the fence too. Caller must
@@ -376,7 +378,16 @@ fn find_break(
     }
 
     // Deterministic UTF-8-safe fallback at window_end.
-    let fallback = safe_utf8_fallback(content, window_end);
+    let prose = content[..filler_start].trim_end();
+    let last_word = prose.trim_end_matches(|c: char| !c.is_whitespace()).len();
+    let cap = if window_end < prose.len() || prose.len() <= start + 1 {
+        window_end
+    } else if last_word > start.max(prose.rfind('\n').map_or(0, |i| i + 1)) {
+        last_word
+    } else {
+        prose.len() - 1
+    };
+    let fallback = safe_utf8_fallback(content, cap);
     if fallback > start && !is_inside_fence(fences, fallback) {
         return Some(fallback);
     }
@@ -1053,6 +1064,14 @@ mod tests {
             "chunk 0 should end at HR newline: {:?}",
             chunk0
         );
+    }
+
+    #[test]
+    fn long_last_line_before_a_trailing_rule_never_splits_the_rule() {
+        let s = "The tide turns and the boats wait in the harbor. ";
+        let content = format!("{}\n\n{}\n\n---\n\n", s.repeat(3), s.repeat(4));
+        let plan = compute_chunks(&content, 200);
+        assert_every_chunk_phrasable(&plan, &content);
     }
 
     fn filler(len: usize) -> String {
