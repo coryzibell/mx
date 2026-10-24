@@ -17,7 +17,8 @@
 //! - **UTF-8 safety**: every boundary lands on a char boundary.
 //! - **Code-block integrity**: fenced ``` blocks are never split mid-block.
 //! - **No filler chunks**: no chunk is only blank and rule lines (mx#487),
-//!   unless the document is, or a run of them is longer than the threshold.
+//!   unless the document is, or a run of them is about as long as the threshold
+//!   or longer.
 //! - **Total extractors**: `salient_candidates` returns a list for any input,
 //!   empty only when the content has nothing to phrase from.
 //! - **Determinism**: same inputs → same output, always.

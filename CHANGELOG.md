@@ -22,9 +22,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   of standing alone; that chunk was already flagged oversized.
 - **Every other plan is unchanged.** A document that never produced such a
   chunk gets the same boundaries, chunk count and oversized flags, so wake-log
-  positions still line up across wakes. A run of rules and blank lines longer
-  than the threshold, or a document that is nothing else, can still be split
-  into filler chunks.
+  positions still line up across wakes. A run of rules and blank lines about as
+  long as the threshold or longer, or a document that is nothing else, can
+  still be split into filler chunks.
 
 ### Added — `mx doors` scopes, modes and two budgets (doors P2a/P2b, #435)
 
