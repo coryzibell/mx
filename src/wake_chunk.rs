@@ -327,10 +327,10 @@ fn is_inside_fence(fences: &[usize], pos: usize) -> bool {
 /// search drops to the next tier. If the break sits at or after
 /// `filler_start`, everything after it is filler, so the search tries that
 /// tier's next earlier match. Neither rule touches a plan that never had a
-/// filler chunk. The UTF-8 fallback never cuts into the trailing filler: when
-/// the window reaches it, the cut moves back to the start of the last word of
-/// prose (or one character before the prose ends), so the last chunk keeps
-/// some prose.
+/// filler chunk. The UTF-8 fallback does not cut into the trailing filler while
+/// more than one byte of prose is left in the window: when the window reaches
+/// it, the cut moves back to the start of the last word of prose (or one
+/// character before the prose ends), so the last chunk keeps some prose.
 ///
 /// Returns `None` only if the entire window is trapped inside a code fence
 /// AND the UTF-8 fallback would land inside the fence too. Caller must
@@ -1072,6 +1072,17 @@ mod tests {
         let content = format!("{}\n\n{}\n\n---\n\n", s.repeat(3), s.repeat(4));
         let plan = compute_chunks(&content, 200);
         assert_every_chunk_phrasable(&plan, &content);
+    }
+
+    #[test]
+    fn one_unbroken_line_between_leading_and_trailing_filler_keeps_prose_in_the_tail() {
+        let content = format!(
+            "{}{}\n{}",
+            "\n".repeat(50),
+            "p".repeat(30),
+            "---\n".repeat(15)
+        );
+        assert_no_filler_chunk(&compute_chunks(&content, 100), &content);
     }
 
     fn filler(len: usize) -> String {
