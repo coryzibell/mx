@@ -2890,10 +2890,7 @@ mod tests {
         let segs = segment(&prompt);
         assert_eq!(segs.iter().filter(|s| s.origin == Origin::Paste).count(), 0);
         assert_eq!(
-            segs.iter()
-                .filter(|s| s.origin != Origin::Typed)
-                .map(|s| &s.origin)
-                .collect::<Vec<_>>(),
+            segs.iter().map(|s| &s.origin).collect::<Vec<_>>(),
             vec![&channel("@a:s")]
         );
 
@@ -2920,10 +2917,7 @@ mod tests {
         let segs = segment(&prompt);
         assert_eq!(segs.iter().filter(|s| s.origin == Origin::Paste).count(), 0);
         assert_eq!(
-            segs.iter()
-                .filter(|s| s.origin != Origin::Typed)
-                .map(|s| &s.origin)
-                .collect::<Vec<_>>(),
+            segs.iter().map(|s| &s.origin).collect::<Vec<_>>(),
             vec![&channel("@a:s")]
         );
     }
