@@ -16,6 +16,8 @@
 //!   (property-tested — Risk 2 in the design).
 //! - **UTF-8 safety**: every boundary lands on a char boundary.
 //! - **Code-block integrity**: fenced ``` blocks are never split mid-block.
+//! - **No filler chunks**: no chunk is only blank and rule lines (mx#487),
+//!   unless the document is, or a run of them is longer than the threshold.
 //! - **Total extractors**: `salient_candidates` returns a list for any input,
 //!   empty only when the content has nothing to phrase from.
 //! - **Determinism**: same inputs → same output, always.
@@ -169,6 +171,7 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
     // Pre-compute fence positions so we can reject candidate boundaries inside
     // code blocks without re-scanning from zero each time.
     let fences = find_fence_starts(content);
+    let filler_start = trailing_filler_start(content);
 
     let mut boundaries: Vec<usize> = Vec::new();
     let mut oversized: Vec<bool> = Vec::new();
@@ -176,7 +179,7 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
 
     while content.len() - cursor > threshold {
         let window_end = cursor + threshold;
-        match find_break(content, cursor, window_end, &fences) {
+        match find_break(content, cursor, window_end, &fences, filler_start) {
             Some(pos) => {
                 // Defensive: find_break must produce a break strictly after
                 // cursor. If it doesn't (e.g. pathological fence interaction),
@@ -185,7 +188,7 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
                 if pos <= cursor {
                     let recovery = recover_past_block(content, cursor, window_end, &fences)
                         .unwrap_or_else(|| safe_utf8_fallback(content, content.len()));
-                    if recovery <= cursor {
+                    if recovery <= cursor || recovery >= filler_start {
                         oversized.push(true);
                         break;
                     }
@@ -212,8 +215,10 @@ pub fn compute_chunks(content: &str, threshold: usize) -> ChunkPlan {
                 // to keep the oversized chunk as tight as possible.
                 let recovery = recover_past_block(content, cursor, window_end, &fences)
                     .unwrap_or_else(|| safe_utf8_fallback(content, content.len()));
-                if recovery <= cursor {
-                    // Absolute pathological case — emit whole remainder.
+                if recovery <= cursor || recovery >= filler_start {
+                    // Absolute pathological case, or nothing but filler (or
+                    // nothing at all) would follow the block — emit the whole
+                    // remainder as one oversized chunk (mx#487).
                     oversized.push(true);
                     break;
                 }
@@ -316,10 +321,25 @@ fn is_inside_fence(fences: &[usize], pos: usize) -> bool {
 /// 5. `\n`     — line break (last-resort semantic-ish).
 /// 6. Deterministic UTF-8-safe byte fallback at `window_end` rounded down.
 ///
+/// A tier's latest match is passed over when it would make a chunk of only
+/// blank and rule lines (mx#487). If the chunk before it, `[start, split)`,
+/// is filler, so is the chunk before every earlier match of that tier, so the
+/// search drops to the next tier. If the break sits at or after
+/// `filler_start`, everything after it is filler, so the search tries that
+/// tier's next earlier match. Neither rule touches a plan that never had a
+/// filler chunk. The UTF-8 fallback is exempt: it is reached with a filler
+/// head only when the window holds no prose to split at.
+///
 /// Returns `None` only if the entire window is trapped inside a code fence
 /// AND the UTF-8 fallback would land inside the fence too. Caller must
 /// recover via `recover_past_block`.
-fn find_break(content: &str, start: usize, window_end: usize, fences: &[usize]) -> Option<usize> {
+fn find_break(
+    content: &str,
+    start: usize,
+    window_end: usize,
+    fences: &[usize],
+    filler_start: usize,
+) -> Option<usize> {
     let window_end = window_end.min(content.len());
     if window_end <= start {
         return None;
@@ -331,17 +351,27 @@ fn find_break(content: &str, start: usize, window_end: usize, fences: &[usize]) 
     let ladder: &[&[u8]] = &[b"\n---\n", b"\n## ", b"\n### ", b"\n\n", b"\n"];
 
     for pat in ladder {
-        if let Some(pos) = rfind_in_range(content, start, window_end, pat) {
+        let mut search_end = window_end;
+        while let Some(pos) = rfind_in_range(content, start, search_end, pat) {
             // Break position is at the `\n` itself. We split so the chunk
             // before the break ends at `\n` (inclusive) and the next chunk
             // begins at the character after the `\n`.
             let split = pos + 1; // advance past the leading '\n'
-            if split <= start || split >= window_end {
+            if split <= start
+                || split >= window_end
+                || is_inside_fence(fences, split)
+                || !content.is_char_boundary(split)
+            {
+                break;
+            }
+            if split >= filler_start {
+                search_end = pos + pat.len() - 1;
                 continue;
             }
-            if !is_inside_fence(fences, split) && content.is_char_boundary(split) {
-                return Some(split);
+            if is_rule_or_blank(&content[start..split]) {
+                break;
             }
+            return Some(split);
         }
     }
 
@@ -352,6 +382,37 @@ fn find_break(content: &str, start: usize, window_end: usize, fences: &[usize]) 
     }
 
     None
+}
+
+/// Is every line of `text` blank or a thematic break (three or more of the
+/// same `-`, `*` or `_`, spaces allowed between)? Such text has nothing to
+/// phrase from, so it must never be a chunk on its own (mx#487).
+fn is_rule_or_blank(text: &str) -> bool {
+    text.lines().all(|line| {
+        let mut marks = line.chars().filter(|c| !c.is_whitespace());
+        match marks.next() {
+            None => true,
+            Some(first @ ('-' | '*' | '_')) => {
+                let rest: Vec<char> = marks.collect();
+                rest.len() >= 2 && rest.iter().all(|&c| c == first)
+            }
+            Some(_) => false,
+        }
+    })
+}
+
+/// Offset where the document's trailing run of blank and rule lines begins:
+/// `content.len()` when the last line has prose. A break at or after this
+/// offset would leave only filler for the chunks after it.
+fn trailing_filler_start(content: &str) -> usize {
+    let mut start = content.len();
+    for line in content.split_inclusive('\n').rev() {
+        if !is_rule_or_blank(line) {
+            break;
+        }
+        start -= line.len();
+    }
+    start
 }
 
 /// Find the latest occurrence of `needle` in `content[start..end]`. Returns
@@ -992,6 +1053,199 @@ mod tests {
             "chunk 0 should end at HR newline: {:?}",
             chunk0
         );
+    }
+
+    fn filler(len: usize) -> String {
+        let mut s = "The tide turns and the boats wait in the harbor. ".repeat(len / 40 + 1);
+        s.truncate(len - 1);
+        s.push('.');
+        s
+    }
+
+    fn chunk_sizes(plan: &ChunkPlan, content: &str) -> Vec<usize> {
+        plan.iter(content).map(|(_, c, _)| c.len()).collect()
+    }
+
+    fn assert_no_filler_chunk(plan: &ChunkPlan, content: &str) {
+        for (idx, chunk, _) in plan.iter(content) {
+            assert!(
+                !is_rule_or_blank(chunk),
+                "chunk {idx} is whitespace/rule-only: {chunk:?} (sizes {:?})",
+                chunk_sizes(plan, content)
+            );
+        }
+    }
+
+    fn assert_every_chunk_phrasable(plan: &ChunkPlan, content: &str) {
+        assert_no_filler_chunk(plan, content);
+        for (idx, chunk, _) in plan.iter(content) {
+            assert!(
+                !salient_candidates(chunk).is_empty(),
+                "chunk {idx} has no candidate: {chunk:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rule_before_heading_never_yields_a_rule_only_chunk() {
+        // mx#487: H2 section, rule, then an H2 section over the threshold with
+        // only paragraph breaks inside. Before the fix the plan was
+        // [172, 5, 181, 175] and chunk 1 was "---\n\n".
+        let content = format!(
+            "## First\n\n{}\n---\n\n## Second\n\n{}\n\n{}",
+            filler(161),
+            filler(169),
+            filler(174)
+        );
+        assert_eq!(content.len(), 533);
+        let plan = compute_chunks(&content, 200);
+        assert_every_chunk_phrasable(&plan, &content);
+        assert_eq!(chunk_sizes(&plan, &content), vec![172, 186, 175]);
+        assert!(plan.oversized.iter().all(|&o| !o));
+    }
+
+    #[test]
+    fn trailing_rule_never_yields_a_rule_only_tail() {
+        // Lines joined by single newlines, then a closing rule, sized so the
+        // last `\n` in the first window sits right before the rule. Before the
+        // fix the tail chunk was "---\n".
+        let mut content = String::new();
+        for i in 0..4 {
+            content.push_str(&format!("line {i} of the closing prose\n"));
+        }
+        content.push_str("---\n");
+        assert_eq!(content.len(), 116);
+        let plan = compute_chunks(&content, 113);
+        assert_every_chunk_phrasable(&plan, &content);
+        assert_eq!(chunk_sizes(&plan, &content), vec![84, 32]);
+        assert!(plan.oversized.iter().all(|&o| !o));
+    }
+
+    #[test]
+    fn oversized_fence_never_leaves_a_filler_or_empty_tail() {
+        let block = format!(
+            "```text\n{}```\n",
+            "a line of code inside the fence\n".repeat(8)
+        );
+        let closed = format!("{}\n\n{block}\n---\n\n", filler(40));
+        let plan = compute_chunks(&closed, 100);
+        assert_no_filler_chunk(&plan, &closed);
+
+        let unclosed = format!("{}\n\n```text\n{}", filler(40), "code line\n".repeat(30));
+        let plan = compute_chunks(&unclosed, 100);
+        assert_no_filler_chunk(&plan, &unclosed);
+    }
+
+    #[test]
+    fn paragraph_break_before_long_paragraph_never_yields_a_newline_chunk() {
+        // A `\n\n` split leaves the second newline at the top of the next
+        // chunk. With no newline inside the long paragraph that follows, the
+        // latest `\n` in the next window was that one, giving a chunk of "\n".
+        let content = format!("{}\n\n{}\n\n{}", filler(150), filler(250), filler(90));
+        let plan = compute_chunks(&content, 200);
+        assert_every_chunk_phrasable(&plan, &content);
+    }
+
+    #[test]
+    fn unaffected_documents_keep_their_plans() {
+        // Boundaries and oversized flags captured at e532fdb, before mx#487.
+        // The wake log compares chunk positions across wakes, so a document
+        // that never produced a filler chunk must keep its exact plan.
+        let expected: &[(&str, &[usize], &[bool])] = &[
+            ("paragraphs", &[264, 459, 654], &[false; 4]),
+            ("sections", &[393, 594, 791, 992], &[false; 5]),
+            (
+                "fenced",
+                &[28, 297, 353, 409, 465],
+                &[false, true, false, false, false, false],
+            ),
+            (
+                "multibyte",
+                &[50, 99, 149, 198, 246, 294, 342, 390, 438],
+                &[false; 10],
+            ),
+            ("leading_rule", &[74, 266, 461, 656, 851], &[false; 6]),
+            ("rule_then_prose", &[111, 227, 236, 349, 461], &[false; 6]),
+            (
+                "lines",
+                &[75, 150, 225, 302, 380, 458, 536, 614, 692],
+                &[false; 10],
+            ),
+            ("rule_inside_last_chunk", &[150], &[false; 2]),
+        ];
+        let docs = pinned_documents();
+        assert_eq!(docs.len(), expected.len());
+        for ((name, content, threshold), (want_name, boundaries, oversized)) in
+            docs.iter().zip(expected)
+        {
+            assert_eq!(name, want_name);
+            let plan = compute_chunks(content, *threshold);
+            assert_eq!(&plan.boundaries, boundaries, "{name} boundaries");
+            assert_eq!(&plan.oversized, oversized, "{name} oversized");
+            assert_eq!(plan.total as usize, boundaries.len() + 1, "{name} total");
+        }
+    }
+
+    fn pinned_documents() -> Vec<(&'static str, String, usize)> {
+        let sentence = "The river bends past the mill and the path follows it. ";
+        let paragraphs = (0..9)
+            .map(|i| format!("Paragraph {i}. {}", sentence.repeat(1 + i % 2)))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let mut sections = String::new();
+        for i in 0..6 {
+            sections.push_str(&format!("## Section {i}\n\n{}\n\n", sentence.repeat(2)));
+            sections.push_str(&format!("### Detail {i}\n\n{}\n", sentence));
+            if i % 2 == 1 {
+                sections.push_str("\n---\n\n");
+            }
+        }
+
+        let fenced = format!(
+            "Intro line before the code.\n\n```text\n{}```\n{}",
+            "a line of code inside the fence\n".repeat(8),
+            format!("{sentence}\n").repeat(4)
+        );
+
+        let multibyte = "\u{00e9}t\u{00e9} \u{1F30A} na\u{00ef}ve caf\u{00e9} ".repeat(20);
+
+        let leading_rule = format!(
+            "---\n\n## Opening\n\n{}\n\n## Second\n\n{}\n\n{}",
+            sentence,
+            sentence.repeat(2),
+            paragraphs
+        );
+
+        let rule_then_prose = format!(
+            "{}\n---\n{}\n\n## Later\n\n{}",
+            sentence.repeat(2),
+            sentence.repeat(2),
+            format!("{sentence}\n").repeat(5)
+        );
+
+        let lines = (0..30)
+            .map(|i| format!("- item {i} on its own line"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let rule_inside_last_chunk = format!(
+            "{}\n\n{}\n---\n{}\n---\n",
+            sentence.repeat(3),
+            sentence,
+            sentence
+        );
+
+        vec![
+            ("paragraphs", paragraphs, 300),
+            ("sections", sections, 400),
+            ("fenced", fenced, 100),
+            ("multibyte", multibyte, 50),
+            ("leading_rule", leading_rule, 250),
+            ("rule_then_prose", rule_then_prose, 120),
+            ("lines", lines, 90),
+            ("rule_inside_last_chunk", rule_inside_last_chunk, 150),
+        ]
     }
 
     #[test]
