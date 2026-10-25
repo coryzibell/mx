@@ -151,6 +151,7 @@ fn each_grammar_rejection_exits_4_and_names_the_rule() {
         ("--trigger=*zorb-el", "letters and digits plus one `*`"),
         ("--trigger=--- + zorbel", "side 1 with no letters or digits"),
         ("--exclude=zorbel + quuxer", "an exclusion is one phrase"),
+        ("--exclude=zorbel +", "an exclusion is one phrase"),
         ("--exclude=zor*bel", "mid-word"),
         ("--exclude=!!!", "could never hold the door"),
     ] {

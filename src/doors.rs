@@ -460,8 +460,8 @@ fn inspect_grammar(g: &triggers::Grammar) -> TriggerVerdict {
 
 /// Judge an authored exclusion: the phrase/wildcard grammar, no ` + `.
 pub fn inspect_exclusion(exclusion: &str) -> TriggerVerdict {
-    if let Ok(Some(g)) = triggers::parse_grammar(exclusion)
-        && g.sides.len() > 1
+    if crate::knowledge::normalize_trigger(exclusion)
+        .is_some_and(|n| n.split(' ').any(|w| w == "+"))
     {
         return TriggerVerdict::Invalid {
             rule: "has ` + `: an exclusion is one phrase (give several with repeated --exclude)"
@@ -484,6 +484,7 @@ pub fn lopsided_plus(trigger: &str) -> Option<String> {
         .map(|(n, w)| {
             let mut w = (*w).to_string();
             let lead = n > 0
+                && words[n - 1] != "+"
                 && w.strip_prefix('+')
                     .and_then(|r| r.chars().next())
                     .is_some_and(char::is_alphanumeric);
@@ -492,6 +493,7 @@ pub fn lopsided_plus(trigger: &str) -> Option<String> {
                 changed = true;
             }
             let trail = n < last
+                && words[n + 1] != "+"
                 && w.strip_suffix('+')
                     .and_then(|r| r.chars().next_back())
                     .is_some_and(char::is_alphanumeric);
@@ -3433,6 +3435,8 @@ mod tests {
             "study+",
             "a + b",
             "x+y",
+            "zorbel + +blarnia",
+            "zorbel+ + quuxer",
         ] {
             assert_eq!(lopsided_plus(fine), None, "{fine:?}");
         }
