@@ -2170,6 +2170,11 @@ pub enum KvCommands {
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
 
+        /// Phrase that holds the door in any segment where it matches
+        /// (repeatable; phrase/wildcard grammar, no ` + `)
+        #[arg(long = "exclude", value_name = "PHRASE")]
+        exclude: Vec<String>,
+
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
         create: Option<CreateType>,
@@ -2267,7 +2272,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to change only --data, --trigger, --fragment, --scope or --memory)
+        /// New value text (omit to change only --data, --trigger, --fragment, --scope, --exclude or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.
@@ -2293,6 +2298,11 @@ pub enum KvCommands {
         /// `--scope ""` clears it back to house.
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
+
+        /// Replace the entry's whole exclusion list (repeatable). A single
+        /// `--exclude ""` clears it.
+        #[arg(long = "exclude", value_name = "PHRASE")]
+        exclude: Vec<String>,
 
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it
         #[arg(long)]

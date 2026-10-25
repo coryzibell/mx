@@ -58,31 +58,102 @@ fn handle_kv_err(err: KvError) -> Result<i32> {
 /// a door nobody has needed yet. That is worth an error rather than a warning.
 /// A one- or two-character token is the opposite failure — it fires constantly —
 /// and is only ever a surprise, so it warns and shows what the trigger BECAME.
+///
+/// A match-grammar trigger that breaks a rule (`fo*o`, `p + `) is refused,
+/// naming the rule. A `+` glued to one word (`study +australia`) is a phrase,
+/// not an AND, so it warns with the ` + ` spelling.
 fn vet_triggers(triggers: &[String]) -> Result<(), i32> {
-    use crate::doors::TriggerVerdict;
+    vet_patterns(triggers, "trigger", crate::doors::inspect_trigger)?;
     for t in triggers {
-        match crate::doors::inspect_trigger(t) {
+        if let Some(and) = crate::doors::lopsided_plus(t) {
+            eprintln!(
+                "warning: trigger {:?} is a phrase, not an AND -- for AND write {:?}",
+                t, and
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Vet `--exclude` phrases the way triggers are vetted. ` + ` is refused.
+fn vet_excludes(excludes: &[String]) -> Result<(), i32> {
+    vet_patterns(excludes, "exclusion", crate::doors::inspect_exclusion)
+}
+
+fn vet_patterns(
+    patterns: &[String],
+    noun: &str,
+    inspect: fn(&str) -> crate::doors::TriggerVerdict,
+) -> Result<(), i32> {
+    use crate::doors::TriggerVerdict;
+    let does = if noun == "trigger" {
+        "fire"
+    } else {
+        "hold the door"
+    };
+    for t in patterns {
+        match inspect(t) {
             TriggerVerdict::Dead => {
                 eprintln!(
-                    "Error: trigger {:?} has no letters or digits to match on -- it could never fire",
-                    t
+                    "Error: {} {:?} has no letters or digits to match on -- it could never {}",
+                    noun, t, does
                 );
+                return Err(kv::EXIT_INVALID_INPUT);
+            }
+            TriggerVerdict::Invalid { rule } => {
+                eprintln!("Error: {} {:?} {}", noun, t, rule);
                 return Err(kv::EXIT_INVALID_INPUT);
             }
             TriggerVerdict::Broad { matched_as } => {
                 eprintln!(
-                    "warning: trigger {:?} matches as {:?} -- it will fire on any bare {:?}",
-                    t, matched_as, matched_as
+                    "warning: {} {:?} matches as {:?} -- it will {} on any bare {:?}",
+                    noun, t, matched_as, does, matched_as
+                );
+            }
+            TriggerVerdict::BroadSide { matched_as, side } => {
+                if matched_as != *t {
+                    eprintln!("note: {} {:?} matches as {:?}", noun, t, matched_as);
+                }
+                eprintln!(
+                    "warning: {} {:?} has the side {:?}, which matches any bare {:?} -- only the other sides narrow it",
+                    noun, t, side, side
                 );
             }
             TriggerVerdict::Fine { matched_as } => {
                 if matched_as != *t {
-                    eprintln!("note: trigger {:?} matches as {:?}", t, matched_as);
+                    eprintln!("note: {} {:?} matches as {:?}", noun, t, matched_as);
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Exclusions only hold a door's triggers, so on an entry with none they do
+/// nothing. Say so; it is not an error.
+fn warn_idle_excludes(idle: bool) {
+    if idle {
+        eprintln!(
+            "warning: this entry has exclusions but no triggers -- they do nothing until it has a trigger"
+        );
+    }
+}
+
+/// True when entry `id` under `key` carries exclusions and no triggers.
+fn excludes_without_triggers(store: &KvStore, key: &str, id: &str) -> bool {
+    use kv::UpdateableEntry;
+    fn idle<T: UpdateableEntry>(entries: &[T], id: &str) -> bool {
+        entries.iter().any(|e| {
+            e.entry_id() == id
+                && e.entry_exclude().is_some_and(|x| !x.is_empty())
+                && e.entry_triggers().is_none_or(|t| t.is_empty())
+        })
+    }
+    match store.get(key) {
+        Ok(kv::DataValue::History { entries, .. }) => idle(entries, id),
+        Ok(kv::DataValue::List { items, .. }) => idle(items, id),
+        _ => false,
+    }
 }
 
 /// A pinned door ignores every place and mode, so say so once at authoring.
@@ -762,6 +833,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             triggers,
             fragment,
             scope,
+            exclude,
             create,
             max_entries,
         } => {
@@ -830,6 +902,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             if let Err(code) = vet_triggers(&normalized) {
                 return Ok(code);
             }
+            let exclude = crate::knowledge::normalize_triggers(exclude);
+            if let Err(code) = vet_excludes(&exclude) {
+                return Ok(code);
+            }
+            let idle_excludes = !exclude.is_empty() && normalized.is_empty();
             let pinned = scope.iter().any(|v| v == "pinned");
             let attrs = kv::EntryAttrs {
                 data: parsed_data,
@@ -837,11 +914,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 triggers: Some(normalized),
                 fragment,
                 scope: (!scope.is_empty()).then_some(scope),
+                exclude: Some(exclude),
             };
             match store.push(&key, &value, attrs) {
                 Ok(result) => {
                     store.save()?;
                     warn_pinned(pinned);
+                    warn_idle_excludes(idle_excludes);
                     println!("kv-{} ({})", result.id, result.index);
                     Ok(kv::EXIT_OK)
                 }
@@ -1082,6 +1161,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             triggers,
             fragment,
             scope,
+            exclude,
             memory,
         } => {
             // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
@@ -1101,8 +1181,18 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 Some(normalized)
             };
 
-            // `--scope ""` clears, same convention as `--trigger ""`.
+            // `--scope ""` and `--exclude ""` clear, same convention as
+            // `--trigger ""`.
             let scope_patch = (!scope.is_empty()).then_some(scope);
+            let exclude_patch = if exclude.is_empty() {
+                None
+            } else {
+                let normalized = crate::knowledge::normalize_triggers(exclude);
+                if let Err(code) = vet_excludes(&normalized) {
+                    return Ok(code);
+                }
+                Some(normalized)
+            };
             let pinned = scope_patch
                 .as_ref()
                 .is_some_and(|s| s.iter().any(|v| v == "pinned"));
@@ -1113,10 +1203,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 && trigger_patch.is_none()
                 && fragment.is_none()
                 && scope_patch.is_none()
+                && exclude_patch.is_none()
                 && memory.is_none()
             {
                 eprintln!(
-                    "Error: provide a value argument, --data, --trigger, --fragment, --scope, or --memory to update"
+                    "Error: provide a value argument, --data, --trigger, --fragment, --scope, --exclude, or --memory to update"
                 );
                 return Ok(kv::EXIT_INVALID_INPUT);
             }
@@ -1159,6 +1250,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         && trigger_patch.is_none()
                         && fragment.is_none()
                         && scope_patch.is_none()
+                        && exclude_patch.is_none()
                         && memory.is_none()
                     {
                         eprintln!(
@@ -1172,18 +1264,23 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             };
 
             // 4. Dispatch to engine.
+            let touches_excludes = trigger_patch.is_some() || exclude_patch.is_some();
             let patch = kv::EntryPatch {
                 value,
                 data: parsed_data,
                 triggers: trigger_patch,
                 fragment,
                 scope: scope_patch,
+                exclude: exclude_patch,
                 memory,
             };
             match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {
                     store.save()?;
                     warn_pinned(pinned);
+                    warn_idle_excludes(
+                        touches_excludes && excludes_without_triggers(&store, &key, &result.id),
+                    );
                     println!("Updated entry {} (kv-{})", result.index, result.id);
                     Ok(kv::EXIT_OK)
                 }
@@ -1256,6 +1353,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         if let Some(s) = c.scope {
                             row["scope"] = s.into();
                         }
+                        if let Some(e) = c.exclude {
+                            row["exclude"] = e.into();
+                        }
                         row
                     })
                     .collect();
@@ -1287,6 +1387,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     n,
                     scope
                 );
+                if let Some(e) = c.exclude {
+                    println!("      exclude: [{}]", e.join(", "));
+                }
                 // Show what the matcher actually sees whenever it differs from
                 // the stored text: `ayo-` matches as `ayo`, `c++` as `c`.
                 let differing: Vec<String> = c

@@ -9,6 +9,10 @@
 //! Snowball stemmer folds Tagalog "ayos" to "ayo", so "ayos lang" would open the
 //! `ayo-` door. Callers matching prose concepts ("diabetes" should fire on
 //! "diabetic") pass `stem = true`.
+//!
+//! [`Grammar`] is the doors-only match grammar (`p + q`, `prefix*`, `*suffix`).
+//! It sits beside the plain pipeline and never changes it: a trigger with no
+//! standalone `+` and no `*` is plain and goes through [`match_triggers`].
 
 use crate::knowledge::normalize_trigger;
 use rust_stemmers::{Algorithm, Stemmer};
@@ -77,6 +81,176 @@ pub fn match_triggers(message_tokens: &[String], triggers: &[String], stem: bool
         .filter(|trig| contains_contiguous(message_tokens, &tokens(trig, stem)))
         .cloned()
         .collect()
+}
+
+/// Fewest literal characters beside a wildcard's `*`.
+pub const MIN_WILDCARD_CHARS: usize = 5;
+
+/// One position in a grammar phrase: it matches exactly one message token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pat {
+    Exact(String),
+    /// `prefix*`: the token starts with this.
+    Prefix(String),
+    /// `*suffix`: the token ends with this.
+    Suffix(String),
+}
+
+impl Pat {
+    fn matches(&self, token: &str) -> bool {
+        match self {
+            Pat::Exact(t) => token == t,
+            Pat::Prefix(p) => token.starts_with(p.as_str()),
+            Pat::Suffix(s) => token.ends_with(s.as_str()),
+        }
+    }
+
+    fn form(&self) -> String {
+        match self {
+            Pat::Exact(t) => t.clone(),
+            Pat::Prefix(p) => format!("{p}*"),
+            Pat::Suffix(s) => format!("*{s}"),
+        }
+    }
+}
+
+/// A doors trigger written in the match grammar: `p + q` sides that must all
+/// match in one token stream, any order, each a contiguous phrase whose words
+/// may carry one leading or trailing `*`. A lone phrase is one side.
+///
+/// Doors only, and never stemmed. A trigger with no ` + ` and no `*` is not a
+/// grammar trigger at all and keeps going through [`match_triggers`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grammar {
+    pub sides: Vec<Vec<Pat>>,
+}
+
+/// Why a trigger string is not valid grammar. Each names the rule it broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrammarError {
+    EmptySide,
+    SeveralStars(String),
+    MidStar(String),
+    NotAlphanumeric(String),
+    ShortWildcard { word: String, chars: usize },
+}
+
+impl std::fmt::Display for GrammarError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GrammarError::EmptySide => write!(
+                f,
+                "has an empty side of `+`: every side of `p + q` needs a phrase"
+            ),
+            GrammarError::SeveralStars(w) => write!(
+                f,
+                "has {w:?} with more than one `*`: a wildcard word takes exactly one"
+            ),
+            GrammarError::MidStar(w) => write!(
+                f,
+                "has {w:?} with `*` mid-word: a wildcard goes at the start or the end of a word"
+            ),
+            GrammarError::NotAlphanumeric(w) => write!(
+                f,
+                "has {w:?}: a wildcard word is letters and digits plus one `*`"
+            ),
+            GrammarError::ShortWildcard { word, chars } => write!(
+                f,
+                "has {word:?} with {chars} literal characters: a wildcard needs at least {MIN_WILDCARD_CHARS}"
+            ),
+        }
+    }
+}
+
+/// Parse a trigger as grammar. `Ok(None)` means it is a plain trigger: no
+/// standalone `+` word and no `*` anywhere, so `c++` stays plain.
+pub fn parse_grammar(trigger: &str) -> Result<Option<Grammar>, GrammarError> {
+    let Some(normalized) = normalize_trigger(trigger) else {
+        return Ok(None);
+    };
+    let words: Vec<&str> = normalized.split(' ').collect();
+    if !normalized.contains('*') && !words.contains(&"+") {
+        return Ok(None);
+    }
+    let mut sides = Vec::new();
+    for side in words.split(|w| *w == "+") {
+        if side.is_empty() {
+            return Err(GrammarError::EmptySide);
+        }
+        let mut pats = Vec::new();
+        for word in side {
+            if word.contains('*') {
+                pats.push(parse_wildcard(word)?);
+            } else {
+                pats.extend(tokens(word, false).into_iter().map(Pat::Exact));
+            }
+        }
+        sides.push(pats);
+    }
+    Ok(Some(Grammar { sides }))
+}
+
+fn parse_wildcard(word: &str) -> Result<Pat, GrammarError> {
+    if word.matches('*').count() > 1 {
+        return Err(GrammarError::SeveralStars(word.to_string()));
+    }
+    let (lit, prefix) = match (word.strip_suffix('*'), word.strip_prefix('*')) {
+        (Some(lit), _) => (lit, true),
+        (_, Some(lit)) => (lit, false),
+        _ => return Err(GrammarError::MidStar(word.to_string())),
+    };
+    if !lit.chars().all(char::is_alphanumeric) {
+        return Err(GrammarError::NotAlphanumeric(word.to_string()));
+    }
+    let chars = lit.chars().count();
+    if chars < MIN_WILDCARD_CHARS {
+        return Err(GrammarError::ShortWildcard {
+            word: word.to_string(),
+            chars,
+        });
+    }
+    let lit = lit.to_string();
+    Ok(if prefix {
+        Pat::Prefix(lit)
+    } else {
+        Pat::Suffix(lit)
+    })
+}
+
+impl Grammar {
+    /// True when every side matches somewhere in `message_tokens`.
+    pub fn matches(&self, message_tokens: &[String]) -> bool {
+        self.sides
+            .iter()
+            .all(|side| side_matches(message_tokens, side))
+    }
+
+    /// Message tokens the trigger spans, summed over its sides.
+    pub fn span(&self) -> usize {
+        self.sides.iter().map(Vec::len).sum()
+    }
+
+    /// What each side matches as, space-joined, wildcards keeping their `*`.
+    pub fn side_forms(&self) -> Vec<String> {
+        self.sides
+            .iter()
+            .map(|side| side.iter().map(Pat::form).collect::<Vec<_>>().join(" "))
+            .collect()
+    }
+
+    /// The sides' forms joined with ` + `.
+    pub fn form(&self) -> String {
+        self.side_forms().join(" + ")
+    }
+}
+
+fn side_matches(haystack: &[String], side: &[Pat]) -> bool {
+    if side.is_empty() || side.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(side.len())
+        .any(|w| w.iter().zip(side).all(|(tok, pat)| pat.matches(tok)))
 }
 
 /// A matched entry: the entry id plus which of its triggers fired.

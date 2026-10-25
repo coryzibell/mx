@@ -490,6 +490,7 @@ impl<'de> Deserialize<'de> for DataValue {
                                 triggers: None,
                                 fragment: None,
                                 scope: None,
+                                exclude: None,
                             }
                         }
                     })
@@ -523,6 +524,9 @@ pub struct HistoryEntry {
     /// `validate_scope` for the accepted values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
+    /// Phrases that hold this door in any segment where one matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -545,6 +549,9 @@ pub struct ListEntry {
     /// `validate_scope` for the accepted values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<Vec<String>>,
+    /// Phrases that hold this door in any segment where one matches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
 }
 
 /// Optional attachments carried by a pushed entry.
@@ -560,12 +567,13 @@ pub struct EntryAttrs {
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
     pub scope: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
 }
 
 /// A partial update to an existing entry. `None` leaves a field untouched.
 ///
 /// `triggers: Some(vec![])`, `fragment: Some(String::new())`,
-/// `scope: Some(vec![])` and `memory: Some(String::new())` are the *clear*
+/// `scope: Some(vec![])`, `exclude: Some(vec![])` and `memory: Some(String::new())` are the *clear*
 /// signals — one command removes
 /// a bad door or a stale link — and all are stored back as `None` so they
 /// vanish from the serialized entry.
@@ -576,6 +584,7 @@ pub struct EntryPatch {
     pub triggers: Option<Vec<String>>,
     pub fragment: Option<String>,
     pub scope: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
     pub memory: Option<String>,
 }
 
@@ -587,6 +596,7 @@ impl EntryPatch {
             && self.triggers.is_none()
             && self.fragment.is_none()
             && self.scope.is_none()
+            && self.exclude.is_none()
             && self.memory.is_none()
     }
 }
@@ -656,6 +666,7 @@ pub struct TriggeredRef<'a> {
     pub fragment: Option<&'a str>,
     pub memory: Option<&'a str>,
     pub scope: Option<&'a [String]>,
+    pub exclude: Option<&'a [String]>,
 }
 
 /// Shared field access for entry types that live in History and List values.
@@ -672,11 +683,13 @@ pub trait UpdateableEntry {
     fn entry_triggers(&self) -> Option<&[String]>;
     fn entry_fragment(&self) -> Option<&str>;
     fn entry_scope(&self) -> Option<&[String]>;
+    fn entry_exclude(&self) -> Option<&[String]>;
     fn set_value(&mut self, v: &str);
     fn set_data(&mut self, d: Option<serde_json::Value>);
     fn set_triggers(&mut self, t: Option<Vec<String>>);
     fn set_fragment(&mut self, f: Option<String>);
     fn set_scope(&mut self, s: Option<Vec<String>>);
+    fn set_exclude(&mut self, e: Option<Vec<String>>);
     fn set_memory(&mut self, m: Option<String>);
 }
 
@@ -710,6 +723,9 @@ macro_rules! impl_updateable_entry {
             fn entry_scope(&self) -> Option<&[String]> {
                 self.scope.as_deref()
             }
+            fn entry_exclude(&self) -> Option<&[String]> {
+                self.exclude.as_deref()
+            }
             fn set_value(&mut self, v: &str) {
                 self.value = v.to_string();
             }
@@ -724,6 +740,9 @@ macro_rules! impl_updateable_entry {
             }
             fn set_scope(&mut self, s: Option<Vec<String>>) {
                 self.scope = s.filter(|list| !list.is_empty());
+            }
+            fn set_exclude(&mut self, e: Option<Vec<String>>) {
+                self.exclude = e.filter(|list| !list.is_empty());
             }
             fn set_memory(&mut self, m: Option<String>) {
                 self.memory = m.filter(|s| !s.is_empty());
@@ -862,6 +881,9 @@ fn apply_entry_update<T: UpdateableEntry>(
     }
     if let Some(scope) = patch.scope.clone() {
         entry.set_scope(Some(scope));
+    }
+    if let Some(exclude) = patch.exclude.clone() {
+        entry.set_exclude(Some(crate::knowledge::normalize_triggers(exclude)));
     }
     if let Some(memory) = patch.memory.clone() {
         entry.set_memory(Some(memory));
@@ -2126,6 +2148,7 @@ impl KvStore {
             triggers,
             fragment,
             scope,
+            exclude,
         } = attrs;
         if let Some(m) = &memory {
             check_memory_pointer(key, m)?;
@@ -2137,6 +2160,9 @@ impl KvStore {
         let memory = memory.filter(|m| !m.is_empty());
         let triggers = triggers.filter(|t| !t.is_empty());
         let fragment = fragment.filter(|f| !f.trim().is_empty());
+        let exclude = exclude
+            .map(crate::knowledge::normalize_triggers)
+            .filter(|e| !e.is_empty());
 
         def.validate_data(key, &data)?;
 
@@ -2166,6 +2192,7 @@ impl KvStore {
                                 triggers,
                                 fragment,
                                 scope,
+                                exclude,
                             },
                         );
                         // Drop oldest at max_entries
@@ -2204,6 +2231,7 @@ impl KvStore {
                             triggers,
                             fragment,
                             scope,
+                            exclude,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
@@ -3222,6 +3250,7 @@ impl KvStore {
             && patch.triggers.is_none()
             && patch.fragment.is_none()
             && patch.scope.is_none()
+            && patch.exclude.is_none()
             && patch.memory.is_none()
             && patch
                 .data
@@ -3294,6 +3323,7 @@ impl KvStore {
                     fragment: e.entry_fragment(),
                     memory: e.entry_memory(),
                     scope: e.entry_scope(),
+                    exclude: e.entry_exclude(),
                 });
             }
         }
@@ -8582,6 +8612,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8630,6 +8661,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8662,6 +8694,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8706,6 +8739,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8742,6 +8776,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8795,6 +8830,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8829,6 +8865,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8873,6 +8910,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -8915,6 +8953,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -9033,6 +9072,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
@@ -9076,6 +9116,7 @@ type = "counter"
                     triggers: None,
                     fragment: None,
                     scope: None,
+                    exclude: None,
                 }],
                 memory: None,
             },
