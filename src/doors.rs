@@ -416,8 +416,10 @@ pub fn matched_form(trigger: &str) -> String {
 pub fn inspect_trigger(trigger: &str) -> TriggerVerdict {
     match triggers::parse_grammar(trigger) {
         Err(e) => {
+            let one_word =
+                crate::knowledge::normalize_trigger(trigger).is_some_and(|n| !n.contains(' '));
             return TriggerVerdict::Invalid {
-                rule: e.to_string(),
+                rule: e.rule(!one_word),
             };
         }
         Ok(Some(g)) => return inspect_grammar(&g),
@@ -3368,6 +3370,26 @@ mod tests {
                 .door
                 .trigger,
             "zorbel quuxer pod"
+        );
+    }
+
+    #[test]
+    fn grammar_rejection_names_the_word_once() {
+        let rule = |t: &str| match inspect_trigger(t) {
+            TriggerVerdict::Invalid { rule } => rule,
+            other => panic!("{t:?}: {other:?}"),
+        };
+        assert_eq!(
+            rule("  Fo*O "),
+            "has `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(
+            rule("zorbel fo*o"),
+            "has \"fo*o\" with `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(
+            rule("quuxer + *flim"),
+            "has \"*flim\" with 4 literal characters: a wildcard needs at least 5"
         );
     }
 

@@ -163,6 +163,12 @@ fn each_grammar_rejection_exits_4_and_names_the_rule() {
     }
     assert!(ok(&mx(&dir, &["kv", "triggers"]), "kv triggers").is_empty());
 
+    let out = mx(&dir, &["kv", "push", "facts", "x", "--trigger=fo*o"]);
+    assert_eq!(
+        stderr(&out),
+        "Error: trigger \"fo*o\" has `*` mid-word: a wildcard goes at the start or the end of a word\n"
+    );
+
     // The same rules guard update.
     let id = push_door(&dir, "x", &["--trigger", "frob"]);
     for flag in ["--trigger=zorbel +", "--exclude=zorbel + quuxer"] {
@@ -298,4 +304,32 @@ fn check_explain_names_the_exclusion_that_held_a_door() {
     let v: serde_json::Value = serde_json::from_str(&check("quuxering zorbel", true)).unwrap();
     assert!(v["doors"][0].get("excluded_by").is_none());
     assert_eq!(v["fired"][0]["trigger"], "zorbel + quuxer*");
+}
+
+#[test]
+fn an_upper_case_greek_wildcard_fires_on_a_medial_sigma() {
+    let dir = setup();
+    let id = push_door(&dir, "sophist fact", &["--trigger", "ΣΟΦΟΣ*"]);
+    assert_eq!(
+        triggers_json(&dir)[0]["triggers"],
+        serde_json::json!(["σοφος*"])
+    );
+    let out = ok(
+        &mx(
+            &dir,
+            &[
+                "doors",
+                "check",
+                "οι σοφοστες",
+                "--session",
+                "s1",
+                "--explain",
+            ],
+        ),
+        "check --explain",
+    );
+    assert!(
+        out.contains(&format!("σοφος*  facts/kv-{id}  FIRED")),
+        "{out}"
+    );
 }

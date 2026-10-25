@@ -100,8 +100,8 @@ impl Pat {
     fn matches(&self, token: &str) -> bool {
         match self {
             Pat::Exact(t) => token == t,
-            Pat::Prefix(p) => token.starts_with(p.as_str()),
-            Pat::Suffix(s) => token.ends_with(s.as_str()),
+            Pat::Prefix(p) => fold_sigma(token).starts_with(&*fold_sigma(p)),
+            Pat::Suffix(s) => fold_sigma(token).ends_with(&*fold_sigma(s)),
         }
     }
 
@@ -111,6 +111,17 @@ impl Pat {
             Pat::Prefix(p) => format!("{p}*"),
             Pat::Suffix(s) => format!("*{s}"),
         }
+    }
+}
+
+/// `ς` as `σ`. Lowercasing writes a final sigma wherever `Σ` ends a word, and a
+/// wildcard literal ends where its `*` is, so `ΣΟΦΟΣ*` lowercases to `σοφος*`
+/// while the `σοφοστες` it should hit carries a medial `σ`.
+fn fold_sigma(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains('ς') {
+        s.replace('ς', "σ").into()
+    } else {
+        s.into()
     }
 }
 
@@ -135,30 +146,43 @@ pub enum GrammarError {
     ShortWildcard { word: String, chars: usize },
 }
 
+impl GrammarError {
+    /// The rule broken. `name_word` false leaves out the offending word, for a
+    /// one-word trigger the caller already shows whole.
+    pub fn rule(&self, name_word: bool) -> String {
+        let (word, rest) = match self {
+            GrammarError::EmptySide => {
+                return "has an empty side of `+`: every side of `p + q` needs a phrase".into();
+            }
+            GrammarError::SeveralStars(w) => (
+                w,
+                "more than one `*`: a wildcard word takes exactly one".to_string(),
+            ),
+            GrammarError::MidStar(w) => (
+                w,
+                "`*` mid-word: a wildcard goes at the start or the end of a word".to_string(),
+            ),
+            GrammarError::NotAlphanumeric(w) => (
+                w,
+                "something besides letters and digits: a wildcard word is letters and digits plus one `*`"
+                    .to_string(),
+            ),
+            GrammarError::ShortWildcard { word, chars } => (
+                word,
+                format!("{chars} literal characters: a wildcard needs at least {MIN_WILDCARD_CHARS}"),
+            ),
+        };
+        if name_word {
+            format!("has {word:?} with {rest}")
+        } else {
+            format!("has {rest}")
+        }
+    }
+}
+
 impl std::fmt::Display for GrammarError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GrammarError::EmptySide => write!(
-                f,
-                "has an empty side of `+`: every side of `p + q` needs a phrase"
-            ),
-            GrammarError::SeveralStars(w) => write!(
-                f,
-                "has {w:?} with more than one `*`: a wildcard word takes exactly one"
-            ),
-            GrammarError::MidStar(w) => write!(
-                f,
-                "has {w:?} with `*` mid-word: a wildcard goes at the start or the end of a word"
-            ),
-            GrammarError::NotAlphanumeric(w) => write!(
-                f,
-                "has {w:?}: a wildcard word is letters and digits plus one `*`"
-            ),
-            GrammarError::ShortWildcard { word, chars } => write!(
-                f,
-                "has {word:?} with {chars} literal characters: a wildcard needs at least {MIN_WILDCARD_CHARS}"
-            ),
-        }
+        f.write_str(&self.rule(true))
     }
 }
 
@@ -580,6 +604,20 @@ mod tests {
     }
 
     #[test]
+    fn grammar_error_rule_can_leave_out_the_word() {
+        let e = parse_grammar("fo*o").unwrap_err();
+        assert_eq!(
+            e.rule(true),
+            "has \"fo*o\" with `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(
+            e.rule(false),
+            "has `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(e.to_string(), e.rule(true));
+    }
+
+    #[test]
     fn grammar_form_and_span() {
         let t = g("frim_bo + quuxer* + *flimbing pod");
         assert_eq!(t.form(), "frim bo + quuxer* + *flimbing pod");
@@ -627,5 +665,27 @@ mod tests {
         let t = g("z\u{00fc}rnig*");
         assert!(t.matches(&bare("ZU\u{0308}RNIGKEIT ahead")));
         assert!(!t.matches(&bare("zurnigkeit")));
+    }
+
+    #[test]
+    fn grammar_wildcard_final_sigma_matches_medial_sigma() {
+        // Upper-case authoring lowercases to a final ς before the `*`.
+        for prefix in ["ΣΟΦΟΣ*", "σοφος*", "σοφοσ*"] {
+            let t = g(prefix);
+            assert!(t.matches(&bare("οι σοφοστες")), "{prefix:?}");
+            assert!(t.matches(&bare("ΣΟΦΟΣΤΕΣ")), "{prefix:?}");
+            assert!(t.matches(&bare("ο σοφος")), "{prefix:?}");
+            assert!(!t.matches(&bare("σοφοζτες")), "{prefix:?}");
+            assert!(!t.matches(&bare("σοφοτες")), "{prefix:?}");
+        }
+        for suffix in ["*ΦΙΛΟΣ", "*φιλος", "*φιλοσ"] {
+            let t = g(suffix);
+            assert!(t.matches(&bare("ο θεοφιλος")), "{suffix:?}");
+            assert!(t.matches(&bare("ΘΕΟΦΙΛΟΣ")), "{suffix:?}");
+            assert!(!t.matches(&bare("θεοφιλοζ")), "{suffix:?}");
+            assert!(!t.matches(&bare("θεοφιλοι")), "{suffix:?}");
+        }
+        // The stored literal keeps what lowercasing wrote.
+        assert_eq!(g("ΣΟΦΟΣ*").form(), "σοφος*");
     }
 }
