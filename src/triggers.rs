@@ -464,4 +464,168 @@ mod tests {
         let entries: Vec<(&str, &[String])> = vec![("kn-brad", trig.as_slice())];
         assert!(match_entries("   ", entries, true).is_empty());
     }
+
+    // ---- Grammar: parsing ----
+
+    fn g(s: &str) -> Grammar {
+        parse_grammar(s).unwrap().unwrap()
+    }
+
+    fn ex(s: &str) -> Pat {
+        Pat::Exact(s.to_string())
+    }
+
+    #[test]
+    fn grammar_plain_triggers_are_not_grammar() {
+        for plain in [
+            "zorbel",
+            "zorbel quuxer",
+            "c++",
+            "c++ tips",
+            "zim & zam",
+            "blip-blop",
+            "a+ grade",
+            "study +blarnia",
+            "!",
+            "",
+        ] {
+            assert_eq!(parse_grammar(plain), Ok(None), "{plain:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_and_splits_into_sides() {
+        assert_eq!(
+            g("Zorbel + quuxer  pod + frim_bo"),
+            Grammar {
+                sides: vec![
+                    vec![ex("zorbel")],
+                    vec![ex("quuxer"), ex("pod")],
+                    vec![ex("frim"), ex("bo")],
+                ]
+            }
+        );
+        // `c++` inside a side is the plain token `c`, not an operator.
+        assert_eq!(
+            g("c++ + zorbel").sides,
+            vec![vec![ex("c")], vec![ex("zorbel")]]
+        );
+    }
+
+    #[test]
+    fn grammar_wildcards_parse_as_prefix_and_suffix() {
+        assert_eq!(
+            g("Quuxer* pod *Flimbing").sides,
+            vec![vec![
+                Pat::Prefix("quuxer".to_string()),
+                ex("pod"),
+                Pat::Suffix("flimbing".to_string()),
+            ]]
+        );
+        // Exactly five literal characters is enough.
+        assert_eq!(g("glarp*").sides, vec![vec![Pat::Prefix("glarp".into())]]);
+        // Counted in characters after NFC, not bytes: decomposed input composes.
+        assert_eq!(
+            g("*zu\u{0308}rnig").sides,
+            vec![vec![Pat::Suffix("z\u{00fc}rnig".into())]]
+        );
+        assert_eq!(g("k\u{00e4}tt\u{00f6}*").span(), 1);
+    }
+
+    #[test]
+    fn grammar_rejects_each_broken_rule() {
+        for (raw, want) in [
+            ("+", GrammarError::EmptySide),
+            ("+ zorbel", GrammarError::EmptySide),
+            ("zorbel +", GrammarError::EmptySide),
+            ("zorbel + + quuxer", GrammarError::EmptySide),
+            (
+                "*",
+                GrammarError::ShortWildcard {
+                    word: "*".into(),
+                    chars: 0,
+                },
+            ),
+            ("**zorbel", GrammarError::SeveralStars("**zorbel".into())),
+            ("*zorbel*", GrammarError::SeveralStars("*zorbel*".into())),
+            ("zor*bel", GrammarError::MidStar("zor*bel".into())),
+            ("*zorb-el", GrammarError::NotAlphanumeric("*zorb-el".into())),
+            (
+                "zorb*",
+                GrammarError::ShortWildcard {
+                    word: "zorb*".into(),
+                    chars: 4,
+                },
+            ),
+            (
+                "quuxer + *flim",
+                GrammarError::ShortWildcard {
+                    word: "*flim".into(),
+                    chars: 4,
+                },
+            ),
+        ] {
+            assert_eq!(parse_grammar(raw), Err(want), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn grammar_errors_name_the_rule() {
+        let msg = |s: &str| parse_grammar(s).unwrap_err().to_string();
+        assert!(msg("zorbel +").contains("empty side of `+`"));
+        assert!(msg("**zorbel").contains("more than one `*`"));
+        assert!(msg("zor*bel").contains("mid-word"));
+        assert!(msg("*zorb-el").contains("letters and digits plus one `*`"));
+        assert!(msg("zorb*").contains("at least 5"));
+    }
+
+    #[test]
+    fn grammar_form_and_span() {
+        let t = g("frim_bo + quuxer* + *flimbing pod");
+        assert_eq!(t.form(), "frim bo + quuxer* + *flimbing pod");
+        assert_eq!(t.side_forms(), vec!["frim bo", "quuxer*", "*flimbing pod"]);
+        assert_eq!(t.span(), 5);
+    }
+
+    // ---- Grammar: matching ----
+
+    #[test]
+    fn grammar_and_matches_in_any_order() {
+        let t = g("zorbel + quuxer pod");
+        assert!(t.matches(&bare("the zorbel met a quuxer pod")));
+        assert!(t.matches(&bare("a quuxer pod, then the zorbel")));
+        // A side is still a contiguous phrase.
+        assert!(!t.matches(&bare("zorbel quuxer and a pod")));
+        // Every side is required.
+        assert!(!t.matches(&bare("just a zorbel")));
+    }
+
+    #[test]
+    fn grammar_wildcard_prefix_and_suffix_match_one_token() {
+        let pre = g("quuxer*");
+        assert!(pre.matches(&bare("so quuxering today")));
+        assert!(pre.matches(&bare("a quuxer")));
+        assert!(!pre.matches(&bare("an unquuxer")));
+        let suf = g("*flimbing");
+        assert!(suf.matches(&bare("much reflimbing")));
+        assert!(suf.matches(&bare("FLIMBING")));
+        assert!(!suf.matches(&bare("flimbings")));
+        // Tokens split on punctuation, so the wildcard sees each part.
+        assert!(suf.matches(&bare("co-flimbing")));
+    }
+
+    #[test]
+    fn grammar_wildcard_inside_a_phrase_holds_its_position() {
+        let t = g("pod quuxer* team");
+        assert!(t.matches(&bare("the pod quuxering team")));
+        assert!(!t.matches(&bare("the pod team quuxering")));
+        assert!(!t.matches(&bare("the pod big quuxering team")));
+    }
+
+    #[test]
+    fn grammar_unicode_wildcard_matches_across_nfc() {
+        let t = g("z\u{00fc}rnig*");
+        assert!(t.matches(&bare("ZU\u{0308}RNIGKEIT ahead")));
+        assert!(!t.matches(&bare("zurnigkeit")));
+    }
 }

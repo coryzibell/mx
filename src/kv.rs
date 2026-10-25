@@ -10240,6 +10240,71 @@ type = "history"
         assert!(!raw.contains("triggers"), "absent fields must stay absent");
         assert!(!raw.contains("fragment"));
         assert!(!raw.contains("scope"));
+        assert!(!raw.contains("exclude"));
+    }
+
+    #[test]
+    fn exclude_is_normalized_on_push_replaced_on_update_and_cleared_on_empty() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        for key in ["facts", "log"] {
+            let push = store
+                .push(
+                    key,
+                    "v",
+                    EntryAttrs {
+                        triggers: Some(vec!["zorbel".to_string()]),
+                        exclude: Some(vec![
+                            "Vintage  Zorbel".to_string(),
+                            "vintage zorbel".to_string(),
+                            "glarp*".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let c = store
+                .iter_triggered()
+                .into_iter()
+                .find(|c| c.key == key)
+                .unwrap();
+            assert_eq!(
+                c.exclude,
+                Some(&["vintage zorbel".to_string(), "glarp*".to_string()][..])
+            );
+            let id = IdRef::Index(push.index);
+            store
+                .update_entry(
+                    key,
+                    &id,
+                    EntryPatch {
+                        exclude: Some(vec!["Quuxer".to_string()]),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let c = store
+                .iter_triggered()
+                .into_iter()
+                .find(|c| c.key == key)
+                .unwrap();
+            assert_eq!(c.exclude, Some(&["quuxer".to_string()][..]));
+            store
+                .update_entry(
+                    key,
+                    &id,
+                    EntryPatch {
+                        exclude: Some(Vec::new()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let c = store
+                .iter_triggered()
+                .into_iter()
+                .find(|c| c.key == key)
+                .unwrap();
+            assert_eq!(c.exclude, None);
+        }
     }
 
     #[test]
