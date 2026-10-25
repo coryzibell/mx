@@ -6,6 +6,52 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx doors` match grammar: `p + q`, affix wildcards, `--exclude` (doors P4, #490)
+
+- **Upgrade before authoring the first exclusion.** An older `mx` doing a
+  read-modify-write of kv drops fields it does not know, so it would silently
+  strip `exclude` from every entry it rewrites.
+- **`p + q` in a trigger** fires when every side matches somewhere in the
+  same segment, in any order. Each side is a contiguous phrase, as before.
+  ` + ` is an operator only as a standalone word, so `c++` and `c++ tips`
+  stay plain literals and match as they did (broad, on `c`). Flat N-way AND
+  (`a + b + c`) is allowed; there is no nesting, no parentheses and no OR
+  (several `--trigger`s are already OR). A side that is empty (`p +`, `+ q`,
+  `p + + q`, a bare `+`) exits `4`. A `+` glued to one word
+  (`study +blarnia`) is still a phrase; it is stored, with a warning on stderr
+  that shows the ` + ` spelling.
+- **Affix wildcards**: a word written `prefix*` or `*suffix` matches exactly
+  one message token that starts or ends with it (the bare literal included).
+  It can sit anywhere in a phrase or a side. The literal is one run of letters
+  and digits, at least 5 characters after normalization. `*`, `**foo`,
+  `*foo*`, `fo*o`, `*foo-bar` and short literals exit `4`, and the message
+  names the rule that was broken.
+- **`--exclude PHRASE` on `mx kv push` and `mx kv update`** (repeatable): if
+  any exclusion matches in a segment, the door is held for that segment. A
+  clean match in another admitted segment still fires. Exclusions take the
+  phrase/wildcard grammar; ` + ` in one exits `4`, and the Dead/Broad checks
+  apply as they do to triggers. Stored normalized and deduplicated as a typed
+  `exclude` field next to `triggers` and `scope`. On `update` it replaces the
+  whole list; `--exclude ""` clears it, and `--exclude` on its own is a
+  complete update. Exclusions on an entry with no triggers are stored with a
+  warning, since they do nothing.
+- **Dead and Broad per side.** A side with nothing to match on exits `4`. A
+  side that is one short token warns, naming the side, since the other sides
+  still narrow it.
+- **The most specific trigger** for a grammar trigger counts the tokens of all
+  its sides, then characters. Plain triggers measure exactly as before, and the
+  fire row's `trigger` is the stored string.
+- **`mx kv triggers`** shows a grammar trigger's matched form with its ` + `
+  and `*` (`frim_bo + *flimbing` matches as `frim bo + *flimbing`), and an
+  `exclude: [...]` line under an entry that has exclusions. `--json` carries
+  `"exclude"` when one is set.
+- **`mx doors check --explain`** ends the line of a door held by an exclusion
+  with `excluded by "<phrase>"`, and `--json` gives that door an
+  `excluded_by` field. A scope hold is shown as before.
+- **Every plain trigger fires as before.** A trigger with no standalone `+`
+  and no `*` goes through the same matcher call as 0.1.231, and plain output
+  of `kv triggers` and `doors check` is unchanged.
+
 ### Fixed — the wake chunker never cuts a chunk of only rules and blank lines (#487)
 
 - **A rule before a heading no longer becomes its own chunk.** The chunker

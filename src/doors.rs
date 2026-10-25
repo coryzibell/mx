@@ -394,17 +394,37 @@ pub enum TriggerVerdict {
     Broad { matched_as: String },
     /// Fires as `matched_as`, which may still differ from what was typed.
     Fine { matched_as: String },
+    /// Breaks a match-grammar rule; `rule` says which. Never stored.
+    Invalid { rule: String },
+    /// A `p + q` trigger with a side that is one very short token. The other
+    /// sides narrow it, so this warns rather than calling the trigger broad.
+    BroadSide { matched_as: String, side: String },
 }
 
 /// The token sequence a trigger actually matches on, space-joined. This is what
 /// the reader should be shown, because it is what the matcher sees — `ayo-`
-/// matches as `ayo`, and `gerf_slips` as `gerf slips`.
+/// matches as `ayo`, and `gerf_slips` as `gerf slips`. A grammar trigger shows
+/// its sides joined with ` + `, wildcards keeping their `*`.
 pub fn matched_form(trigger: &str) -> String {
-    triggers::tokens(trigger, false).join(" ")
+    match triggers::parse_grammar(trigger) {
+        Ok(Some(g)) => g.form(),
+        _ => triggers::tokens(trigger, false).join(" "),
+    }
 }
 
 /// Judge an authored trigger before it is stored.
 pub fn inspect_trigger(trigger: &str) -> TriggerVerdict {
+    match triggers::parse_grammar(trigger) {
+        Err(e) => {
+            let one_word =
+                crate::knowledge::normalize_trigger(trigger).is_some_and(|n| !n.contains(' '));
+            return TriggerVerdict::Invalid {
+                rule: e.rule(!one_word),
+            };
+        }
+        Ok(Some(g)) => return inspect_grammar(&g),
+        Ok(None) => {}
+    }
     let toks = triggers::tokens(trigger, false);
     if toks.is_empty() {
         return TriggerVerdict::Dead;
@@ -417,13 +437,87 @@ pub fn inspect_trigger(trigger: &str) -> TriggerVerdict {
     }
 }
 
+fn inspect_grammar(g: &triggers::Grammar) -> TriggerVerdict {
+    let forms = g.side_forms();
+    if let Some(dead) = g.sides.iter().position(Vec::is_empty) {
+        return TriggerVerdict::Invalid {
+            rule: format!(
+                "has side {} with no letters or digits to match on, so it could never fire",
+                dead + 1
+            ),
+        };
+    }
+    let matched_as = g.form();
+    let broad = g.sides.iter().zip(&forms).find(|(side, _)| {
+        matches!(side.as_slice(), [triggers::Pat::Exact(t)] if t.chars().count() < MIN_TRIGGER_TOKEN_CHARS)
+    });
+    match broad {
+        Some((_, side)) => TriggerVerdict::BroadSide {
+            matched_as,
+            side: side.clone(),
+        },
+        None => TriggerVerdict::Fine { matched_as },
+    }
+}
+
+/// Judge an authored exclusion: the phrase/wildcard grammar, no ` + `.
+pub fn inspect_exclusion(exclusion: &str) -> TriggerVerdict {
+    if crate::knowledge::normalize_trigger(exclusion)
+        .is_some_and(|n| n.split(' ').any(|w| w == "+"))
+    {
+        return TriggerVerdict::Invalid {
+            rule: "has ` + `: an exclusion is one phrase (give several with repeated --exclude)"
+                .to_string(),
+        };
+    }
+    inspect_trigger(exclusion)
+}
+
+/// The ` + ` spelling of a trigger that reads like an AND but is a phrase: a
+/// `+` glued to one side of a word (`study +australia`). `c++` and `c++ tips`
+/// are left alone because their `+` follows another `+`.
+pub fn lopsided_plus(trigger: &str) -> Option<String> {
+    let words: Vec<&str> = trigger.split_whitespace().collect();
+    let last = words.len().checked_sub(1)?;
+    let mut changed = false;
+    let fixed: Vec<String> = words
+        .iter()
+        .enumerate()
+        .map(|(n, w)| {
+            let mut w = (*w).to_string();
+            let lead = n > 0
+                && words[n - 1] != "+"
+                && w.strip_prefix('+')
+                    .and_then(|r| r.chars().next())
+                    .is_some_and(char::is_alphanumeric);
+            if lead {
+                w = format!("+ {}", &w[1..]);
+                changed = true;
+            }
+            let trail = n < last
+                && words[n + 1] != "+"
+                && w.strip_suffix('+')
+                    .and_then(|r| r.chars().next_back())
+                    .is_some_and(char::is_alphanumeric);
+            if trail {
+                w = format!("{} +", &w[..w.len() - 1]);
+                changed = true;
+            }
+            w
+        })
+        .collect();
+    changed.then(|| fixed.join(" "))
+}
+
 /// How specific a trigger is: how many message tokens it spans, then how many
-/// characters. A longer span is a more precise statement about the message.
+/// characters. A longer span is a more precise statement about the message. A
+/// grammar trigger spans the tokens of all its sides.
 fn specificity(trigger: &str) -> (usize, usize) {
-    (
-        triggers::tokens(trigger, false).len(),
-        trigger.chars().count(),
-    )
+    let span = match triggers::parse_grammar(trigger) {
+        Ok(Some(g)) => g.span(),
+        _ => triggers::tokens(trigger, false).len(),
+    };
+    (span, trigger.chars().count())
 }
 
 /// Who wrote a stretch of the prompt.
@@ -705,6 +799,9 @@ pub struct DoorMatch {
     pub segment: usize,
     /// The budget pool its winning hit spends.
     pub pool: Pool,
+    /// For a held door: the exclusion that matched in its admitted segment.
+    /// `None` for a scope hold.
+    pub excluded_by: Option<String>,
 }
 
 /// Everything one prompt produced, for `check --explain`.
@@ -730,16 +827,67 @@ impl Explanation {
     }
 }
 
+/// What a candidate matched across a run of segments.
+#[derive(Debug, Default)]
+struct Hits {
+    /// The most specific trigger matched in a segment no exclusion matched,
+    /// and that segment's index.
+    clean: Option<(String, usize)>,
+    /// The same for segments an exclusion held, with the first exclusion
+    /// (stored order) that matched there.
+    excluded: Option<(String, usize, String)>,
+}
+
+impl Hits {
+    /// Any hit at all, held or not.
+    fn any(self) -> Option<(String, usize)> {
+        self.clean.or(self.excluded.map(|(t, n, _)| (t, n)))
+    }
+}
+
+/// Each pattern compiled: grammar when it parses as grammar, else plain.
+fn compile(patterns: &[String]) -> Vec<Option<triggers::Grammar>> {
+    patterns
+        .iter()
+        .map(|t| triggers::parse_grammar(t).ok().flatten())
+        .collect()
+}
+
+/// True when `pattern` (compiled as `grammar`) matches `toks`. A plain one
+/// goes through the shared `match_triggers`, unstemmed.
+fn pattern_hits(toks: &[String], pattern: &String, grammar: Option<&triggers::Grammar>) -> bool {
+    match grammar {
+        Some(g) => g.matches(toks),
+        None => !triggers::match_triggers(toks, std::slice::from_ref(pattern), false).is_empty(),
+    }
+}
+
 /// The most specific trigger a candidate matches across `segs`, and the index
 /// of the segment it matched in. Ties go to the stored order within a
-/// segment, then to the earlier segment.
+/// segment, then to the earlier segment. A segment where one of the entry's
+/// exclusions matches never yields a clean hit.
 fn best_hit<'s>(
     cand: &TriggeredRef<'_>,
     segs: impl Iterator<Item = (usize, &'s [String])>,
-) -> Option<(String, usize)> {
-    let mut best: Option<(String, usize)> = None;
+) -> Hits {
+    let grammar = compile(cand.triggers);
+    let all_plain = grammar.iter().all(Option::is_none);
+    let exclude = cand.exclude.unwrap_or_default();
+    let exclude_grammar = compile(exclude);
+    let mut out = Hits::default();
     for (n, toks) in segs {
-        let hits = triggers::match_triggers(toks, cand.triggers, false);
+        // A plain trigger keeps the exact pre-grammar call; only grammar
+        // triggers take the new matcher.
+        let hits = if all_plain {
+            triggers::match_triggers(toks, cand.triggers, false)
+        } else {
+            cand.triggers
+                .iter()
+                .zip(&grammar)
+                .filter(|(t, g)| pattern_hits(toks, t, g.as_ref()))
+                .map(|(t, _)| t.clone())
+                .collect()
+        };
         // Report the MOST SPECIFIC trigger, not whichever was stored first.
         // An entry carrying both `gerf` and `gerf_slips` should say
         // `gerf_slips` fired on "gerf_slips is permanent" — the longer match
@@ -753,14 +901,33 @@ fn best_hit<'s>(
         }) else {
             continue;
         };
-        if best
-            .as_ref()
-            .is_none_or(|(b, _)| specificity(&t) > specificity(b))
-        {
-            best = Some((t, n));
+        let held_by = exclude
+            .iter()
+            .zip(&exclude_grammar)
+            .find(|(e, g)| pattern_hits(toks, e, g.as_ref()))
+            .map(|(e, _)| e.clone());
+        match held_by {
+            None => {
+                if out
+                    .clean
+                    .as_ref()
+                    .is_none_or(|(b, _)| specificity(&t) > specificity(b))
+                {
+                    out.clean = Some((t, n));
+                }
+            }
+            Some(e) => {
+                if out
+                    .excluded
+                    .as_ref()
+                    .is_none_or(|(b, _, _)| specificity(&t) > specificity(b))
+                {
+                    out.excluded = Some((t, n, e));
+                }
+            }
         }
     }
-    best
+    out
 }
 
 /// Decide which doors open for one prompt, and say why, held doors included.
@@ -897,13 +1064,17 @@ fn run(
                 .filter(move |(n, t)| !t.is_empty() && through(*n).is_some() == admitted)
                 .map(|(n, t)| (n, t.as_slice()))
         };
-        let (hit, status) = match best_hit(cand, segs(true)) {
-            Some(h) => (h, DoorStatus::Fired),
-            None if with_held => match best_hit(cand, segs(false)) {
-                Some(h) => (h, DoorStatus::Held),
+        let (hit, status, excluded_by) = match best_hit(cand, segs(true)) {
+            Hits { clean: Some(h), .. } => (h, DoorStatus::Fired, None),
+            _ if !with_held => continue,
+            Hits {
+                excluded: Some((t, n, e)),
+                ..
+            } => ((t, n), DoorStatus::Held, Some(e)),
+            _ => match best_hit(cand, segs(false)).any() {
+                Some(h) => (h, DoorStatus::Held, None),
                 None => continue,
             },
-            None => continue,
         };
         let (trigger, n) = hit;
         let count = fire_counts.get(&pair).copied().unwrap_or(0);
@@ -919,11 +1090,16 @@ fn run(
                     fragment: derive_fragment(cand.value, cand.fragment),
                     dig: dig_pointer(cand.key, cand.id, cand.memory),
                     origin: segments[n].origin.label(),
-                    place: through(n).unwrap_or_default(),
+                    place: if status == DoorStatus::Held {
+                        String::new()
+                    } else {
+                        through(n).unwrap_or_default()
+                    },
                 },
                 status,
                 segment: n + 1,
                 pool: segments[n].places.pool(),
+                excluded_by,
             },
         );
         match status {
@@ -989,6 +1165,7 @@ mod tests {
             fragment: None,
             memory: None,
             scope: None,
+            exclude: None,
         }
     }
 
@@ -1192,6 +1369,7 @@ mod tests {
                 fragment: None,
                 memory: None,
                 scope: None,
+                exclude: None,
             })
             .collect();
         let mut fired: Vec<String> = select(
@@ -2289,6 +2467,7 @@ mod tests {
                 fragment: None,
                 memory: None,
                 scope: None,
+                exclude: None,
             })
             .collect();
         explain(
@@ -2509,6 +2688,7 @@ mod tests {
                 fragment: None,
                 memory: None,
                 scope: d.scope.as_deref(),
+                exclude: None,
             })
             .collect()
     }
@@ -2576,7 +2756,7 @@ mod tests {
                             .is_some_and(|c| c.verdict == Verdict::ForeignProse)
                 })
                 .map(|(n, (_, t))| (n, t.as_slice()));
-            if let Some((trigger, _)) = best_hit(c, admitted) {
+            if let Some((trigger, _)) = best_hit(c, admitted).clean {
                 let pair = (c.key.to_string(), c.id.to_string());
                 let line = format!(
                     "\u{1f6aa} {} \u{2192} {} (dig: {})",
@@ -3015,5 +3195,357 @@ mod tests {
         ] {
             assert!(fired_on(prompt, &trig).is_empty(), "{prompt:?}");
         }
+    }
+
+    // ---- match grammar (P4) ----
+
+    /// `(id, triggers, exclusions)` doors explained in house mode, budget 9.
+    fn explain_grammar(prompt: &str, doors: &[(&'static str, &[&str], &[&str])]) -> Explanation {
+        let owned: Vec<(Vec<String>, Vec<String>)> = doors
+            .iter()
+            .map(|(_, t, e)| {
+                (
+                    t.iter().map(|s| s.to_string()).collect(),
+                    e.iter().map(|s| s.to_string()).collect(),
+                )
+            })
+            .collect();
+        let cands: Vec<TriggeredRef<'_>> = doors
+            .iter()
+            .zip(&owned)
+            .map(|((id, _, _), (t, e))| TriggeredRef {
+                key: "d",
+                id,
+                value: "v",
+                ts: "2026-01-01T00:00:00Z",
+                triggers: t,
+                fragment: None,
+                memory: None,
+                scope: None,
+                exclude: (!e.is_empty()).then_some(e.as_slice()),
+            })
+            .collect();
+        explain(
+            prompt,
+            &Mode::House,
+            &NamesUs::default(),
+            &cands,
+            &HashSet::new(),
+            &HashMap::new(),
+            9,
+        )
+    }
+
+    /// `(id, trigger, status, segment, excluded_by)` per matched door.
+    fn grammar_outcome(
+        ex: &Explanation,
+    ) -> Vec<(String, String, DoorStatus, usize, Option<String>)> {
+        ex.doors
+            .iter()
+            .map(|d| {
+                (
+                    d.door.id.clone(),
+                    d.door.trigger.clone(),
+                    d.status,
+                    d.segment,
+                    d.excluded_by.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grammar_and_fires_in_one_segment_in_any_order() {
+        let doors = [("z", &["zorbel + quuxer"][..], &[][..])];
+        for prompt in ["a quuxer and a zorbel", "zorbel, then quuxer"] {
+            assert_eq!(
+                grammar_outcome(&explain_grammar(prompt, &doors)),
+                vec![(
+                    "z".into(),
+                    "zorbel + quuxer".into(),
+                    DoorStatus::Fired,
+                    1,
+                    None
+                )],
+                "{prompt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_and_split_across_segments_does_not_fire() {
+        let doors = [("z", &["zorbel + quuxer"][..], &[][..])];
+        let prompt = format!("about the zorbel\n\n{}", paste("aaaa", "one quuxer"));
+        let ex = explain_grammar(&prompt, &doors);
+        assert_eq!(ex.segments.len(), 2);
+        assert!(ex.doors.is_empty(), "{:?}", grammar_outcome(&ex));
+        // Both sides inside the paste fire from the paste.
+        let prompt = format!("hm\n\n{}", paste("aaaa", "one quuxer, one zorbel"));
+        assert_eq!(
+            grammar_outcome(&explain_grammar(&prompt, &doors)),
+            vec![(
+                "z".into(),
+                "zorbel + quuxer".into(),
+                DoorStatus::Fired,
+                2,
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn exclusion_holds_the_door_for_its_segment_and_says_why() {
+        let doors = [("z", &["zorbel"][..], &["vintage zorbel", "glarp*"][..])];
+        for (prompt, by) in [
+            ("my vintage zorbel", "vintage zorbel"),
+            ("a glarpish zorbel", "glarp*"),
+        ] {
+            let ex = explain_grammar(prompt, &doors);
+            assert_eq!(
+                grammar_outcome(&ex),
+                vec![(
+                    "z".into(),
+                    "zorbel".into(),
+                    DoorStatus::Held,
+                    1,
+                    Some(by.into())
+                )],
+                "{prompt:?}"
+            );
+            assert_eq!(ex.doors[0].door.place, "");
+            assert!(ex.selection().fired.is_empty());
+        }
+        // Without an exclusion phrase present it fires.
+        assert_eq!(
+            explain_grammar("my zorbel", &doors).selection().fired.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn exclusion_in_one_segment_and_a_clean_hit_in_another_still_fires() {
+        let doors = [("z", &["zorbel"][..], &["vintage"][..])];
+        let prompt = format!("vintage zorbel\n\n{}", paste("aaaa", "zorbel again"));
+        assert_eq!(
+            grammar_outcome(&explain_grammar(&prompt, &doors)),
+            vec![("z".into(), "zorbel".into(), DoorStatus::Fired, 2, None)]
+        );
+        // An exclusion only holds the segment it matched in.
+        let prompt = format!("zorbel\n\n{}", paste("aaaa", "vintage stuff"));
+        assert_eq!(
+            grammar_outcome(&explain_grammar(&prompt, &doors)),
+            vec![("z".into(), "zorbel".into(), DoorStatus::Fired, 1, None)]
+        );
+    }
+
+    #[test]
+    fn exclusion_hold_is_distinct_from_a_scope_hold() {
+        let doors = [door("b", "zorbel", &["book:walden"])];
+        let ex = explain_mode("a zorbel", "house", &doors, &HashMap::new(), 2);
+        assert_eq!(ex.doors[0].status, DoorStatus::Held);
+        assert_eq!(ex.doors[0].excluded_by, None);
+    }
+
+    #[test]
+    fn grammar_specificity_counts_tokens_across_sides() {
+        assert_eq!(specificity("zorbel + quuxer pod"), (3, 19));
+        assert_eq!(specificity("quuxer*"), (1, 7));
+        // Plain triggers keep today's measure exactly.
+        assert_eq!(specificity("c++ tips"), (2, 8));
+        assert_eq!(specificity("study +blarnia"), (2, 14));
+        let doors = [(
+            "z",
+            &["zorbel", "zorbel + quuxer", "quuxer pod"][..],
+            &[][..],
+        )];
+        assert_eq!(
+            explain_grammar("quuxer pod zorbel", &doors).doors[0]
+                .door
+                .trigger,
+            "zorbel + quuxer"
+        );
+        let doors = [("z", &["zorbel + quuxer", "zorbel quuxer pod"][..], &[][..])];
+        assert_eq!(
+            explain_grammar("zorbel quuxer pod", &doors).doors[0]
+                .door
+                .trigger,
+            "zorbel quuxer pod"
+        );
+    }
+
+    #[test]
+    fn grammar_rejection_names_the_word_once() {
+        let rule = |t: &str| match inspect_trigger(t) {
+            TriggerVerdict::Invalid { rule } => rule,
+            other => panic!("{t:?}: {other:?}"),
+        };
+        assert_eq!(
+            rule("  Fo*O "),
+            "has `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(
+            rule("zorbel fo*o"),
+            "has \"fo*o\" with `*` mid-word: a wildcard goes at the start or the end of a word"
+        );
+        assert_eq!(
+            rule("quuxer + *flim"),
+            "has \"*flim\" with 4 literal characters: a wildcard needs at least 5"
+        );
+    }
+
+    #[test]
+    fn grammar_triggers_are_judged_before_they_are_stored() {
+        let invalid = |t: &str| matches!(inspect_trigger(t), TriggerVerdict::Invalid { .. });
+        for bad in [
+            "zorbel +",
+            "+",
+            "zor*bel",
+            "*zorb",
+            "**zorbel",
+            "*zorb-el",
+            "--- + zorbel",
+        ] {
+            assert!(invalid(bad), "{bad:?}");
+        }
+        assert_eq!(
+            inspect_trigger("zorbel + quuxer*"),
+            TriggerVerdict::Fine {
+                matched_as: "zorbel + quuxer*".into()
+            }
+        );
+        assert_eq!(
+            inspect_trigger("c++ + zorbel"),
+            TriggerVerdict::BroadSide {
+                matched_as: "c + zorbel".into(),
+                side: "c".into()
+            }
+        );
+        assert_eq!(matched_form("frim_bo + *flimbing"), "frim bo + *flimbing");
+        // Exclusions: phrase/wildcard only, and Dead/Broad as for triggers.
+        assert!(matches!(
+            inspect_exclusion("zorbel + quuxer"),
+            TriggerVerdict::Invalid { .. }
+        ));
+        assert_eq!(inspect_exclusion("!!!"), TriggerVerdict::Dead);
+        assert_eq!(
+            inspect_exclusion("c#"),
+            TriggerVerdict::Broad {
+                matched_as: "c".into()
+            }
+        );
+        assert!(matches!(
+            inspect_exclusion("glarp*"),
+            TriggerVerdict::Fine { .. }
+        ));
+    }
+
+    #[test]
+    fn a_glued_plus_is_flagged_with_its_and_spelling() {
+        assert_eq!(
+            lopsided_plus("study +blarnia").as_deref(),
+            Some("study + blarnia")
+        );
+        assert_eq!(
+            lopsided_plus("study+ blarnia").as_deref(),
+            Some("study + blarnia")
+        );
+        for fine in [
+            "c++",
+            "c++ tips",
+            "zim & zam",
+            "+blarnia",
+            "study+",
+            "a + b",
+            "x+y",
+            "zorbel + +blarnia",
+            "zorbel+ + quuxer",
+        ] {
+            assert_eq!(lopsided_plus(fine), None, "{fine:?}");
+        }
+    }
+
+    /// Back-compat pin: every plain trigger shape fires through the doors path
+    /// exactly what the pre-grammar matcher fires, and none is parsed as grammar.
+    #[test]
+    fn plain_triggers_fire_exactly_as_legacy_through_the_doors_path() {
+        let trigs = [
+            "zorbel",
+            "zorbel quuxer",
+            "c++",
+            "c++ tips",
+            "c#",
+            "zim & zam",
+            "blip-blop",
+            "frim_bo",
+            "snorp-",
+            ".grimnet",
+            "a+ grade",
+            "study +blarnia",
+            "q",
+            "caf\u{00e9}",
+            "\u{00fc}berfrob stra\u{00df}e",
+            "na\u{00ef}ve plan",
+            "x2",
+            "mr. snorkel",
+        ];
+        for t in trigs {
+            assert_eq!(
+                triggers::parse_grammar(t),
+                Ok(None),
+                "{t:?} must stay plain"
+            );
+        }
+        let prompts = [
+            "the zorbel quuxer is out",
+            "quuxer then zorbel",
+            "I write C++ tips, and c# too",
+            "ZIM & ZAM, zim and zam",
+            "blip blop; blip-blop; blipblop",
+            "frim_bo frim-bo frimbo",
+            "snorp-light and snorpy",
+            "the .GRIMNET stack",
+            "an A+ grade, a grade",
+            "study blarnia, study +blarnia",
+            "q? Q! queue",
+            "cafe\u{0301} au lait",
+            "UBERFROB strasse vs \u{00fc}berfrob stra\u{00df}e",
+            "a naive plan, a na\u{00ef}ve plan",
+            "x2 and x 2",
+            "ask Mr Snorkel",
+            "<system-reminder>zorbel</system-reminder> blip-blop",
+            "nothing at all",
+        ];
+        let mut any = 0;
+        for prompt in prompts {
+            let legacy = legacy_fired(prompt, &trigs);
+            assert_eq!(fired_on(prompt, &trigs), legacy, "{prompt:?}");
+            any += legacy.len();
+        }
+        assert!(any >= 15, "fixture must actually fire things ({any})");
+    }
+
+    /// A ` + ` or `*` trigger takes the grammar path: the legacy matcher reads
+    /// it as a contiguous phrase of its bare tokens and would answer otherwise.
+    #[test]
+    fn grammar_triggers_take_the_new_path_and_plain_ones_do_not() {
+        for (trig, prompt) in [
+            ("zorbel + quuxer", "quuxer, later zorbel"),
+            ("*flimbing", "much reflimbing"),
+            ("quuxer* pod", "quuxering pod"),
+        ] {
+            assert!(triggers::parse_grammar(trig).unwrap().is_some());
+            assert!(legacy_fired(prompt, &[trig]).is_empty(), "{trig:?}");
+            assert_eq!(fired_on(prompt, &[trig]), vec![trig], "{trig:?}");
+        }
+        // A grammar trigger next to plain ones on the same entry: the plain
+        // ones still answer exactly as before.
+        let doors = [("m", &["zorbel quuxer", "*flimbing"][..], &[][..])];
+        assert!(explain_grammar("quuxer zorbel", &doors).doors.is_empty());
+        assert_eq!(
+            explain_grammar("zorbel quuxer", &doors).doors[0]
+                .door
+                .trigger,
+            "zorbel quuxer"
+        );
     }
 }

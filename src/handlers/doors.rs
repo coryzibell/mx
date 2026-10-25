@@ -458,15 +458,21 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
         } else {
             d.pool.label()
         };
+        let excluded = d
+            .excluded_by
+            .as_ref()
+            .map(|e| format!("  excluded by {e:?}"))
+            .unwrap_or_default();
         println!(
-            "{}  {}/kv-{}  {}  seg {}  place {}  pool {}",
+            "{}  {}/kv-{}  {}  seg {}  place {}  pool {}{}",
             d.door.trigger,
             d.door.key,
             d.door.id,
             d.status.label(),
             d.segment,
             place,
-            pool
+            pool,
+            excluded
         );
     }
     for h in hints {
@@ -505,7 +511,7 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
         .doors
         .iter()
         .map(|d| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "trigger": d.door.trigger,
                 "key": d.door.key,
                 "id": d.door.id,
@@ -515,7 +521,11 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
                 "segment": d.segment,
                 "place": d.door.place,
                 "pool": (d.status != doors::DoorStatus::Held).then_some(d.pool),
-            })
+            });
+            if let Some(e) = &d.excluded_by {
+                row["excluded_by"] = e.as_str().into();
+            }
+            row
         })
         .collect();
     let hints: Vec<serde_json::Value> = hints
