@@ -19,8 +19,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `person` of any mapped entry** (unmapped `@alice:evil.example` never opens
   the `person:alice` doors of a mapped `@alice:example.org`). **With
   `doors_people` empty that is every channel sender**, so
-  no house door opens from Matrix until the map is populated. A mode never
-  touches a channel body. Typed text and pastes route as before.
+  no house door opens from Matrix until the map is populated. Map a person
+  before authoring `person:<name>` doors for them: until `<name>` is mapped,
+  any unmapped sender with that localpart, on any server, opens those doors.
+  A mode never touches a channel body. Typed text and pastes route as before.
 - **Harness blocks no longer pair across a channel or paste boundary.** A
   harness opener and closer (#478) pair only when both sit outside every
   channel or paste body, or both inside the same one, so a
