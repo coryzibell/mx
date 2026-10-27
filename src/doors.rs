@@ -309,8 +309,13 @@ fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
 /// inside an earlier removed block), including when that closer is quoted
 /// inside a different block; (3) a raw `<channel ...>` opener, or a paste
 /// opener with its own id's closer later on, quoted inside a harness body
-/// counts as a block here and shifts the regions (Claude Code neutralizes
-/// channel openers in harness bodies).
+/// counts as a block here and shifts the regions: the harness pair breaks and
+/// leaks its text, and the next sender's block can be relabeled as the quoted
+/// sender. This is a regression against pairing by name alone. Claude Code
+/// scrubs these tags in subagent output; other harness bodies are untraced.
+/// Ending a channel body at the next raw opener would close it but is unsafe:
+/// Claude Code neutralizes only closers inside channel bodies, so a sender
+/// could forge an opener in her own body (#500).
 pub fn strip_harness_blocks(prompt: &str) -> String {
     let prompt = &strip_notification_preambles(prompt);
     let bytes = prompt.as_bytes();

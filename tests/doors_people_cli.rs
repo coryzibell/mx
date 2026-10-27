@@ -464,7 +464,7 @@ fn typed_text_gains_its_owner_in_book_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// Back-compat pin: no doors_people, no agent:, no expires, Q's main thread
+// Back-compat pin: no doors_people, no agent:, no expires, a plain session's main thread
 // ---------------------------------------------------------------------------
 
 /// A 0.1.232 schema: fire rows take `origin` and `place`, nothing newer.
@@ -485,18 +485,18 @@ origin = { type = "string" }
 place = { type = "string" }
 "#;
 
-/// Written by `mx 0.1.232` (`kv push`), copied verbatim.
+/// Written by `mx 0.1.232` (`kv push`), copied verbatim except `_schema`.
 const PIN_SEED: &str = r#"{"_schema": "lead", "_updated": "2026-10-27T15:02:06.402745250+00:00", "facts": {"items": [{"id": 1, "hash": "6tGEJ7", "value": "Huckleberry note.", "ts": "2026-10-27T15:02:06.372990449+00:00", "triggers": ["huckleberries"]}, {"id": 2, "hash": "4tMebm", "value": "A pond south of town.", "ts": "2026-10-27T15:02:06.378676837+00:00", "triggers": ["fair haven"]}, {"id": 3, "hash": "2dvJ2k", "value": "Widget one.", "ts": "2026-10-27T15:02:06.384386819+00:00", "triggers": ["widget"]}, {"id": 4, "hash": "5dZX5y", "value": "Widget two.", "ts": "2026-10-27T15:02:06.390602139+00:00", "triggers": ["widget"]}, {"id": 5, "hash": "74HRYD", "value": "Widget three.", "ts": "2026-10-27T15:02:06.396329194+00:00", "triggers": ["widget"]}, {"id": 6, "hash": "4922Z1", "value": "Pinned pond.", "ts": "2026-10-27T15:02:06.402638690+00:00", "triggers": ["fair haven"], "scope": ["pinned"]}]}}"#;
 
 const HOOK_PASTE: &str = include_str!("fixtures/doors/hook-paste.json");
 const PIN_SESSION: &str = "00000000-0000-4000-8000-000000000001";
 
-/// The typed and paste fixtures through the hook as Q's main thread (no
+/// The typed and paste fixtures through the hook as a plain session's main thread (no
 /// `agent_type`, no `agent_id`, `MX_CURRENT_AGENT=lead`), then `doors check`.
 /// Every expected string below is what `mx 0.1.232` printed and recorded on
 /// this exact store.
 #[test]
-fn back_compat_pin_q_main_thread_is_0_1_232() {
+fn back_compat_pin_main_thread_is_0_1_232() {
     let dir = setup_schema(PIN_SCHEMA);
     std::fs::create_dir_all(data_path(&dir).parent().unwrap()).unwrap();
     std::fs::write(data_path(&dir), PIN_SEED).unwrap();

@@ -28,7 +28,10 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   with a closer in another sender's body or a paste and carry that text into
   a typed (or that sender's) segment. A harness block that wraps whole channel
   or paste blocks still removes them. A tag left unpaired loses only the tag,
-  as before.
+  as before. Known regression: a raw, unclosed channel (or paste) opener
+  quoted inside a harness body now counts as a block, so that harness block
+  leaks its text and the next sender's block can be relabeled as the quoted
+  sender. Claude Code scrubs these tags in subagent output (#500).
 - **Upgrade before authoring the first `expires`, `person:` or `agent:`
   door.** An older `mx` doing a read-modify-write of kv drops fields it does
   not know, so it would silently strip `expires` from every entry it
