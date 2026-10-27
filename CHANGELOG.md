@@ -21,13 +21,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `doors_people` empty that is every channel sender**, so
   no house door opens from Matrix until the map is populated. A mode never
   touches a channel body. Typed text and pastes route as before.
-- **Harness blocks no longer pair across a channel boundary.** A harness
-  opener and closer (#478) pair only when both sit outside every channel
-  body, or both inside the same one, so a `<system-reminder>` typed, pasted
-  or sent by one sender can no longer pair with a closer in another sender's
-  body and carry her text into a typed (or that sender's) segment. A harness
-  block that wraps whole channel blocks still removes them. A tag left
-  unpaired loses only the tag, as before.
+- **Harness blocks no longer pair across a channel or paste boundary.** A
+  harness opener and closer (#478) pair only when both sit outside every
+  channel or paste body, or both inside the same one, so a
+  `<system-reminder>` typed, pasted or sent by one sender can no longer pair
+  with a closer in another sender's body or a paste and carry that text into
+  a typed (or that sender's) segment. A harness block that wraps whole channel
+  or paste blocks still removes them. A tag left unpaired loses only the tag,
+  as before.
 - **Upgrade before authoring the first `expires`, `person:` or `agent:`
   door.** An older `mx` doing a read-modify-write of kv drops fields it does
   not know, so it would silently strip `expires` from every entry it

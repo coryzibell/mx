@@ -294,12 +294,12 @@ fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
 /// and a stray closer each lose only the tag. Each removed block or tag becomes
 /// one space, so the text on either side stays separate tokens.
 ///
-/// An opener and a closer pair only inside one channel region: both outside
-/// every channel body, or both inside the same one (found by the scan
+/// An opener and a closer pair only inside one region: both outside every
+/// channel or paste body, or both inside the same one (found by the scan
 /// `segment` uses). A block never carries text across a routing boundary, so a
-/// typed opener cannot pair with a closer in a sender's body and hand her text
-/// to the typed segment. A block whose opener and closer are both outside still
-/// removes the whole channel blocks it wraps.
+/// typed opener cannot pair with a closer in a sender's body or a paste and
+/// hand that text to the typed segment. A block whose opener and closer are
+/// both outside still removes the whole channel or paste blocks it wraps.
 ///
 /// Known edges: (1) a body that quotes a tag WITHOUT backticks can pair wrongly
 /// and leak part of that block's text, and nested blocks of the same name leak
@@ -307,9 +307,10 @@ fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
 /// tag after an unbackticked opener with the same name is a closer, the text
 /// between them is removed whoever wrote them (unless the opener already sits
 /// inside an earlier removed block), including when that closer is quoted
-/// inside a different block; (3) a raw `<channel ...>` opener quoted inside a
-/// harness body counts as a channel block here and shifts the regions (Claude
-/// Code neutralizes these in harness bodies).
+/// inside a different block; (3) a raw `<channel ...>` opener, or a paste
+/// opener with its own id's closer later on, quoted inside a harness body
+/// counts as a block here and shifts the regions (Claude Code neutralizes
+/// channel openers in harness bodies).
 pub fn strip_harness_blocks(prompt: &str) -> String {
     let prompt = &strip_notification_preambles(prompt);
     let bytes = prompt.as_bytes();
@@ -331,21 +332,20 @@ pub fn strip_harness_blocks(prompt: &str) -> String {
         })
         .collect();
 
-    // The channel body each tag sits in, `None` outside every one. Opener
-    // attribute text counts as outside: Claude Code escapes `<` there, so only
-    // a hand-written opener can hold a tag in it.
-    let channels: Vec<(usize, usize)> = blocks(prompt)
+    // The channel or paste body each tag sits in, `None` outside every one.
+    // Opener attribute text counts as outside: Claude Code escapes `<` there,
+    // so only a hand-written opener can hold a tag in it.
+    let bodies: Vec<(usize, usize)> = blocks(prompt)
         .into_iter()
-        .filter(|b| matches!(b.kind, BlockKind::Channel { .. }))
         .map(|b| (b.body.start, b.body.end))
         .collect();
     let region = |at: usize| {
-        let k = channels.partition_point(|&(start, _)| start <= at);
-        k.checked_sub(1).filter(|&k| at < channels[k].1)
+        let k = bodies.partition_point(|&(start, _)| start <= at);
+        k.checked_sub(1).filter(|&k| at < bodies[k].1)
     };
 
     // block_end[i]: where the block opened by tag i ends. A closer pairs with
-    // the latest unclosed opener of its name in its own channel region; an
+    // the latest unclosed opener of its name in its own region; an
     // earlier one it displaced stays unpaired, so an opener quoted inside a
     // block of its own name closes no later than that block's closer.
     let mut block_end: Vec<Option<usize>> = vec![None; tags.len()];
@@ -3571,6 +3571,85 @@ mod tests {
         let prompt = from(ZED, "<system-reminder>zephyrine</system-reminder> widget");
         let segs = analyze(&prompt, &Mode::House, &map());
         assert_eq!(segs.len(), 1);
+        assert!(!segs[0].text.contains("zephyrine"));
+        assert!(segs[0].text.contains("widget"));
+    }
+
+    // ---- P3: paste bodies are regions too ----
+
+    /// The one paste in `segs` is the whole Walden window, judged foreign and
+    /// held in house mode.
+    fn assert_walden_paste_held(segs: &[Segment]) {
+        let pastes: Vec<&Segment> = segs.iter().filter(|s| s.origin == Origin::Paste).collect();
+        assert_eq!(pastes.len(), 1, "{segs:?}");
+        assert_eq!(pastes[0].text.trim(), WALDEN.trim());
+        assert_eq!(
+            pastes[0].classified.as_ref().map(|c| c.verdict),
+            Some(Verdict::ForeignProse)
+        );
+        assert!(pastes[0].places.is_empty(), "a foreign paste is held");
+        assert!(
+            segs.iter()
+                .filter(|s| s.origin != Origin::Paste)
+                .all(|s| !s.text.contains("Fair Haven"))
+        );
+    }
+
+    #[test]
+    fn a_typed_harness_opener_does_not_pair_into_a_paste() {
+        let prompt = format!(
+            "widget <system-reminder> \n\n{}",
+            paste("ab12", &format!("</system-reminder> {WALDEN}"))
+        );
+        let segs = analyze(&prompt, &Mode::House, &map());
+        assert_eq!(segs[0].origin, Origin::Typed);
+        assert!(segs[0].text.contains("widget"));
+        assert_walden_paste_held(&segs);
+    }
+
+    #[test]
+    fn a_pasted_harness_opener_does_not_pair_into_typed_text() {
+        let prompt = format!(
+            "{} </system-reminder> widget",
+            paste("ab12", &format!("{WALDEN} <system-reminder>"))
+        );
+        let segs = analyze(&prompt, &Mode::House, &map());
+        assert_walden_paste_held(&segs);
+        assert_eq!(segs.last().unwrap().origin, Origin::Typed);
+        assert!(segs.last().unwrap().text.contains("widget"));
+    }
+
+    #[test]
+    fn a_pasted_harness_opener_does_not_pair_into_a_senders_body() {
+        let prompt = format!(
+            "{}{}",
+            paste("ab12", &format!("<system-reminder> {WALDEN}")),
+            from(ZED, "</system-reminder> zephyrine")
+        );
+        assert_walden_paste_held(&analyze(&prompt, &Mode::House, &map()));
+        assert_zed_held_in(&prompt);
+    }
+
+    #[test]
+    fn a_senders_harness_opener_does_not_pair_into_a_paste() {
+        let prompt = format!(
+            "{}{}",
+            from(ZED, "<system-reminder> zephyrine"),
+            paste("ab12", &format!("</system-reminder> {WALDEN}"))
+        );
+        assert_walden_paste_held(&analyze(&prompt, &Mode::House, &map()));
+        assert_zed_held_in(&prompt);
+    }
+
+    #[test]
+    fn a_harness_block_inside_one_paste_still_goes() {
+        let prompt = paste(
+            "ab12",
+            "<system-reminder>zephyrine</system-reminder> widget",
+        );
+        let segs = analyze(&prompt, &Mode::House, &map());
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].origin, Origin::Paste);
         assert!(!segs[0].text.contains("zephyrine"));
         assert!(segs[0].text.contains("widget"));
     }
