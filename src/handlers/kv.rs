@@ -1293,7 +1293,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             let touches_excludes = trigger_patch.is_some() || exclude_patch.is_some();
             let sets_triggers = trigger_patch.as_ref().is_some_and(|t| !t.is_empty());
             let burn = !fire_here && sets_triggers;
-            let routes = sets_triggers || scope_patch.is_some();
+            let routes = sets_triggers || scope_patch.is_some() || expires.is_some();
             let patch = kv::EntryPatch {
                 value,
                 data: parsed_data,

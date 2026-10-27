@@ -13,10 +13,21 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `doors_people` with `"house":true` places `{house, person:<name>}`, one
   mapped with `"house":false` places `{person:<name>}`, and an unmapped
   sender places only `{person:<localpart>}` (the text between `@` and the
-  first `:`, lowercased), or `∅` (pinned only) when the id has no usable
-  localpart. **With `doors_people` empty that is every channel sender**, so
+  first `:`, ASCII-lowercased), or `∅` (pinned only) when the id has no
+  usable localpart: not a valid name (a non-ASCII letter included, so the
+  Kelvin sign never folds to `k`), longer than 64 bytes, or **equal to the
+  `person` of any mapped entry** (unmapped `@alice:evil.example` never opens
+  the `person:alice` doors of a mapped `@alice:example.org`). **With
+  `doors_people` empty that is every channel sender**, so
   no house door opens from Matrix until the map is populated. A mode never
   touches a channel body. Typed text and pastes route as before.
+- **Harness blocks no longer pair across a channel boundary.** A harness
+  opener and closer (#478) pair only when both sit outside every channel
+  body, or both inside the same one, so a `<system-reminder>` typed, pasted
+  or sent by one sender can no longer pair with a closer in another sender's
+  body and carry her text into a typed (or that sender's) segment. A harness
+  block that wraps whole channel blocks still removes them. A tag left
+  unpaired loses only the tag, as before.
 - **Upgrade before authoring the first `expires`, `person:` or `agent:`
   door.** An older `mx` doing a read-modify-write of kv drops fields it does
   not know, so it would silently strip `expires` from every entry it
@@ -58,8 +69,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   with no `agent_id`. A door with `agent:` values fires only for a reader it
   names, main thread or not. A door without them fires only on the main
   thread, so a subagent's prompt opens only doors that name its agent. This
-  holds for pinned doors too. Q's main thread (no `agent_type`, no
-  `agent_id`, `MX_CURRENT_AGENT=queue`) sees exactly what it saw before.
+  holds for pinned doors too. A plain session's main thread (no
+  `agent_type`, no `agent_id`) sees exactly what it saw before.
 - **`mx doors check --agent A`** reads as `A` on the main thread, as
   `claude --agent A` would. The default reader for `check` is
   `$MX_CURRENT_AGENT`, else `none`.
@@ -84,8 +95,9 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `N pre-burned at authoring (not fires)`, and `--json` has `pre_burned`.
 - **`--expires WHEN` on `mx kv push` and `mx kv update`**: `<n>h`, `<n>d`,
   `<n>w` (from now) or an RFC 3339 time, stored as absolute UTC in a typed
-  `expires` field. `--expires ""` clears it on update, and `--expires` on its
-  own is a complete update. Any other form is a usage error (exit 2) naming
+  `expires` field. On push it needs `--trigger`. `--expires ""` clears it on
+  update, and `--expires` on its own is a complete update. Any other form
+  (`-1d` included) is a usage error (exit 2) naming
   the accepted forms; a time already past is stored with an
   `already expired` warning. A door is expired once now reaches its
   `expires`, and a stored value that does not parse counts as expired.
@@ -101,10 +113,13 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   `held by reader` / `held by expired`. `--json` adds `reader`,
   `main_thread`, a segment's `mapped`, and a door's `held_by`.
 - **A shared-trigger warning at write.** After `kv push`/`kv update` with
-  `--trigger`, or `--scope` on an entry that has triggers, each of the
-  entry's trigger forms carried by at least the per-prompt budget
-  (`$MX_DOORS_BUDGET`, else 2) of live doors whose scopes overlap prints one
-  stderr warning naming the form, the count, the budget and the other doors.
+  `--trigger`, or `--scope` or `--expires` on an entry that has triggers,
+  each of the entry's trigger forms carried by at least the per-prompt
+  budget (`$MX_DOORS_BUDGET`, else 2), and by at least two, live doors whose
+  scopes overlap prints one stderr warning naming the form, the count, the
+  budget and the other doors. At the budget it says the form fills it, so any
+  other door matching the same prompt defers; over it, that some of these
+  will defer. A lone door never warns.
   Scopes overlap when either is pinned, they share a place value (books by
   slug), or one has `house` or `book:*` and the other `person:*`; and they
   miss on the reader axis only when both name agents and no name is shared.

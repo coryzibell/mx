@@ -294,13 +294,22 @@ fn strip_notification_preambles(prompt: &str) -> std::borrow::Cow<'_, str> {
 /// and a stray closer each lose only the tag. Each removed block or tag becomes
 /// one space, so the text on either side stays separate tokens.
 ///
+/// An opener and a closer pair only inside one channel region: both outside
+/// every channel body, or both inside the same one (found by the scan
+/// `segment` uses). A block never carries text across a routing boundary, so a
+/// typed opener cannot pair with a closer in a sender's body and hand her text
+/// to the typed segment. A block whose opener and closer are both outside still
+/// removes the whole channel blocks it wraps.
+///
 /// Known edges: (1) a body that quotes a tag WITHOUT backticks can pair wrongly
 /// and leak part of that block's text, and nested blocks of the same name leak
-/// the outer block's text; (2) when the next unbackticked tag after an
-/// unbackticked opener with the same name is a closer, the text between them
-/// is removed whoever wrote them (unless the opener already sits inside an
-/// earlier removed block), including when that closer is quoted inside a
-/// different block.
+/// the outer block's text; (2) within one region, when the next unbackticked
+/// tag after an unbackticked opener with the same name is a closer, the text
+/// between them is removed whoever wrote them (unless the opener already sits
+/// inside an earlier removed block), including when that closer is quoted
+/// inside a different block; (3) a raw `<channel ...>` opener quoted inside a
+/// harness body counts as a channel block here and shifts the regions (Claude
+/// Code neutralizes these in harness bodies).
 pub fn strip_harness_blocks(prompt: &str) -> String {
     let prompt = &strip_notification_preambles(prompt);
     let bytes = prompt.as_bytes();
@@ -322,19 +331,33 @@ pub fn strip_harness_blocks(prompt: &str) -> String {
         })
         .collect();
 
+    // The channel body each tag sits in, `None` outside every one. Opener
+    // attribute text counts as outside: Claude Code escapes `<` there, so only
+    // a hand-written opener can hold a tag in it.
+    let channels: Vec<(usize, usize)> = blocks(prompt)
+        .into_iter()
+        .filter(|b| matches!(b.kind, BlockKind::Channel { .. }))
+        .map(|b| (b.body.start, b.body.end))
+        .collect();
+    let region = |at: usize| {
+        let k = channels.partition_point(|&(start, _)| start <= at);
+        k.checked_sub(1).filter(|&k| at < channels[k].1)
+    };
+
     // block_end[i]: where the block opened by tag i ends. A closer pairs with
-    // the latest unclosed opener of its name; an earlier one it displaced
-    // stays unpaired, so an opener quoted inside a block of its own name closes
-    // no later than that block's closer.
+    // the latest unclosed opener of its name in its own channel region; an
+    // earlier one it displaced stays unpaired, so an opener quoted inside a
+    // block of its own name closes no later than that block's closer.
     let mut block_end: Vec<Option<usize>> = vec![None; tags.len()];
-    let mut open: HashMap<&str, usize> = HashMap::new();
+    let mut open: HashMap<(&str, Option<usize>), usize> = HashMap::new();
     for (i, tag) in tags.iter().enumerate() {
+        let key = (tag.name, region(tag.start));
         match tag.kind {
             TagKind::Open => {
-                open.insert(tag.name, i);
+                open.insert(key, i);
             }
             TagKind::Close => {
-                if let Some(o) = open.remove(tag.name) {
+                if let Some(o) = open.remove(&key) {
                     block_end[o] = Some(tag.end);
                 }
             }
@@ -534,7 +557,8 @@ fn specificity(trigger: &str) -> (usize, usize) {
     (span, trigger.chars().count())
 }
 
-/// One trigger form that `budget` or more live, scope-overlapping doors carry.
+/// One trigger form that at least `budget`, and at least two, live,
+/// scope-overlapping doors carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedForm {
     pub form: String,
@@ -546,8 +570,9 @@ pub struct SharedForm {
 
 /// The trigger forms of `written` that compete for one prompt's budget: per
 /// form, the live doors in `all` carrying a trigger with that matched form and
-/// a scope that overlaps `written`'s, when there are `budget` or more of them.
-/// Nothing when `written` is itself expired, or the budget is 0 (nothing fires).
+/// a scope that overlaps `written`'s, when there are `budget` or more of them
+/// and at least two (a lone door shares with nothing). Nothing when `written`
+/// is itself expired, or the budget is 0 (nothing fires).
 pub fn shared_forms(
     written: &TriggeredRef<'_>,
     all: &[TriggeredRef<'_>],
@@ -576,7 +601,7 @@ pub fn shared_forms(
                 .map(|c| (c.key.to_string(), c.id.to_string()))
                 .collect();
             let count = others.len() + 1;
-            (count >= budget).then_some(SharedForm {
+            (count >= budget.max(2)).then_some(SharedForm {
                 form,
                 count,
                 others,
@@ -691,6 +716,54 @@ fn push_typed(out: &mut Vec<RawSegment>, text: &str) {
 /// - A paste body that contains its own session's closer (same id) closes
 ///   early there, and the remainder becomes typed text (admitted).
 pub fn segment(prompt: &str) -> Vec<RawSegment> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for b in blocks(prompt) {
+        push_typed(&mut out, &prompt[pos..b.start]);
+        let body = &prompt[b.body.clone()];
+        let segment = match b.kind {
+            BlockKind::Paste => {
+                let body = body.strip_prefix('\n').unwrap_or(body);
+                let body = body.strip_suffix('\n').unwrap_or(body);
+                RawSegment {
+                    origin: Origin::Paste,
+                    text: strip_channel_tags(body),
+                }
+            }
+            BlockKind::Channel { attrs } => RawSegment {
+                origin: Origin::Channel {
+                    user_id: channel_attr(attrs, "user_id").unwrap_or_default(),
+                },
+                text: strip_channel_tags(body),
+            },
+        };
+        out.push(segment);
+        pos = b.end;
+    }
+    push_typed(&mut out, &prompt[pos..]);
+    out
+}
+
+enum BlockKind<'a> {
+    Paste,
+    /// The opener's attribute text.
+    Channel {
+        attrs: &'a str,
+    },
+}
+
+/// One paste or channel block: `start..end` from its opener through its
+/// closer, `body` between them.
+struct Block<'a> {
+    start: usize,
+    body: std::ops::Range<usize>,
+    end: usize,
+    kind: BlockKind<'a>,
+}
+
+/// The paste and channel blocks of `prompt`, left to right, by the rules
+/// `segment` documents.
+fn blocks(prompt: &str) -> Vec<Block<'_>> {
     let mut closers: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
     for (i, _) in prompt.match_indices(PASTE_CLOSE) {
         if let Some((id, len)) = paste_tag(&prompt[i..], PASTE_CLOSE) {
@@ -707,22 +780,18 @@ pub fn segment(prompt: &str) -> Vec<RawSegment> {
     };
 
     let mut out = Vec::new();
-    let mut pos = 0;
     let mut at = 0;
     let mut channels = true;
     while let Some(off) = prompt[at..].find('<') {
         let i = at + off;
         at = i + 1;
         if let Some((body_start, close_start, close_end)) = paste_at(i) {
-            push_typed(&mut out, &prompt[pos..i]);
-            let body = &prompt[body_start..close_start];
-            let body = body.strip_prefix('\n').unwrap_or(body);
-            let body = body.strip_suffix('\n').unwrap_or(body);
-            out.push(RawSegment {
-                origin: Origin::Paste,
-                text: strip_channel_tags(body),
+            out.push(Block {
+                start: i,
+                body: body_start..close_start,
+                end: close_end,
+                kind: BlockKind::Paste,
             });
-            pos = close_end;
             at = close_end;
             channels = true;
         } else if channels && is_channel_opener(&prompt[i..]) {
@@ -737,22 +806,21 @@ pub fn segment(prompt: &str) -> Vec<RawSegment> {
                 channels = false;
                 continue;
             };
-            push_typed(&mut out, &prompt[pos..i]);
-            let user_id = channel_attr(&prompt[i + CHANNEL_OPEN.len()..tag_end - 1], "user_id")
-                .unwrap_or_default();
             let (body_end, next) = match prompt[tag_end..].find(CHANNEL_CLOSE) {
                 Some(o) => (tag_end + o, tag_end + o + CHANNEL_CLOSE.len()),
                 None => (prompt.len(), prompt.len()),
             };
-            out.push(RawSegment {
-                origin: Origin::Channel { user_id },
-                text: strip_channel_tags(&prompt[tag_end..body_end]),
+            out.push(Block {
+                start: i,
+                body: tag_end..body_end,
+                end: next,
+                kind: BlockKind::Channel {
+                    attrs: &prompt[i + CHANNEL_OPEN.len()..tag_end - 1],
+                },
             });
-            pos = next;
             at = next;
         }
     }
-    push_typed(&mut out, &prompt[pos..]);
     out
 }
 
@@ -3410,6 +3478,103 @@ mod tests {
         }
     }
 
+    // ---- P3: harness blocks stay inside one channel region ----
+
+    const ZED: &str = "@zed:evil.example";
+
+    /// The unmapped sender's trigger, after `lead` set up a harness opener
+    /// somewhere ahead of her body: her segment keeps `{person:zed}` and a
+    /// house door on her word is held.
+    fn assert_zed_held(lead: &str) {
+        let prompt = format!("{lead}{}", from(ZED, "</system-reminder> zephyrine"));
+        assert_zed_held_in(&prompt);
+    }
+
+    fn assert_zed_held_in(prompt: &str) {
+        let zed = Places(vec![route::Place::Person("zed".to_string())]);
+        let segs = analyze(prompt, &Mode::House, &map());
+        let hers: Vec<&Segment> = segs
+            .iter()
+            .filter(|s| s.text.contains("zephyrine"))
+            .collect();
+        assert_eq!(hers.len(), 1, "{prompt:?}: {segs:?}");
+        assert_eq!(
+            hers[0].origin,
+            Origin::Channel {
+                user_id: ZED.to_string()
+            },
+            "{prompt:?}"
+        );
+        assert_eq!(hers[0].places, zed, "{prompt:?}");
+        let ex = explain_mode_as(
+            prompt,
+            "house",
+            &[door("zep", "zephyrine", &[])],
+            &HashMap::new(),
+            5,
+            &map(),
+        );
+        assert_eq!(
+            verdicts(&ex),
+            vec![("zep".to_string(), DoorStatus::Held, String::new())],
+            "{prompt:?}"
+        );
+    }
+
+    #[test]
+    fn a_typed_harness_opener_does_not_pair_into_a_channel_body() {
+        assert_zed_held("see <system-reminder> here ");
+    }
+
+    #[test]
+    fn a_pasted_harness_opener_does_not_pair_into_a_channel_body() {
+        assert_zed_held(&paste("ab12", "see <system-reminder> here"));
+    }
+
+    #[test]
+    fn a_harness_opener_in_another_senders_body_does_not_pair_into_hers() {
+        for sender in ["@alice:example.org", "@bob:example.org"] {
+            assert_zed_held(&from(sender, "see <system-reminder> here"));
+        }
+    }
+
+    #[test]
+    fn a_typed_local_command_opener_does_not_pair_into_a_channel_body() {
+        assert_zed_held_in(&format!(
+            "see <local-command-stdout> here {}",
+            from(ZED, "</local-command-stdout> zephyrine")
+        ));
+    }
+
+    #[test]
+    fn a_harness_block_wrapping_a_whole_channel_block_still_goes() {
+        let prompt = format!(
+            "hi <system-reminder>{}</system-reminder> there",
+            from(ZED, "zephyrine")
+        );
+        let segs = analyze(&prompt, &Mode::House, &map());
+        assert!(segs.iter().all(|s| s.origin == Origin::Typed), "{segs:?}");
+        assert!(segs.iter().all(|s| !s.text.contains("zephyrine")));
+        let ex = explain_mode_as(
+            &prompt,
+            "house",
+            &[door("zep", "zephyrine", &[])],
+            &HashMap::new(),
+            5,
+            &map(),
+        );
+        assert!(verdicts(&ex).is_empty());
+    }
+
+    #[test]
+    fn a_harness_block_inside_one_channel_body_still_goes() {
+        let prompt = from(ZED, "<system-reminder>zephyrine</system-reminder> widget");
+        let segs = analyze(&prompt, &Mode::House, &map());
+        assert_eq!(segs.len(), 1);
+        assert!(!segs[0].text.contains("zephyrine"));
+        assert!(segs[0].text.contains("widget"));
+    }
+
     // ---- P3: the shared-trigger warning ----
 
     #[test]
@@ -3449,10 +3614,15 @@ mod tests {
             "budget 0 fires nothing"
         );
         assert!(
-            shared_forms(&me, &all[..1], 1, now()).len() == 1,
-            "alone, budget 1"
+            shared_forms(&me, &all[..1], 1, now()).is_empty(),
+            "alone, budget 1: a lone door shares with nothing"
         );
         assert!(shared_forms(&me, &all[..1], 2, now()).is_empty());
+        assert_eq!(
+            shared_forms(&me, &all[..2], 1, now())[0].count,
+            2,
+            "two doors, budget 1"
+        );
     }
 
     #[test]
@@ -3501,7 +3671,7 @@ mod tests {
         cands[1].expires = Some("2026-10-27T11:59:59Z");
         cands[2].expires = Some("2026-10-27T12:00:00Z");
         cands[3].expires = Some("next tuesday");
-        for r in [reader("queue", true), reader("helper", false)] {
+        for r in [reader("lead", true), reader("helper", false)] {
             let (kept, gated) = gate(&cands, &r, now());
             let why: Vec<(&str, Gate)> = gated.iter().map(|(c, g)| (c.id, *g)).collect();
             assert_eq!(
@@ -3515,7 +3685,7 @@ mod tests {
             );
             assert!(kept.iter().all(|c| c.id == "liv"), "{r:?}");
         }
-        let (kept, _) = gate(&cands, &reader("queue", true), now());
+        let (kept, _) = gate(&cands, &reader("lead", true), now());
         assert_eq!(kept.len(), 1, "a future expiry stays live");
     }
 
@@ -3535,7 +3705,7 @@ mod tests {
         ];
         let cands = refs(&doors);
         let ids = |v: &[TriggeredRef<'_>]| v.iter().map(|c| c.id.to_string()).collect::<Vec<_>>();
-        let (kept, gated) = gate(&cands, &reader("queue", true), now());
+        let (kept, gated) = gate(&cands, &reader("lead", true), now());
         assert_eq!(ids(&kept), vec!["pln", "pin"]);
         assert_eq!(gated.len(), 1);
         assert_eq!((gated[0].0.id, gated[0].1), ("hlp", Gate::Reader));
@@ -3553,7 +3723,7 @@ mod tests {
             door("old", "widget", &["agent:helper"]),
         ];
         let cands = refs(&doors);
-        let (kept, gated) = gate(&cands, &reader("queue", true), now());
+        let (kept, gated) = gate(&cands, &reader("lead", true), now());
         let who = Who::default();
         let seen: HashSet<(String, String)> =
             [("d".to_string(), "old".to_string())].into_iter().collect();

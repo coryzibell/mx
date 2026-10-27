@@ -2195,8 +2195,14 @@ pub enum KvCommands {
         fire_here: bool,
 
         /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
-        /// RFC 3339 time. Stored as absolute UTC. On update, "" clears it
-        #[arg(long, value_name = "WHEN", value_parser = parse_expires_arg)]
+        /// RFC 3339 time. Stored as absolute UTC. Needs --trigger
+        #[arg(
+            long,
+            value_name = "WHEN",
+            value_parser = parse_expires_arg,
+            requires = "triggers",
+            allow_hyphen_values = true
+        )]
         expires: Option<String>,
 
         /// Auto-create key in schema if missing (type: history or list)
@@ -2337,8 +2343,13 @@ pub enum KvCommands {
         fire_here: bool,
 
         /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
-        /// RFC 3339 time. Stored as absolute UTC. On update, "" clears it
-        #[arg(long, value_name = "WHEN", value_parser = parse_expires_arg)]
+        /// RFC 3339 time. Stored as absolute UTC. "" clears it
+        #[arg(
+            long,
+            value_name = "WHEN",
+            value_parser = parse_expires_arg,
+            allow_hyphen_values = true
+        )]
         expires: Option<String>,
 
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it

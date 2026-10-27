@@ -65,25 +65,34 @@ impl People {
     /// Where a channel body from `user_id` opens doors, in every mode.
     /// Mapped: `{house, person:<p>}` when `house`, else `{person:<p>}`.
     /// Unmapped: `{person:<localpart>}`, never house (D3), or `∅` when the
-    /// id has no usable localpart.
+    /// id has no usable localpart or its localpart is a mapped entry's
+    /// `person` (`@alice:evil.example` never opens `@alice:example.org`'s
+    /// doors).
     pub fn channel_places(&self, user_id: &str) -> Places {
         match self.get(user_id) {
             Some(p) if p.house => Places(vec![Place::House, Place::Person(p.person.clone())]),
             Some(p) => Places(vec![Place::Person(p.person.clone())]),
             None => match localpart(user_id) {
-                Some(l) => Places(vec![Place::Person(l)]),
-                None => Places::none(),
+                Some(l) if !self.by_id.values().any(|p| p.person == l) => {
+                    Places(vec![Place::Person(l)])
+                }
+                _ => Places::none(),
             },
         }
     }
 }
 
-/// The text between a leading `@` and the first `:`, lowercased, when it is a
-/// valid person name. Localparts carrying `=` or `/` fall out here, on purpose.
+/// Longest localpart that still names a person, in bytes.
+const LOCALPART_MAX: usize = 64;
+
+/// The text between a leading `@` and the first `:`, ASCII-lowercased, when it
+/// is a valid person name of at most `LOCALPART_MAX` bytes. Localparts
+/// carrying `=`, `/` or any non-ASCII letter fall out here, on purpose: full
+/// Unicode folding would turn the Kelvin sign into `k`.
 pub fn localpart(user_id: &str) -> Option<String> {
     let (l, _) = user_id.strip_prefix('@')?.split_once(':')?;
-    let l = l.to_lowercase();
-    valid_person(&l).then_some(l)
+    let l = l.to_ascii_lowercase();
+    (l.len() <= LOCALPART_MAX && valid_person(&l)).then_some(l)
 }
 
 #[cfg(test)]
@@ -147,6 +156,45 @@ mod tests {
         ] {
             assert_eq!(p.channel_places(bad), Places::none(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_localpart_colliding_with_a_mapped_person_places_nothing() {
+        for v in [
+            r#"{"person":"alice","house":true}"#,
+            r#"{"person":"alice"}"#,
+        ] {
+            let p = people(&[("@alice:example.org", v)]);
+            for id in ["@alice:evil.example", "@ALICE:evil.example"] {
+                assert_eq!(p.channel_places(id), Places::none(), "{v} {id}");
+            }
+        }
+        // The collision is on the mapped `person`, not the mapped localpart.
+        let p = people(&[("@al:example.org", r#"{"person":"alice"}"#)]);
+        assert_eq!(p.channel_places("@alice:evil.example"), Places::none());
+        assert_eq!(
+            p.channel_places("@al:evil.example"),
+            Places(vec![person("al")])
+        );
+    }
+
+    #[test]
+    fn non_ascii_localparts_never_fold_into_a_name() {
+        let kelvin = "@\u{212A}aren:x";
+        let mapped = people(&[("@karen:example.org", r#"{"person":"karen"}"#)]);
+        assert_eq!(mapped.channel_places(kelvin), Places::none());
+        assert_eq!(People::default().channel_places(kelvin), Places::none());
+    }
+
+    #[test]
+    fn localparts_stop_at_sixty_four_bytes() {
+        let p = People::default();
+        let at = |n: usize| format!("@{}:example.org", "a".repeat(n));
+        assert_eq!(p.channel_places(&at(65)), Places::none());
+        assert_eq!(
+            p.channel_places(&at(64)),
+            Places(vec![person(&"a".repeat(64))])
+        );
     }
 
     #[test]

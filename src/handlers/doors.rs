@@ -366,9 +366,10 @@ pub(crate) fn pre_burn(store: &mut KvStore, key: &str, id: &str) {
 }
 
 /// Warn, once per trigger form, when the door just written on `key`/`id`
-/// shares that form with enough live, scope-overlapping doors to meet the
-/// per-prompt budget (`$MX_DOORS_BUDGET`, else 2): they compete, and some will
-/// defer. A warning only; the write already happened.
+/// shares that form with enough live, scope-overlapping doors to fill the
+/// per-prompt budget (`$MX_DOORS_BUDGET`, else 2), and at least one other.
+/// Filling it defers any other door matching the same prompt; exceeding it
+/// defers some of these. A warning only; the write already happened.
 pub(crate) fn warn_shared_triggers(store: &KvStore, key: &str, id: &str) {
     let all = store.iter_triggered();
     let Some(written) = all.iter().find(|c| c.key == key && c.id == id) else {
@@ -381,11 +382,17 @@ pub(crate) fn warn_shared_triggers(store: &KvStore, key: &str, id: &str) {
             .iter()
             .map(|(k, i)| format!("{k}/kv-{i}"))
             .collect();
+        let effect = if f.count > budget {
+            format!("exceeds the per-prompt budget of {budget}, so some of these will defer")
+        } else {
+            format!(
+                "fills the per-prompt budget of {budget}, so any other door matching the same prompt defers"
+            )
+        };
         eprintln!(
-            "warning: trigger form {:?} is on {} doors whose scopes overlap, at or over the per-prompt budget of {} -- they compete and some will defer. Others: {}",
+            "warning: trigger form {:?} is on {} doors whose scopes overlap, which {effect}. Others: {}",
             f.form,
             f.count,
-            budget,
             others.join(", ")
         );
     }

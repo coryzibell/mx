@@ -72,10 +72,10 @@ mod tests {
     #[test]
     fn reader_is_agent_type_then_current_agent_then_none() {
         assert_eq!(
-            Reader::resolve("Helper", Some("queue"), true),
+            Reader::resolve("Helper", Some("lead"), true),
             main("helper")
         );
-        assert_eq!(Reader::resolve("", Some("Queue"), true), main("queue"));
+        assert_eq!(Reader::resolve("", Some("Lead"), true), main("lead"));
         assert_eq!(Reader::resolve("", Some(""), false), sub("none"));
         assert_eq!(Reader::resolve("", None, true), main("none"));
     }
@@ -83,7 +83,7 @@ mod tests {
     #[test]
     fn a_door_without_agent_values_is_main_thread_only() {
         for scope in [None, Some(s(&["house"])), Some(s(&["pinned"]))] {
-            assert!(reader_admits(scope.as_deref(), &main("queue")));
+            assert!(reader_admits(scope.as_deref(), &main("lead")));
             assert!(reader_admits(scope.as_deref(), &main("none")));
             assert!(
                 !reader_admits(scope.as_deref(), &sub("helper")),
@@ -98,12 +98,12 @@ mod tests {
         for r in [main("helper"), sub("helper"), sub("plugin:reviewer")] {
             assert!(reader_admits(Some(&scope), &r), "{r:?}");
         }
-        for r in [main("queue"), sub("queue"), main("none")] {
+        for r in [main("lead"), sub("lead"), main("none")] {
             assert!(!reader_admits(Some(&scope), &r), "{r:?}");
         }
         let pinned = s(&["pinned", "agent:helper"]);
         assert!(
-            !reader_admits(Some(&pinned), &main("queue")),
+            !reader_admits(Some(&pinned), &main("lead")),
             "pinned is place-axis only"
         );
         assert!(reader_admits(Some(&pinned), &sub("helper")));
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn an_unparseable_agent_value_matches_no_reader() {
         let scope = s(&["agent:Helper"]);
-        for r in [main("helper"), sub("helper"), main("queue")] {
+        for r in [main("helper"), sub("helper"), main("lead")] {
             assert!(!reader_admits(Some(&scope), &r), "{r:?}");
         }
     }
