@@ -2041,6 +2041,12 @@ pub enum DoorsCommands {
         /// or held. Implies --dry-run
         #[arg(long)]
         explain: bool,
+
+        /// Read as this agent on the main thread, as `claude --agent AGENT`
+        /// does (default: $MX_CURRENT_AGENT, else none). A subagent's view is
+        /// only reachable through `mx doors hook`
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
     },
 
     /// Fire telemetry: fires per entry and per trigger, plus doors never fired
@@ -2071,6 +2077,11 @@ pub enum DoorsCommands {
         #[arg(long)]
         session: Option<String>,
     },
+}
+
+/// `--expires` in its stored form (absolute RFC 3339 UTC, or "" to clear).
+fn parse_expires_arg(s: &str) -> Result<String, String> {
+    crate::doors::parse_expires(s, chrono::Utc::now())
 }
 
 #[derive(Subcommand)]
@@ -2166,7 +2177,8 @@ pub enum KvCommands {
         fragment: Option<String>,
 
         /// Where the door may fire (repeatable): house, pinned,
-        /// book:<slug>[@n]. Absent means house
+        /// book:<slug>[@n], person:<name>; agent:<name> limits who reads it.
+        /// Absent means house, main thread only
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
 
@@ -2174,6 +2186,24 @@ pub enum KvCommands {
         /// (repeatable; phrase/wildcard grammar, no ` + `)
         #[arg(long = "exclude", value_name = "PHRASE")]
         exclude: Vec<String>,
+
+        /// Skip the pre-burn, so the door can fire later in this same session
+        /// (for notes-to-self). By default a door is marked as already seen by
+        /// the session that authors it ($CLAUDE_CODE_SESSION_ID). Needs
+        /// --trigger
+        #[arg(long, requires = "triggers")]
+        fire_here: bool,
+
+        /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
+        /// RFC 3339 time. Stored as absolute UTC. Needs --trigger
+        #[arg(
+            long,
+            value_name = "WHEN",
+            value_parser = parse_expires_arg,
+            requires = "triggers",
+            allow_hyphen_values = true
+        )]
+        expires: Option<String>,
 
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
@@ -2272,7 +2302,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to change only --data, --trigger, --fragment, --scope, --exclude or --memory)
+        /// New value text (omit to change only --data, --trigger, --fragment, --scope, --exclude, --expires or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.
@@ -2294,8 +2324,9 @@ pub enum KvCommands {
         #[arg(long)]
         fragment: Option<String>,
 
-        /// Replace the entry's whole scope list (repeatable). A single
-        /// `--scope ""` clears it back to house.
+        /// Replace the entry's whole scope list (repeatable): house, pinned,
+        /// book:<slug>[@n], person:<name>, agent:<name>. A single `--scope ""`
+        /// clears it back to house.
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
 
@@ -2303,6 +2334,23 @@ pub enum KvCommands {
         /// `--exclude ""` clears it.
         #[arg(long = "exclude", value_name = "PHRASE")]
         exclude: Vec<String>,
+
+        /// Skip the pre-burn, so the door can fire later in this same session
+        /// (for notes-to-self). By default a door is marked as already seen by
+        /// the session that authors it ($CLAUDE_CODE_SESSION_ID). Needs
+        /// --trigger
+        #[arg(long, requires = "triggers")]
+        fire_here: bool,
+
+        /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
+        /// RFC 3339 time. Stored as absolute UTC. "" clears it
+        #[arg(
+            long,
+            value_name = "WHEN",
+            value_parser = parse_expires_arg,
+            allow_hyphen_values = true
+        )]
+        expires: Option<String>,
 
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it
         #[arg(long)]

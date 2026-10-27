@@ -275,6 +275,7 @@ mod tests {
                 gated: false,
             }),
             places: Places::none(),
+            mapped: None,
         };
         let now = DateTime::parse_from_rfc3339("2026-01-01T12:00:00Z")
             .unwrap()

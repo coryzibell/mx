@@ -491,6 +491,7 @@ impl<'de> Deserialize<'de> for DataValue {
                                 fragment: None,
                                 scope: None,
                                 exclude: None,
+                                expires: None,
                             }
                         }
                     })
@@ -527,6 +528,9 @@ pub struct HistoryEntry {
     /// Phrases that hold this door in any segment where one matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
+    /// When this door stops opening: RFC 3339 UTC, absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -552,6 +556,9 @@ pub struct ListEntry {
     /// Phrases that hold this door in any segment where one matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
+    /// When this door stops opening: RFC 3339 UTC, absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
 }
 
 /// Optional attachments carried by a pushed entry.
@@ -568,12 +575,14 @@ pub struct EntryAttrs {
     pub fragment: Option<String>,
     pub scope: Option<Vec<String>>,
     pub exclude: Option<Vec<String>>,
+    pub expires: Option<String>,
 }
 
 /// A partial update to an existing entry. `None` leaves a field untouched.
 ///
 /// `triggers: Some(vec![])`, `fragment: Some(String::new())`,
-/// `scope: Some(vec![])`, `exclude: Some(vec![])` and `memory: Some(String::new())` are the *clear*
+/// `scope: Some(vec![])`, `exclude: Some(vec![])`, `expires: Some(String::new())`
+/// and `memory: Some(String::new())` are the *clear*
 /// signals — one command removes
 /// a bad door or a stale link — and all are stored back as `None` so they
 /// vanish from the serialized entry.
@@ -585,6 +594,7 @@ pub struct EntryPatch {
     pub fragment: Option<String>,
     pub scope: Option<Vec<String>>,
     pub exclude: Option<Vec<String>>,
+    pub expires: Option<String>,
     pub memory: Option<String>,
 }
 
@@ -597,6 +607,7 @@ impl EntryPatch {
             && self.fragment.is_none()
             && self.scope.is_none()
             && self.exclude.is_none()
+            && self.expires.is_none()
             && self.memory.is_none()
     }
 }
@@ -628,9 +639,8 @@ fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
 /// Check a door's `scope` list and return it deduplicated, first occurrence
 /// kept. `[]` (and a lone `""`) is the clear signal and comes back empty.
 ///
-/// Accepted: `house`, `pinned`, `book:<slug>` and `book:<slug>@<n>`. `person:`
-/// and `agent:` are refused rather than stored: nothing routes them yet, so a
-/// door carrying one would silently never fire.
+/// Accepted: `house`, `pinned`, `book:<slug>`, `book:<slug>@<n>`,
+/// `person:<name>` and `agent:<name>` (see `doors::ScopeValue::parse`).
 pub fn validate_scope(key: &str, scope: &[String]) -> Result<Vec<String>, KvError> {
     let mut out: Vec<String> = Vec::new();
     for v in scope {
@@ -667,6 +677,7 @@ pub struct TriggeredRef<'a> {
     pub memory: Option<&'a str>,
     pub scope: Option<&'a [String]>,
     pub exclude: Option<&'a [String]>,
+    pub expires: Option<&'a str>,
 }
 
 /// Shared field access for entry types that live in History and List values.
@@ -684,12 +695,14 @@ pub trait UpdateableEntry {
     fn entry_fragment(&self) -> Option<&str>;
     fn entry_scope(&self) -> Option<&[String]>;
     fn entry_exclude(&self) -> Option<&[String]>;
+    fn entry_expires(&self) -> Option<&str>;
     fn set_value(&mut self, v: &str);
     fn set_data(&mut self, d: Option<serde_json::Value>);
     fn set_triggers(&mut self, t: Option<Vec<String>>);
     fn set_fragment(&mut self, f: Option<String>);
     fn set_scope(&mut self, s: Option<Vec<String>>);
     fn set_exclude(&mut self, e: Option<Vec<String>>);
+    fn set_expires(&mut self, e: Option<String>);
     fn set_memory(&mut self, m: Option<String>);
 }
 
@@ -726,6 +739,9 @@ macro_rules! impl_updateable_entry {
             fn entry_exclude(&self) -> Option<&[String]> {
                 self.exclude.as_deref()
             }
+            fn entry_expires(&self) -> Option<&str> {
+                self.expires.as_deref()
+            }
             fn set_value(&mut self, v: &str) {
                 self.value = v.to_string();
             }
@@ -743,6 +759,9 @@ macro_rules! impl_updateable_entry {
             }
             fn set_exclude(&mut self, e: Option<Vec<String>>) {
                 self.exclude = e.filter(|list| !list.is_empty());
+            }
+            fn set_expires(&mut self, e: Option<String>) {
+                self.expires = e.filter(|s| !s.is_empty());
             }
             fn set_memory(&mut self, m: Option<String>) {
                 self.memory = m.filter(|s| !s.is_empty());
@@ -884,6 +903,9 @@ fn apply_entry_update<T: UpdateableEntry>(
     }
     if let Some(exclude) = patch.exclude.clone() {
         entry.set_exclude(Some(crate::knowledge::normalize_triggers(exclude)));
+    }
+    if let Some(expires) = patch.expires.clone() {
+        entry.set_expires(Some(expires));
     }
     if let Some(memory) = patch.memory.clone() {
         entry.set_memory(Some(memory));
@@ -2149,6 +2171,7 @@ impl KvStore {
             fragment,
             scope,
             exclude,
+            expires,
         } = attrs;
         if let Some(m) = &memory {
             check_memory_pointer(key, m)?;
@@ -2163,6 +2186,7 @@ impl KvStore {
         let exclude = exclude
             .map(crate::knowledge::normalize_triggers)
             .filter(|e| !e.is_empty());
+        let expires = expires.filter(|e| !e.is_empty());
 
         def.validate_data(key, &data)?;
 
@@ -2193,6 +2217,7 @@ impl KvStore {
                                 fragment,
                                 scope,
                                 exclude,
+                                expires,
                             },
                         );
                         // Drop oldest at max_entries
@@ -2232,6 +2257,7 @@ impl KvStore {
                             fragment,
                             scope,
                             exclude,
+                            expires,
                         });
                         // Drop oldest at max_entries — single drain instead of O(n^2) remove loop
                         if let Some(max) = def.max_entries
@@ -3251,6 +3277,7 @@ impl KvStore {
             && patch.fragment.is_none()
             && patch.scope.is_none()
             && patch.exclude.is_none()
+            && patch.expires.is_none()
             && patch.memory.is_none()
             && patch
                 .data
@@ -3324,6 +3351,7 @@ impl KvStore {
                     memory: e.entry_memory(),
                     scope: e.entry_scope(),
                     exclude: e.entry_exclude(),
+                    expires: e.entry_expires(),
                 });
             }
         }
@@ -8613,6 +8641,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8662,6 +8691,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8695,6 +8725,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8740,6 +8771,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8777,6 +8809,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8831,6 +8864,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8866,6 +8900,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8911,6 +8946,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -8954,6 +8990,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -9073,6 +9110,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -9117,6 +9155,7 @@ type = "counter"
                     fragment: None,
                     scope: None,
                     exclude: None,
+                    expires: None,
                 }],
                 memory: None,
             },
@@ -10241,6 +10280,53 @@ type = "history"
         assert!(!raw.contains("fragment"));
         assert!(!raw.contains("scope"));
         assert!(!raw.contains("exclude"));
+    }
+
+    #[test]
+    fn expires_is_stored_on_push_replaced_on_update_and_cleared_on_empty() {
+        let (mut store, _dir) = setup_store(doors_schema());
+        for key in ["facts", "log"] {
+            let push = store
+                .push(
+                    key,
+                    "v",
+                    EntryAttrs {
+                        triggers: Some(vec!["zorbel".to_string()]),
+                        expires: Some("2026-11-01T00:00:00Z".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let get = |store: &KvStore| {
+                store
+                    .iter_triggered()
+                    .into_iter()
+                    .find(|c| c.key == key)
+                    .unwrap()
+                    .expires
+                    .map(str::to_string)
+            };
+            assert_eq!(get(&store).as_deref(), Some("2026-11-01T00:00:00Z"));
+            let id = IdRef::Index(push.index);
+            for (patch, want) in [
+                (Some("2027-01-01T00:00:00Z"), Some("2027-01-01T00:00:00Z")),
+                (Some(""), None),
+            ] {
+                store
+                    .update_entry(
+                        key,
+                        &id,
+                        EntryPatch {
+                            expires: patch.map(str::to_string),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(get(&store).as_deref(), want, "{key} {patch:?}");
+            }
+        }
+        let raw = serde_json::to_string(&store.data).unwrap();
+        assert!(!raw.contains("expires"), "a cleared expiry leaves no field");
     }
 
     #[test]

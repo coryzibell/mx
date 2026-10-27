@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::DoorsCommands;
 use crate::doors::{
-    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, SESSION_KEY,
-    Selection, SessionRow, SessionState,
+    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, PEOPLE_KEY, People,
+    Reader, SESSION_KEY, Selection, SessionRow, SessionState, Who,
 };
 use crate::kv::{DataFieldType, DataValue, EntryAttrs, HistoryEntry, KvStore, TriggeredRef};
 
@@ -50,6 +50,10 @@ required = false
 [keys.doors_fired.data.place]
 type = "string"
 required = false
+
+[keys.doors_fired.data.reader]
+type = "string"
+required = false
 "#;
 
 /// A `(kv key, entry id)` pair — the tuple that identifies one door. The key is
@@ -57,13 +61,24 @@ required = false
 /// id can legitimately appear under two different keys.
 type DoorId = (String, String);
 
+/// The `origin` of a pre-burn row. It dedups like a fire but is not one.
+const AUTHORED: &str = "authored";
+
 /// One row of the fire log, flattened out of its `data` blob.
 struct FireRow {
     session: String,
     key: String,
     entry: String,
     trigger: String,
+    origin: String,
     ts: String,
+}
+
+impl FireRow {
+    /// A pre-burn row written at authoring, not a fire.
+    fn authored(&self) -> bool {
+        self.origin == AUTHORED
+    }
 }
 
 fn field(e: &HistoryEntry, name: &str) -> String {
@@ -89,19 +104,23 @@ fn read_fire_log(store: &KvStore) -> Vec<FireRow> {
             key: field(e, "key"),
             entry: field(e, "entry"),
             trigger: field(e, "trigger"),
+            origin: field(e, "origin"),
             ts: e.ts.clone(),
         })
         .collect()
 }
 
 /// Split the fire log into this session's dedup set and the all-time fire counts
-/// that drive least-fired-first ordering.
+/// that drive least-fired-first ordering. A pre-burn row dedups but is not
+/// counted as a fire.
 fn fire_state(rows: &[FireRow], session: &str) -> (HashSet<DoorId>, HashMap<DoorId, u64>) {
     let mut fired: HashSet<DoorId> = HashSet::new();
     let mut counts: HashMap<DoorId, u64> = HashMap::new();
     for r in rows {
         let pair = (r.key.clone(), r.entry.clone());
-        *counts.entry(pair.clone()).or_insert(0) += 1;
+        if !r.authored() {
+            *counts.entry(pair.clone()).or_insert(0) += 1;
+        }
         if r.session == session {
             fired.insert(pair);
         }
@@ -175,38 +194,68 @@ fn names_us() -> NamesUs {
     )
 }
 
-type Matcher<T> = fn(
-    &str,
-    &Mode,
-    &NamesUs,
-    &[TriggeredRef<'_>],
-    &HashSet<DoorId>,
-    &HashMap<DoorId, u64>,
-    usize,
-) -> T;
+/// The `doors_people` map from the loaded store. An absent key or one of the
+/// wrong type is an empty map: every sender unmapped, no owners.
+fn people(store: &KvStore) -> People {
+    match store.data.entries.get(PEOPLE_KEY) {
+        Some(DataValue::State { fields, .. }) => {
+            People::from_fields(fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        }
+        _ => People::default(),
+    }
+}
+
+type Matcher<T> =
+    fn(&str, &Mode, &Who, &[TriggeredRef<'_>], &HashSet<DoorId>, &HashMap<DoorId, u64>, usize) -> T;
+
+/// `MX_CURRENT_AGENT`, the reader when the payload names no agent type.
+fn current_agent() -> Option<String> {
+    std::env::var("MX_CURRENT_AGENT").ok()
+}
 
 /// Run `matcher` (`doors::select`, `doors::explain` or `doors::route`) for one
-/// message. Does not write.
+/// message, over the doors the gate lets `reader` see. Does not write.
 fn evaluate<T>(
     store: &KvStore,
     session: &str,
     prompt: &str,
     mode: &Mode,
+    reader: &Reader,
     budget: usize,
     matcher: Matcher<T>,
 ) -> T {
     let rows = read_fire_log(store);
     let (already, counts) = fire_state(&rows, session);
     let candidates = store.iter_triggered();
-    matcher(
-        prompt,
-        mode,
-        &names_us(),
-        &candidates,
-        &already,
-        &counts,
-        budget,
-    )
+    let (kept, _) = doors::gate(&candidates, reader, Utc::now());
+    matcher(prompt, mode, &who(store), &kept, &already, &counts, budget)
+}
+
+fn who(store: &KvStore) -> Who {
+    Who {
+        names: names_us(),
+        people: people(store),
+    }
+}
+
+/// `doors::explain` over the gated doors, then each gated door that would
+/// have matched listed as HELD with its gate.
+fn explain_all(
+    store: &KvStore,
+    session: &str,
+    prompt: &str,
+    mode: &Mode,
+    reader: &Reader,
+    budget: usize,
+) -> Explanation {
+    let rows = read_fire_log(store);
+    let (already, counts) = fire_state(&rows, session);
+    let candidates = store.iter_triggered();
+    let (kept, gated) = doors::gate(&candidates, reader, Utc::now());
+    let who = who(store);
+    let mut ex = doors::explain(prompt, mode, &who, &kept, &already, &counts, budget);
+    doors::hold_gated(&mut ex, prompt, &who, &gated, &already, &counts);
+    ex
 }
 
 /// Whether the store's schema accepts a string `name` field on fire rows.
@@ -225,9 +274,15 @@ fn schema_takes(store: &KvStore, name: &str) -> bool {
 /// Append one fire row per opened door, without saving. Overflow (`deferred`)
 /// is deliberately NOT recorded, which is what keeps a deferred door eligible
 /// on the next prompt.
-fn push_fires(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()> {
+fn push_fires(
+    store: &mut KvStore,
+    session: &str,
+    reader: &Reader,
+    fired: &[FiredDoor],
+) -> Result<()> {
     let with_origin = schema_takes(store, "origin");
     let with_place = schema_takes(store, "place");
+    let with_reader = schema_takes(store, "reader");
     for f in fired {
         let mut data = serde_json::json!({
             "session": session,
@@ -241,6 +296,9 @@ fn push_fires(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result
         if with_place {
             data["place"] = f.place.as_str().into();
         }
+        if with_reader {
+            data["reader"] = reader.name.as_str().into();
+        }
         store.push(
             FIRED_KEY,
             &f.trigger,
@@ -253,11 +311,98 @@ fn push_fires(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result
     Ok(())
 }
 
-fn record(store: &mut KvStore, session: &str, fired: &[FiredDoor]) -> Result<()> {
+/// Pre-burn a door just authored on `key`/`id`: one `origin: "authored"` row
+/// for `$CLAUDE_CODE_SESSION_ID`, so the door does not fire back into the
+/// session that wrote it. Call after the entry is saved. Never fails the
+/// caller: the entry is already stored, so a problem here is one stderr line.
+pub(crate) fn pre_burn(store: &mut KvStore, key: &str, id: &str) {
+    let Some(session) = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(trigger) = store
+        .iter_triggered()
+        .into_iter()
+        .find(|c| c.key == key && c.id == id)
+        .and_then(|c| c.triggers.first().cloned())
+    else {
+        return;
+    };
+    if !schema_takes(store, "origin") {
+        eprintln!(
+            "warning: not pre-burned: the schema's {FIRED_KEY} has no string `origin` field, so this door can fire in this session"
+        );
+        return;
+    }
+    if read_fire_log(store)
+        .iter()
+        .any(|r| r.session == session && r.key == key && r.entry == id)
+    {
+        return;
+    }
+    let data = serde_json::json!({
+        "session": session,
+        "key": key,
+        "entry": id,
+        "trigger": trigger,
+        "origin": AUTHORED,
+    });
+    let pushed = store.push(
+        FIRED_KEY,
+        &trigger,
+        EntryAttrs {
+            data: Some(data),
+            ..Default::default()
+        },
+    );
+    if let Err(e) = pushed
+        .map_err(anyhow::Error::from)
+        .and_then(|_| store.save())
+    {
+        eprintln!("warning: could not pre-burn the door, it can fire in this session: {e:#}");
+    }
+}
+
+/// Warn, once per trigger form, when the door just written on `key`/`id`
+/// shares that form with enough live, scope-overlapping doors to fill the
+/// per-prompt budget (`$MX_DOORS_BUDGET`, else 2), and at least one other.
+/// Filling it defers any other door matching the same prompt; exceeding it
+/// defers some of these. A warning only; the write already happened.
+pub(crate) fn warn_shared_triggers(store: &KvStore, key: &str, id: &str) {
+    let all = store.iter_triggered();
+    let Some(written) = all.iter().find(|c| c.key == key && c.id == id) else {
+        return;
+    };
+    let budget = resolve_budget(None);
+    for f in doors::shared_forms(written, &all, budget, Utc::now()) {
+        let others: Vec<String> = f
+            .others
+            .iter()
+            .map(|(k, i)| format!("{k}/kv-{i}"))
+            .collect();
+        let effect = if f.count > budget {
+            format!("exceeds the per-prompt budget of {budget}, so some of these will defer")
+        } else {
+            format!(
+                "fills the per-prompt budget of {budget}, so any other door matching the same prompt defers"
+            )
+        };
+        eprintln!(
+            "warning: trigger form {:?} is on {} doors whose scopes overlap, which {effect}. Others: {}",
+            f.form,
+            f.count,
+            others.join(", ")
+        );
+    }
+}
+
+fn record(store: &mut KvStore, session: &str, reader: &Reader, fired: &[FiredDoor]) -> Result<()> {
     if fired.is_empty() {
         return Ok(());
     }
-    push_fires(store, session, fired)?;
+    push_fires(store, session, reader, fired)?;
     store.save()?;
     Ok(())
 }
@@ -304,6 +449,13 @@ fn hook(dry_run: bool, budget: usize) {
     };
 
     let sid = input.session_id.as_str();
+    // P6 (#492): subagent delivery (a PreToolUse(Agent) path) would hook in
+    // here. Today a subagent's prompt only sees doors that name its agent.
+    let reader = Reader::resolve(
+        &input.agent_type,
+        current_agent().as_deref(),
+        input.agent_id.is_empty(),
+    );
     let tracked = tracks_sessions(&store, sid);
     let state = session_state(&store, sid);
     let ex = evaluate(
@@ -311,6 +463,7 @@ fn hook(dry_run: bool, budget: usize) {
         sid,
         &input.prompt,
         &state.mode,
+        &reader,
         budget,
         doors::route,
     );
@@ -341,7 +494,7 @@ fn hook(dry_run: bool, budget: usize) {
     // every message. Failing to record means failing to fire. Hints follow the
     // same rule: one that cannot be recorded would print on every prompt.
     let before = store.data.entries.get(FIRED_KEY).cloned();
-    let doors_ok = match push_fires(&mut store, sid, &fired) {
+    let doors_ok = match push_fires(&mut store, sid, &reader, &fired) {
         Ok(()) => true,
         Err(e) => {
             eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
@@ -417,12 +570,30 @@ fn compose(message: &str, session: &str, pastes: &[String], from: Option<&str>) 
 
 const NOT_CLASSIFIED: &str = "only pastes are classified";
 
-fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
+fn thread(reader: &Reader) -> &'static str {
+    if reader.main_thread {
+        "main thread"
+    } else {
+        "subagent"
+    }
+}
+
+fn print_explanation(ex: &Explanation, source: &str, reader: &Reader, hints: &[Hint]) {
     println!("mode {} ({source})", ex.mode);
+    println!("reader {} ({})", reader.name, thread(reader));
     for (n, seg) in ex.segments.iter().enumerate() {
         let origin = match &seg.origin {
-            doors::Origin::Channel { user_id } if !user_id.is_empty() => {
-                format!("channel({user_id})")
+            doors::Origin::Channel { user_id } => {
+                let mapped = if seg.mapped == Some(true) {
+                    "mapped"
+                } else {
+                    "unmapped"
+                };
+                if user_id.is_empty() {
+                    format!("channel({mapped})")
+                } else {
+                    format!("channel({user_id} {mapped})")
+                }
             }
             o => o.label().to_string(),
         };
@@ -458,11 +629,11 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
         } else {
             d.pool.label()
         };
-        let excluded = d
-            .excluded_by
-            .as_ref()
-            .map(|e| format!("  excluded by {e:?}"))
-            .unwrap_or_default();
+        let excluded = match (&d.excluded_by, d.gated_by) {
+            (Some(e), _) => format!("  excluded by {e:?}"),
+            (None, Some(g)) => format!("  held by {}", g.label()),
+            (None, None) => String::new(),
+        };
         println!(
             "{}  {}/kv-{}  {}  seg {}  place {}  pool {}{}",
             d.door.trigger,
@@ -480,7 +651,12 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
     }
 }
 
-fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_json::Value {
+fn explanation_json(
+    ex: &Explanation,
+    source: &str,
+    reader: &Reader,
+    hints: &[Hint],
+) -> serde_json::Value {
     let segments: Vec<serde_json::Value> = ex
         .segments
         .iter()
@@ -495,6 +671,7 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
                 "segment": n + 1,
                 "origin": seg.origin.label(),
                 "user_id": user_id,
+                "mapped": seg.mapped,
                 "chars": seg.text.chars().count(),
                 "verdict": c.map(|c| c.verdict),
                 "reason": c.is_none().then_some(NOT_CLASSIFIED),
@@ -525,6 +702,9 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
             if let Some(e) = &d.excluded_by {
                 row["excluded_by"] = e.as_str().into();
             }
+            if let Some(g) = d.gated_by {
+                row["held_by"] = g.label().into();
+            }
             row
         })
         .collect();
@@ -536,6 +716,8 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
     serde_json::json!({
         "mode": ex.mode.to_string(),
         "mode_source": source,
+        "reader": reader.name,
+        "main_thread": reader.main_thread,
         "segments": segments,
         "doors": doors,
         "fired": sel.fired,
@@ -554,6 +736,7 @@ struct CheckArgs {
     pastes: Vec<PathBuf>,
     from: Option<String>,
     explain: bool,
+    reader: Reader,
 }
 
 fn check(a: CheckArgs) -> Result<i32> {
@@ -574,7 +757,7 @@ fn check(a: CheckArgs) -> Result<i32> {
     };
     // Explaining never burns dedup, and never records a hint.
     if a.explain {
-        let ex = evaluate(&store, &a.session, &prompt, &mode, a.budget, doors::explain);
+        let ex = explain_all(&store, &a.session, &prompt, &mode, &a.reader, a.budget);
         let hints = if tracks_sessions(&store, &a.session) {
             doors::hints(&ex.segments, &mode, &state, Utc::now())
         } else {
@@ -583,20 +766,27 @@ fn check(a: CheckArgs) -> Result<i32> {
         if a.json {
             println!(
                 "{}",
-                serde_json::to_string(&explanation_json(&ex, source, &hints))?
+                serde_json::to_string(&explanation_json(&ex, source, &a.reader, &hints))?
             );
         } else {
-            print_explanation(&ex, source, &hints);
+            print_explanation(&ex, source, &a.reader, &hints);
         }
         return Ok(crate::kv::EXIT_OK);
     }
-    let selection: Selection =
-        evaluate(&store, &a.session, &prompt, &mode, a.budget, doors::select);
+    let selection: Selection = evaluate(
+        &store,
+        &a.session,
+        &prompt,
+        &mode,
+        &a.reader,
+        a.budget,
+        doors::select,
+    );
     // Same ordering as the hook: a door that reports without recording is a
     // door with no dedup. Here the error propagates instead of being swallowed,
     // because `check` is run by a person who wants to see it.
     if !a.dry_run {
-        record(&mut store, &a.session, &selection.fired)?;
+        record(&mut store, &a.session, &a.reader, &selection.fired)?;
     }
     if a.json {
         println!("{}", serde_json::to_string(&selection)?);
@@ -665,7 +855,9 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         None => None,
     };
 
-    let all_rows = read_fire_log(&store);
+    let logged = read_fire_log(&store);
+    let pre_burned = logged.iter().filter(|r| r.authored()).count();
+    let all_rows: Vec<FireRow> = logged.into_iter().filter(|r| !r.authored()).collect();
 
     // "Never fired" is computed over the WHOLE log, deliberately. It is the
     // signal used to decide a door is bad and should be pruned, so scoping it to
@@ -703,6 +895,22 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         .filter(|p| !ever_fired.contains(p))
         .collect();
 
+    // Expired doors, for pruning: (key, id, expires, first trigger).
+    let now = Utc::now();
+    let triggered = store.iter_triggered();
+    let expired: Vec<(&str, &str, &str, &str)> = triggered
+        .iter()
+        .filter_map(|c| {
+            let e = c.expires.filter(|e| doors::is_expired(e, now))?;
+            Some((
+                c.key,
+                c.id,
+                e,
+                c.triggers.first().map_or("", String::as_str),
+            ))
+        })
+        .collect();
+
     if json {
         let entries: Vec<serde_json::Value> = per_entry
             .iter()
@@ -723,12 +931,20 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
                 "entries": entries,
                 "triggers": triggers,
                 "never_fired": never_json,
+                "pre_burned": pre_burned,
+                "expired": expired
+                    .iter()
+                    .map(|(k, e, x, t)| serde_json::json!({"key": k, "entry": e, "expires": x, "trigger": t}))
+                    .collect::<Vec<_>>(),
             }))?
         );
         return Ok(crate::kv::EXIT_OK);
     }
 
     println!("{} fires recorded", rows.len());
+    if pre_burned > 0 {
+        println!("{pre_burned} pre-burned at authoring (not fires)");
+    }
     let mut entries: Vec<_> = per_entry.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     for ((k, e), n) in &entries {
@@ -746,6 +962,12 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         println!("never fired:");
         for (k, e) in &never {
             println!("        {}/kv-{}", k, e);
+        }
+    }
+    if !expired.is_empty() {
+        println!("expired:");
+        for (k, e, x, t) in &expired {
+            println!("        {k}/kv-{e}  {x}  {t}");
         }
     }
     Ok(crate::kv::EXIT_OK)
@@ -787,6 +1009,7 @@ pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
             pastes,
             from,
             explain,
+            agent,
         } => {
             let mode = match mode.as_deref().map(|m| (m, Mode::parse(m))) {
                 None => None,
@@ -806,6 +1029,11 @@ pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
                 pastes,
                 from,
                 explain,
+                reader: Reader::resolve(
+                    agent.as_deref().unwrap_or(""),
+                    current_agent().as_deref(),
+                    true,
+                ),
             })
         }
         DoorsCommands::Stats { since, json } => stats(since.as_deref(), json),
@@ -834,6 +1062,37 @@ mod tests {
             None,
         );
         assert_eq!(format!("{composed}\n\n keep it short"), prompt);
+    }
+
+    fn row(session: &str, entry: &str, origin: &str) -> FireRow {
+        FireRow {
+            session: session.to_string(),
+            key: "facts".to_string(),
+            entry: entry.to_string(),
+            trigger: "widget".to_string(),
+            origin: origin.to_string(),
+            ts: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_pre_burn_row_dedups_but_is_not_counted() {
+        let rows = [
+            row("s1", "aaa", AUTHORED),
+            row("s2", "aaa", AUTHORED),
+            row("s2", "bbb", "typed"),
+            row("s3", "bbb", ""),
+        ];
+        let (seen, counts) = fire_state(&rows, "s1");
+        let pair = |e: &str| ("facts".to_string(), e.to_string());
+        assert!(seen.contains(&pair("aaa")));
+        assert!(!seen.contains(&pair("bbb")));
+        assert_eq!(counts.get(&pair("aaa")), None);
+        assert_eq!(
+            counts.get(&pair("bbb")),
+            Some(&2),
+            "legacy rows still count"
+        );
     }
 
     #[test]
