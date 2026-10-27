@@ -2079,6 +2079,11 @@ pub enum DoorsCommands {
     },
 }
 
+/// `--expires` in its stored form (absolute RFC 3339 UTC, or "" to clear).
+fn parse_expires_arg(s: &str) -> Result<String, String> {
+    crate::doors::parse_expires(s, chrono::Utc::now())
+}
+
 #[derive(Subcommand)]
 pub enum KvCommands {
     /// Get the current value of a key, or specific entries by ID
@@ -2189,6 +2194,11 @@ pub enum KvCommands {
         #[arg(long, requires = "triggers")]
         fire_here: bool,
 
+        /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
+        /// RFC 3339 time. Stored as absolute UTC. On update, "" clears it
+        #[arg(long, value_name = "WHEN", value_parser = parse_expires_arg)]
+        expires: Option<String>,
+
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
         create: Option<CreateType>,
@@ -2286,7 +2296,7 @@ pub enum KvCommands {
         /// Key name
         key: String,
 
-        /// New value text (omit to change only --data, --trigger, --fragment, --scope, --exclude or --memory)
+        /// New value text (omit to change only --data, --trigger, --fragment, --scope, --exclude, --expires or --memory)
         value: Option<String>,
 
         /// Target entry by ID (numeric index or kv-HASH prefix). Required.
@@ -2325,6 +2335,11 @@ pub enum KvCommands {
         /// --trigger
         #[arg(long, requires = "triggers")]
         fire_here: bool,
+
+        /// When the door stops opening: <n>h, <n>d, <n>w from now, or an
+        /// RFC 3339 time. Stored as absolute UTC. On update, "" clears it
+        #[arg(long, value_name = "WHEN", value_parser = parse_expires_arg)]
+        expires: Option<String>,
 
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it
         #[arg(long)]

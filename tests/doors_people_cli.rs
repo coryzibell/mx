@@ -1024,3 +1024,221 @@ fn a_failed_pre_burn_does_not_fail_the_command() {
         "the entry was stored"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Item 4: --expires
+// ---------------------------------------------------------------------------
+
+fn stored(dir: &TempDir, id: &str) -> serde_json::Value {
+    let data: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(data_path(dir)).unwrap()).unwrap();
+    data["facts"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["hash"] == id)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn relative_and_absolute_expiries_are_stored_absolute_utc() {
+    let dir = setup();
+    let rel = push(&dir, "v", &["--trigger", "widget", "--expires", "2d"]);
+    let e = stored(&dir, &rel)["expires"].as_str().unwrap().to_string();
+    let at = chrono::DateTime::parse_from_rfc3339(&e).unwrap();
+    let ahead = at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    assert!(
+        ahead > chrono::Duration::hours(47) && ahead <= chrono::Duration::days(2),
+        "{e}"
+    );
+    assert!(e.ends_with('Z'), "{e}");
+    let abs = push(
+        &dir,
+        "v",
+        &[
+            "--trigger",
+            "gizmo",
+            "--expires",
+            "2999-01-01T02:00:00+02:00",
+        ],
+    );
+    assert_eq!(stored(&dir, &abs)["expires"], "2999-01-01T00:00:00Z");
+    let none = push(&dir, "v", &["--trigger", "doohickey", "--expires", ""]);
+    assert!(stored(&dir, &none).get("expires").is_none());
+    assert_eq!(
+        sorted(fired_ids(&ok(
+            &run(
+                &dir,
+                &["doors", "hook", "--budget", "9"],
+                &serde_json::json!({"session_id": "s1", "prompt": "widget gizmo doohickey"})
+                    .to_string(),
+                &[],
+            ),
+            "hook"
+        ))),
+        sorted(vec![rel, abs, none]),
+        "unexpired doors fire"
+    );
+}
+
+#[test]
+fn a_past_expiry_is_stored_with_a_warning_and_the_door_is_silent() {
+    let dir = setup();
+    let out = mx(
+        &dir,
+        &[
+            "kv",
+            "push",
+            "facts",
+            "v",
+            "--trigger",
+            "widget",
+            "--expires",
+            "2020-01-01T00:00:00Z",
+        ],
+    );
+    let id = ok(&out, "push")
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .trim_start_matches("kv-")
+        .to_string();
+    assert!(stderr(&out).contains("already expired"), "{}", stderr(&out));
+    assert_eq!(hook(&dir, "s1", "widget"), "");
+    assert_eq!(
+        ok(&mx(&dir, &["doors", "check", "widget", "--json"]), "check").trim(),
+        r#"{"fired":[],"deferred":0}"#
+    );
+    let v = explain(&dir, "widget", &[]);
+    assert_eq!(v["doors"][0]["id"], id.as_str());
+    assert_eq!(v["doors"][0]["status"], "HELD");
+    assert_eq!(v["doors"][0]["held_by"], "expired");
+    let text = ok(
+        &mx(&dir, &["doors", "check", "widget", "--explain"]),
+        "explain",
+    );
+    assert!(text.contains("held by expired"), "{text}");
+}
+
+#[test]
+fn update_sets_and_clears_an_expiry() {
+    let dir = setup();
+    let id = push(&dir, "v", &["--trigger", "widget"]);
+    let target = format!("kv-{id}");
+    let upd = |when: &str| {
+        ok(
+            &mx(
+                &dir,
+                &["kv", "update", "facts", "--id", &target, "--expires", when],
+            ),
+            "update --expires",
+        )
+    };
+    upd("2020-01-01T00:00:00Z");
+    assert_eq!(hook(&dir, "s1", "widget"), "");
+    upd("");
+    assert!(stored(&dir, &id).get("expires").is_none());
+    assert_eq!(fired_ids(&hook(&dir, "s1", "widget")), vec![id]);
+}
+
+#[test]
+fn bad_expiry_forms_are_usage_errors_that_name_the_accepted_forms() {
+    let dir = setup();
+    let id = push(&dir, "v", &["--trigger", "widget"]);
+    for bad in ["0d", "1m", "1y", "tomorrow", "2026-11-01", "-3h"] {
+        let flag = format!("--expires={bad}");
+        for args in [
+            vec!["kv", "push", "facts", "v", "--trigger", "x", &flag],
+            vec!["kv", "update", "facts", "--id", &id, &flag],
+        ] {
+            let out = mx(&dir, &args);
+            assert_eq!(out.status.code(), Some(2), "{bad}: {}", stderr(&out));
+            assert!(
+                stderr(&out).contains("<n>h, <n>d or <n>w") && stderr(&out).contains("RFC 3339"),
+                "{}",
+                stderr(&out)
+            );
+        }
+    }
+    let data: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(data_path(&dir)).unwrap()).unwrap();
+    assert_eq!(
+        data["facts"]["items"].as_array().unwrap().len(),
+        1,
+        "nothing written"
+    );
+}
+
+#[test]
+fn an_unparseable_stored_expiry_counts_as_expired() {
+    let dir = setup();
+    let id = push(&dir, "v", &["--trigger", "widget"]);
+    let raw = std::fs::read_to_string(data_path(&dir)).unwrap();
+    let mut data: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    data["facts"]["items"][0]["expires"] = "next tuesday".into();
+    std::fs::write(data_path(&dir), data.to_string()).unwrap();
+    assert_eq!(hook(&dir, "s1", "widget"), "");
+    let text = ok(&mx(&dir, &["kv", "triggers"]), "triggers");
+    assert!(
+        text.lines()
+            .any(|l| l.contains(&format!("kv-{id}")) && l.ends_with("[expired]")),
+        "{text}"
+    );
+}
+
+#[test]
+fn kv_triggers_marks_expiry_and_stats_lists_expired_doors() {
+    let dir = setup();
+    let live = push(
+        &dir,
+        "v",
+        &["--trigger", "widget", "--expires", "2999-06-01T00:00:00Z"],
+    );
+    let dead = push(
+        &dir,
+        "v",
+        &["--trigger", "gizmo", "--expires", "2020-06-01T00:00:00Z"],
+    );
+    let plain = push(&dir, "v", &["--trigger", "doohickey"]);
+    let text = ok(&mx(&dir, &["kv", "triggers"]), "triggers");
+    let line = |id: &str| {
+        text.lines()
+            .find(|l| l.contains(&format!("kv-{id}")))
+            .unwrap()
+            .to_string()
+    };
+    assert!(line(&live).ends_with("[exp:2999-06-01]"), "{text}");
+    assert!(line(&dead).ends_with("[expired]"), "{text}");
+    assert!(line(&plain).ends_with("fires=0"), "{text}");
+    let v: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "--json"]), "json")).unwrap();
+    let row = |id: &str| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(&live)["expires"], "2999-06-01T00:00:00Z");
+    assert_eq!(row(&live)["expired"], false);
+    assert_eq!(row(&dead)["expired"], true);
+    assert!(row(&plain).get("expires").is_none());
+
+    let stats: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["doors", "stats", "--json"]), "stats")).unwrap();
+    assert_eq!(
+        stats["expired"],
+        serde_json::json!([{
+            "key": "facts", "entry": dead, "expires": "2020-06-01T00:00:00Z", "trigger": "gizmo",
+        }])
+    );
+    let text = ok(&mx(&dir, &["doors", "stats"]), "stats");
+    assert!(
+        text.contains(&format!(
+            "expired:\n        facts/kv-{dead}  2020-06-01T00:00:00Z  gizmo"
+        )),
+        "{text}"
+    );
+}

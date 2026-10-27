@@ -10,6 +10,7 @@
 //! the fire log and stdout live in `handlers::doors`.
 
 mod classify;
+mod expiry;
 mod people;
 mod reader;
 mod route;
@@ -20,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 pub use classify::{Classified, NamesUs, Verdict, classify};
+pub use expiry::{is_expired, parse_expires};
 pub use people::{PEOPLE_KEY, People};
 pub use reader::Reader;
 pub use route::{Mode, Places, Pool, ScopeValue};
@@ -860,6 +862,8 @@ pub struct DoorMatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Gate {
+    /// Its `expires` is at or before now, or does not parse.
+    Expired,
     /// The reader axis does not admit this reader.
     Reader,
 }
@@ -867,6 +871,7 @@ pub enum Gate {
 impl Gate {
     pub fn label(self) -> &'static str {
         match self {
+            Gate::Expired => "expired",
             Gate::Reader => "reader",
         }
     }
@@ -875,16 +880,20 @@ impl Gate {
 /// A door the gate filtered out, and why.
 pub type Gated<'a> = (TriggeredRef<'a>, Gate);
 
-/// Split candidates into the ones `reader` may see and the gated rest. This
-/// runs before matching; the matcher only ever sees what it keeps.
+/// Split candidates into the ones `reader` may see at `now` and the gated
+/// rest. An expired door is gated for everyone, so expiry is checked first.
+/// This runs before matching; the matcher only ever sees what it keeps.
 pub fn gate<'a>(
     candidates: &[TriggeredRef<'a>],
     reader: &Reader,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> (Vec<TriggeredRef<'a>>, Vec<Gated<'a>>) {
     let mut kept = Vec::new();
     let mut gated = Vec::new();
     for c in candidates {
-        if reader::reader_admits(c.scope, reader) {
+        if c.expires.is_some_and(|e| is_expired(e, now)) {
+            gated.push((*c, Gate::Expired));
+        } else if reader::reader_admits(c.scope, reader) {
             kept.push(*c);
         } else {
             gated.push((*c, Gate::Reader));
@@ -1292,6 +1301,7 @@ mod tests {
             memory: None,
             scope: None,
             exclude: None,
+            expires: None,
         }
     }
 
@@ -1509,6 +1519,7 @@ mod tests {
                 memory: None,
                 scope: None,
                 exclude: None,
+                expires: None,
             })
             .collect();
         let mut fired: Vec<String> = select(
@@ -2619,6 +2630,7 @@ mod tests {
                 memory: None,
                 scope: None,
                 exclude: None,
+                expires: None,
             })
             .collect();
         explain(
@@ -2840,6 +2852,7 @@ mod tests {
                 memory: None,
                 scope: d.scope.as_deref(),
                 exclude: None,
+                expires: None,
             })
             .collect()
     }
@@ -3348,6 +3361,43 @@ mod tests {
 
     // ---- P3: the reader gate ----
 
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-10-27T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn the_gate_holds_expired_doors_for_every_reader() {
+        let doors = [
+            door("liv", "widget", &[]),
+            door("exp", "widget", &[]),
+            door("bnd", "widget", &[]),
+            door("bad", "widget", &["agent:helper"]),
+        ];
+        let mut cands = refs(&doors);
+        cands[0].expires = Some("2026-10-27T12:00:01Z");
+        cands[1].expires = Some("2026-10-27T11:59:59Z");
+        cands[2].expires = Some("2026-10-27T12:00:00Z");
+        cands[3].expires = Some("next tuesday");
+        for r in [reader("queue", true), reader("helper", false)] {
+            let (kept, gated) = gate(&cands, &r, now());
+            let why: Vec<(&str, Gate)> = gated.iter().map(|(c, g)| (c.id, *g)).collect();
+            assert_eq!(
+                &why[why.len() - 3..],
+                &[
+                    ("exp", Gate::Expired),
+                    ("bnd", Gate::Expired),
+                    ("bad", Gate::Expired)
+                ],
+                "{r:?}"
+            );
+            assert!(kept.iter().all(|c| c.id == "liv"), "{r:?}");
+        }
+        let (kept, _) = gate(&cands, &reader("queue", true), now());
+        assert_eq!(kept.len(), 1, "a future expiry stays live");
+    }
+
     fn reader(name: &str, main_thread: bool) -> Reader {
         Reader {
             name: name.to_string(),
@@ -3364,11 +3414,11 @@ mod tests {
         ];
         let cands = refs(&doors);
         let ids = |v: &[TriggeredRef<'_>]| v.iter().map(|c| c.id.to_string()).collect::<Vec<_>>();
-        let (kept, gated) = gate(&cands, &reader("queue", true));
+        let (kept, gated) = gate(&cands, &reader("queue", true), now());
         assert_eq!(ids(&kept), vec!["pln", "pin"]);
         assert_eq!(gated.len(), 1);
         assert_eq!((gated[0].0.id, gated[0].1), ("hlp", Gate::Reader));
-        let (kept, gated) = gate(&cands, &reader("helper", false));
+        let (kept, gated) = gate(&cands, &reader("helper", false), now());
         assert_eq!(ids(&kept), vec!["hlp"]);
         assert_eq!(gated.len(), 2);
     }
@@ -3382,7 +3432,7 @@ mod tests {
             door("old", "widget", &["agent:helper"]),
         ];
         let cands = refs(&doors);
-        let (kept, gated) = gate(&cands, &reader("queue", true));
+        let (kept, gated) = gate(&cands, &reader("queue", true), now());
         let who = Who::default();
         let seen: HashSet<(String, String)> =
             [("d".to_string(), "old".to_string())].into_iter().collect();
@@ -3752,6 +3802,7 @@ mod tests {
                 memory: None,
                 scope: None,
                 exclude: (!e.is_empty()).then_some(e.as_slice()),
+                expires: None,
             })
             .collect();
         explain(

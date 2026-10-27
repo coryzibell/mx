@@ -156,6 +156,16 @@ fn excludes_without_triggers(store: &KvStore, key: &str, id: &str) -> bool {
     }
 }
 
+/// An `--expires` time already past is stored, but say so: the door will never
+/// open.
+fn warn_expired(expires: Option<&str>) {
+    if let Some(e) = expires.filter(|e| !e.is_empty())
+        && crate::doors::is_expired(e, chrono::Utc::now())
+    {
+        eprintln!("warning: --expires {e} is already expired -- this door will not open");
+    }
+}
+
 /// A pinned door ignores every place and mode, so say so once at authoring.
 fn warn_pinned(pinned: bool) {
     if pinned {
@@ -835,6 +845,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             scope,
             exclude,
             fire_here,
+            expires,
             create,
             max_entries,
         } => {
@@ -917,10 +928,12 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 fragment,
                 scope: (!scope.is_empty()).then_some(scope),
                 exclude: Some(exclude),
+                expires: expires.clone(),
             };
             match store.push(&key, &value, attrs) {
                 Ok(result) => {
                     store.save()?;
+                    warn_expired(expires.as_deref());
                     if burn {
                         crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
                     }
@@ -1168,6 +1181,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             scope,
             exclude,
             fire_here,
+            expires,
             memory,
         } => {
             // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
@@ -1210,10 +1224,11 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 && fragment.is_none()
                 && scope_patch.is_none()
                 && exclude_patch.is_none()
+                && expires.is_none()
                 && memory.is_none()
             {
                 eprintln!(
-                    "Error: provide a value argument, --data, --trigger, --fragment, --scope, --exclude, or --memory to update"
+                    "Error: provide a value argument, --data, --trigger, --fragment, --scope, --exclude, --expires, or --memory to update"
                 );
                 return Ok(kv::EXIT_INVALID_INPUT);
             }
@@ -1257,6 +1272,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         && fragment.is_none()
                         && scope_patch.is_none()
                         && exclude_patch.is_none()
+                        && expires.is_none()
                         && memory.is_none()
                     {
                         eprintln!(
@@ -1279,11 +1295,13 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 fragment,
                 scope: scope_patch,
                 exclude: exclude_patch,
+                expires: expires.clone(),
                 memory,
             };
             match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {
                     store.save()?;
+                    warn_expired(expires.as_deref());
                     if burn {
                         crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
                     }
@@ -1327,6 +1345,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 }
             }
 
+            let now = chrono::Utc::now();
             let rows: Vec<_> = store
                 .iter_triggered()
                 .into_iter()
@@ -1369,6 +1388,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                         if let Some(e) = c.exclude {
                             row["exclude"] = e.into();
                         }
+                        if let Some(e) = c.expires {
+                            row["expires"] = e.into();
+                            row["expired"] = crate::doors::is_expired(e, now).into();
+                        }
                         row
                     })
                     .collect();
@@ -1393,12 +1416,18 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     .scope
                     .map(|s| format!("  [scope: {}]", s.join(", ")))
                     .unwrap_or_default();
+                let expires = match c.expires {
+                    None => String::new(),
+                    Some(e) if crate::doors::is_expired(e, now) => "  [expired]".to_string(),
+                    Some(e) => format!("  [exp:{}]", &e[..e.len().min(10)]),
+                };
                 println!(
-                    "  kv-{}  [{}]  fires={}{}",
+                    "  kv-{}  [{}]  fires={}{}{}",
                     c.id,
                     c.triggers.join(", "),
                     n,
-                    scope
+                    scope,
+                    expires
                 );
                 if let Some(e) = c.exclude {
                     println!("      exclude: [{}]", e.join(", "));

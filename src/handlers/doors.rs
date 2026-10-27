@@ -227,7 +227,7 @@ fn evaluate<T>(
     let rows = read_fire_log(store);
     let (already, counts) = fire_state(&rows, session);
     let candidates = store.iter_triggered();
-    let (kept, _) = doors::gate(&candidates, reader);
+    let (kept, _) = doors::gate(&candidates, reader, Utc::now());
     matcher(prompt, mode, &who(store), &kept, &already, &counts, budget)
 }
 
@@ -251,7 +251,7 @@ fn explain_all(
     let rows = read_fire_log(store);
     let (already, counts) = fire_state(&rows, session);
     let candidates = store.iter_triggered();
-    let (kept, gated) = doors::gate(&candidates, reader);
+    let (kept, gated) = doors::gate(&candidates, reader, Utc::now());
     let who = who(store);
     let mut ex = doors::explain(prompt, mode, &who, &kept, &already, &counts, budget);
     doors::hold_gated(&mut ex, prompt, &who, &gated, &already, &counts);
@@ -862,6 +862,22 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         .filter(|p| !ever_fired.contains(p))
         .collect();
 
+    // Expired doors, for pruning: (key, id, expires, first trigger).
+    let now = Utc::now();
+    let triggered = store.iter_triggered();
+    let expired: Vec<(&str, &str, &str, &str)> = triggered
+        .iter()
+        .filter_map(|c| {
+            let e = c.expires.filter(|e| doors::is_expired(e, now))?;
+            Some((
+                c.key,
+                c.id,
+                e,
+                c.triggers.first().map_or("", String::as_str),
+            ))
+        })
+        .collect();
+
     if json {
         let entries: Vec<serde_json::Value> = per_entry
             .iter()
@@ -883,6 +899,10 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
                 "triggers": triggers,
                 "never_fired": never_json,
                 "pre_burned": pre_burned,
+                "expired": expired
+                    .iter()
+                    .map(|(k, e, x, t)| serde_json::json!({"key": k, "entry": e, "expires": x, "trigger": t}))
+                    .collect::<Vec<_>>(),
             }))?
         );
         return Ok(crate::kv::EXIT_OK);
@@ -909,6 +929,12 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         println!("never fired:");
         for (k, e) in &never {
             println!("        {}/kv-{}", k, e);
+        }
+    }
+    if !expired.is_empty() {
+        println!("expired:");
+        for (k, e, x, t) in &expired {
+            println!("        {k}/kv-{e}  {x}  {t}");
         }
     }
     Ok(crate::kv::EXIT_OK)
@@ -1029,7 +1055,11 @@ mod tests {
         assert!(seen.contains(&pair("aaa")));
         assert!(!seen.contains(&pair("bbb")));
         assert_eq!(counts.get(&pair("aaa")), None);
-        assert_eq!(counts.get(&pair("bbb")), Some(&2), "legacy rows still count");
+        assert_eq!(
+            counts.get(&pair("bbb")),
+            Some(&2),
+            "legacy rows still count"
+        );
     }
 
     #[test]
