@@ -30,9 +30,14 @@ use std::process::Command;
 /// set, and `kv push --trigger` pre-burns the door for that session. A test that
 /// wants a session sets one explicitly after this call.
 ///
+/// `HOME` is pinned to `home` as well: kv falls back to the legacy
+/// `~/.crewu/kv/<agent>.*` when `MX_HOME` holds no kv files for the agent, and
+/// that is the live store.
+///
 /// `home` must be a `tempfile::TempDir` path so each test gets a fresh store.
 pub fn isolate(cmd: &mut Command, home: &Path) {
-    cmd.env("MX_HOME", home)
+    cmd.env("HOME", home)
+        .env("MX_HOME", home)
         .env("MX_SURREAL_MODE", "embedded")
         .env("MX_SURREAL_ROOT", home.join("surreal"))
         .env_remove("MX_SURREAL_URL")
