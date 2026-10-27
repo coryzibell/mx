@@ -11,6 +11,7 @@
 
 mod classify;
 mod people;
+mod reader;
 mod route;
 mod session;
 
@@ -20,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 pub use classify::{Classified, NamesUs, Verdict, classify};
 pub use people::{PEOPLE_KEY, People};
+pub use reader::Reader;
 pub use route::{Mode, Places, Pool, ScopeValue};
 pub use session::{
     Hint, SESSION_KEY, SessionRow, SessionState, foreign_paste, hints, session_state,
@@ -50,6 +52,13 @@ pub struct HookInput {
     pub session_id: String,
     #[serde(default, deserialize_with = "lenient_string")]
     pub prompt: String,
+    /// The `--agent` type of the session, or of the subagent the hook fired in.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub agent_type: String,
+    /// Present only inside a subagent; absent on the main thread, even in an
+    /// `--agent` session.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub agent_id: String,
 }
 
 /// Accept a JSON string, number, or null where a string is expected.
@@ -842,6 +851,78 @@ pub struct DoorMatch {
     /// For a held door: the exclusion that matched in its admitted segment.
     /// `None` for a scope hold.
     pub excluded_by: Option<String>,
+    /// For a held door: the gate that filtered it out before matching.
+    pub gated_by: Option<Gate>,
+}
+
+/// Why a door was filtered out before matching. A gated door is never
+/// matched, so it never fires, defers or spends budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gate {
+    /// The reader axis does not admit this reader.
+    Reader,
+}
+
+impl Gate {
+    pub fn label(self) -> &'static str {
+        match self {
+            Gate::Reader => "reader",
+        }
+    }
+}
+
+/// A door the gate filtered out, and why.
+pub type Gated<'a> = (TriggeredRef<'a>, Gate);
+
+/// Split candidates into the ones `reader` may see and the gated rest. This
+/// runs before matching; the matcher only ever sees what it keeps.
+pub fn gate<'a>(
+    candidates: &[TriggeredRef<'a>],
+    reader: &Reader,
+) -> (Vec<TriggeredRef<'a>>, Vec<Gated<'a>>) {
+    let mut kept = Vec::new();
+    let mut gated = Vec::new();
+    for c in candidates {
+        if reader::reader_admits(c.scope, reader) {
+            kept.push(*c);
+        } else {
+            gated.push((*c, Gate::Reader));
+        }
+    }
+    (kept, gated)
+}
+
+/// For `--explain`: append each gated door that would have matched the prompt
+/// as HELD, naming its gate. Its fire state counts as usual, so a door this
+/// session already saw is not listed.
+pub fn hold_gated(
+    ex: &mut Explanation,
+    prompt: &str,
+    who: &Who,
+    gated: &[Gated<'_>],
+    already_fired: &HashSet<(String, String)>,
+    fire_counts: &HashMap<(String, String), u64>,
+) {
+    let cands: Vec<TriggeredRef<'_>> = gated.iter().map(|(c, _)| *c).collect();
+    let why: HashMap<(&str, &str), Gate> = gated.iter().map(|(c, g)| ((c.key, c.id), *g)).collect();
+    let mode = ex.mode.clone();
+    let probe = explain(
+        prompt,
+        &mode,
+        who,
+        &cands,
+        already_fired,
+        fire_counts,
+        usize::MAX,
+    );
+    ex.doors.extend(probe.doors.into_iter().map(|mut d| {
+        d.gated_by = why.get(&(d.door.key.as_str(), d.door.id.as_str())).copied();
+        d.status = DoorStatus::Held;
+        d.door.place = String::new();
+        d.excluded_by = None;
+        d
+    }));
 }
 
 /// Everything one prompt produced, for `check --explain`.
@@ -1144,6 +1225,7 @@ fn run(
                 segment: n + 1,
                 pool,
                 excluded_by,
+                gated_by: None,
             },
         );
         match status {
@@ -3262,6 +3344,90 @@ mod tests {
             );
             assert!(with.selection().fired.is_empty(), "{mode}");
         }
+    }
+
+    // ---- P3: the reader gate ----
+
+    fn reader(name: &str, main_thread: bool) -> Reader {
+        Reader {
+            name: name.to_string(),
+            main_thread,
+        }
+    }
+
+    #[test]
+    fn the_gate_keeps_what_the_reader_may_see() {
+        let doors = [
+            door("pln", "widget", &[]),
+            door("hlp", "widget", &["agent:helper"]),
+            door("pin", "widget", &["pinned"]),
+        ];
+        let cands = refs(&doors);
+        let ids = |v: &[TriggeredRef<'_>]| v.iter().map(|c| c.id.to_string()).collect::<Vec<_>>();
+        let (kept, gated) = gate(&cands, &reader("queue", true));
+        assert_eq!(ids(&kept), vec!["pln", "pin"]);
+        assert_eq!(gated.len(), 1);
+        assert_eq!((gated[0].0.id, gated[0].1), ("hlp", Gate::Reader));
+        let (kept, gated) = gate(&cands, &reader("helper", false));
+        assert_eq!(ids(&kept), vec!["hlp"]);
+        assert_eq!(gated.len(), 2);
+    }
+
+    #[test]
+    fn gated_doors_are_listed_held_only_when_they_match_and_spend_nothing() {
+        let doors = [
+            door("pln", "widget", &[]),
+            door("hlp", "widget", &["agent:helper"]),
+            door("far", "gizmo", &["agent:helper"]),
+            door("old", "widget", &["agent:helper"]),
+        ];
+        let cands = refs(&doors);
+        let (kept, gated) = gate(&cands, &reader("queue", true));
+        let who = Who::default();
+        let seen: HashSet<(String, String)> =
+            [("d".to_string(), "old".to_string())].into_iter().collect();
+        let mut ex = explain(
+            "widget",
+            &Mode::House,
+            &who,
+            &kept,
+            &seen,
+            &HashMap::new(),
+            1,
+        );
+        let before = ex.selection();
+        hold_gated(&mut ex, "widget", &who, &gated, &seen, &HashMap::new());
+        assert_eq!(ex.selection(), before, "a gated door never fires or defers");
+        let held: Vec<(String, DoorStatus, Option<Gate>, String)> = ex
+            .doors
+            .iter()
+            .map(|d| {
+                (
+                    d.door.id.clone(),
+                    d.status,
+                    d.gated_by,
+                    d.door.place.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                (
+                    "pln".to_string(),
+                    DoorStatus::Fired,
+                    None,
+                    "house".to_string()
+                ),
+                (
+                    "hlp".to_string(),
+                    DoorStatus::Held,
+                    Some(Gate::Reader),
+                    String::new()
+                ),
+            ],
+            "no-match and already-seen gated doors are not listed"
+        );
     }
 
     #[test]

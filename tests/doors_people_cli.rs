@@ -462,3 +462,307 @@ fn typed_text_gains_its_owner_in_book_mode() {
     );
     assert_eq!(status(&house).0, "HELD");
 }
+
+// ---------------------------------------------------------------------------
+// Back-compat pin: no doors_people, no agent:, no expires, Q's main thread
+// ---------------------------------------------------------------------------
+
+/// A 0.1.232 schema: fire rows take `origin` and `place`, nothing newer.
+const PIN_SCHEMA: &str = r#"
+[keys.facts]
+type = "list"
+
+[keys.doors_fired]
+type = "history"
+max_entries = 5000
+
+[keys.doors_fired.data]
+session = { type = "string", required = true }
+key = { type = "string", required = true }
+entry = { type = "string", required = true }
+trigger = { type = "string" }
+origin = { type = "string" }
+place = { type = "string" }
+"#;
+
+/// Written by `mx 0.1.232` (`kv push`), copied verbatim.
+const PIN_SEED: &str = r#"{"_schema": "queue", "_updated": "2026-10-27T15:02:06.402745250+00:00", "facts": {"items": [{"id": 1, "hash": "6tGEJ7", "value": "Huckleberry note.", "ts": "2026-10-27T15:02:06.372990449+00:00", "triggers": ["huckleberries"]}, {"id": 2, "hash": "4tMebm", "value": "A pond south of town.", "ts": "2026-10-27T15:02:06.378676837+00:00", "triggers": ["fair haven"]}, {"id": 3, "hash": "2dvJ2k", "value": "Widget one.", "ts": "2026-10-27T15:02:06.384386819+00:00", "triggers": ["widget"]}, {"id": 4, "hash": "5dZX5y", "value": "Widget two.", "ts": "2026-10-27T15:02:06.390602139+00:00", "triggers": ["widget"]}, {"id": 5, "hash": "74HRYD", "value": "Widget three.", "ts": "2026-10-27T15:02:06.396329194+00:00", "triggers": ["widget"]}, {"id": 6, "hash": "4922Z1", "value": "Pinned pond.", "ts": "2026-10-27T15:02:06.402638690+00:00", "triggers": ["fair haven"], "scope": ["pinned"]}]}}"#;
+
+const HOOK_PASTE: &str = include_str!("fixtures/doors/hook-paste.json");
+const PIN_SESSION: &str = "00000000-0000-4000-8000-000000000001";
+
+/// The typed and paste fixtures through the hook as Q's main thread (no
+/// `agent_type`, no `agent_id`, `MX_CURRENT_AGENT=queue`), then `doors check`.
+/// Every expected string below is what `mx 0.1.232` printed and recorded on
+/// this exact store.
+#[test]
+fn back_compat_pin_q_main_thread_is_0_1_232() {
+    let dir = setup_schema(PIN_SCHEMA);
+    std::fs::create_dir_all(data_path(&dir).parent().unwrap()).unwrap();
+    std::fs::write(data_path(&dir), PIN_SEED).unwrap();
+    let q_hook = |stdin: &str| ok(&run(&dir, &["doors", "hook"], stdin, &[]), "hook");
+    let typed = |session: &str, prompt: &str| {
+        q_hook(
+            &serde_json::json!({
+                "session_id": session,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": prompt,
+            })
+            .to_string(),
+        )
+    };
+
+    assert_eq!(
+        q_hook(HOOK_PASTE),
+        "\u{1f6aa} fair haven \u{2192} Pinned pond. (dig: facts/kv-4922Z1)\n\
+         \u{1f6aa} huckleberries \u{2192} Huckleberry note. (dig: facts/kv-6tGEJ7)\n"
+    );
+    assert_eq!(
+        typed(PIN_SESSION, "widget and huckleberries and gizmo"),
+        "\u{1f6aa} widget \u{2192} Widget one. (dig: facts/kv-2dvJ2k)\n\
+         \u{1f6aa} widget \u{2192} Widget two. (dig: facts/kv-5dZX5y)\n"
+    );
+    assert_eq!(
+        typed(PIN_SESSION, "widget again, fair haven"),
+        "\u{1f6aa} fair haven \u{2192} A pond south of town. (dig: facts/kv-4tMebm)\n\
+         \u{1f6aa} widget \u{2192} Widget three. (dig: facts/kv-74HRYD)\n"
+    );
+    assert_eq!(
+        typed("s2", "widget widget fair haven"),
+        "\u{1f6aa} fair haven \u{2192} Pinned pond. (dig: facts/kv-4922Z1)\n\
+         \u{1f6aa} fair haven \u{2192} A pond south of town. (dig: facts/kv-4tMebm)\n"
+    );
+    assert_eq!(
+        ok(
+            &mx(
+                &dir,
+                &[
+                    "doors",
+                    "check",
+                    "huckleberries widget",
+                    "--session",
+                    "s3",
+                    "--json"
+                ]
+            ),
+            "check"
+        )
+        .trim(),
+        r#"{"fired":[{"key":"facts","id":"6tGEJ7","trigger":"huckleberries","fragment":"Huckleberry note.","dig":"facts/kv-6tGEJ7","origin":"typed","place":"house"},{"key":"facts","id":"2dvJ2k","trigger":"widget","fragment":"Widget one.","dig":"facts/kv-2dvJ2k","origin":"typed","place":"house"}],"deferred":2}"#
+    );
+
+    let rows: Vec<serde_json::Value> = fire_rows(&dir)
+        .into_iter()
+        .map(|r| r["data"].clone())
+        .collect();
+    let row = |entry: &str, origin: &str, place: &str, session: &str, trigger: &str| {
+        serde_json::json!({
+            "entry": entry, "key": "facts", "origin": origin, "place": place,
+            "session": session, "trigger": trigger,
+        })
+    };
+    assert_eq!(
+        rows,
+        vec![
+            row("4922Z1", "paste", "pinned", PIN_SESSION, "fair haven"),
+            row("6tGEJ7", "typed", "house", PIN_SESSION, "huckleberries"),
+            row("2dvJ2k", "typed", "house", PIN_SESSION, "widget"),
+            row("5dZX5y", "typed", "house", PIN_SESSION, "widget"),
+            row("4tMebm", "typed", "house", PIN_SESSION, "fair haven"),
+            row("74HRYD", "typed", "house", PIN_SESSION, "widget"),
+            row("4922Z1", "typed", "pinned", "s2", "fair haven"),
+            row("4tMebm", "typed", "house", "s2", "fair haven"),
+            row("6tGEJ7", "typed", "house", "s3", "huckleberries"),
+            row("2dvJ2k", "typed", "house", "s3", "widget"),
+        ]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Item 2: the agent: reader axis
+// ---------------------------------------------------------------------------
+
+struct ReaderDoors {
+    plain: String,
+    pinned: String,
+    helper: String,
+    queue: String,
+}
+
+fn reader_doors(dir: &TempDir) -> ReaderDoors {
+    ReaderDoors {
+        plain: push(dir, "plain door", &["--trigger", "widget"]),
+        pinned: push(
+            dir,
+            "pinned door",
+            &["--trigger", "widget", "--scope", "pinned"],
+        ),
+        helper: push(
+            dir,
+            "helper door",
+            &["--trigger", "widget", "--scope", "agent:helper"],
+        ),
+        queue: push(
+            dir,
+            "queue door",
+            &["--trigger", "widget", "--scope", "agent:queue"],
+        ),
+    }
+}
+
+fn hook_as(
+    dir: &TempDir,
+    session: &str,
+    extra: serde_json::Value,
+    env: &[(&str, &str)],
+) -> Vec<String> {
+    let mut input = serde_json::json!({
+        "session_id": session,
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "widget",
+    });
+    if let serde_json::Value::Object(m) = extra {
+        for (k, v) in m {
+            input[k] = v;
+        }
+    }
+    let out = run(
+        dir,
+        &["doors", "hook", "--budget", "9"],
+        &input.to_string(),
+        env,
+    );
+    sorted(fired_ids(&ok(&out, "hook")))
+}
+
+#[test]
+fn main_thread_reader_from_agent_type() {
+    let dir = setup();
+    let d = reader_doors(&dir);
+    let got = hook_as(&dir, "s1", serde_json::json!({"agent_type": "Helper"}), &[]);
+    assert_eq!(got, sorted(vec![d.plain, d.pinned, d.helper]));
+    let rows = fire_rows(&dir);
+    assert!(
+        rows.iter().all(|r| r["data"]["reader"] == "helper"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn main_thread_reader_from_mx_current_agent() {
+    let dir = setup();
+    let d = reader_doors(&dir);
+    let got = hook_as(&dir, "s1", serde_json::json!({}), &[]);
+    assert_eq!(got, sorted(vec![d.plain, d.pinned, d.queue]));
+    assert!(
+        fire_rows(&dir)
+            .iter()
+            .all(|r| r["data"]["reader"] == "queue")
+    );
+}
+
+#[test]
+fn main_thread_reader_none() {
+    let dir = setup();
+    let d = reader_doors(&dir);
+    let got = hook_as(
+        &dir,
+        "s1",
+        serde_json::json!({"agent_type": null}),
+        &[("MX_CURRENT_AGENT", "")],
+    );
+    // MX_CURRENT_AGENT is also kv's store selector; explicit kv paths keep the
+    // store, and the reader falls through to `none`.
+    assert_eq!(got, sorted(vec![d.plain, d.pinned]));
+}
+
+#[test]
+fn a_subagent_sees_only_doors_that_name_it() {
+    let dir = setup();
+    let d = reader_doors(&dir);
+    let got = hook_as(
+        &dir,
+        "s1",
+        serde_json::json!({"agent_type": "helper", "agent_id": "a1b2c3"}),
+        &[],
+    );
+    assert_eq!(
+        got,
+        vec![d.helper.clone()],
+        "pinned does not reach a subagent"
+    );
+    // A subagent with no matching door gets nothing, not even pinned.
+    let got = hook_as(
+        &dir,
+        "s2",
+        serde_json::json!({"agent_type": "reviewer", "agent_id": "x"}),
+        &[],
+    );
+    assert!(got.is_empty(), "{got:?}");
+    // Same session, main thread afterwards: the subagent's fire deduped
+    // only the helper door.
+    let got = hook_as(&dir, "s1", serde_json::json!({}), &[]);
+    assert_eq!(got, sorted(vec![d.plain, d.pinned, d.queue]));
+}
+
+#[test]
+fn check_agent_reads_as_that_agent_on_the_main_thread() {
+    let dir = setup();
+    let d = reader_doors(&dir);
+    let v = explain(&dir, "widget", &["--agent", "helper", "--budget", "9"]);
+    assert_eq!(v["reader"], "helper");
+    assert_eq!(v["main_thread"], true);
+    let status = |id: &str| {
+        let row = v["doors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .cloned()
+            .unwrap();
+        (row["status"].clone(), row.get("held_by").cloned())
+    };
+    assert_eq!(status(&d.helper), ("FIRED".into(), None));
+    assert_eq!(status(&d.plain), ("FIRED".into(), None));
+    assert_eq!(
+        status(&d.queue),
+        ("HELD".into(), Some("reader".into())),
+        "{v}"
+    );
+
+    let v = explain(&dir, "widget", &["--budget", "9"]);
+    assert_eq!(v["reader"], "queue", "default is MX_CURRENT_AGENT");
+    let text = ok(
+        &mx(&dir, &["doors", "check", "widget", "--explain"]),
+        "explain",
+    );
+    assert!(text.contains("reader queue (main thread)"), "{text}");
+    assert!(
+        text.lines()
+            .any(|l| l.contains(&format!("kv-{}", d.helper)) && l.ends_with("held by reader")),
+        "{text}"
+    );
+
+    // Without --explain, check records as that reader.
+    ok(
+        &mx(
+            &dir,
+            &[
+                "doors", "check", "widget", "--agent", "helper", "--budget", "9",
+            ],
+        ),
+        "check",
+    );
+    let rows = fire_rows(&dir);
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r["data"]["reader"] == "helper"));
+}
+
+#[test]
+fn reader_is_not_written_when_the_schema_does_not_declare_it() {
+    let dir = setup_schema(PIN_SCHEMA);
+    push(&dir, "plain door", &["--trigger", "widget"]);
+    assert_eq!(fired_ids(&hook(&dir, "s1", "widget")).len(), 1);
+    let rows = fire_rows(&dir);
+    assert!(rows[0]["data"].get("reader").is_none(), "{rows:?}");
+}

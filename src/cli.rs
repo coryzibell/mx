@@ -2041,6 +2041,12 @@ pub enum DoorsCommands {
         /// or held. Implies --dry-run
         #[arg(long)]
         explain: bool,
+
+        /// Read as this agent on the main thread, as `claude --agent AGENT`
+        /// does (default: $MX_CURRENT_AGENT, else none). A subagent's view is
+        /// only reachable through `mx doors hook`
+        #[arg(long, value_name = "AGENT")]
+        agent: Option<String>,
     },
 
     /// Fire telemetry: fires per entry and per trigger, plus doors never fired

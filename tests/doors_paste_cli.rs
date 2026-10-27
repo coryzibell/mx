@@ -265,24 +265,25 @@ fn explain_shows_segments_verdicts_and_held_doors_without_recording() {
         "check --explain",
     );
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 5, "{out}");
+    assert_eq!(lines.len(), 6, "{out}");
     assert_eq!(lines[0], "mode house (default)");
+    assert_eq!(lines[1], "reader test (main thread)");
     assert_eq!(
-        lines[1],
+        lines[2],
         "segment 1  typed  21 ch  not classified (only pastes are classified)  places {house}"
     );
-    assert!(lines[2].starts_with("segment 2  paste  "), "{out}");
+    assert!(lines[3].starts_with("segment 2  paste  "), "{out}");
     assert!(
-        lines[2].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
+        lines[3].contains("verdict ForeignProse F=5 O=0 [continuous-prose"),
         "{out}"
     );
-    assert!(lines[2].ends_with("places \u{2205} (quarantined)"), "{out}");
+    assert!(lines[3].ends_with("places \u{2205} (quarantined)"), "{out}");
     assert_eq!(
-        lines[3],
+        lines[4],
         format!("huckleberries  facts/kv-{berries}  FIRED  seg 1  place house  pool house")
     );
     assert_eq!(
-        lines[4],
+        lines[5],
         format!("fair haven  facts/kv-{haven}  HELD  seg 2  place -  pool -")
     );
 
