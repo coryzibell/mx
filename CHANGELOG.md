@@ -6,6 +6,110 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Changed — `mx doors` people map, `agent:` readers, pre-burn, `--expires` (doors P3, #489)
+
+- **Behaviour change (D3): an unmapped Matrix sender no longer opens house
+  doors.** A channel body now opens doors by who sent it. A sender mapped in
+  `doors_people` with `"house":true` places `{house, person:<name>}`, one
+  mapped with `"house":false` places `{person:<name>}`, and an unmapped
+  sender places only `{person:<localpart>}` (the text between `@` and the
+  first `:`, lowercased), or `∅` (pinned only) when the id has no usable
+  localpart. **With `doors_people` empty that is every channel sender**, so
+  no house door opens from Matrix until the map is populated. A mode never
+  touches a channel body. Typed text and pastes route as before.
+- **Upgrade before authoring the first `expires`, `person:` or `agent:`
+  door.** An older `mx` doing a read-modify-write of kv drops fields it does
+  not know, so it would silently strip `expires` from every entry it
+  rewrites, and an older `mx` refuses `person:`/`agent:` scope values.
+- **Schema lines needed.** The map is a state key whose field names are open
+  (Matrix user ids), so it declares no `fields`; the fire log gains an
+  optional `reader`:
+
+  ```toml
+  [keys.doors_people]
+  type = "state"
+  description = "Doors people map: Matrix user_id -> {\"person\",\"house\",\"owner\"}."
+
+  [keys.doors_fired.data.reader]
+  type = "string"
+  required = false
+  ```
+
+  Pre-burn rows use the existing `doors_fired.data.origin` field. Each new
+  field is written only where the schema declares it, as before.
+- **`doors_people`**: field name = full Matrix `user_id`, value = a JSON
+  object string `{"person":"<name>","house":true|false,"owner":true}`
+  (`house` and `owner` default to false). A sender resolves on its `user_id`
+  alone, by exact match; display names never count. An entry that does not
+  parse, or whose `person` is not a valid name, leaves that sender unmapped,
+  silently. Set one with
+  `mx kv set doors_people @alice:example.org '{"person":"alice","house":true}'`.
+- **Typed text gains `person:<owner>`** for each mapped entry with
+  `"owner":true`, in every mode: `{house, person:<owner>}` in house and ours
+  mode, `{book:<slug>, person:<owner>}` in book mode. No owner entry, no
+  change.
+- **`person:<name>` and `agent:<name>` scope values** are accepted (a name is
+  `[a-z0-9][a-z0-9._-]*`; an agent name may also carry `:`). `person:<n>`
+  admits through the matching person place. `agent:` values are the reader
+  axis: OR within an axis, AND across axes, and a scope of only `agent:`
+  values has the default place `house`.
+- **The reader axis.** The reader is the hook payload's `agent_type`, else
+  `$MX_CURRENT_AGENT`, else `none`, lowercased; the main thread is a payload
+  with no `agent_id`. A door with `agent:` values fires only for a reader it
+  names, main thread or not. A door without them fires only on the main
+  thread, so a subagent's prompt opens only doors that name its agent. This
+  holds for pinned doors too. Q's main thread (no `agent_type`, no
+  `agent_id`, `MX_CURRENT_AGENT=queue`) sees exactly what it saw before.
+- **`mx doors check --agent A`** reads as `A` on the main thread, as
+  `claude --agent A` would. The default reader for `check` is
+  `$MX_CURRENT_AGENT`, else `none`.
+- **The budget pool follows the place that admitted the hit**: `book:*`
+  spends the book pool, `house` and `person:*` the house pool; a pinned door
+  spends its segment's pool as before. Existing doors are unaffected; it
+  matters for book-mode typed text, which can now carry both.
+- **Pre-burn is on by default.** `mx kv push --trigger …` and
+  `mx kv update --trigger …` (setting or replacing non-empty triggers) write
+  one `doors_fired` row for `$CLAUDE_CODE_SESSION_ID` with
+  `"origin":"authored"`, so a door does not fire back into the session that
+  wrote it. **`--fire-here`** skips it, for notes-to-self; it needs
+  `--trigger`. No pre-burn without a session id, on `--trigger ""`, or when
+  the session already has a row for that door. If the schema cannot take
+  `origin` the pre-burn is skipped with one stderr line, and a failed
+  pre-burn write is one stderr warning; the command still exits 0. A
+  subagent shares its parent's session id, so a door it authors is
+  pre-burned for the parent too.
+- **Pre-burn rows are not fires.** They dedup, but least-fired-first
+  ordering, `mx doors stats` totals, `never fired` and `mx kv triggers`
+  `fires=` all leave them out. `doors stats` prints
+  `N pre-burned at authoring (not fires)`, and `--json` has `pre_burned`.
+- **`--expires WHEN` on `mx kv push` and `mx kv update`**: `<n>h`, `<n>d`,
+  `<n>w` (from now) or an RFC 3339 time, stored as absolute UTC in a typed
+  `expires` field. `--expires ""` clears it on update, and `--expires` on its
+  own is a complete update. Any other form is a usage error (exit 2) naming
+  the accepted forms; a time already past is stored with an
+  `already expired` warning. A door is expired once now reaches its
+  `expires`, and a stored value that does not parse counts as expired.
+  Expired doors are silent in the hook and in `doors check`.
+- **`mx kv triggers`** shows `person:`/`agent:` scope values like any other,
+  tags an entry `[exp:<date>]` or `[expired]`, and `--json` carries
+  `expires` and `expired`. **`mx doors stats`** lists expired doors (key/id,
+  expiry, first trigger) under `expired:`, and `--json` has `expired`.
+- **`mx doors check --explain`** prints a `reader <name> (main thread|subagent)`
+  line after the mode line, shows each channel segment as
+  `channel(<user_id> mapped|unmapped)` with its places, and lists a door the
+  reader axis or its expiry filtered out as HELD ending
+  `held by reader` / `held by expired`. `--json` adds `reader`,
+  `main_thread`, a segment's `mapped`, and a door's `held_by`.
+- **A shared-trigger warning at write.** After `kv push`/`kv update` with
+  `--trigger`, or `--scope` on an entry that has triggers, each of the
+  entry's trigger forms carried by at least the per-prompt budget
+  (`$MX_DOORS_BUDGET`, else 2) of live doors whose scopes overlap prints one
+  stderr warning naming the form, the count, the budget and the other doors.
+  Scopes overlap when either is pinned, they share a place value (books by
+  slug), or one has `house` or `book:*` and the other `person:*`; and they
+  miss on the reader axis only when both name agents and no name is shared.
+  Warning only; the write always lands.
+
 ### Added — `mx doors` match grammar: `p + q`, affix wildcards, `--exclude` (doors P4, #490)
 
 - **Upgrade before authoring the first exclusion.** An older `mx` doing a
