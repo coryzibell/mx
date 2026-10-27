@@ -10,6 +10,7 @@
 //! the fire log and stdout live in `handlers::doors`.
 
 mod classify;
+mod people;
 mod route;
 mod session;
 
@@ -18,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 pub use classify::{Classified, NamesUs, Verdict, classify};
+pub use people::{PEOPLE_KEY, People};
 pub use route::{Mode, Places, Pool, ScopeValue};
 pub use session::{
     Hint, SESSION_KEY, SessionRow, SessionState, foreign_paste, hints, session_state,
@@ -78,7 +80,8 @@ pub struct FiredDoor {
     pub dig: String,
     /// Where the matching text came from: `typed`, `paste` or `channel`.
     pub origin: &'static str,
-    /// The place it opened through: `house`, `book:<slug>`, or `pinned`.
+    /// The place it opened through: `house`, `book:<slug>`, `person:<name>`
+    /// or `pinned`.
     /// Empty for a held door, which opened through nothing.
     pub place: String,
 }
@@ -621,8 +624,8 @@ fn push_typed(out: &mut Vec<RawSegment>, text: &str) {
 ///
 /// Known edges:
 /// - A channel opener with `>` but no `</channel>` labels the rest of the text
-///   `channel`. Routing is `{house}` either way; only the origin in telemetry
-///   differs.
+///   `channel`, so it routes as that sender's channel body rather than typed
+///   text.
 /// - A paste body that contains its own session's closer (same id) closes
 ///   early there, and the remainder becomes typed text (admitted).
 pub fn segment(prompt: &str) -> Vec<RawSegment> {
@@ -700,16 +703,31 @@ pub struct Segment {
     pub classified: Option<Classified>,
     /// Where doors may open in it. `∅` admits only pinned doors.
     pub places: Places,
+    /// For a channel body: whether its `user_id` is in `doors_people`.
+    pub mapped: Option<bool>,
+}
+
+/// What routing knows about who is who: the words that mark text as ours, and
+/// the `doors_people` map.
+#[derive(Debug, Clone, Default)]
+pub struct Who {
+    pub names: NamesUs,
+    pub people: People,
 }
 
 /// Places for typed text. In book mode the user is talking about the book, so
 /// typed text opens book doors and holds house doors; pinned still fires
-/// (decision D1, which overrides design §5's typed row).
-fn typed_places(mode: &Mode) -> Places {
-    match mode {
+/// (decision D1, which overrides design §5's typed row). Each `doors_people`
+/// owner joins as `person:<owner>` in every mode.
+fn typed_places(mode: &Mode, owners: &[String]) -> Places {
+    let mut places = match mode {
         Mode::Book(b) => Places::book(&b.slug),
         _ => Places::house(),
-    }
+    };
+    places
+        .0
+        .extend(owners.iter().map(|o| route::Place::Person(o.clone())));
+    places
 }
 
 #[cfg(test)]
@@ -720,20 +738,37 @@ mod d1 {
     #[test]
     fn d1_typed_text_follows_the_book() {
         let book = Mode::parse("book:walden@3").unwrap();
-        assert_eq!(typed_places(&book), Places::book("walden"));
-        assert_eq!(typed_places(&Mode::House), Places::house());
-        assert_eq!(typed_places(&Mode::Ours), Places::house());
+        assert_eq!(typed_places(&book, &[]), Places::book("walden"));
+        assert_eq!(typed_places(&Mode::House, &[]), Places::house());
+        assert_eq!(typed_places(&Mode::Ours, &[]), Places::house());
+    }
+
+    /// D1 amendment: owners join typed places in every mode.
+    #[test]
+    fn d1_typed_text_carries_its_owners() {
+        use route::Place;
+        let owners = ["alice".to_string(), "bob".to_string()];
+        let alice = Place::Person("alice".to_string());
+        let bob = Place::Person("bob".to_string());
+        for mode in [Mode::House, Mode::Ours] {
+            assert_eq!(
+                typed_places(&mode, &owners),
+                Places(vec![Place::House, alice.clone(), bob.clone()])
+            );
+        }
+        assert_eq!(
+            typed_places(&Mode::parse("book:walden").unwrap(), &owners),
+            Places(vec![Place::Book("walden".to_string()), alice, bob])
+        );
     }
 }
 
 /// The places one segment opens doors in under `mode` (the routing table).
-fn places_for(origin: &Origin, classified: Option<&Classified>, mode: &Mode) -> Places {
+fn places_for(origin: &Origin, classified: Option<&Classified>, mode: &Mode, who: &Who) -> Places {
     match origin {
-        // P3: `person:<owner>` joins typed places here, in every mode (`doors_people`).
-        Origin::Typed => typed_places(mode),
-        // P3: `person:<user_id>` or `house?` for channel bodies here.
+        Origin::Typed => typed_places(mode, who.people.owners()),
         // A mode never touches a channel body.
-        Origin::Channel { .. } => Places::house(),
+        Origin::Channel { user_id } => who.people.channel_places(user_id),
         Origin::Paste => {
             let verdict = classified.map(|c| c.verdict);
             match mode {
@@ -750,20 +785,25 @@ fn places_for(origin: &Origin, classified: Option<&Classified>, mode: &Mode) -> 
 /// Only tagged pastes are judged. House mode quarantines a paste that reads as
 /// someone else's prose; a book mode routes every paste but an Ours one to the
 /// book; `ours` mode never quarantines. Typed text goes through `typed_places`
-/// and channel bodies always place `{house}`.
-pub fn analyze(prompt: &str, mode: &Mode, names: &NamesUs) -> Vec<Segment> {
+/// and channel bodies through `People::channel_places`.
+pub fn analyze(prompt: &str, mode: &Mode, who: &Who) -> Vec<Segment> {
     segment(&strip_harness_blocks(prompt))
         .into_iter()
         .map(|s| {
             // Shelved: an untagged fallback that judges long typed and channel
             // text would go here. It held the user's own long typed messages.
-            let classified = (s.origin == Origin::Paste).then(|| classify(&s.text, names));
-            let places = places_for(&s.origin, classified.as_ref(), mode);
+            let classified = (s.origin == Origin::Paste).then(|| classify(&s.text, &who.names));
+            let places = places_for(&s.origin, classified.as_ref(), mode, who);
+            let mapped = match &s.origin {
+                Origin::Channel { user_id } => Some(who.people.get(user_id).is_some()),
+                _ => None,
+            };
             Segment {
                 origin: s.origin,
                 text: s.text,
                 classified,
                 places,
+                mapped,
             }
         })
         .collect()
@@ -944,11 +984,13 @@ fn best_hit<'s>(
 /// matching only in segments it is not admitted to is held.
 ///
 /// Two pools of `budget` each, `house` and `book`: a door spends the pool of
-/// the segment its winning hit came from. Within a pool pinned doors go first.
+/// the place that admitted its winning hit (`book:*` the book pool, `house`
+/// and `person:*` the house pool); a pinned door spends its segment's pool.
+/// Within a pool pinned doors go first.
 pub fn explain(
     prompt: &str,
     mode: &Mode,
-    names: &NamesUs,
+    who: &Who,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
     fire_counts: &HashMap<(String, String), u64>,
@@ -957,7 +999,7 @@ pub fn explain(
     run(
         prompt,
         mode,
-        names,
+        who,
         candidates,
         (already_fired, fire_counts),
         budget,
@@ -971,7 +1013,7 @@ pub fn explain(
 pub fn select(
     prompt: &str,
     mode: &Mode,
-    names: &NamesUs,
+    who: &Who,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
     fire_counts: &HashMap<(String, String), u64>,
@@ -980,7 +1022,7 @@ pub fn select(
     route(
         prompt,
         mode,
-        names,
+        who,
         candidates,
         already_fired,
         fire_counts,
@@ -994,7 +1036,7 @@ pub fn select(
 pub fn route(
     prompt: &str,
     mode: &Mode,
-    names: &NamesUs,
+    who: &Who,
     candidates: &[TriggeredRef<'_>],
     already_fired: &HashSet<(String, String)>,
     fire_counts: &HashMap<(String, String), u64>,
@@ -1003,7 +1045,7 @@ pub fn route(
     run(
         prompt,
         mode,
-        names,
+        who,
         candidates,
         (already_fired, fire_counts),
         budget,
@@ -1020,13 +1062,13 @@ type FireState<'a> = (
 fn run(
     prompt: &str,
     mode: &Mode,
-    names: &NamesUs,
+    who: &Who,
     candidates: &[TriggeredRef<'_>],
     (already_fired, fire_counts): FireState<'_>,
     budget: usize,
     with_held: bool,
 ) -> Explanation {
-    let segments = analyze(prompt, mode, names);
+    let segments = analyze(prompt, mode, who);
     let any_pinned = candidates.iter().any(|c| route::is_pinned(c.scope));
     // Stemming OFF: doors are proper nouns, and the English stemmer folds
     // Tagalog "ayos" onto "ayo". Morphology is the enemy here.
@@ -1050,11 +1092,13 @@ fn run(
             continue;
         }
         let pinned = route::is_pinned(cand.scope);
-        let through = |n: usize| -> Option<String> {
+        // The place a hit in segment `n` opens through, and the pool it spends.
+        let through = |n: usize| -> Option<(String, Pool)> {
             if pinned {
-                return Some("pinned".to_string());
+                return Some(("pinned".to_string(), segments[n].places.pool()));
             }
-            route::admitting_place(cand.scope, &segments[n].places, mode).map(|p| p.to_string())
+            route::admitting_place(cand.scope, &segments[n].places, mode)
+                .map(|p| (p.to_string(), p.pool()))
         };
         let segs = |admitted: bool| {
             let through = &through;
@@ -1077,6 +1121,10 @@ fn run(
             },
         };
         let (trigger, n) = hit;
+        let (place, pool) = match status {
+            DoorStatus::Held => (String::new(), segments[n].places.pool()),
+            _ => through(n).unwrap_or_else(|| (String::new(), segments[n].places.pool())),
+        };
         let count = fire_counts.get(&pair).copied().unwrap_or(0);
         let entry = (
             !pinned,
@@ -1090,15 +1138,11 @@ fn run(
                     fragment: derive_fragment(cand.value, cand.fragment),
                     dig: dig_pointer(cand.key, cand.id, cand.memory),
                     origin: segments[n].origin.label(),
-                    place: if status == DoorStatus::Held {
-                        String::new()
-                    } else {
-                        through(n).unwrap_or_default()
-                    },
+                    place,
                 },
                 status,
                 segment: n + 1,
-                pool: segments[n].places.pool(),
+                pool,
                 excluded_by,
             },
         );
@@ -1169,6 +1213,15 @@ mod tests {
         }
     }
 
+    /// D3: a channel body opens house doors only for a mapped house sender.
+    /// Tests that use a channel body as a house segment map its sender.
+    fn house_sender(user_id: &str) -> Who {
+        Who {
+            people: People::from_fields([(user_id, r#"{"person":"j","house":true}"#)]),
+            ..Default::default()
+        }
+    }
+
     // ---- strip_channel_tags ----
 
     #[test]
@@ -1190,7 +1243,7 @@ mod tests {
         let sel = select(
             CHANNEL,
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1227,7 +1280,7 @@ mod tests {
         let sel = select(
             "<channel user=\"unclosed good morning widget",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1251,7 +1304,7 @@ mod tests {
         let sel = select(
             "gerf_slips is permanent",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1263,7 +1316,7 @@ mod tests {
         let sel = select(
             "ask gerf",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1356,6 +1409,10 @@ mod tests {
 
     /// The triggers that opened a door on `prompt`, one candidate per trigger.
     fn fired_on(prompt: &str, triggers: &[&str]) -> Vec<String> {
+        fired_on_as(prompt, triggers, &Who::default())
+    }
+
+    fn fired_on_as(prompt: &str, triggers: &[&str], who: &Who) -> Vec<String> {
         let owned: Vec<Vec<String>> = triggers.iter().map(|t| vec![t.to_string()]).collect();
         let cands: Vec<TriggeredRef<'_>> = owned
             .iter()
@@ -1375,7 +1432,7 @@ mod tests {
         let mut fired: Vec<String> = select(
             prompt,
             &Mode::House,
-            &NamesUs::default(),
+            who,
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1887,12 +1944,16 @@ mod tests {
 
     #[test]
     fn channel_body_still_fires_next_to_a_harness_block() {
-        assert_eq!(fired_on(CHANNEL, &["widget", "tester"]), vec!["widget"]);
+        let j = house_sender("@j:s");
+        assert_eq!(
+            fired_on_as(CHANNEL, &["widget", "tester"], &j),
+            vec!["widget"]
+        );
         let prompt = format!(
             "<system-reminder>gizmo tester</system-reminder>{CHANNEL}<task-notification>gizmo</task-notification>"
         );
         assert_eq!(
-            fired_on(&prompt, &["widget", "gizmo", "tester"]),
+            fired_on_as(&prompt, &["widget", "gizmo", "tester"], &j),
             vec!["widget"]
         );
     }
@@ -1901,10 +1962,14 @@ mod tests {
     fn harness_blocks_are_stripped_before_channel_tags() {
         let prompt = concat!(
             "<system-reminder>quoted <channel oops</system-reminder>",
-            r#"<channel source="matrix" user="tester">widget</channel>"#
+            r#"<channel source="matrix" user="tester" user_id="@j:s">widget</channel>"#
         );
         assert_eq!(
-            fired_on(prompt, &["widget", "quoted", "tester"]),
+            fired_on_as(
+                prompt,
+                &["widget", "quoted", "tester"],
+                &house_sender("@j:s")
+            ),
             vec!["widget"]
         );
     }
@@ -1968,7 +2033,7 @@ mod tests {
         let sel = select(
             CHANNEL,
             &Mode::House,
-            &NamesUs::default(),
+            &house_sender("@j:s"),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -1993,7 +2058,7 @@ mod tests {
         let sel = select(
             "hi widget",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &fired,
             &HashMap::new(),
@@ -2021,7 +2086,7 @@ mod tests {
         let sel = select(
             "widget",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &fired,
             &HashMap::new(),
@@ -2049,7 +2114,7 @@ mod tests {
         let sel = select(
             "widget",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &counts,
@@ -2070,7 +2135,7 @@ mod tests {
         let sel = select(
             "widget",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -2087,7 +2152,7 @@ mod tests {
         let sel = select(
             "hello there",
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -2111,7 +2176,7 @@ mod tests {
             select(
                 "ayos lang",
                 &Mode::House,
-                &NamesUs::default(),
+                &Who::default(),
                 &cands,
                 &HashSet::new(),
                 &HashMap::new(),
@@ -2124,7 +2189,7 @@ mod tests {
             select(
                 "switched to ayo-mirage",
                 &Mode::House,
-                &NamesUs::default(),
+                &Who::default(),
                 &cands,
                 &HashSet::new(),
                 &HashMap::new(),
@@ -2316,7 +2381,7 @@ mod tests {
     #[test]
     fn a_bare_typed_channel_word_does_not_swallow_a_later_paste() {
         let prompt = format!("what does <channel do here?\n\n{}", paste("ab12", WALDEN));
-        let segs = analyze(&prompt, &Mode::House, &NamesUs::default());
+        let segs = analyze(&prompt, &Mode::House, &Who::default());
         assert_eq!(segs.len(), 2, "{segs:?}");
         assert_eq!(segs[0].origin, Origin::Typed);
         assert_eq!(segs[0].text, "what does <channel do here?\n\n");
@@ -2437,7 +2502,7 @@ mod tests {
             ("switched to ayo-mirage, ayos lang", &["ayo-", "ayos"]),
         ] {
             assert!(
-                analyze(prompt, &Mode::House, &NamesUs::default())
+                analyze(prompt, &Mode::House, &Who::default())
                     .iter()
                     .all(|s| s.origin == Origin::Typed && s.classified.is_none()),
                 "{prompt:?}"
@@ -2454,6 +2519,10 @@ mod tests {
     // ---- routing ----
 
     fn explain_on(prompt: &str, trigs: &[&str], budget: usize) -> Explanation {
+        explain_on_as(prompt, trigs, budget, &Who::default())
+    }
+
+    fn explain_on_as(prompt: &str, trigs: &[&str], budget: usize, who: &Who) -> Explanation {
         let owned: Vec<Vec<String>> = trigs.iter().map(|t| vec![t.to_string()]).collect();
         let cands: Vec<TriggeredRef<'_>> = owned
             .iter()
@@ -2473,7 +2542,7 @@ mod tests {
         explain(
             prompt,
             &Mode::House,
-            &NamesUs::default(),
+            who,
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -2553,7 +2622,7 @@ mod tests {
         );
 
         let body = format!("<channel source=\"matrix\" user_id=\"@j:s\">\n{WALDEN}\n</channel>");
-        let ex = explain_on(&body, &["fair haven"], 2);
+        let ex = explain_on_as(&body, &["fair haven"], 2, &house_sender("@j:s"));
         assert_eq!(ex.segments[0].origin, channel("@j:s"));
         assert!(ex.segments[0].classified.is_none());
         assert_eq!(
@@ -2579,11 +2648,11 @@ mod tests {
         ];
         let none = HashSet::new();
         let counts = HashMap::new();
-        let names = NamesUs::default();
+        let who = Who::default();
         let held = run(
             &prompt,
             &Mode::House,
-            &names,
+            &who,
             &cands,
             (&none, &counts),
             2,
@@ -2591,8 +2660,8 @@ mod tests {
         );
         assert!(held.doors.iter().all(|d| d.status != DoorStatus::Held));
         assert_eq!(
-            select(&prompt, &Mode::House, &names, &cands, &none, &counts, 2),
-            explain(&prompt, &Mode::House, &names, &cands, &none, &counts, 2).selection()
+            select(&prompt, &Mode::House, &who, &cands, &none, &counts, 2),
+            explain(&prompt, &Mode::House, &who, &cands, &none, &counts, 2).selection()
         );
     }
 
@@ -2604,7 +2673,7 @@ mod tests {
         let sel = select(
             &prompt,
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),
@@ -2645,7 +2714,7 @@ mod tests {
         let ex = explain(
             &paste("aaaa", WALDEN),
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &fired,
             &HashMap::new(),
@@ -2700,10 +2769,21 @@ mod tests {
         counts: &HashMap<(String, String), u64>,
         budget: usize,
     ) -> Explanation {
+        explain_mode_as(prompt, mode, doors, counts, budget, &Who::default())
+    }
+
+    fn explain_mode_as(
+        prompt: &str,
+        mode: &str,
+        doors: &[Door],
+        counts: &HashMap<(String, String), u64>,
+        budget: usize,
+        who: &Who,
+    ) -> Explanation {
         explain(
             prompt,
             &Mode::parse(mode).unwrap(),
-            &NamesUs::default(),
+            who,
             &refs(doors),
             &HashSet::new(),
             counts,
@@ -2737,7 +2817,7 @@ mod tests {
         counts: &HashMap<(String, String), u64>,
         budget: usize,
     ) -> (Vec<String>, usize) {
-        let segs = analyze(prompt, &Mode::House, &NamesUs::default());
+        let segs = analyze(prompt, &Mode::House, &Who::default());
         let toks: Vec<Vec<String>> = segs
             .iter()
             .map(|s| triggers::tokens(&s.text, false))
@@ -2810,12 +2890,15 @@ mod tests {
             "nothing here".to_string(),
         ];
         let cands = refs(&doors);
+        // D3: the channel prompt's sender is mapped as house, which is what
+        // 0.1.228 assumed of every sender.
+        let j = house_sender("@j:s");
         for prompt in &prompts {
             for budget in [0, 1, 2, 5] {
                 let sel = select(
                     prompt,
                     &Mode::House,
-                    &NamesUs::default(),
+                    &j,
                     &cands,
                     &HashSet::new(),
                     &counts,
@@ -2901,8 +2984,27 @@ mod tests {
     }
 
     #[test]
-    fn channel_bodies_stay_house_in_every_mode() {
+    fn channel_bodies_ignore_the_mode() {
+        use route::Place;
+        let j = Place::Person("j".to_string());
         for mode in ["house", "ours", "book:walden"] {
+            let ex = explain_mode_as(
+                CHANNEL,
+                mode,
+                &[door("w", "widget", &[])],
+                &HashMap::new(),
+                2,
+                &house_sender("@j:s"),
+            );
+            assert_eq!(
+                ex.segments[0].places,
+                Places(vec![Place::House, j.clone()]),
+                "{mode}"
+            );
+            assert_eq!(ex.segments[0].mapped, Some(true));
+            assert_eq!(ex.selection().fired.len(), 1, "{mode}");
+
+            // D3: an unmapped sender is its localpart, never house.
             let ex = explain_mode(
                 CHANNEL,
                 mode,
@@ -2910,8 +3012,255 @@ mod tests {
                 &HashMap::new(),
                 2,
             );
-            assert_eq!(ex.segments[0].places, Places::house(), "{mode}");
-            assert_eq!(ex.selection().fired.len(), 1, "{mode}");
+            assert_eq!(ex.segments[0].places, Places(vec![j.clone()]), "{mode}");
+            assert_eq!(ex.segments[0].mapped, Some(false));
+            assert_eq!(
+                verdicts(&ex),
+                vec![("w".to_string(), DoorStatus::Held, String::new())],
+                "{mode}"
+            );
+        }
+    }
+
+    // ---- P3: doors_people ----
+
+    fn people_map(fields: &[(&str, &str)]) -> Who {
+        Who {
+            people: People::from_fields(fields.iter().copied()),
+            ..Default::default()
+        }
+    }
+
+    fn from(user_id: &str, body: &str) -> String {
+        format!("<channel source=\"matrix\" user_id=\"{user_id}\">\n{body}\n</channel>")
+    }
+
+    fn ids(ex: &Explanation) -> Vec<(String, DoorStatus, String)> {
+        let mut v = verdicts(ex);
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    }
+
+    fn map() -> Who {
+        people_map(&[
+            ("@alice:example.org", r#"{"person":"alice","house":true}"#),
+            ("@bob:example.org", r#"{"person":"bob"}"#),
+        ])
+    }
+
+    fn sender_doors() -> [Door; 4] {
+        [
+            door("hse", "widget", &[]),
+            door("ali", "widget", &["person:alice"]),
+            door("bob", "widget", &["person:bob"]),
+            door("mal", "widget", &["person:mallory"]),
+        ]
+    }
+
+    #[test]
+    fn a_mapped_house_sender_opens_house_and_their_person_doors() {
+        let ex = explain_mode_as(
+            &from("@alice:example.org", "widget"),
+            "house",
+            &sender_doors(),
+            &HashMap::new(),
+            5,
+            &map(),
+        );
+        assert_eq!(
+            ids(&ex),
+            vec![
+                (
+                    "ali".to_string(),
+                    DoorStatus::Fired,
+                    "person:alice".to_string()
+                ),
+                ("bob".to_string(), DoorStatus::Held, String::new()),
+                ("hse".to_string(), DoorStatus::Fired, "house".to_string()),
+                ("mal".to_string(), DoorStatus::Held, String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mapped_non_house_sender_opens_only_their_person_doors() {
+        let ex = explain_mode_as(
+            &from("@bob:example.org", "widget"),
+            "house",
+            &sender_doors(),
+            &HashMap::new(),
+            5,
+            &map(),
+        );
+        let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+        assert_eq!(fired, vec!["bob"]);
+    }
+
+    #[test]
+    fn an_unmapped_sender_opens_only_their_localpart_doors() {
+        for mode in ["house", "ours", "book:walden"] {
+            let ex = explain_mode_as(
+                &from("@Mallory:example.org", "widget"),
+                mode,
+                &sender_doors(),
+                &HashMap::new(),
+                5,
+                &map(),
+            );
+            let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+            assert_eq!(fired, vec!["mal"], "{mode}");
+            assert_eq!(ex.segments[0].mapped, Some(false));
+        }
+    }
+
+    #[test]
+    fn a_malformed_user_id_opens_only_pinned() {
+        let mut doors: Vec<Door> = sender_doors().into_iter().collect();
+        doors.push(door("pin", "widget", &["pinned"]));
+        for uid in [
+            "",
+            "mallory",
+            "@mallory",
+            "@:example.org",
+            "@mal=lory:example.org",
+        ] {
+            let ex = explain_mode_as(
+                &from(uid, "widget"),
+                "house",
+                &doors,
+                &HashMap::new(),
+                9,
+                &map(),
+            );
+            assert!(ex.segments[0].places.is_empty(), "{uid:?}");
+            let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+            assert_eq!(fired, vec!["pin"], "{uid:?}");
+        }
+    }
+
+    #[test]
+    fn a_spoofed_display_name_does_not_resolve() {
+        let prompt = concat!(
+            r#"<channel source="matrix" user="alice" user_id="@mallory:example.org" "#,
+            r#"display_name="alice">"#,
+            "\nwidget\n</channel>"
+        );
+        let ex = explain_mode_as(prompt, "house", &sender_doors(), &HashMap::new(), 5, &map());
+        let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+        assert_eq!(fired, vec!["mal"], "only the user_id counts");
+        // And a user_id that only differs from a mapped one is not mapped.
+        let ex = explain_mode_as(
+            &from("@alice:evil.example", "widget"),
+            "house",
+            &sender_doors(),
+            &HashMap::new(),
+            5,
+            &map(),
+        );
+        assert_eq!(ex.segments[0].mapped, Some(false));
+        assert!(
+            ex.selection().fired.iter().all(|f| f.id != "hse"),
+            "never house"
+        );
+    }
+
+    fn owned() -> Who {
+        people_map(&[(
+            "@alice:example.org",
+            r#"{"person":"alice","house":true,"owner":true}"#,
+        )])
+    }
+
+    #[test]
+    fn typed_text_carries_its_owner_in_house_and_ours_mode() {
+        let doors = sender_doors();
+        for mode in ["house", "ours"] {
+            let ex = explain_mode_as("widget", mode, &doors, &HashMap::new(), 5, &owned());
+            let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+            assert_eq!(fired, vec!["ali", "hse"], "{mode}");
+            let ex = explain_mode_as("widget", mode, &doors, &HashMap::new(), 5, &map());
+            assert_eq!(
+                ex.segments[0].places,
+                Places::house(),
+                "no owner: as before"
+            );
+            let fired: Vec<String> = ex.selection().fired.into_iter().map(|f| f.id).collect();
+            assert_eq!(fired, vec!["hse"], "{mode}");
+        }
+    }
+
+    #[test]
+    fn typed_text_carries_its_owner_in_book_mode_and_each_spends_its_pool() {
+        let doors = [
+            door("hse", "widget", &[]),
+            door("ali", "widget", &["person:alice"]),
+            door("wal", "widget", &["book:walden"]),
+            door("wa2", "widget", &["book:walden"]),
+        ];
+        let ex = explain_mode_as(
+            "widget",
+            "book:walden",
+            &doors,
+            &HashMap::new(),
+            1,
+            &owned(),
+        );
+        let got: Vec<(String, DoorStatus, String, Pool)> = {
+            let mut v: Vec<_> = ex
+                .doors
+                .iter()
+                .map(|d| (d.door.id.clone(), d.status, d.door.place.clone(), d.pool))
+                .collect();
+            v.sort_by(|a, b| a.0.cmp(&b.0));
+            v
+        };
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "ali".to_string(),
+                    DoorStatus::Fired,
+                    "person:alice".to_string(),
+                    Pool::House
+                ),
+                (
+                    "hse".to_string(),
+                    DoorStatus::Held,
+                    String::new(),
+                    Pool::Book
+                ),
+                (
+                    "wa2".to_string(),
+                    DoorStatus::Fired,
+                    "book:walden".to_string(),
+                    Pool::Book
+                ),
+                (
+                    "wal".to_string(),
+                    DoorStatus::Deferred,
+                    "book:walden".to_string(),
+                    Pool::Book
+                ),
+            ],
+            "a person hit spends the house pool, a book hit the book pool"
+        );
+        // Without an owner, book-mode typed text is exactly D1's.
+        let ex = explain_mode_as("widget", "book:walden", &doors, &HashMap::new(), 1, &map());
+        assert_eq!(ex.segments[0].places, Places::book("walden"));
+    }
+
+    #[test]
+    fn pastes_are_untouched_by_the_people_map() {
+        let prompt = paste("aaaa", WALDEN);
+        let doors = [door("ali", "fair haven", &["person:alice"])];
+        for mode in ["house", "ours", "book:walden"] {
+            let with = explain_mode_as(&prompt, mode, &doors, &HashMap::new(), 2, &owned());
+            let without = explain_mode(&prompt, mode, &doors, &HashMap::new(), 2);
+            assert_eq!(
+                with.segments[0].places, without.segments[0].places,
+                "{mode}"
+            );
+            assert!(with.selection().fired.is_empty(), "{mode}");
         }
     }
 
@@ -2979,7 +3328,14 @@ mod tests {
             door("wal", "fair haven", &["book:walden"]),
             door("wa2", "huckleberries", &["book:walden"]),
         ];
-        let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 1);
+        let ex = explain_mode_as(
+            &prompt,
+            "book:walden",
+            &doors,
+            &HashMap::new(),
+            1,
+            &house_sender("@j:s"),
+        );
         let sel = ex.selection();
         let fired: Vec<(&str, &str)> = sel
             .fired
@@ -2999,7 +3355,14 @@ mod tests {
             paste("aaaa", WALDEN)
         );
         let doors = [door("two", "fair haven", &["house", "book:walden"])];
-        let ex = explain_mode(&prompt, "book:walden", &doors, &HashMap::new(), 2);
+        let ex = explain_mode_as(
+            &prompt,
+            "book:walden",
+            &doors,
+            &HashMap::new(),
+            2,
+            &house_sender("@j:s"),
+        );
         assert_eq!(
             verdicts(&ex),
             vec![("two".to_string(), DoorStatus::Fired, "house".to_string())],
@@ -3228,7 +3591,7 @@ mod tests {
         explain(
             prompt,
             &Mode::House,
-            &NamesUs::default(),
+            &Who::default(),
             &cands,
             &HashSet::new(),
             &HashMap::new(),

@@ -77,10 +77,32 @@ pub enum ScopeValue {
     /// Fires in every place and every mode.
     Pinned,
     Book(Book),
+    /// Opens where this person is speaking (a channel sender) or is the owner
+    /// of typed text.
+    Person(String),
+    /// The reader axis: the door fires only for this reader.
+    Agent(String),
+}
+
+pub(super) const AGENT_PREFIX: &str = "agent:";
+
+/// `[a-z0-9][a-z0-9._-]*`: a person name in a scope value or `doors_people`.
+pub fn valid_person(s: &str) -> bool {
+    name_ok(s, b"._-")
+}
+
+/// `[a-z0-9][a-z0-9._:-]*`: agent types carry `-` and `plugin:` prefixes.
+pub fn valid_agent(s: &str) -> bool {
+    name_ok(s, b"._:-")
+}
+
+fn name_ok(s: &str, extra: &[u8]) -> bool {
+    let word = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    s.bytes().next().is_some_and(word) && s.bytes().all(|b| word(b) || extra.contains(&b))
 }
 
 impl ScopeValue {
-    /// The error reads after the value, e.g. `"person:x" arrives in P3`.
+    /// The error reads after the value, e.g. `"book:" has book slug ""`.
     pub fn parse(s: &str) -> Result<ScopeValue, String> {
         match s {
             "house" => Ok(ScopeValue::House),
@@ -89,14 +111,26 @@ impl ScopeValue {
                 if let Some(rest) = s.strip_prefix("book:") {
                     return Book::parse(rest).map(ScopeValue::Book);
                 }
-                if s.starts_with("person:") || s.starts_with("agent:") {
-                    return Err(
-                        "is not accepted yet: person: and agent: scopes arrive in a later phase (P3)"
-                            .to_string(),
-                    );
+                if let Some(name) = s.strip_prefix("person:") {
+                    return if valid_person(name) {
+                        Ok(ScopeValue::Person(name.to_string()))
+                    } else {
+                        Err(format!(
+                            "has person name {name:?}; a person name is lowercase letters, digits, '.', '_' and '-', starting with a letter or digit"
+                        ))
+                    };
+                }
+                if let Some(name) = s.strip_prefix(AGENT_PREFIX) {
+                    return if valid_agent(name) {
+                        Ok(ScopeValue::Agent(name.to_string()))
+                    } else {
+                        Err(format!(
+                            "has agent name {name:?}; an agent name is lowercase letters, digits, '.', '_', ':' and '-', starting with a letter or digit"
+                        ))
+                    };
                 }
                 Err(
-                    "is not a scope; accepted: house, pinned, book:<slug>, book:<slug>@<n>"
+                    "is not a scope; accepted: house, pinned, book:<slug>, book:<slug>@<n>, person:<name>, agent:<name>"
                         .to_string(),
                 )
             }
@@ -142,6 +176,18 @@ impl fmt::Display for Mode {
 pub enum Place {
     House,
     Book(String),
+    Person(String),
+}
+
+impl Place {
+    /// The budget pool a hit admitted through this place spends: a book place
+    /// spends the book pool, `house` and `person:*` the house pool.
+    pub fn pool(&self) -> Pool {
+        match self {
+            Place::Book(_) => Pool::Book,
+            Place::House | Place::Person(_) => Pool::House,
+        }
+    }
 }
 
 impl fmt::Display for Place {
@@ -149,6 +195,7 @@ impl fmt::Display for Place {
         match self {
             Place::House => f.write_str("house"),
             Place::Book(slug) => write!(f, "book:{slug}"),
+            Place::Person(name) => write!(f, "person:{name}"),
         }
     }
 }
@@ -175,7 +222,7 @@ impl Places {
         self.0.is_empty()
     }
 
-    /// The budget pool a hit here spends. `∅` spends the house pool.
+    /// The budget pool a pinned hit here spends. `∅` spends the house pool.
     pub fn pool(&self) -> Pool {
         if self.0.iter().any(|p| matches!(p, Place::Book(_))) {
             Pool::Book
@@ -216,16 +263,24 @@ impl Pool {
     }
 }
 
-/// The values a door's scope holds; absent is `[house]`. A value that does not
-/// parse (a hand-edited store) admits nothing.
-fn scope_values(scope: Option<&[String]>) -> Vec<ScopeValue> {
-    match scope {
-        None => vec![ScopeValue::House],
-        Some(list) => list
-            .iter()
-            .filter_map(|v| ScopeValue::parse(v).ok())
-            .collect(),
+/// The place-axis values a door's scope holds; absent is `[house]`, and so is
+/// a scope holding only `agent:` values. A value that does not parse (a
+/// hand-edited store) admits nothing.
+fn place_values(scope: Option<&[String]>) -> Vec<ScopeValue> {
+    let Some(list) = scope else {
+        return vec![ScopeValue::House];
+    };
+    let places: Vec<&String> = list
+        .iter()
+        .filter(|v| !v.starts_with(AGENT_PREFIX))
+        .collect();
+    if places.is_empty() && !list.is_empty() {
+        return vec![ScopeValue::House];
     }
+    places
+        .into_iter()
+        .filter_map(|v| ScopeValue::parse(v).ok())
+        .collect()
 }
 
 pub fn is_pinned(scope: Option<&[String]>) -> bool {
@@ -251,13 +306,14 @@ pub fn admitting_place<'p>(
     places: &'p Places,
     mode: &Mode,
 ) -> Option<&'p Place> {
-    let values = scope_values(scope);
+    let values = place_values(scope);
     places.0.iter().find(|place| {
         values.iter().any(|v| match (v, place) {
             (ScopeValue::House, Place::House) => true,
             (ScopeValue::Book(door), Place::Book(slug)) => {
                 door.slug == *slug && gate_open(door, mode)
             }
+            (ScopeValue::Person(door), Place::Person(name)) => door == name,
             _ => false,
         })
     })
@@ -280,9 +336,24 @@ mod tests {
             "book:walden@3",
             "book:9-lives",
             "book:a@1",
+            "person:alice",
+            "person:a.b_c-1",
+            "person:9",
+            "agent:helper",
+            "agent:general-purpose",
+            "agent:plugin:reviewer",
+            "agent:a.b_c",
         ] {
             assert!(ScopeValue::parse(ok).is_ok(), "{ok}");
         }
+        assert_eq!(
+            ScopeValue::parse("person:alice"),
+            Ok(ScopeValue::Person("alice".to_string()))
+        );
+        assert_eq!(
+            ScopeValue::parse("agent:plugin:reviewer"),
+            Ok(ScopeValue::Agent("plugin:reviewer".to_string()))
+        );
     }
 
     #[test]
@@ -303,10 +374,34 @@ mod tests {
         ] {
             assert!(ScopeValue::parse(bad).is_err(), "{bad:?}");
         }
-        for later in ["person:someone", "agent:helper"] {
-            let e = ScopeValue::parse(later).unwrap_err();
-            assert!(e.contains("later phase"), "{e}");
+        for bad in [
+            "person:",
+            "person:Alice",
+            "person:-alice",
+            "person:.alice",
+            "person:al ice",
+            "person:al:ice",
+            "person:al=ice",
+            "person:al/ice",
+        ] {
+            let e = ScopeValue::parse(bad).unwrap_err();
+            assert!(e.contains("person name"), "{bad:?}: {e}");
         }
+        for bad in [
+            "agent:",
+            "agent:Helper",
+            "agent::x",
+            "agent:-x",
+            "agent:a b",
+        ] {
+            let e = ScopeValue::parse(bad).unwrap_err();
+            assert!(e.contains("agent name"), "{bad:?}: {e}");
+        }
+        let e = ScopeValue::parse("everyone").unwrap_err();
+        assert!(
+            e.contains("person:<name>") && e.contains("agent:<name>"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -364,6 +459,63 @@ mod tests {
         ));
         assert!(!admits(&["pinned"], &Places::house(), "house"));
         assert!(!admits(&["house"], &Places::none(), "house"));
+    }
+
+    #[test]
+    fn person_values_admit_through_their_person_place() {
+        let alice = Places(vec![Place::Person("alice".to_string())]);
+        assert!(admits(&["person:alice"], &alice, "house"));
+        assert!(!admits(&["person:bob"], &alice, "house"));
+        assert!(
+            !admits(&["house"], &alice, "house"),
+            "a person place is not house"
+        );
+        assert!(!admits(&["person:alice"], &Places::house(), "house"));
+        let both = Places(vec![Place::House, Place::Person("alice".to_string())]);
+        assert_eq!(
+            admitting_place(Some(&s(&["person:alice"])), &both, &Mode::House),
+            Some(&Place::Person("alice".to_string()))
+        );
+    }
+
+    #[test]
+    fn agent_values_are_not_places() {
+        assert!(
+            admits(&["agent:helper"], &Places::house(), "house"),
+            "agent-only is house"
+        );
+        assert!(!admits(
+            &["agent:helper"],
+            &Places::book("walden"),
+            "book:walden"
+        ));
+        assert!(admits(
+            &["agent:helper", "book:walden"],
+            &Places::book("walden"),
+            "book:walden"
+        ));
+        assert!(!admits(
+            &["agent:helper", "book:walden"],
+            &Places::house(),
+            "house"
+        ));
+        assert!(
+            !admits(&["agent:helper", "bogus"], &Places::house(), "house"),
+            "an unparseable place value still admits nothing"
+        );
+        let empty: Vec<String> = Vec::new();
+        assert!(
+            admitting_place(Some(&empty), &Places::house(), &Mode::House).is_none(),
+            "a hand-edited empty scope admits nothing, as before"
+        );
+    }
+
+    #[test]
+    fn a_place_spends_its_own_pool() {
+        assert_eq!(Place::House.pool(), Pool::House);
+        assert_eq!(Place::Person("a".to_string()).pool(), Pool::House);
+        assert_eq!(Place::Book("w".to_string()).pool(), Pool::Book);
+        assert_eq!(Place::Person("a".to_string()).to_string(), "person:a");
     }
 
     #[test]

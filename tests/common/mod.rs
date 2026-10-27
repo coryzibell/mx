@@ -26,6 +26,10 @@ use std::process::Command;
 /// is deprecated and merely prints a stderr deprecation note (`src/paths.rs`),
 /// which would contaminate stderr assertions.
 ///
+/// `CLAUDE_CODE_SESSION_ID` is removed too: run from inside Claude Code it is
+/// set, and `kv push --trigger` pre-burns the door for that session. A test that
+/// wants a session sets one explicitly after this call.
+///
 /// `home` must be a `tempfile::TempDir` path so each test gets a fresh store.
 pub fn isolate(cmd: &mut Command, home: &Path) {
     cmd.env("MX_HOME", home)
@@ -39,5 +43,6 @@ pub fn isolate(cmd: &mut Command, home: &Path) {
         .env_remove("MX_SURREAL_DB")
         .env_remove("MX_SURREAL_AUTH_LEVEL")
         .env_remove("MX_MEMORY_PATH")
-        .env_remove("MX_MEMORY_BACKEND");
+        .env_remove("MX_MEMORY_BACKEND")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
 }

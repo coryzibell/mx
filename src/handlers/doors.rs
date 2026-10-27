@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::DoorsCommands;
 use crate::doors::{
-    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, SESSION_KEY,
-    Selection, SessionRow, SessionState,
+    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, PEOPLE_KEY, People,
+    SESSION_KEY, Selection, SessionRow, SessionState, Who,
 };
 use crate::kv::{DataFieldType, DataValue, EntryAttrs, HistoryEntry, KvStore, TriggeredRef};
 
@@ -175,15 +175,19 @@ fn names_us() -> NamesUs {
     )
 }
 
-type Matcher<T> = fn(
-    &str,
-    &Mode,
-    &NamesUs,
-    &[TriggeredRef<'_>],
-    &HashSet<DoorId>,
-    &HashMap<DoorId, u64>,
-    usize,
-) -> T;
+/// The `doors_people` map from the loaded store. An absent key or one of the
+/// wrong type is an empty map: every sender unmapped, no owners.
+fn people(store: &KvStore) -> People {
+    match store.data.entries.get(PEOPLE_KEY) {
+        Some(DataValue::State { fields, .. }) => {
+            People::from_fields(fields.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        }
+        _ => People::default(),
+    }
+}
+
+type Matcher<T> =
+    fn(&str, &Mode, &Who, &[TriggeredRef<'_>], &HashSet<DoorId>, &HashMap<DoorId, u64>, usize) -> T;
 
 /// Run `matcher` (`doors::select`, `doors::explain` or `doors::route`) for one
 /// message. Does not write.
@@ -201,7 +205,10 @@ fn evaluate<T>(
     matcher(
         prompt,
         mode,
-        &names_us(),
+        &Who {
+            names: names_us(),
+            people: people(store),
+        },
         &candidates,
         &already,
         &counts,
@@ -421,8 +428,17 @@ fn print_explanation(ex: &Explanation, source: &str, hints: &[Hint]) {
     println!("mode {} ({source})", ex.mode);
     for (n, seg) in ex.segments.iter().enumerate() {
         let origin = match &seg.origin {
-            doors::Origin::Channel { user_id } if !user_id.is_empty() => {
-                format!("channel({user_id})")
+            doors::Origin::Channel { user_id } => {
+                let mapped = if seg.mapped == Some(true) {
+                    "mapped"
+                } else {
+                    "unmapped"
+                };
+                if user_id.is_empty() {
+                    format!("channel({mapped})")
+                } else {
+                    format!("channel({user_id} {mapped})")
+                }
             }
             o => o.label().to_string(),
         };
@@ -495,6 +511,7 @@ fn explanation_json(ex: &Explanation, source: &str, hints: &[Hint]) -> serde_jso
                 "segment": n + 1,
                 "origin": seg.origin.label(),
                 "user_id": user_id,
+                "mapped": seg.mapped,
                 "chars": seg.text.chars().count(),
                 "verdict": c.map(|c| c.verdict),
                 "reason": c.is_none().then_some(NOT_CLASSIFIED),

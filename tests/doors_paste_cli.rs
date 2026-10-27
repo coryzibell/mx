@@ -21,6 +21,9 @@ const SCHEMA_BASE: &str = r#"
 [keys.facts]
 type = "list"
 
+[keys.doors_people]
+type = "state"
+
 [keys.doors_fired]
 type = "history"
 max_entries = 5000
@@ -33,6 +36,23 @@ trigger = { type = "string" }
 "#;
 
 const ORIGIN_FIELD: &str = "origin = { type = \"string\" }\n";
+
+/// D3: a channel body opens house doors only for a mapped house sender.
+fn map_house(dir: &TempDir, user_id: &str) {
+    ok(
+        &mx(
+            dir,
+            &[
+                "kv",
+                "set",
+                "doors_people",
+                user_id,
+                r#"{"person":"j","house":true}"#,
+            ],
+        ),
+        "map the sender",
+    );
+}
 
 fn setup(with_origin: bool) -> TempDir {
     setup_schema(if with_origin { ORIGIN_FIELD } else { "" })
@@ -314,6 +334,7 @@ fn explain_json_has_the_same_structure() {
 fn only_a_tagged_paste_is_ever_held() {
     let dir = setup(true);
     push_door(&dir, "A pond south of town.", "fair haven");
+    map_house(&dir, "@j:s");
     let walden = std::fs::read_to_string(WALDEN).unwrap();
     assert!(walden.chars().count() >= 600);
     let explain = |extra: &[&str], message: &str| -> serde_json::Value {
@@ -341,6 +362,7 @@ fn only_a_tagged_paste_is_ever_held() {
 fn from_wraps_the_message_in_a_channel_block() {
     let dir = setup(true);
     push_door(&dir, "A sample widget.", "widget");
+    map_house(&dir, "@j:s");
     let out = ok(
         &mx(
             &dir,

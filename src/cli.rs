@@ -2166,7 +2166,8 @@ pub enum KvCommands {
         fragment: Option<String>,
 
         /// Where the door may fire (repeatable): house, pinned,
-        /// book:<slug>[@n]. Absent means house
+        /// book:<slug>[@n], person:<name>; agent:<name> limits who reads it.
+        /// Absent means house, main thread only
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
 
@@ -2294,8 +2295,9 @@ pub enum KvCommands {
         #[arg(long)]
         fragment: Option<String>,
 
-        /// Replace the entry's whole scope list (repeatable). A single
-        /// `--scope ""` clears it back to house.
+        /// Replace the entry's whole scope list (repeatable): house, pinned,
+        /// book:<slug>[@n], person:<name>, agent:<name>. A single `--scope ""`
+        /// clears it back to house.
         #[arg(long = "scope", value_name = "SCOPE")]
         scope: Vec<String>,
 

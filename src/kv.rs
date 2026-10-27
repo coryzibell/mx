@@ -628,9 +628,8 @@ fn check_memory_pointer(key: &str, memory: &str) -> Result<(), KvError> {
 /// Check a door's `scope` list and return it deduplicated, first occurrence
 /// kept. `[]` (and a lone `""`) is the clear signal and comes back empty.
 ///
-/// Accepted: `house`, `pinned`, `book:<slug>` and `book:<slug>@<n>`. `person:`
-/// and `agent:` are refused rather than stored: nothing routes them yet, so a
-/// door carrying one would silently never fire.
+/// Accepted: `house`, `pinned`, `book:<slug>`, `book:<slug>@<n>`,
+/// `person:<name>` and `agent:<name>` (see `doors::ScopeValue::parse`).
 pub fn validate_scope(key: &str, scope: &[String]) -> Result<Vec<String>, KvError> {
     let mut out: Vec<String> = Vec::new();
     for v in scope {

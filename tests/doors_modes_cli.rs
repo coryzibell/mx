@@ -221,8 +221,10 @@ fn scope_accepts_the_documented_forms_and_dedups_in_order() {
 fn scope_rejects_bad_values_and_writes_nothing() {
     let dir = setup();
     for bad in [
-        "person:someone",
-        "agent:helper",
+        "person:Someone",
+        "person:",
+        "agent:Helper",
+        "agent:-x",
         "everyone",
         "book:Walden",
         "book:",
@@ -251,9 +253,12 @@ fn scope_rejects_bad_values_and_writes_nothing() {
             "{bad}: {}",
             stderr(&out)
         );
-        if bad.starts_with("person:") || bad.starts_with("agent:") {
+        if let Some(axis) = ["person", "agent"]
+            .into_iter()
+            .find(|a| bad.starts_with(&format!("{a}:")))
+        {
             assert!(
-                stderr(&out).contains("later phase (P3)"),
+                stderr(&out).contains(&format!("{axis} name")),
                 "{}",
                 stderr(&out)
             );
@@ -271,7 +276,7 @@ fn scope_rejects_bad_values_and_writes_nothing() {
             "--id",
             &format!("kv-{id}"),
             "--scope",
-            "agent:x",
+            "agent:X",
         ],
     );
     assert_eq!(out.status.code(), Some(4));

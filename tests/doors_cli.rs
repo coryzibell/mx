@@ -28,6 +28,9 @@ type = "list"
 [keys.doors]
 type = "list"
 
+[keys.doors_people]
+type = "state"
+
 [keys.doors_fired]
 type = "history"
 max_entries = 5000
@@ -159,6 +162,20 @@ fn widget_fires_from_a_matrix_channel_block() {
         "facts",
         "A sample fragment for the widget door.",
         &["--trigger", "widget"],
+    );
+    // D3: a channel body opens house doors only for a mapped house sender.
+    ok(
+        &mx(
+            &dir,
+            &[
+                "kv",
+                "set",
+                "doors_people",
+                "@j:s",
+                r#"{"person":"j","house":true}"#,
+            ],
+        ),
+        "map the sender",
     );
 
     let out = mx_stdin(
