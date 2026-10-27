@@ -61,13 +61,24 @@ required = false
 /// id can legitimately appear under two different keys.
 type DoorId = (String, String);
 
+/// The `origin` of a pre-burn row. It dedups like a fire but is not one.
+const AUTHORED: &str = "authored";
+
 /// One row of the fire log, flattened out of its `data` blob.
 struct FireRow {
     session: String,
     key: String,
     entry: String,
     trigger: String,
+    origin: String,
     ts: String,
+}
+
+impl FireRow {
+    /// A pre-burn row written at authoring, not a fire.
+    fn authored(&self) -> bool {
+        self.origin == AUTHORED
+    }
 }
 
 fn field(e: &HistoryEntry, name: &str) -> String {
@@ -93,19 +104,23 @@ fn read_fire_log(store: &KvStore) -> Vec<FireRow> {
             key: field(e, "key"),
             entry: field(e, "entry"),
             trigger: field(e, "trigger"),
+            origin: field(e, "origin"),
             ts: e.ts.clone(),
         })
         .collect()
 }
 
 /// Split the fire log into this session's dedup set and the all-time fire counts
-/// that drive least-fired-first ordering.
+/// that drive least-fired-first ordering. A pre-burn row dedups but is not
+/// counted as a fire.
 fn fire_state(rows: &[FireRow], session: &str) -> (HashSet<DoorId>, HashMap<DoorId, u64>) {
     let mut fired: HashSet<DoorId> = HashSet::new();
     let mut counts: HashMap<DoorId, u64> = HashMap::new();
     for r in rows {
         let pair = (r.key.clone(), r.entry.clone());
-        *counts.entry(pair.clone()).or_insert(0) += 1;
+        if !r.authored() {
+            *counts.entry(pair.clone()).or_insert(0) += 1;
+        }
         if r.session == session {
             fired.insert(pair);
         }
@@ -294,6 +309,60 @@ fn push_fires(
         )?;
     }
     Ok(())
+}
+
+/// Pre-burn a door just authored on `key`/`id`: one `origin: "authored"` row
+/// for `$CLAUDE_CODE_SESSION_ID`, so the door does not fire back into the
+/// session that wrote it. Call after the entry is saved. Never fails the
+/// caller: the entry is already stored, so a problem here is one stderr line.
+pub(crate) fn pre_burn(store: &mut KvStore, key: &str, id: &str) {
+    let Some(session) = std::env::var("CLAUDE_CODE_SESSION_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(trigger) = store
+        .iter_triggered()
+        .into_iter()
+        .find(|c| c.key == key && c.id == id)
+        .and_then(|c| c.triggers.first().cloned())
+    else {
+        return;
+    };
+    if !schema_takes(store, "origin") {
+        eprintln!(
+            "warning: not pre-burned: the schema's {FIRED_KEY} has no string `origin` field, so this door can fire in this session"
+        );
+        return;
+    }
+    if read_fire_log(store)
+        .iter()
+        .any(|r| r.session == session && r.key == key && r.entry == id)
+    {
+        return;
+    }
+    let data = serde_json::json!({
+        "session": session,
+        "key": key,
+        "entry": id,
+        "trigger": trigger,
+        "origin": AUTHORED,
+    });
+    let pushed = store.push(
+        FIRED_KEY,
+        &trigger,
+        EntryAttrs {
+            data: Some(data),
+            ..Default::default()
+        },
+    );
+    if let Err(e) = pushed
+        .map_err(anyhow::Error::from)
+        .and_then(|_| store.save())
+    {
+        eprintln!("warning: could not pre-burn the door, it can fire in this session: {e:#}");
+    }
 }
 
 fn record(store: &mut KvStore, session: &str, reader: &Reader, fired: &[FiredDoor]) -> Result<()> {
@@ -753,7 +822,9 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         None => None,
     };
 
-    let all_rows = read_fire_log(&store);
+    let logged = read_fire_log(&store);
+    let pre_burned = logged.iter().filter(|r| r.authored()).count();
+    let all_rows: Vec<FireRow> = logged.into_iter().filter(|r| !r.authored()).collect();
 
     // "Never fired" is computed over the WHOLE log, deliberately. It is the
     // signal used to decide a door is bad and should be pruned, so scoping it to
@@ -811,12 +882,16 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
                 "entries": entries,
                 "triggers": triggers,
                 "never_fired": never_json,
+                "pre_burned": pre_burned,
             }))?
         );
         return Ok(crate::kv::EXIT_OK);
     }
 
     println!("{} fires recorded", rows.len());
+    if pre_burned > 0 {
+        println!("{pre_burned} pre-burned at authoring (not fires)");
+    }
     let mut entries: Vec<_> = per_entry.into_iter().collect();
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     for ((k, e), n) in &entries {
@@ -928,6 +1003,33 @@ mod tests {
             None,
         );
         assert_eq!(format!("{composed}\n\n keep it short"), prompt);
+    }
+
+    fn row(session: &str, entry: &str, origin: &str) -> FireRow {
+        FireRow {
+            session: session.to_string(),
+            key: "facts".to_string(),
+            entry: entry.to_string(),
+            trigger: "widget".to_string(),
+            origin: origin.to_string(),
+            ts: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_pre_burn_row_dedups_but_is_not_counted() {
+        let rows = [
+            row("s1", "aaa", AUTHORED),
+            row("s2", "aaa", AUTHORED),
+            row("s2", "bbb", "typed"),
+            row("s3", "bbb", ""),
+        ];
+        let (seen, counts) = fire_state(&rows, "s1");
+        let pair = |e: &str| ("facts".to_string(), e.to_string());
+        assert!(seen.contains(&pair("aaa")));
+        assert!(!seen.contains(&pair("bbb")));
+        assert_eq!(counts.get(&pair("aaa")), None);
+        assert_eq!(counts.get(&pair("bbb")), Some(&2), "legacy rows still count");
     }
 
     #[test]

@@ -834,6 +834,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             fragment,
             scope,
             exclude,
+            fire_here,
             create,
             max_entries,
         } => {
@@ -907,6 +908,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 return Ok(code);
             }
             let idle_excludes = !exclude.is_empty() && normalized.is_empty();
+            let burn = !fire_here && !normalized.is_empty();
             let pinned = scope.iter().any(|v| v == "pinned");
             let attrs = kv::EntryAttrs {
                 data: parsed_data,
@@ -919,6 +921,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             match store.push(&key, &value, attrs) {
                 Ok(result) => {
                     store.save()?;
+                    if burn {
+                        crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
+                    }
                     warn_pinned(pinned);
                     warn_idle_excludes(idle_excludes);
                     println!("kv-{} ({})", result.id, result.index);
@@ -1162,6 +1167,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             fragment,
             scope,
             exclude,
+            fire_here,
             memory,
         } => {
             // `--trigger ""` is the documented CLEAR gesture: a present-but-empty
@@ -1265,6 +1271,7 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
             // 4. Dispatch to engine.
             let touches_excludes = trigger_patch.is_some() || exclude_patch.is_some();
+            let burn = !fire_here && trigger_patch.as_ref().is_some_and(|t| !t.is_empty());
             let patch = kv::EntryPatch {
                 value,
                 data: parsed_data,
@@ -1277,6 +1284,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
             match store.update_entry(&key, &id_ref, patch) {
                 Ok(result) => {
                     store.save()?;
+                    if burn {
+                        crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
+                    }
                     warn_pinned(pinned);
                     warn_idle_excludes(
                         touches_excludes && excludes_without_triggers(&store, &key, &result.id),
@@ -1310,7 +1320,10 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                             .unwrap_or("")
                             .to_string()
                     };
-                    *fires.entry((get("key"), get("entry"))).or_insert(0) += 1;
+                    // A pre-burn row is not a fire.
+                    if get("origin") != "authored" {
+                        *fires.entry((get("key"), get("entry"))).or_insert(0) += 1;
+                    }
                 }
             }
 

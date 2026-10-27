@@ -2182,6 +2182,13 @@ pub enum KvCommands {
         #[arg(long = "exclude", value_name = "PHRASE")]
         exclude: Vec<String>,
 
+        /// Skip the pre-burn, so the door can fire later in this same session
+        /// (for notes-to-self). By default a door is marked as already seen by
+        /// the session that authors it ($CLAUDE_CODE_SESSION_ID). Needs
+        /// --trigger
+        #[arg(long, requires = "triggers")]
+        fire_here: bool,
+
         /// Auto-create key in schema if missing (type: history or list)
         #[arg(long, value_name = "TYPE")]
         create: Option<CreateType>,
@@ -2311,6 +2318,13 @@ pub enum KvCommands {
         /// `--exclude ""` clears it.
         #[arg(long = "exclude", value_name = "PHRASE")]
         exclude: Vec<String>,
+
+        /// Skip the pre-burn, so the door can fire later in this same session
+        /// (for notes-to-self). By default a door is marked as already seen by
+        /// the session that authors it ($CLAUDE_CODE_SESSION_ID). Needs
+        /// --trigger
+        #[arg(long, requires = "triggers")]
+        fire_here: bool,
 
         /// Set the entry's memory pointer (kn- ID); --memory "" clears it
         #[arg(long)]

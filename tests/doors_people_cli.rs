@@ -766,3 +766,261 @@ fn reader_is_not_written_when_the_schema_does_not_declare_it() {
     let rows = fire_rows(&dir);
     assert!(rows[0]["data"].get("reader").is_none(), "{rows:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Item 3: pre-burn on authoring, --fire-here
+// ---------------------------------------------------------------------------
+
+const AUTHOR: &str = "author-session";
+
+fn as_author(dir: &TempDir, args: &[&str]) -> std::process::Output {
+    run(dir, args, "", &[("CLAUDE_CODE_SESSION_ID", AUTHOR)])
+}
+
+fn push_as_author(dir: &TempDir, value: &str, extra: &[&str]) -> String {
+    let mut args = vec!["kv", "push", "facts", value];
+    args.extend_from_slice(extra);
+    let out = ok(&as_author(dir, &args), "kv push");
+    out.split_whitespace()
+        .next()
+        .unwrap()
+        .trim_start_matches("kv-")
+        .to_string()
+}
+
+fn authored_rows(dir: &TempDir) -> Vec<serde_json::Value> {
+    fire_rows(dir)
+        .into_iter()
+        .map(|r| r["data"].clone())
+        .filter(|d| d["origin"] == "authored")
+        .collect()
+}
+
+#[test]
+fn push_pre_burns_the_door_for_the_authoring_session() {
+    let dir = setup();
+    let id = push_as_author(
+        &dir,
+        "a note",
+        &["--trigger", "Widget", "--trigger", "gizmo"],
+    );
+    assert_eq!(
+        authored_rows(&dir),
+        vec![serde_json::json!({
+            "session": AUTHOR, "key": "facts", "entry": id,
+            "trigger": "widget", "origin": "authored",
+        })],
+        "first trigger, as stored"
+    );
+    assert_eq!(hook(&dir, AUTHOR, "widget"), "", "no echo into the author");
+    assert_eq!(fired_ids(&hook(&dir, "other", "widget")), vec![id]);
+}
+
+#[test]
+fn fire_here_skips_the_pre_burn() {
+    let dir = setup();
+    let id = push_as_author(
+        &dir,
+        "note to self",
+        &["--trigger", "widget", "--fire-here"],
+    );
+    assert!(authored_rows(&dir).is_empty());
+    assert_eq!(fired_ids(&hook(&dir, AUTHOR, "widget")), vec![id.clone()]);
+
+    let other = push_as_author(&dir, "second", &["--trigger", "gizmo"]);
+    ok(
+        &as_author(
+            &dir,
+            &[
+                "kv",
+                "update",
+                "facts",
+                "--id",
+                &format!("kv-{other}"),
+                "--trigger",
+                "gizmo",
+                "--trigger",
+                "doohickey",
+                "--fire-here",
+            ],
+        ),
+        "update --fire-here",
+    );
+    assert_eq!(authored_rows(&dir).len(), 1, "only the push pre-burned");
+}
+
+#[test]
+fn fire_here_without_trigger_is_a_usage_error() {
+    let dir = setup();
+    for args in [
+        &["kv", "push", "facts", "v", "--fire-here"][..],
+        &["kv", "update", "facts", "--id", "1", "v", "--fire-here"][..],
+    ] {
+        let out = as_author(&dir, args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+        assert!(stderr(&out).contains("--trigger"), "{}", stderr(&out));
+    }
+    let help = ok(&mx(&dir, &["kv", "push", "--help"]), "help");
+    assert!(
+        help.contains("--fire-here") && help.contains("same session"),
+        "{help}"
+    );
+}
+
+#[test]
+fn no_pre_burn_without_a_session_id() {
+    let dir = setup();
+    push(&dir, "unset", &["--trigger", "widget"]);
+    let out = run(
+        &dir,
+        &["kv", "push", "facts", "empty", "--trigger", "widget"],
+        "",
+        &[("CLAUDE_CODE_SESSION_ID", "")],
+    );
+    ok(&out, "push");
+    assert!(fire_rows(&dir).is_empty());
+}
+
+#[test]
+fn update_pre_burns_only_when_it_sets_triggers() {
+    let dir = setup();
+    let id = push(&dir, "v", &["--trigger", "widget"]);
+    let target = format!("kv-{id}");
+    let upd = |extra: &[&str]| {
+        let mut args = vec!["kv", "update", "facts", "--id", &target];
+        args.extend_from_slice(extra);
+        ok(&as_author(&dir, &args), "update")
+    };
+    upd(&["--fragment", "a fragment"]);
+    upd(&["--scope", "house"]);
+    assert!(authored_rows(&dir).is_empty(), "does not touch triggers");
+    upd(&["--trigger", "gizmo"]);
+    assert_eq!(authored_rows(&dir).len(), 1);
+    assert_eq!(authored_rows(&dir)[0]["trigger"], "gizmo");
+    upd(&["--trigger", "doohickey"]);
+    assert_eq!(authored_rows(&dir).len(), 1, "no duplicate row");
+    upd(&["--trigger", ""]);
+    assert_eq!(authored_rows(&dir).len(), 1, "clearing writes nothing");
+}
+
+#[test]
+fn a_pre_burn_row_is_not_a_fire() {
+    let dir = setup();
+    // `old` is older, so with equal fire counts it wins the one slot.
+    let old = push_as_author(&dir, "old", &["--trigger", "widget"]);
+    let new = push(&dir, "new", &["--trigger", "widget"]);
+    for s in ["a1", "a2", "a3"] {
+        ok(
+            &run(
+                &dir,
+                &[
+                    "kv",
+                    "update",
+                    "facts",
+                    "--id",
+                    &format!("kv-{old}"),
+                    "--trigger",
+                    "widget",
+                ],
+                "",
+                &[("CLAUDE_CODE_SESSION_ID", s)],
+            ),
+            "update",
+        );
+    }
+    assert_eq!(authored_rows(&dir).len(), 4);
+    let hook_budget = |session: &str, budget: &str| {
+        let input = serde_json::json!({"session_id": session, "prompt": "widget"}).to_string();
+        let out = run(&dir, &["doors", "hook", "--budget", budget], &input, &[]);
+        fired_ids(&ok(&out, "hook"))
+    };
+    assert_eq!(
+        hook_budget("fresh", "1"),
+        vec![old.clone()],
+        "least-fired-first ignores pre-burns"
+    );
+    assert_eq!(
+        sorted(hook_budget("fresh2", "9")),
+        sorted(vec![old.clone(), new.clone()])
+    );
+
+    let stats: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["doors", "stats", "--json"]), "stats")).unwrap();
+    assert_eq!(stats["pre_burned"], 4);
+    let fires: u64 = stats["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["fires"].as_u64().unwrap())
+        .sum();
+    assert_eq!(stats["total_fires"].as_u64().unwrap(), fires);
+    assert_eq!(fires, 3, "{stats}");
+    let text = ok(&mx(&dir, &["doors", "stats"]), "stats");
+    assert!(
+        text.contains("4 pre-burned at authoring (not fires)"),
+        "{text}"
+    );
+
+    let triggers: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["kv", "triggers", "--json"]), "triggers")).unwrap();
+    let fires_of = |id: &str| {
+        triggers
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap()["fires"]
+            .clone()
+    };
+    assert_eq!(fires_of(&old), 2);
+    assert_eq!(fires_of(&new), 1);
+}
+
+#[test]
+fn a_pre_burned_door_that_never_fired_is_never_fired() {
+    let dir = setup();
+    let id = push_as_author(&dir, "v", &["--trigger", "widget"]);
+    let stats: serde_json::Value =
+        serde_json::from_str(&ok(&mx(&dir, &["doors", "stats", "--json"]), "stats")).unwrap();
+    assert_eq!(stats["total_fires"], 0);
+    assert_eq!(stats["never_fired"][0]["entry"], id.as_str());
+}
+
+#[test]
+fn a_schema_without_origin_skips_the_pre_burn_with_one_line() {
+    let dir = setup_schema(&SCHEMA.replace("origin = { type = \"string\" }\n", ""));
+    let out = as_author(&dir, &["kv", "push", "facts", "v", "--trigger", "widget"]);
+    ok(&out, "push");
+    let lines: Vec<String> = stderr(&out)
+        .lines()
+        .filter(|l| l.contains("pre-burn"))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 1, "{}", stderr(&out));
+    assert!(
+        fire_rows(&dir).is_empty(),
+        "an unmarked row would count as a fire"
+    );
+}
+
+#[test]
+fn a_failed_pre_burn_does_not_fail_the_command() {
+    let dir = setup_schema(&SCHEMA.replace(
+        "place = { type = \"string\" }",
+        "place = { type = \"string\", required = true }",
+    ));
+    let out = as_author(&dir, &["kv", "push", "facts", "v", "--trigger", "widget"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("could not pre-burn"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(fire_rows(&dir).is_empty());
+    let v = explain(&dir, "widget", &[]);
+    assert_eq!(
+        v["fired"].as_array().unwrap().len(),
+        1,
+        "the entry was stored"
+    );
+}
