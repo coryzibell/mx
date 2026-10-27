@@ -365,6 +365,32 @@ pub(crate) fn pre_burn(store: &mut KvStore, key: &str, id: &str) {
     }
 }
 
+/// Warn, once per trigger form, when the door just written on `key`/`id`
+/// shares that form with enough live, scope-overlapping doors to meet the
+/// per-prompt budget (`$MX_DOORS_BUDGET`, else 2): they compete, and some will
+/// defer. A warning only; the write already happened.
+pub(crate) fn warn_shared_triggers(store: &KvStore, key: &str, id: &str) {
+    let all = store.iter_triggered();
+    let Some(written) = all.iter().find(|c| c.key == key && c.id == id) else {
+        return;
+    };
+    let budget = resolve_budget(None);
+    for f in doors::shared_forms(written, &all, budget, Utc::now()) {
+        let others: Vec<String> = f
+            .others
+            .iter()
+            .map(|(k, i)| format!("{k}/kv-{i}"))
+            .collect();
+        eprintln!(
+            "warning: trigger form {:?} is on {} doors whose scopes overlap, at or over the per-prompt budget of {} -- they compete and some will defer. Others: {}",
+            f.form,
+            f.count,
+            budget,
+            others.join(", ")
+        );
+    }
+}
+
 fn record(store: &mut KvStore, session: &str, reader: &Reader, fired: &[FiredDoor]) -> Result<()> {
     if fired.is_empty() {
         return Ok(());

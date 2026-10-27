@@ -534,6 +534,57 @@ fn specificity(trigger: &str) -> (usize, usize) {
     (span, trigger.chars().count())
 }
 
+/// One trigger form that `budget` or more live, scope-overlapping doors carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedForm {
+    pub form: String,
+    /// Doors carrying it, the written one included.
+    pub count: usize,
+    /// The other doors, as `(key, id)`, in store order.
+    pub others: Vec<(String, String)>,
+}
+
+/// The trigger forms of `written` that compete for one prompt's budget: per
+/// form, the live doors in `all` carrying a trigger with that matched form and
+/// a scope that overlaps `written`'s, when there are `budget` or more of them.
+/// Nothing when `written` is itself expired, or the budget is 0 (nothing fires).
+pub fn shared_forms(
+    written: &TriggeredRef<'_>,
+    all: &[TriggeredRef<'_>],
+    budget: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<SharedForm> {
+    let live = |c: &TriggeredRef<'_>| c.expires.is_none_or(|e| !is_expired(e, now));
+    if budget == 0 || !live(written) {
+        return Vec::new();
+    }
+    let mut forms: Vec<String> = Vec::new();
+    for t in written.triggers {
+        let f = matched_form(t);
+        if !f.is_empty() && !forms.contains(&f) {
+            forms.push(f);
+        }
+    }
+    forms
+        .into_iter()
+        .filter_map(|form| {
+            let others: Vec<(String, String)> = all
+                .iter()
+                .filter(|c| !(c.key == written.key && c.id == written.id))
+                .filter(|c| live(c) && route::scopes_overlap(written.scope, c.scope))
+                .filter(|c| c.triggers.iter().any(|t| matched_form(t) == form))
+                .map(|c| (c.key.to_string(), c.id.to_string()))
+                .collect();
+            let count = others.len() + 1;
+            (count >= budget).then_some(SharedForm {
+                form,
+                count,
+                others,
+            })
+        })
+        .collect()
+}
+
 /// Who wrote a stretch of the prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
@@ -3357,6 +3408,76 @@ mod tests {
             );
             assert!(with.selection().fired.is_empty(), "{mode}");
         }
+    }
+
+    // ---- P3: the shared-trigger warning ----
+
+    #[test]
+    fn shared_forms_count_live_overlapping_doors_against_the_budget() {
+        let doors = [
+            door("me", "Widget-", &[]),
+            door("a", "widget", &[]),
+            door("b", "WIDGET", &["person:alice"]),
+            door("c", "widget", &["book:walden"]),
+            door("d", "widget", &["agent:helper"]),
+            door("e", "widget", &[]),
+            door("f", "gizmo", &[]),
+        ];
+        let mut all = refs(&doors);
+        all[5].expires = Some("2020-01-01T00:00:00Z");
+        let me = all[0];
+        let got = shared_forms(&me, &all, 2, now());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].form, "widget");
+        assert_eq!(
+            got[0].count, 4,
+            "a, b and d overlap; c is another place; e expired"
+        );
+        let ids: Vec<&str> = got[0].others.iter().map(|(_, id)| id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", "d"]);
+        assert_eq!(
+            shared_forms(&me, &all, 4, now()).len(),
+            1,
+            "at the budget warns"
+        );
+        assert!(
+            shared_forms(&me, &all, 5, now()).is_empty(),
+            "below it does not"
+        );
+        assert!(
+            shared_forms(&me, &all, 0, now()).is_empty(),
+            "budget 0 fires nothing"
+        );
+        assert!(
+            shared_forms(&me, &all[..1], 1, now()).len() == 1,
+            "alone, budget 1"
+        );
+        assert!(shared_forms(&me, &all[..1], 2, now()).is_empty());
+    }
+
+    #[test]
+    fn shared_forms_go_per_form_and_skip_an_expired_writer() {
+        let doors = [
+            Door {
+                id: "me",
+                trig: vec!["widget".to_string(), "fair haven".to_string()],
+                scope: Some(vec!["book:walden".to_string()]),
+                ts: "2026-01-01T00:00:00Z",
+            },
+            door("a", "widget", &["book:walden@4"]),
+            door("b", "fair haven", &["book:walden"]),
+        ];
+        let mut all = refs(&doors);
+        let got: Vec<(String, usize)> = shared_forms(&all[0], &all, 2, now())
+            .into_iter()
+            .map(|f| (f.form, f.count))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("widget".to_string(), 2), ("fair haven".to_string(), 2)]
+        );
+        all[0].expires = Some("2020-01-01T00:00:00Z");
+        assert!(shared_forms(&all[0], &all, 1, now()).is_empty());
     }
 
     // ---- P3: the reader gate ----

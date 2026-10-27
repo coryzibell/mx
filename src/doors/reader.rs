@@ -5,7 +5,7 @@ use super::route::{AGENT_PREFIX, valid_agent};
 
 /// The reader-axis values a door's scope holds, or `None` when it has none.
 /// An `agent:` value that does not parse matches no reader.
-fn reader_values(scope: Option<&[String]>) -> Option<Vec<&str>> {
+pub(super) fn reader_values(scope: Option<&[String]>) -> Option<Vec<&str>> {
     let list = scope?;
     let raw: Vec<&str> = list
         .iter()

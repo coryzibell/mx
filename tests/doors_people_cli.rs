@@ -1242,3 +1242,196 @@ fn kv_triggers_marks_expiry_and_stats_lists_expired_doors() {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Item 5: the shared-trigger warning
+// ---------------------------------------------------------------------------
+
+fn push_out(dir: &TempDir, key: &str, extra: &[&str], env: &[(&str, &str)]) -> (String, String) {
+    let mut args = vec!["kv", "push", key, "v"];
+    args.extend_from_slice(extra);
+    let out = run(dir, &args, "", env);
+    let id = ok(&out, "push")
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .trim_start_matches("kv-")
+        .to_string();
+    (id, stderr(&out))
+}
+
+fn shared_lines(err: &str) -> Vec<&str> {
+    err.lines().filter(|l| l.contains("trigger form")).collect()
+}
+
+#[test]
+fn shared_trigger_warning_below_at_and_above_the_budget() {
+    let dir = setup();
+    let (a, err) = push_out(&dir, "facts", &["--trigger", "widget"], &[]);
+    assert!(shared_lines(&err).is_empty(), "1 of 2: below");
+    let (b, err) = push_out(
+        &dir,
+        "log",
+        &["--trigger", "Widget-", "--trigger", "gizmo"],
+        &[],
+    );
+    let lines = shared_lines(&err);
+    assert_eq!(lines.len(), 1, "at the budget, once per form: {err}");
+    assert!(
+        lines[0].contains("\"widget\"")
+            && lines[0].contains("on 2 doors")
+            && lines[0].contains("budget of 2")
+            && lines[0].contains(&format!("facts/kv-{a}"))
+            && !lines[0].contains(&format!("kv-{b}")),
+        "{err}"
+    );
+    let (_, err) = push_out(&dir, "facts", &["--trigger", "widget"], &[]);
+    let lines = shared_lines(&err);
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].contains("on 3 doors")
+            && lines[0].contains(&format!("facts/kv-{a}"))
+            && lines[0].contains(&format!("log/kv-{b}")),
+        "{err}"
+    );
+}
+
+#[test]
+fn shared_trigger_warning_only_counts_overlapping_scopes() {
+    let dir = setup();
+    push_out(&dir, "facts", &["--trigger", "widget"], &[]);
+    let (_, err) = push_out(
+        &dir,
+        "facts",
+        &["--trigger", "widget", "--scope", "book:walden"],
+        &[],
+    );
+    assert!(
+        shared_lines(&err).is_empty(),
+        "house and a book do not overlap: {err}"
+    );
+    let (_, err) = push_out(
+        &dir,
+        "facts",
+        &[
+            "--trigger",
+            "widget",
+            "--scope",
+            "agent:helper",
+            "--scope",
+            "book:prince",
+        ],
+        &[],
+    );
+    assert!(shared_lines(&err).is_empty(), "{err}");
+    let (_, err) = push_out(
+        &dir,
+        "facts",
+        &["--trigger", "widget", "--scope", "person:alice"],
+        &[],
+    );
+    assert_eq!(
+        shared_lines(&err).len(),
+        1,
+        "person overlaps house and every book: {err}"
+    );
+    assert!(shared_lines(&err)[0].contains("on 4 doors"), "{err}");
+    let (_, err) = push_out(
+        &dir,
+        "facts",
+        &["--trigger", "widget", "--expires", "2020-01-01T00:00:00Z"],
+        &[],
+    );
+    assert!(
+        shared_lines(&err).is_empty(),
+        "an expired door competes for nothing"
+    );
+}
+
+#[test]
+fn shared_trigger_warning_follows_mx_doors_budget_and_scope_updates() {
+    let dir = setup();
+    push_out(&dir, "facts", &["--trigger", "widget"], &[]);
+    let (b, err) = push_out(
+        &dir,
+        "facts",
+        &["--trigger", "widget"],
+        &[("MX_DOORS_BUDGET", "3")],
+    );
+    assert!(shared_lines(&err).is_empty(), "2 of 3: {err}");
+    let (_, err) = push_out(
+        &dir,
+        "facts",
+        &["--trigger", "widget"],
+        &[("MX_DOORS_BUDGET", "3")],
+    );
+    assert!(shared_lines(&err)[0].contains("budget of 3"), "{err}");
+    let (_, err) = push_out(
+        &dir,
+        "log",
+        &["--trigger", "gizmo"],
+        &[("MX_DOORS_BUDGET", "1")],
+    );
+    assert_eq!(
+        shared_lines(&err).len(),
+        1,
+        "budget 1: a door alone meets it"
+    );
+    let (_, err) = push_out(
+        &dir,
+        "log",
+        &["--trigger", "doohickey"],
+        &[("MX_DOORS_BUDGET", "0")],
+    );
+    assert!(shared_lines(&err).is_empty(), "budget 0 fires nothing");
+
+    // --scope on an entry that has triggers re-checks; the write still lands.
+    let out = mx(
+        &dir,
+        &[
+            "kv",
+            "update",
+            "facts",
+            "--id",
+            &format!("kv-{b}"),
+            "--scope",
+            "book:walden",
+        ],
+    );
+    ok(&out, "update --scope");
+    assert!(shared_lines(&stderr(&out)).is_empty(), "{}", stderr(&out));
+    let out = mx(
+        &dir,
+        &[
+            "kv",
+            "update",
+            "facts",
+            "--id",
+            &format!("kv-{b}"),
+            "--scope",
+            "",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        shared_lines(&stderr(&out))[0].contains("on 3 doors"),
+        "{}",
+        stderr(&out)
+    );
+    let out = mx(
+        &dir,
+        &[
+            "kv",
+            "update",
+            "facts",
+            "--id",
+            &format!("kv-{b}"),
+            "--fragment",
+            "f",
+        ],
+    );
+    assert!(
+        shared_lines(&stderr(&out)).is_empty(),
+        "no trigger or scope change"
+    );
+}

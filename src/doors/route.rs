@@ -287,6 +287,46 @@ pub fn is_pinned(scope: Option<&[String]>) -> bool {
     scope.is_some_and(|s| s.iter().any(|v| v == "pinned"))
 }
 
+/// Whether two doors' scopes can open on the same segment for the same
+/// reader. Place axis: either is pinned; or they share a place value (books by
+/// slug, ordinals ignored); or one has `house` or `book:*` and the other
+/// `person:*`. Reader axis: they miss only when both name agents and no name
+/// is shared. Absent scope is `[house]`.
+pub fn scopes_overlap(a: Option<&[String]>, b: Option<&[String]>) -> bool {
+    places_overlap(a, b) && readers_overlap(a, b)
+}
+
+fn places_overlap(a: Option<&[String]>, b: Option<&[String]>) -> bool {
+    if is_pinned(a) || is_pinned(b) {
+        return true;
+    }
+    let (va, vb) = (place_values(a), place_values(b));
+    let person = |v: &[ScopeValue]| v.iter().any(|x| matches!(x, ScopeValue::Person(_)));
+    let wide = |v: &[ScopeValue]| {
+        v.iter()
+            .any(|x| matches!(x, ScopeValue::House | ScopeValue::Book(_)))
+    };
+    let shared = va.iter().any(|x| {
+        vb.iter().any(|y| match (x, y) {
+            (ScopeValue::House, ScopeValue::House) => true,
+            (ScopeValue::Book(p), ScopeValue::Book(q)) => p.slug == q.slug,
+            (ScopeValue::Person(p), ScopeValue::Person(q)) => p == q,
+            _ => false,
+        })
+    });
+    shared || (wide(&va) && person(&vb)) || (person(&va) && wide(&vb))
+}
+
+fn readers_overlap(a: Option<&[String]>, b: Option<&[String]>) -> bool {
+    match (
+        super::reader::reader_values(a),
+        super::reader::reader_values(b),
+    ) {
+        (Some(x), Some(y)) => x.iter().any(|n| y.contains(n)),
+        _ => true,
+    }
+}
+
 /// The spoiler gate. A door at position `k` opens only once the mode has read
 /// to `k` in the same book; an ordinal-less door opens at any position, and an
 /// ordinal-less mode is page one.
@@ -516,6 +556,64 @@ mod tests {
         assert_eq!(Place::Person("a".to_string()).pool(), Pool::House);
         assert_eq!(Place::Book("w".to_string()).pool(), Pool::Book);
         assert_eq!(Place::Person("a".to_string()).to_string(), "person:a");
+    }
+
+    type Pair<'a> = (Option<&'a [&'a str]>, Option<&'a [&'a str]>);
+
+    fn overlap(a: Option<&[&str]>, b: Option<&[&str]>) -> bool {
+        let (a, b) = (a.map(s), b.map(s));
+        let ab = scopes_overlap(a.as_deref(), b.as_deref());
+        assert_eq!(ab, scopes_overlap(b.as_deref(), a.as_deref()), "symmetric");
+        ab
+    }
+
+    #[test]
+    fn scopes_overlap_on_the_place_axis() {
+        let yes: &[Pair<'_>] = &[
+            (None, None),
+            (None, Some(&["house"])),
+            (Some(&["pinned"]), Some(&["book:walden"])),
+            (Some(&["pinned"]), Some(&["person:alice"])),
+            (Some(&["book:walden@3"]), Some(&["book:walden@9"])),
+            (Some(&["book:walden"]), Some(&["book:walden@2", "house"])),
+            (Some(&["person:alice"]), Some(&["person:alice"])),
+            (None, Some(&["person:alice"])),
+            (Some(&["book:walden"]), Some(&["person:alice"])),
+            (Some(&["agent:helper"]), None),
+        ];
+        for (a, b) in yes {
+            assert!(overlap(*a, *b), "{a:?} {b:?}");
+        }
+        let no: &[Pair<'_>] = &[
+            (None, Some(&["book:walden"])),
+            (Some(&["book:walden"]), Some(&["book:prince"])),
+            (Some(&["person:alice"]), Some(&["person:bob"])),
+            (Some(&["bogus"]), None),
+        ];
+        for (a, b) in no {
+            assert!(!overlap(*a, *b), "{a:?} {b:?}");
+        }
+    }
+
+    #[test]
+    fn scopes_overlap_on_the_reader_axis() {
+        assert!(overlap(Some(&["agent:helper"]), Some(&["agent:helper"])));
+        assert!(overlap(
+            Some(&["agent:helper", "agent:x"]),
+            Some(&["agent:x"])
+        ));
+        assert!(
+            overlap(Some(&["agent:helper"]), Some(&["house"])),
+            "main thread of --agent helper"
+        );
+        assert!(!overlap(Some(&["agent:helper"]), Some(&["agent:reviewer"])));
+        assert!(
+            !overlap(
+                Some(&["pinned", "agent:helper"]),
+                Some(&["pinned", "agent:reviewer"])
+            ),
+            "both axes must overlap"
+        );
     }
 
     #[test]

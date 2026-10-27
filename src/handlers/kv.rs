@@ -919,7 +919,8 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                 return Ok(code);
             }
             let idle_excludes = !exclude.is_empty() && normalized.is_empty();
-            let burn = !fire_here && !normalized.is_empty();
+            let has_triggers = !normalized.is_empty();
+            let burn = !fire_here && has_triggers;
             let pinned = scope.iter().any(|v| v == "pinned");
             let attrs = kv::EntryAttrs {
                 data: parsed_data,
@@ -936,6 +937,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     warn_expired(expires.as_deref());
                     if burn {
                         crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
+                    }
+                    if has_triggers {
+                        crate::handlers::doors::warn_shared_triggers(&store, &key, &result.id);
                     }
                     warn_pinned(pinned);
                     warn_idle_excludes(idle_excludes);
@@ -1287,7 +1291,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
 
             // 4. Dispatch to engine.
             let touches_excludes = trigger_patch.is_some() || exclude_patch.is_some();
-            let burn = !fire_here && trigger_patch.as_ref().is_some_and(|t| !t.is_empty());
+            let sets_triggers = trigger_patch.as_ref().is_some_and(|t| !t.is_empty());
+            let burn = !fire_here && sets_triggers;
+            let routes = sets_triggers || scope_patch.is_some();
             let patch = kv::EntryPatch {
                 value,
                 data: parsed_data,
@@ -1304,6 +1310,9 @@ pub(crate) fn handle_kv(cmd: KvCommands, verbose: bool) -> Result<i32> {
                     warn_expired(expires.as_deref());
                     if burn {
                         crate::handlers::doors::pre_burn(&mut store, &key, &result.id);
+                    }
+                    if routes {
+                        crate::handlers::doors::warn_shared_triggers(&store, &key, &result.id);
                     }
                     warn_pinned(pinned);
                     warn_idle_excludes(
