@@ -31,7 +31,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
   section and `--json` an `"origins":[{"origin":"dispatch","fires":3}]` key,
   both respecting `--since`. The label is the origin up to the first `:`, and a
   row with no origin is `legacy`. No existing key changes. Dispatch fires stay
-  in the totals, the per-entry and per-trigger counts and `never_fired`.
+  in the totals and the per-entry and per-trigger counts, and a door fired only
+  on dispatch is not in `never_fired`.
 - **No schema change.** `origin` is the field `doors_fired` already declares.
   If the schema has no string `origin`, the dispatch path fires nothing and says
   so on stderr, because an unmarked row would burn the door on the main thread.

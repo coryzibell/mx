@@ -1243,7 +1243,7 @@ mod tests {
     fn a_dispatch_dedups_on_its_own_rows_and_counts_all_dispatches() {
         let rows = [
             row("s1", "aaa", "dispatch:t1"),
-            row("s2", "aaa", "dispatch:t1"),
+            row("s2", "eee", "dispatch:t1"),
             row("s1", "bbb", "dispatch:t2"),
             row("s1", "ccc", "typed"),
             row("s1", "ddd", AUTHORED),
@@ -1251,7 +1251,8 @@ mod tests {
         let (seen, counts) = dispatch_state(&rows, "s1", "dispatch:t1");
         let pair = |e: &str| ("facts".to_string(), e.to_string());
         assert_eq!(seen, HashSet::from([pair("aaa")]));
-        assert_eq!(counts.get(&pair("aaa")), Some(&2));
+        assert_eq!(counts.get(&pair("aaa")), Some(&1));
+        assert_eq!(counts.get(&pair("eee")), Some(&1));
         assert_eq!(counts.get(&pair("bbb")), Some(&1));
         assert_eq!(counts.get(&pair("ccc")), None);
         assert_eq!(counts.get(&pair("ddd")), None);

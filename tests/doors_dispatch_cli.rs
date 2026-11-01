@@ -580,6 +580,19 @@ fn stats_separate_dispatch_from_typed() {
         .map(|l| l.split_whitespace().collect())
         .collect();
     assert_eq!(split, vec![vec!["2", "dispatch"], vec!["1", "typed"]]);
+    assert!(ok(&mx(&dir, &["kv", "triggers"]), "kv triggers").contains("fires=2"));
+}
+
+#[test]
+fn a_failed_record_opens_nothing() {
+    let dir = setup_with(&format!(
+        "{FIRED_NO_ORIGIN}{ORIGIN_AND_SESSION}\n[keys.doors_fired.data.needed]\ntype = \"string\"\nrequired = true\n"
+    ));
+    agent_door(&dir, "helper");
+    let out = dispatch(&dir, &payload("s1", "t1", "helper", "fix the widget"));
+    assert_nothing(&out, "unrecordable fire");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("could not record"));
+    assert!(fire_rows(&dir).is_empty());
 }
 
 #[test]
