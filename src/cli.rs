@@ -2001,6 +2001,21 @@ pub enum DoorsCommands {
         budget: Option<usize>,
     },
 
+    /// Claude Code PreToolUse(Agent) entry point. Reads hook JSON on stdin and,
+    /// when a door names the dispatched agent, prints one line of JSON that
+    /// appends it to the dispatch prompt. ALWAYS exits 0 -- an exit of 2 on this
+    /// hook event blocks the dispatch.
+    Dispatch {
+        /// Match and print without recording fires
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Maximum entries to fire per pool (house, book) on one dispatch.
+        /// Default: $MX_DOORS_BUDGET, else 2
+        #[arg(long)]
+        budget: Option<usize>,
+    },
+
     /// Run the same engine against plain text, for humans and tests
     Check {
         /// Message to match against
@@ -2044,12 +2059,13 @@ pub enum DoorsCommands {
 
         /// Read as this agent on the main thread, as `claude --agent AGENT`
         /// does (default: $MX_CURRENT_AGENT, else none). A subagent's view is
-        /// only reachable through `mx doors hook`
+        /// only reachable through `mx doors hook` and `mx doors dispatch`
         #[arg(long, value_name = "AGENT")]
         agent: Option<String>,
     },
 
-    /// Fire telemetry: fires per entry and per trigger, plus doors never fired
+    /// Fire telemetry: fires per entry, trigger and origin, plus doors never
+    /// fired
     Stats {
         /// Only count fires within this relative window (e.g. 30d, 1w)
         #[arg(long)]

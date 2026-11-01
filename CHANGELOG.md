@@ -6,6 +6,58 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Added — `mx doors dispatch`: doors reach dispatched subagents (doors P6, #492)
+
+- **New `mx doors dispatch`, the `PreToolUse(Agent)` entry point.** When a door
+  names the agent about to be dispatched, its line is appended to the dispatch
+  prompt through `updatedInput`, so the child reads it and the parent's prompt
+  stays as written. Flags as on `doors hook`: `--dry-run`, `--budget`. It always
+  exits 0 (an exit of 2 here blocks the dispatch), and stdout is one line of
+  JSON or nothing: an unknown `tool_input` field passes through untouched, and
+  no `permissionDecision` is set.
+- **`agent:` doors only.** The reader is `tool_input.subagent_type` and nothing
+  else, not the payload's `agent_type` (on a nested dispatch that is the
+  dispatcher) and not `MX_CURRENT_AGENT` (that picks the store). House and
+  pinned doors without an `agent:` value never reach a child, and a fork only
+  matches `agent:fork`. The session's mode applies as it does in `doors hook`.
+  Doors land at dispatch only: resuming a subagent fires no `PreToolUse(Agent)`.
+- **Two books in `doors_fired`.** A dispatch fire row has `origin` set to
+  `dispatch:<tool_use_id>`. It dedups on `(session, tool_use_id, key, entry)`
+  and ranks on dispatch rows only. It never burns a door for the main thread,
+  never shifts main-thread least-fired ordering, and never stops a pre-burn. In
+  the other direction a main-thread fire or an authored pre-burn does not hold
+  a dispatch: pre-burn means the author holds the text, and a child doesn't.
+- **`mx doors stats` groups by origin.** The text output grows a `by origin:`
+  section and `--json` an `"origins":[{"origin":"dispatch","fires":3}]` key,
+  both respecting `--since`. The label is the origin up to the first `:`, and a
+  row with no origin is `legacy`. No existing key changes. Dispatch fires stay
+  in the totals, the per-entry and per-trigger counts and `never_fired`.
+- **No schema change.** `origin` is the field `doors_fired` already declares.
+  If the schema has no string `origin`, the dispatch path fires nothing and says
+  so on stderr, because an unmarked row would burn the door on the main thread.
+- **Install.** A second hook, next to the `UserPromptSubmit` one, with
+  `MX_CURRENT_AGENT` naming the store. Keep the `|| true`: it holds the
+  exit-0 contract when `mx` is missing or too old to have the subcommand.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env MX_CURRENT_AGENT=<agent> mx doors dispatch || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ### Changed — `mx doors` people map, `agent:` readers, pre-burn, `--expires` (doors P3, #489)
 
 - **Behaviour change (D3): an unmapped Matrix sender no longer opens house
