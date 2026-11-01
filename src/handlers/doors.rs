@@ -6,7 +6,7 @@
 //! to follow it.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::DoorsCommands;
 use crate::doors::{
-    self, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, PEOPLE_KEY, People,
-    Reader, SESSION_KEY, Selection, SessionRow, SessionState, Who,
+    self, Dispatch, Explanation, FIRED_KEY, FiredDoor, Hint, HookInput, Mode, NamesUs, PEOPLE_KEY,
+    People, Reader, SESSION_KEY, Selection, SessionRow, SessionState, Who, is_dispatch,
 };
 use crate::kv::{DataFieldType, DataValue, EntryAttrs, HistoryEntry, KvStore, TriggeredRef};
 
@@ -112,16 +112,37 @@ fn read_fire_log(store: &KvStore) -> Vec<FireRow> {
 
 /// Split the fire log into this session's dedup set and the all-time fire counts
 /// that drive least-fired-first ordering. A pre-burn row dedups but is not
-/// counted as a fire.
+/// counted as a fire. A dispatch row does neither: the door went to a child, so
+/// the main thread still doesn't hold its text.
 fn fire_state(rows: &[FireRow], session: &str) -> (HashSet<DoorId>, HashMap<DoorId, u64>) {
     let mut fired: HashSet<DoorId> = HashSet::new();
     let mut counts: HashMap<DoorId, u64> = HashMap::new();
-    for r in rows {
+    for r in rows.iter().filter(|r| !is_dispatch(&r.origin)) {
         let pair = (r.key.clone(), r.entry.clone());
         if !r.authored() {
             *counts.entry(pair.clone()).or_insert(0) += 1;
         }
         if r.session == session {
+            fired.insert(pair);
+        }
+    }
+    (fired, counts)
+}
+
+/// `fire_state` for the dispatch path: only rows of this dispatch dedup, and only
+/// dispatch rows count. Every dispatch is a fresh reader, so neither a main-thread
+/// fire nor a pre-burn means the child already holds the text.
+fn dispatch_state(
+    rows: &[FireRow],
+    session: &str,
+    origin: &str,
+) -> (HashSet<DoorId>, HashMap<DoorId, u64>) {
+    let mut fired: HashSet<DoorId> = HashSet::new();
+    let mut counts: HashMap<DoorId, u64> = HashMap::new();
+    for r in rows.iter().filter(|r| is_dispatch(&r.origin)) {
+        let pair = (r.key.clone(), r.entry.clone());
+        *counts.entry(pair.clone()).or_insert(0) += 1;
+        if r.session == session && r.origin == origin {
             fired.insert(pair);
         }
     }
@@ -273,12 +294,13 @@ fn schema_takes(store: &KvStore, name: &str) -> bool {
 
 /// Append one fire row per opened door, without saving. Overflow (`deferred`)
 /// is deliberately NOT recorded, which is what keeps a deferred door eligible
-/// on the next prompt.
+/// on the next prompt. `origin` replaces each door's own text origin.
 fn push_fires(
     store: &mut KvStore,
     session: &str,
     reader: &Reader,
     fired: &[FiredDoor],
+    origin: Option<&str>,
 ) -> Result<()> {
     let with_origin = schema_takes(store, "origin");
     let with_place = schema_takes(store, "place");
@@ -291,7 +313,7 @@ fn push_fires(
             "trigger": f.trigger,
         });
         if with_origin {
-            data["origin"] = f.origin.into();
+            data["origin"] = origin.unwrap_or(f.origin).into();
         }
         if with_place {
             data["place"] = f.place.as_str().into();
@@ -338,7 +360,7 @@ pub(crate) fn pre_burn(store: &mut KvStore, key: &str, id: &str) {
     }
     if read_fire_log(store)
         .iter()
-        .any(|r| r.session == session && r.key == key && r.entry == id)
+        .any(|r| r.session == session && r.key == key && r.entry == id && !is_dispatch(&r.origin))
     {
         return;
     }
@@ -402,7 +424,7 @@ fn record(store: &mut KvStore, session: &str, reader: &Reader, fired: &[FiredDoo
     if fired.is_empty() {
         return Ok(());
     }
-    push_fires(store, session, reader, fired)?;
+    push_fires(store, session, reader, fired, None)?;
     store.save()?;
     Ok(())
 }
@@ -449,8 +471,8 @@ fn hook(dry_run: bool, budget: usize) {
     };
 
     let sid = input.session_id.as_str();
-    // P6 (#492): subagent delivery (a PreToolUse(Agent) path) would hook in
-    // here. Today a subagent's prompt only sees doors that name its agent.
+    // A subagent reading here sees only doors that name its agent. The prompt
+    // it is dispatched with goes through `dispatch`, on PreToolUse(Agent).
     let reader = Reader::resolve(
         &input.agent_type,
         current_agent().as_deref(),
@@ -494,7 +516,7 @@ fn hook(dry_run: bool, budget: usize) {
     // every message. Failing to record means failing to fire. Hints follow the
     // same rule: one that cannot be recorded would print on every prompt.
     let before = store.data.entries.get(FIRED_KEY).cloned();
-    let doors_ok = match push_fires(&mut store, sid, &reader, &fired) {
+    let doors_ok = match push_fires(&mut store, sid, &reader, &fired, None) {
         Ok(()) => true,
         Err(e) => {
             eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
@@ -534,6 +556,94 @@ fn hook(dry_run: bool, budget: usize) {
         print_fired(&fired);
     }
     print_hints(&shown);
+}
+
+/// The doors open for this dispatch. Does not write.
+fn select_dispatch(
+    store: &KvStore,
+    d: &Dispatch,
+    reader: &Reader,
+    origin: &str,
+    budget: usize,
+) -> Vec<FiredDoor> {
+    let mode = session_state(store, &d.session).mode;
+    let rows = read_fire_log(store);
+    let (already, counts) = dispatch_state(&rows, &d.session, origin);
+    let candidates = store.iter_triggered();
+    let (kept, _) = doors::gate(&candidates, reader, Utc::now());
+    doors::select(
+        &d.prompt,
+        &mode,
+        &who(store),
+        &kept,
+        &already,
+        &counts,
+        budget,
+    )
+    .fired
+}
+
+/// `mx doors dispatch` -- the PreToolUse(Agent) entry point. Appends the doors
+/// naming the dispatched agent to its prompt, through `updatedInput`.
+///
+/// EXIT CODE CONTRACT: this returns `()`, never an error, and the caller always
+/// exits 0. On PreToolUse an exit of 2 blocks the dispatch, and a bad rewrite on
+/// stdout kills it too, so stdout is one valid JSON line or nothing at all. A kv
+/// hiccup costs a door, never a dispatch. Failures go to stderr.
+///
+/// Hints and `foreign_paste` don't exist on this path: no `doors_session` writes.
+fn dispatch(dry_run: bool, budget: usize) {
+    let mut raw = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut raw) {
+        eprintln!("[mx doors] could not read hook input: {e}");
+        return;
+    }
+    let payload: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[mx doors] malformed hook JSON: {e}");
+            return;
+        }
+    };
+    let Some(d) = Dispatch::parse(payload) else {
+        return;
+    };
+
+    let mut store = match KvStore::from_env() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[mx doors] kv unavailable: {e:#}");
+            return;
+        }
+    };
+
+    let reader = d.reader();
+    let origin = doors::dispatch_origin(&d.tool_use_id);
+    let fired = select_dispatch(&store, &d, &reader, &origin, budget);
+    if fired.is_empty() {
+        return;
+    }
+    // An unmarked row would read as a main-thread fire and burn the door there.
+    if !schema_takes(&store, "origin") {
+        eprintln!(
+            "[mx doors] the schema's {FIRED_KEY} has no string `origin` field, no doors opened"
+        );
+        return;
+    }
+
+    // RECORD BEFORE PRINT, for the reason in `hook`: a door with no row has no
+    // dedup.
+    if !dry_run {
+        let saved = push_fires(&mut store, &d.session, &reader, &fired, Some(&origin))
+            .and_then(|()| store.save());
+        if let Err(e) = saved {
+            eprintln!("[mx doors] could not record fires, no doors opened: {e:#}");
+            return;
+        }
+    }
+    if let Err(e) = writeln!(std::io::stdout(), "{}", d.output(&fired)) {
+        eprintln!("[mx doors] could not print the dispatch: {e}");
+    }
 }
 
 fn print_hints(hints: &[Hint]) {
@@ -881,12 +991,18 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
 
     let mut per_entry: HashMap<DoorId, u64> = HashMap::new();
     let mut per_trigger: HashMap<String, u64> = HashMap::new();
+    let mut per_origin: HashMap<&str, u64> = HashMap::new();
     for r in &rows {
         *per_entry
             .entry((r.key.clone(), r.entry.clone()))
             .or_insert(0) += 1;
         *per_trigger.entry(r.trigger.clone()).or_insert(0) += 1;
+        *per_origin
+            .entry(doors::origin_label(&r.origin))
+            .or_insert(0) += 1;
     }
+    let mut origins: Vec<(&str, u64)> = per_origin.into_iter().collect();
+    origins.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
 
     let never: Vec<DoorId> = store
         .iter_triggered()
@@ -930,6 +1046,10 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
                 "total_fires": rows.len(),
                 "entries": entries,
                 "triggers": triggers,
+                "origins": origins
+                    .iter()
+                    .map(|(o, n)| serde_json::json!({"origin": o, "fires": n}))
+                    .collect::<Vec<_>>(),
                 "never_fired": never_json,
                 "pre_burned": pre_burned,
                 "expired": expired
@@ -956,6 +1076,12 @@ fn stats(since: Option<&str>, json: bool) -> Result<i32> {
         println!("by trigger:");
         for (t, n) in &triggers {
             println!("  {:>4}  {}", n, t);
+        }
+    }
+    if !origins.is_empty() {
+        println!("by origin:");
+        for (o, n) in &origins {
+            println!("  {:>4}  {}", n, o);
         }
     }
     if !never.is_empty() {
@@ -997,6 +1123,10 @@ pub(crate) fn handle_doors(command: DoorsCommands) -> Result<i32> {
     match command {
         DoorsCommands::Hook { dry_run, budget } => {
             hook(dry_run, resolve_budget(budget));
+            Ok(crate::kv::EXIT_OK)
+        }
+        DoorsCommands::Dispatch { dry_run, budget } => {
+            dispatch(dry_run, resolve_budget(budget));
             Ok(crate::kv::EXIT_OK)
         }
         DoorsCommands::Check {
@@ -1093,6 +1223,39 @@ mod tests {
             Some(&2),
             "legacy rows still count"
         );
+    }
+
+    #[test]
+    fn the_main_path_skips_dispatch_rows_entirely() {
+        let rows = [
+            row("s1", "aaa", "dispatch:t1"),
+            row("s2", "aaa", "dispatch:t2"),
+            row("s1", "bbb", "typed"),
+        ];
+        let (seen, counts) = fire_state(&rows, "s1");
+        let pair = |e: &str| ("facts".to_string(), e.to_string());
+        assert!(!seen.contains(&pair("aaa")));
+        assert_eq!(counts.get(&pair("aaa")), None);
+        assert!(seen.contains(&pair("bbb")));
+    }
+
+    #[test]
+    fn a_dispatch_dedups_on_its_own_rows_and_counts_all_dispatches() {
+        let rows = [
+            row("s1", "aaa", "dispatch:t1"),
+            row("s2", "eee", "dispatch:t1"),
+            row("s1", "bbb", "dispatch:t2"),
+            row("s1", "ccc", "typed"),
+            row("s1", "ddd", AUTHORED),
+        ];
+        let (seen, counts) = dispatch_state(&rows, "s1", "dispatch:t1");
+        let pair = |e: &str| ("facts".to_string(), e.to_string());
+        assert_eq!(seen, HashSet::from([pair("aaa")]));
+        assert_eq!(counts.get(&pair("aaa")), Some(&1));
+        assert_eq!(counts.get(&pair("eee")), Some(&1));
+        assert_eq!(counts.get(&pair("bbb")), Some(&1));
+        assert_eq!(counts.get(&pair("ccc")), None);
+        assert_eq!(counts.get(&pair("ddd")), None);
     }
 
     #[test]

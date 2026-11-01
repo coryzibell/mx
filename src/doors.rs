@@ -10,6 +10,7 @@
 //! the fire log and stdout live in `handlers::doors`.
 
 mod classify;
+mod dispatch;
 mod expiry;
 mod people;
 mod reader;
@@ -21,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 pub use classify::{Classified, NamesUs, Verdict, classify};
+pub use dispatch::{Dispatch, dispatch_origin, is_dispatch, origin_label};
 pub use expiry::{is_expired, parse_expires};
 pub use people::{PEOPLE_KEY, People};
 pub use reader::Reader;
@@ -41,7 +43,9 @@ pub const DEFAULT_BUDGET: usize = 2;
 const DERIVED_FRAGMENT_MAX: usize = 200;
 
 /// The kv key holding the fire log. It is both the dedup table and the
-/// telemetry source: one row per (session, key, entry) fire.
+/// telemetry source. A main-thread fire is one row per (session, key, entry);
+/// a dispatch fire is one per (session, tool_use_id, key, entry), with the id in
+/// its `origin`. The two paths never dedup or rank against each other.
 pub const FIRED_KEY: &str = "doors_fired";
 
 /// The subset of the Claude Code UserPromptSubmit payload doors reads.
