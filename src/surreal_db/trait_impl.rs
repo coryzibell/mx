@@ -74,6 +74,16 @@ impl KnowledgeStore for SurrealDatabase {
         self.list_by_category(category, ctx, filter)
     }
 
+    fn list_by_category_limited(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: Option<usize>,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        self.list_by_category_limited(category, ctx, filter, limit)
+    }
+
     fn count_by_category(
         &self,
         category: &str,
