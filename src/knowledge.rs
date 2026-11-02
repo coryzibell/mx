@@ -159,18 +159,18 @@ where
 }
 
 /// Common LLM-regenerated Unicode punctuation glyphs that stand in for their
-/// ASCII counterparts: smart quotes, en/em dash, and horizontal ellipsis
-/// (fix-round review, minor finding: `is_ascii_punctuation` alone leaves
-/// these untouched, so "don't" vs "don't" -- straight vs smart apostrophe --
-/// fails to dedup even though it's the exact recase/repunctuate class this
-/// gate targets). A false negative here only means a real duplicate slips
+/// ASCII counterparts: smart quotes, en/em dash, and horizontal ellipsis.
+/// `is_ascii_punctuation` alone leaves these untouched, so "don't" vs
+/// "don't" -- straight vs smart apostrophe -- fails to dedup even though
+/// it's the exact recase/repunctuate class this gate targets. A false
+/// negative here only means a real duplicate slips
 /// through uncaught, never a false-positive merge of distinct content, so
 /// extending this list is one-directional safe.
 const DEDUP_UNICODE_PUNCTUATION: [char; 7] = [
     '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2013}', '\u{2014}', '\u{2026}',
 ];
 
-/// Normalize content for write-boundary DEDUPLICATION (W447). Lowercases,
+/// Normalize content for write-boundary DEDUPLICATION. Lowercases,
 /// strips ASCII punctuation plus the common Unicode punctuation glyphs LLM
 /// regeneration substitutes for them (see [`DEDUP_UNICODE_PUNCTUATION`]), and
 /// collapses whitespace, so a recased/repunctuated regenerated duplicate
@@ -194,7 +194,7 @@ pub fn normalize_for_dedup(content: &str) -> String {
         .join(" ")
 }
 
-/// Compute the write-boundary dedup hash for an entry's title+body (W447).
+/// Compute the write-boundary dedup hash for an entry's title+body.
 /// Two entries whose title+body normalize identically -- same text modulo
 /// case, punctuation, and whitespace -- hash equal, so a
 /// regenerated/recased near-duplicate is caught at the write boundary before
@@ -205,8 +205,8 @@ pub fn normalize_for_dedup(content: &str) -> String {
 /// but never enforced) -- that field is untouched by this. `dedup_hash` keys
 /// on title+body and is the write-boundary gate's identity key.
 ///
-/// Hashes title and body as a length-prefixed PAIR, never a joined string
-/// (fix-round review, finding 1): `normalize_for_dedup` collapses ALL
+/// Hashes title and body as a length-prefixed PAIR, never a joined string:
+/// `normalize_for_dedup` collapses ALL
 /// whitespace -- including any separator character we might pick, since
 /// separators are themselves whitespace or get stripped as punctuation -- so
 /// `dedup_hash("Ship it", "now.")` and `dedup_hash("Ship it now", "")`
@@ -318,7 +318,7 @@ impl KnowledgeEntry {
     /// "hello, world!" (lowercased/collapsed). Thread-matching (helpers.rs)
     /// depends on this exact behavior, so this function is intentionally
     /// left unchanged; see `normalize_for_dedup` below for the punctuation-
-    /// stripping variant used by write-boundary dedup (W447).
+    /// stripping variant used by write-boundary dedup.
     pub fn normalize_content(content: &str) -> String {
         content
             .trim()
@@ -470,9 +470,9 @@ mod tests {
 
     #[test]
     fn test_normalize_for_dedup_strips_common_unicode_punctuation() {
-        // Fix-round review, minor finding: smart quotes / em-dash / ellipsis
-        // are the exact glyphs LLM regeneration swaps in for their ASCII
-        // counterparts -- must fold to the same normalized form.
+        // Smart quotes / em-dash / ellipsis are the exact glyphs LLM
+        // regeneration swaps in for their ASCII counterparts -- must fold
+        // to the same normalized form.
         assert_eq!(
             normalize_for_dedup("don't"),
             normalize_for_dedup("don\u{2019}t")
@@ -495,7 +495,7 @@ mod tests {
     fn test_normalize_content_not_mutated_by_dedup_work() {
         // normalize_content must still lowercase/collapse WITHOUT stripping
         // punctuation -- thread-matching (helpers.rs) depends on the exact
-        // pre-W447 behavior.
+        // original behavior.
         assert_eq!(
             KnowledgeEntry::normalize_content("hello, world!"),
             "hello, world!"
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_dedup_hash_recased_repunctuated_pair_equal() {
-        // W447 evidence class: regenerated duplicates differ only by case,
+        // Evidence class: regenerated duplicates differ only by case,
         // punctuation, or whitespace -- dedup_hash must collapse them.
         let a = dedup_hash("The External Plan", "Ship it, and move on.");
         let b = dedup_hash("the external plan", "ship it and move on");
@@ -520,8 +520,8 @@ mod tests {
 
     #[test]
     fn test_dedup_hash_does_not_collapse_title_body_boundary() {
-        // Fix-round review, finding 1: pre-fix, both sides normalized to the
-        // identical string "ship it now" (the `\n` joiner is whitespace, so
+        // Before this fix, both sides normalized to the identical string
+        // "ship it now" (the `\n` joiner is whitespace, so
         // `normalize_for_dedup`'s split_whitespace/join collapses it exactly
         // like any other space) and hashed equal -- a false-positive skip
         // that silently drops a distinct entry. They must now differ.
