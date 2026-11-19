@@ -121,6 +121,8 @@ Default categories: `pattern`, `technique`, `insight`, `gotcha`, `reference`, `d
 
 `mx memory list` and `mx memory search` are **public-only by default** -- your own private entries are omitted unless you pass `--include-private` (or `--mine`). When a public-only query matches private entries you own but hides them, `mx` prints a best-effort hint on **stderr** pointing at `--include-private` (stdout, `--json`, and exit codes are unaffected). See the [memory docs](https://coryzibell.github.io/mx/memory.html) for the full visibility and resonance-basis details.
 
+How resonance shapes what an agent sees at session start, and how the wake sequence logs its recall, is covered in [Resonance and the wake sequence](#resonance-and-the-wake-sequence).
+
 ### KV Store
 
 Fast local key-value state per agent. Counters, strings, lists, timestamped history, and structured state fields -- all backed by a TOML schema file and a JSON data file. No networking, no database.
@@ -270,6 +272,53 @@ Pull and push issues/discussions as local YAML files.
 mx sync pull owner/repo
 mx sync push owner/repo --dry-run
 mx sync labels owner/repo
+```
+
+## Resonance and the wake sequence
+
+Two parts of the memory system decide what an agent sees at session start and record how it responds to it. The full reference is in the [memory docs](https://coryzibell.github.io/mx/memory.html).
+
+### Resonance
+
+Every entry carries an integer `resonance` (1-10, higher allowed) and an optional `resonance_type`: `foundational`, `transformative`, `relational`, `operational`, `ephemeral` or `session`.
+
+- **Decay.** `list` and `search` filter on an *effective* resonance that decays weekly from the entry's last activation: 10% per week at resonance 3 or below, 5% at 4-5, 2.5% at 6 and above. `foundational` and `transformative` entries do not decay. `wake` uses the raw stored value.
+- **Activation.** `mx memory show` and `search --activate` count as deliberate access: they bump `activation_count` and reset `last_activated`, which restarts the decay clock. Being surfaced by `wake` only bumps the count, so an entry cannot stay fresh just by being shown at every session start.
+- **Reinforcement.** `mx memory reinforce` raises the stored resonance (default +1, capped at 10). Adding a relationship reinforces its target the same way, except for `contradicts` and `supersedes`.
+
+`mx memory wake` builds the wake set from three layers, filled in order up to `--limit` (default 20):
+
+1. **Core:** raw resonance 8 or higher, not `ephemeral`.
+2. **Recent:** activated within `--days` (default 7).
+3. **Bridges:** resonance 5 or higher, anchored to an entry already in core or recent.
+
+Within a layer, entries with an explicit `wake_order` come first, then higher resonance, then ID. The order is deterministic, so the same set is walked in the same sequence every time. Entries tagged `archive` or `wake-exclude` are left out.
+
+### The wake sequence
+
+`mx memory wake --begin` walks the set as recall before reveal. For each entry the agent sees only the title, submits exactly one guess at what the entry says with `--respond`, and is then shown the entry. There is no hint and no second attempt; retrying a step returns the guess already logged.
+
+- **Chunking.** Content over 28,000 bytes (`MX_WAKE_CHUNK_BYTES`) is split at headings, rules or paragraph breaks, never inside a fenced code block. Each chunk is its own step with its own guess, titled `(Part N/M)`.
+- **Phrase sources.** Each guess is matched against the step's phrases, and the prompt names where they came from: `authored` (wake phrases written on the entry, first chunk only), `auto` (one phrase extracted from the content when none were written), `derived` (one phrase from a later chunk's own text, chosen so it repeats nothing already revealed) or `unphrased` (a later chunk with nothing usable to match).
+- **Buckets, not a score.** A guess that matches a phrase, exactly or after normalization, lands in `unhinted`. Anything else lands in `revealed`. The bucket names what the tool did, not what the agent knew. The final response reports bucket counts split by phrase source, plus chunks walked and steps left unjudged.
+
+### The guess log and scoring
+
+Every judged guess is written as a `wake_guess` row in the same transaction that advances the session: the entry, chunk, position, title as shown, guess, phrases, match and bucket, plus the optional `--wake` label and `--model` identifier given at `--begin`. Rows are scoped to the calling agent and are not part of `mx memory export`.
+
+`mx memory wake-log score` embeds pending rows and stores two axes per guess. **Axis A** (`sim_phrase`, `sim_content`, `sim_title`) compares the guess with the entry. It rises whenever phrases are retuned toward past guesses, so it is a phrase-authoring aid and nothing more. **Axis B** compares the guess with the centroid of the agent's 5 most recent earlier guesses on the same entry and title from other sessions (`sim_prior`), against a baseline of the same centroid built for up to 10 other entries (`sim_prior_null`). The gap between the two is the signal. Axis B is also stored over prior guesses from the same `--model` (`*_same`) and from a different one (`*_cross`), which allows comparison across model versions. In the tool's own words, Axis B "is evidence of stable reaching, not of remembering." The 5 and the 10 are untuned defaults, and Axis B is empty until an entry has history.
+
+### Why the scores are terminal-only
+
+A measure the subject can see stops measuring the subject. A model that can read its score can play to it, and one that can read its earlier guesses will repeat them, which would inflate Axis B directly. So `score` prints only row counts, `--begin` and `--respond` never carry an axis value, and `wake-log report`, `bloom` and `wake` print only when stdout is a terminal. Anywhere else they refuse before reading anything, unless `--out FILE` names a regular file. A model's shell tool is not a terminal; a human's shell is. This guards against accidental leakage. It does not stop a process that deliberately fakes a terminal or reads the `--out` file.
+
+```bash
+mx memory wake --begin --wake 3 --model example-model
+mx memory wake --bloom-id kn-abc123 --session <token> --respond "one guess from the title"
+# repeat --respond with each returned token until the summary
+mx memory wake-log score
+mx memory wake-log report             # human terminal only
+mx memory wake-log bloom kn-abc123    # one entry's guesses across sessions
 ```
 
 ## Configuration
