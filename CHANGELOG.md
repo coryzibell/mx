@@ -6,6 +6,18 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com).
 
 ## [Unreleased]
 
+### Fixed — `mx memory wake --min-resonance` returns only bloom-category rows
+
+- **The wake ritual's core read now requires `category = bloom`.** The query
+  behind `--min-resonance` filtered on resonance alone, and adding a
+  relationship edge reinforces its target by +1 (cap 10) unless the type is
+  contradicts/supersedes or `--no-reinforce` is passed. A non-bloom row that
+  gathered enough edges (a `decision` row rose 6 to 9 on three automatic
+  `extends` edges) therefore loaded at wake as core identity, past the rule
+  that creating a bloom is Geoff's gate. Edge reinforcement is unchanged.
+- **Not touched:** the default cascade (no `--min-resonance`: core at 8+,
+  recent, bridges) keeps its layer queries as they were.
+
 ### Added — `mx doors dispatch`: doors reach dispatched subagents (doors P6, #492)
 
 - **New `mx doors dispatch`, the `PreToolUse(Agent)` entry point.** When a door

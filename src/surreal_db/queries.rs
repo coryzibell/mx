@@ -380,6 +380,14 @@ impl SurrealDatabase {
 
     /// Query all blooms with resonance >= threshold (for --min-resonance flag).
     ///
+    /// Only rows in the `bloom` category qualify. Resonance alone is not a
+    /// bloom test: adding a relationship edge reinforces its target by +1
+    /// unless the type is contradicts/supersedes or `--no-reinforce` is
+    /// passed (`handlers/metadata.rs`), so a decision or insight row that gathers
+    /// enough edges climbs past the threshold and, without the category gate,
+    /// loads at wake as core identity. Blooms are created at Geoff's gate;
+    /// edge reinforcement must not be a way around it.
+    ///
     /// Shares the core query's ordering so the sequence is stable across wakes
     /// and `wake_order` decides which bloom opens the ritual.
     ///
@@ -401,6 +409,7 @@ impl SurrealDatabase {
                 SELECT {}
                 FROM knowledge
                 WHERE resonance >= $threshold
+                AND category = category:bloom
                 AND (resonance_type IS NONE OR resonance_type != 'ephemeral')
                 {}
             )

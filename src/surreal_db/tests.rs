@@ -758,6 +758,7 @@ fn test_wake_cascade_empty_anchors() {
 
     // Create bloom with no anchors
     let mut entry = make_test_entry("kn-solo", 9, 0.0);
+    entry.category_id = "bloom".to_string();
     entry.resonance_type = Some("foundational".to_string());
     entry.anchors = vec![];
     db.upsert_knowledge(&entry).unwrap();
@@ -779,10 +780,12 @@ fn test_wake_cascade_circular_anchors() {
 
     // Create two blooms that reference each other
     let mut bloom_a = make_test_entry("kn-circular-a", 9, 0.0);
+    bloom_a.category_id = "bloom".to_string();
     bloom_a.resonance_type = Some("foundational".to_string());
     bloom_a.anchors = vec!["kn-circular-b".to_string()];
 
     let mut bloom_b = make_test_entry("kn-circular-b", 9, 0.0);
+    bloom_b.category_id = "bloom".to_string();
     bloom_b.resonance_type = Some("foundational".to_string());
     bloom_b.anchors = vec!["kn-circular-a".to_string()];
 
@@ -4287,6 +4290,7 @@ fn semantic_search_returns_chunked_entries_with_their_tags_hydrated() {
 /// recent layer will not also pick it up.
 fn core_layer_entry(id: &str, tags: &[&str]) -> crate::knowledge::KnowledgeEntry {
     let mut e = make_test_entry(id, 9, 0.0);
+    e.category_id = "bloom".to_string();
     e.resonance_type = Some("foundational".to_string());
     e.last_activated = Some((chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339());
     e.tags = tags.iter().map(|t| t.to_string()).collect();
@@ -4425,6 +4429,61 @@ fn wake_cascade_excludes_tagged_entries_on_the_min_resonance_path() {
         let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, true).unwrap();
         assert_eq!(cascade_ids(&cascade).len(), 2, "tag {tag}");
     }
+}
+
+#[test]
+fn wake_min_resonance_path_returns_only_bloom_category_rows() {
+    // The specimen: a `decision` row climbs to resonance 9+ on automatic
+    // `extends` edges. Resonance is not a bloom test; the wake read must
+    // return the bloom and leave the decision out at any threshold it clears.
+    for resonance in [9, 10] {
+        let db = SurrealDatabase::open_in_memory().unwrap();
+        let ctx = crate::store::AgentContext::public_only();
+
+        db.upsert_knowledge(&core_layer_entry("kn-bloom", &[]))
+            .unwrap();
+        let mut decision = core_layer_entry("kn-decision", &[]);
+        decision.category_id = "decision".to_string();
+        decision.resonance = resonance;
+        db.upsert_knowledge(&decision).unwrap();
+
+        let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, true).unwrap();
+        assert_eq!(
+            cascade_ids(&cascade),
+            vec!["kn-bloom".to_string()],
+            "resonance {resonance}: a decision row must not load at wake"
+        );
+    }
+}
+
+#[test]
+fn wake_min_resonance_path_ignores_a_non_bloom_row_raised_by_edge_reinforcement() {
+    // End to end through the real reinforce path: 6 -> 9 on three edges,
+    // exactly the kn-2df485a5 climb. Reinforcement still works; the row just
+    // does not join the wake set by it.
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let ctx = crate::store::AgentContext::public_only();
+
+    let mut decision = core_layer_entry("kn-climber", &[]);
+    decision.category_id = "decision".to_string();
+    decision.resonance = 6;
+    db.upsert_knowledge(&decision).unwrap();
+
+    for _ in 0..3 {
+        db.reinforce("kn-climber", 1, Some(10), &ctx).unwrap();
+    }
+    let raised = db.get("kn-climber", &ctx).unwrap().unwrap();
+    assert_eq!(
+        raised.resonance, 9,
+        "reinforcement itself must be untouched"
+    );
+
+    let cascade = db.wake_cascade(&ctx, 50, Some(9), 7, true).unwrap();
+    assert!(
+        cascade_ids(&cascade).is_empty(),
+        "a reinforced non-bloom row must not load at wake: {:?}",
+        cascade_ids(&cascade)
+    );
 }
 
 #[test]
