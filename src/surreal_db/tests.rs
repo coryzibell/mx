@@ -5608,8 +5608,11 @@ fn lean_wake_cascade_preserves_vector_on_upsert() {
 
     let db = SurrealDatabase::open_in_memory().unwrap();
     let v = synthetic_768_vector();
-    db.upsert_knowledge(&entry_with_768_vector("kn-lean-wake", v.clone()))
-        .unwrap();
+    // The min-resonance wake path returns only `bloom` category rows, so the
+    // fixture must be one; the default "test" category would never surface.
+    let mut entry = entry_with_768_vector("kn-lean-wake", v.clone());
+    entry.category_id = "bloom".to_string();
+    db.upsert_knowledge(&entry).unwrap();
 
     let ctx = AgentContext::public_only();
     // min_resonance = Some(8) takes the simple query_blooms_by_resonance
