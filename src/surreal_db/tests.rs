@@ -4365,6 +4365,98 @@ fn list_by_category_limited_returns_exact_prefix_of_unbounded_order() {
     );
 }
 
+#[test]
+fn list_by_category_limited_prefix_under_mixed_visibility() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    // insert in reverse id order so insertion order != id order
+    let mut ids: Vec<String> = (0..40).map(|i| format!("kn-mix{:03}", i)).collect();
+    ids.reverse();
+    for (k, id) in ids.iter().enumerate() {
+        let i = 39 - k;
+        let mut e = make_test_entry(id, 5, 0.0);
+        if i % 3 == 0 {
+            e.visibility = "private".into();
+            e.owner = Some("someone-else".into());
+        } else if i % 5 == 0 {
+            e.visibility = "private".into();
+            e.owner = Some("me".into());
+        }
+        db.upsert_knowledge(&e).unwrap();
+    }
+    let f = KnowledgeFilter::default();
+    for ctx in [
+        AgentContext::for_agent("me"),
+        AgentContext::public_for_agent("me"),
+        AgentContext::public_only(),
+    ] {
+        let unb = db.list_by_category("test", &ctx, &f).unwrap();
+        let unb_ids: Vec<String> = unb.iter().map(|e| e.id.clone()).collect();
+        let mut sorted = unb_ids.clone();
+        sorted.sort();
+        assert_eq!(
+            unb_ids, sorted,
+            "unbounded not id-ordered for {:?}",
+            ctx.include_private
+        );
+        assert!(
+            unb.iter()
+                .all(|e| e.owner.as_deref() != Some("someone-else"))
+        );
+        if ctx.include_private {
+            assert!(unb.iter().any(|e| e.owner.as_deref() == Some("me")));
+        } else {
+            assert!(unb.iter().all(|e| e.visibility == "public"));
+        }
+        for n in 0..=45 {
+            let lim = db
+                .list_by_category_limited("test", &ctx, &f, Some(n))
+                .unwrap();
+            let lim_ids: Vec<String> = lim.iter().map(|e| e.id.clone()).collect();
+            assert_eq!(
+                lim_ids,
+                unb_ids[..n.min(unb_ids.len())].to_vec(),
+                "n={n} ctx={:?}",
+                ctx.include_private
+            );
+        }
+    }
+}
+
+#[test]
+fn list_by_category_limited_prefix_under_decayed_min_resonance() {
+    use crate::store::{AgentContext, KnowledgeFilter};
+    let db = SurrealDatabase::open_in_memory().unwrap();
+    let old = (chrono::Utc::now() - chrono::Duration::days(3 * 365)).to_rfc3339();
+    for i in (0..30).rev() {
+        let mut e = make_test_entry(&format!("kn-dec{:03}", i), 8, 0.0);
+        if i % 2 == 0 {
+            e.last_activated = Some(old.clone());
+            e.created_at = Some(old.clone());
+        }
+        db.upsert_knowledge(&e).unwrap();
+    }
+    let ctx = AgentContext::public_only();
+    let f = KnowledgeFilter {
+        min_resonance: Some(5),
+        ..Default::default()
+    };
+    let unb = db.list_by_category("test", &ctx, &f).unwrap();
+    let unb_ids: Vec<String> = unb.iter().map(|e| e.id.clone()).collect();
+    assert_eq!(
+        unb_ids.len(),
+        15,
+        "decayed rows (raw 8) must be excluded: {unb_ids:?}"
+    );
+    for n in 0..=20 {
+        let lim = db
+            .list_by_category_limited("test", &ctx, &f, Some(n))
+            .unwrap();
+        let lim_ids: Vec<String> = lim.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(lim_ids, unb_ids[..n.min(15)].to_vec(), "n={n}");
+    }
+}
+
 // =========================================================================
 // owned_private_matching: BM25 full-text coverage. `owned_private_matching`
 // had no test calling it with an actual `query` before this. `query =
