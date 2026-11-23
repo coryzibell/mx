@@ -287,8 +287,10 @@ JSON must be updated; the shapes below are the whole contract.
   runs in ~111ms (~98x), from three changes in
   `SurrealDatabase::list_by_category_async`
   (`src/surreal_db/queries.rs`): (1) `WITH INDEX knowledge_category` forces
-  the planner off `knowledge_visibility` (every row is public, so that index
-  matched the WHOLE table, not just the category); (2) the query now orders
+  the planner off `knowledge_visibility` (which matches every public row
+  table-wide, not just the category; the category index is never worse than
+  O(category), though a public-only view of a mostly-private category can walk
+  the whole category's index range); (2) the query now orders
   on the raw record id inside a nested subquery instead of the outer
   `meta::id(id) AS id` projection alias — ordering by that computed alias
   shadowed the index-backed sort key, forcing a full materialize-and-heap-sort
