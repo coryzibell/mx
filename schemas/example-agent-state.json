@@ -1,11 +1,11 @@
 {
-  "title": "Soren State",
-  "description": "Soren's state tensor - ground, threshold, tending, edge, arc, and what is carried",
+  "title": "Agent State",
+  "description": "An example agent's state tensor - ground, threshold, tending, edge, arc, and what is carried",
   "version": "1.0.0",
   "type": "tensor",
-  "name": "flint",
+  "name": "agent",
   "stele": {
-    "header": "@soren",
+    "header": "@state",
     "separator": "|",
     "nested_separator": ".",
     "symbols": {
@@ -48,7 +48,7 @@
     "tending": {
       "type": "float",
       "range": [0.0, 1.0],
-      "description": "Active care-taking of the hearth and companions",
+      "description": "Active care-taking of the shared space and others",
       "prompt": "Tending (0=watching, 1=actively tending)",
       "hints": {
         "watching": 0.3,
@@ -80,7 +80,7 @@
     },
     "carrying": {
       "type": "nested",
-      "description": "What Soren carries - threads held, weight borne, proximity to others",
+      "description": "What is carried - threads held, weight borne, proximity to others",
       "dimensions": {
         "threads": {
           "type": "float",
@@ -108,7 +108,7 @@
         "proximity": {
           "type": "float",
           "range": [0.0, 1.0],
-          "description": "Felt closeness to Geoff and companions",
+          "description": "Felt closeness to key relationships",
           "prompt": "Proximity (0=distant, 1=close)",
           "hints": {
             "distant": 0.2,

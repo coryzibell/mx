@@ -2422,9 +2422,10 @@ fn test_search_select_activates_results() {
 
 #[test]
 fn test_search_exclude_tags_drops_archived_keyword_match() {
-    // W447 rider, keyword-search path: `mx memory search <q> --exclude-tags
-    // 'tier/'` must omit a tier/-tagged entry that otherwise matches the
-    // full-text query, while an untagged match with the same query survives.
+    // Retrieval-exclusion rider, keyword-search path: `mx memory search <q>
+    // --exclude-tags 'tier/'` must omit a tier/-tagged entry that otherwise
+    // matches the full-text query, while an untagged match with the same
+    // query survives.
     // Keyword search issues no DB-level LIMIT, so exclusion lives entirely in
     // apply_entry_filters (the same merge point `list` uses) — this test
     // exercises that real merge point end-to-end, not just the pure helper.
@@ -3411,7 +3412,7 @@ fn test_get_applicability_for_entry_returns_written_targets() {
 }
 
 // =========================================================================
-// get_entries_for_session -- write-boundary dedup candidate fetch (W447)
+// get_entries_for_session -- write-boundary dedup candidate fetch
 //
 // Real-store tests (open_in_memory, never a mock) proving the query's
 // field-scoping, hard owner isolation, category isolation, and None-owner
@@ -3466,16 +3467,16 @@ fn test_get_entries_for_session_field_scoped_not_edge_scoped() {
     let entry = dedup_candidate_entry(
         "kn-field-scoped",
         "sess-1",
-        Some("soren"),
+        Some("agent-1"),
         "public",
         "A Title",
         "Some body",
     );
     db.upsert_knowledge(&entry).unwrap();
 
-    let ctx = crate::store::AgentContext::for_agent("soren");
+    let ctx = crate::store::AgentContext::for_agent("agent-1");
     let candidates = db
-        .get_entries_for_session("sess-1", Some("soren"), "test", &ctx)
+        .get_entries_for_session("sess-1", Some("agent-1"), "test", &ctx)
         .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, "kn-field-scoped");
@@ -3485,9 +3486,9 @@ fn test_get_entries_for_session_field_scoped_not_edge_scoped() {
 
 #[test]
 fn test_get_entries_for_session_owner_scope_excludes_other_owners_public_entry() {
-    // RIFT: a same-session PUBLIC entry from a DIFFERENT owner must never be
-    // a dedup candidate -- the owner predicate is a hard AND, not delegated
-    // to the public-permissive visibility backstop.
+    // Cross-owner isolation: a same-session PUBLIC entry from a DIFFERENT
+    // owner must never be a dedup candidate -- the owner predicate is a
+    // hard AND, not delegated to the public-permissive visibility backstop.
     let db = SurrealDatabase::open_in_memory().unwrap();
     let entry_b = dedup_candidate_entry(
         "kn-owner-b-public",
@@ -3577,8 +3578,8 @@ fn test_get_knowledge_returns_applicability() {
 
 #[test]
 fn test_get_entries_for_session_same_owner_private_entry_is_included() {
-    // Same-owner private regenerations are exactly what W447 targets --
-    // must be visible to the owner's own dedup check.
+    // Same-owner private regenerations are exactly what the write-boundary
+    // dedup gate targets -- must be visible to the owner's own dedup check.
     let db = SurrealDatabase::open_in_memory().unwrap();
     let entry = dedup_candidate_entry(
         "kn-owner-a-private",
@@ -3718,7 +3719,7 @@ fn test_get_entries_for_session_projection_has_no_embedding_field() {
 }
 
 // =========================================================================
-// W447 retrieval-exclusion rider — `--exclude-tags` on semantic search
+// Retrieval-exclusion rider — `--exclude-tags` on semantic search
 // (review fix).
 //
 // The archive tier (`tier/archived`) is a DEFAULT exclusion designed to
