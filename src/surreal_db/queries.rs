@@ -1578,7 +1578,20 @@ impl SurrealDatabase {
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
     ) -> Result<Vec<KnowledgeEntry>> {
-        Self::runtime().block_on(self.list_by_category_async(category, ctx, filter))
+        Self::runtime().block_on(self.list_by_category_async(category, ctx, filter, None))
+    }
+
+    /// `list_by_category` with an optional SQL-level LIMIT pushed into the
+    /// query — see the trait doc on
+    /// `KnowledgeStore::list_by_category_limited`.
+    pub fn list_by_category_limited(
+        &self,
+        category: &str,
+        ctx: &crate::store::AgentContext,
+        filter: &crate::store::KnowledgeFilter,
+        limit: Option<usize>,
+    ) -> Result<Vec<KnowledgeEntry>> {
+        Self::runtime().block_on(self.list_by_category_async(category, ctx, filter, limit))
     }
 
     /// Fast count of entries in a category with the same visibility / resonance
@@ -1637,25 +1650,72 @@ impl SurrealDatabase {
         category: &str,
         ctx: &crate::store::AgentContext,
         filter: &crate::store::KnowledgeFilter,
+        limit: Option<usize>,
     ) -> Result<Vec<KnowledgeEntry>> {
         let category_thing = Thing::from(("category", category));
 
         let (visibility_clause, current_agent) = Self::build_visibility_filter(ctx);
         let resonance_clause = Self::build_resonance_filter(filter);
 
-        // ORDER BY id instead of title — see comment in list_all_async
+        // Three changes in this one SQL string:
+        //
+        // 1. `WITH INDEX knowledge_category` — `category = $c` is the only
+        //    predicate bounded by the category's size, while the visibility
+        //    predicate always admits every public row table-wide. Forcing
+        //    the category index is therefore never worse than O(category);
+        //    left to itself the planner can pick `knowledge_visibility`,
+        //    which matches every public row table-wide rather than just
+        //    this category (measured 490->1.9ms / 732->18ms on a 3281-row
+        //    category out of 8998 total rows). Worst case: a
+        //    public-only view of a mostly-private category walks the
+        //    category's index range until it finds N public rows, which is
+        //    O(category).
+        //
+        // 2. The inner SELECT orders on the RAW `id` field, not the
+        //    `meta::id(id) AS id` alias `knowledge_select_fields()` computes
+        //    for the OUTER select. `ORDER BY id` on the outer select alone
+        //    binds to that computed string alias, not the record id the
+        //    index already orders by, forcing a `MemoryOrdered` collector to
+        //    materialize and heap-sort every matched row through a per-row
+        //    function call. Un-shadowing it (ordering inside a subquery that
+        //    never computes an `id` alias) measured 1111->18ms (61x) and is
+        //    NOT an ordering-contract change: a record id and its
+        //    `meta::id()` string sort by the same underlying bytes, so the
+        //    planner ends up serving the identical order, just from the
+        //    index instead of a full materialize+sort. Do not flatten this
+        //    into a single SELECT — `knowledge_select_fields()`'s `id` alias
+        //    is shared by every other caller (list_all_async,
+        //    owned_private_matching, the bloom queries, ...) and shadowing
+        //    it there is the whole reason this function has to nest.
+        //
+        // 3. `LIMIT` (when the caller asked for one) is applied INSIDE the
+        //    inner subquery, before the outer SELECT re-projects fields, so
+        //    this query hydrates at most N rows. That bounds the query, not
+        //    the command: a default `list` with MX_CURRENT_AGENT set also
+        //    runs `warn_hidden_private` -> `owned_private_matching`, which
+        //    hydrates every private row the caller owns that matches the
+        //    same category/resonance filter (every owned private row, for a
+        //    bare list).
+        let limit_clause = if limit.is_some() { " LIMIT $limit" } else { "" };
+
         let sql = format!(
             "SELECT {}
-            FROM knowledge
-            WHERE category = $category {} {}
-            ORDER BY id",
+            FROM (
+                SELECT * FROM knowledge WITH INDEX knowledge_category
+                WHERE category = $category {} {}
+                ORDER BY id{}
+            )",
             Self::knowledge_select_fields(),
             visibility_clause,
-            resonance_clause
+            resonance_clause,
+            limit_clause
         );
 
         let mut response = with_db!(self, db, {
             let mut query = db.query(&sql).bind(("category", category_thing));
+            if let Some(n) = limit {
+                query = query.bind(("limit", n as i64));
+            }
             if let Some(agent) = current_agent {
                 query = query.bind(("current_agent", agent));
             }
